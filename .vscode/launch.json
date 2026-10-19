@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      // --disable-extensions: load only this extension in the Development Host. With the
+      // user's installed extensions the extension host crashed (exit code 134) right after
+      // start on Windows, unrelated to this extension. Remove the flag if another extension
+      // is ever needed alongside (e.g. to test coexistence with the official opencode one).
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}", "--disable-extensions"],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "${defaultBuildTask}"
+    }
+  ]
+}

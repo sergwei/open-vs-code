@@ -1,0 +1,59 @@
+{
+  "name": "open-vs-code",
+  "displayName": "open-vs-code",
+  "description": "A mouse-friendly graphical interface for opencode inside VS Code.",
+  "version": "0.0.1",
+  "publisher": "sergwei",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sergwei/open-vs-code"
+  },
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "openVsCode",
+          "title": "OpenCode",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "openVsCode": [
+        {
+          "type": "webview",
+          "id": "openVsCode.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "openVsCode.showLogs",
+        "title": "Show Logs",
+        "category": "OpenCode"
+      }
+    ]
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "build:host": "node esbuild.mjs",
+    "watch:host": "node esbuild.mjs --watch",
+    "watch:types": "tsc --noEmit --watch"
+  },
+  "devDependencies": {
+    "@types/node": "22.x",
+    "@types/vscode": "1.105.0",
+    "esbuild": "^0.28.2",
+    "typescript": "~6.0.3"
+  }
+}
