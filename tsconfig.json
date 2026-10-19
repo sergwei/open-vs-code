@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // "preserve" (implies bundler resolution) because esbuild does the bundling and
+    // ESM-only clients (the opencode client planned for a later issue) would not
+    // resolve under Node16 resolution in a CommonJS package.
+    "module": "preserve",
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "types": ["node", "vscode"]
+  },
+  "include": ["src/**/*.ts"]
+}
