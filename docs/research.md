@@ -7,8 +7,15 @@ Markers: **VERIFIED** = read on 2026-10-19 in the cited source. **HYPOTHESIS** =
 confirm before building on it. **UNVERIFIED** = not checked.
 
 Pinned sources:
-- `anomalyco/opencode` tag `v1.19.3` (`e3c4eb24`, released 2026-10-16) and branch `dev` at
-  `52a10f57` (2026-10-19). Repo license: MIT ("Copyright (c) 2025 opencode", `LICENSE` @v1.19.3).
+- `anomalyco/opencode` tag `v1.19.3` (`e3c4eb24`, released 2026-10-16) for the v1 line, and tag
+  `v2.0.32` (`843a6c514e606b436a7fe713422ace0a93ad3d61`, 2026-10-16) for the v2 line. Repo license:
+  MIT ("Copyright (c) 2025 opencode", `LICENSE` @v1.19.3).
+- v2 claims marked VERIFIED are read at tag `v2.0.32` (`@843a6c51`), because that is what npm
+  publishes (`@opencode/cli@2.0.32`, `@opencode/client@2.0.32`). Branch `dev` at `52a10f57`
+  (2026-10-19) is cited only as "what is coming": it is 72 commits ahead of the tag (and 1 behind;
+  GitHub compare reports `diverged`) and already adds `session.archived` / `session.unarchived`,
+  which the tag does not define. Line numbers in `server-process.ts` at the tag are shifted by
+  about -4 relative to `dev`; the numbers cited below are the tag's.
 - npm registry on 2026-10-19: `opencode-ai@1.19.3`, `@opencode-ai/sdk@1.19.3`,
   `@opencode-ai/ui@1.19.3`; `@opencode/cli`, `@opencode/client`, `@opencode/sdk`, `@opencode/ui`
   all `2.0.32`.
@@ -28,7 +35,8 @@ Pinned sources:
    but its server launch (`process.chdir`, no password) and its "webview SDK over proxied fetch"
    design are what we must avoid (section 3).
 5. Full SSE catalog for v1.19.3 in section 4 (kept as reference); v2 summary in section 5. The v2
-   permission / question / todo catalog is deferred to #8/#9 (section 8).
+   permission / form catalog is deferred to #8/#9 (section 8). v2 has no `question.*` events (a
+   question is a form) and no todos at all (section 5).
 
 ## 1. Two opencode lines
 
@@ -36,7 +44,7 @@ Pinned sources:
 |---|---|---|
 | CLI package | `opencode-ai` 1.19.3 (2026-10-16); GitHub releases are still v1.x | `@opencode/cli` 2.0.32 (`latest`; 2.0.0 published 2026-09-11) |
 | Binaries | `opencode` | `opencode` **and** `opencode2` |
-| Install docs | README @v1.19.3: `npm i -g opencode-ai`, `opencode.ai/install` | README on `dev` (default branch): `npm i -g @opencode/cli`, `opencode.ai/v2/install`, `brew install anomalyco/tap/opencode-v2`; "mise 2026.10.9 or later … older versions install OpenCode 1" |
+| Install docs | README @v1.19.3: `npm i -g opencode-ai`, `opencode.ai/install` | README @v2.0.32 (lines 48-57): `curl -fsSL https://opencode.ai/install`, `npm i -g @opencode/cli@latest`, `scoop`/`choco install opencode`, `brew install anomalyco/tap/opencode`. Caveat: on 2026-10-19 the tap formula `opencode.rb` is version 1.19.3 (v1) and the v2 formula is `opencode-v2.rb` (2.0.32, installs only `opencode`, `conflicts_with "opencode"`), VERIFIED in `anomalyco/homebrew-tap@master`. README on `dev` @52a10f57 (not yet in the tag) adds `opencode.ai/v2/install` and `brew install anomalyco/tap/opencode-v2`; the mise note ("mise 2026.10.9 or later … older versions install OpenCode 1") is on opencode.ai/v2/docs |
 | HTTP API | `/global/health`, `/event`, `/session/:id/prompt_async`, ... | everything under `/api/*`: `/api/info`, `/api/event`, `/api/session/:sessionID/prompt`, `/api/session/:sessionID/interrupt`, ... |
 | Client package | `@opencode-ai/sdk` (import `@opencode-ai/sdk/v2`) | `@opencode/client` (promise root, `/solid`, `/effect`) |
 | Event envelope | SSE `data: {"id","type","properties"}` | frames `{ id, type, data }`; durable events carry `aggregateID`, `seq`, `version` |
@@ -45,15 +53,16 @@ Pinned sources:
 | Streaming events | `message.part.updated` + `message.part.delta` | `session.text.started/delta/ended`, `session.tool.*`, `session.reasoning.*`, `session.step.*` |
 | Public docs | opencode.ai/docs/server (banner: "New OpenCode v2 is now available") | no server/client docs page found; `packages/client/README.md` calls it a "Private generation target" although it is published as public |
 
-Sources (all VERIFIED): `npm view <pkg> dist-tags time bin`; `README.md` @v1.19.3 and @dev;
-https://opencode.ai/docs/server/ ; https://opencode.ai/v2/docs/ (mise note);
-`packages/cli/src/server-process.ts` @dev (modes, stdio JSON line, `waitForStdinClose`, password);
-`packages/protocol/src/groups/{session,event,server}.ts` @dev (paths);
-`packages/server/src/handlers/event.ts` @dev (connected frame, 15 s comment heartbeat);
-`packages/schema/src/event.ts` @dev (durable envelope, `after` cursors);
+Sources (all VERIFIED): `npm view <pkg> dist-tags time bin`; `README.md` @v1.19.3, @v2.0.32 and
+@dev (the `dev` README only for the v2 install lines); https://opencode.ai/docs/server/ ;
+https://opencode.ai/v2/docs/ (mise note);
+`packages/cli/src/server-process.ts` @v2.0.32 (modes, stdio JSON line, `waitForStdinClose`, password);
+`packages/protocol/src/groups/{session,event,server}.ts` @v2.0.32 (paths);
+`packages/server/src/handlers/event.ts` @v2.0.32 (connected frame, 15 s comment heartbeat);
+`packages/schema/src/event.ts` @v2.0.32 (durable envelope, `after` cursors);
 `packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts` @v1.19.3.
 HYPOTHESIS: the v2 server has no v1-compatible HTTP routes (only a `V1Migration` DB layer was found
-in `packages/server/src/routes.ts` @dev).
+in `packages/server/src/routes.ts` @v2.0.32, line 190).
 
 Consequences:
 - The `opencode` on a user's PATH can be either line. The host must run `opencode --version` and
@@ -62,20 +71,20 @@ Consequences:
   processes even if the extension host crashes). It does NOT give global replay: `GET /api/event`
   has no `after` parameter and is "Volatile by contract: a slow consumer overflows and fails the
   stream, and events during disconnection are missed" (VERIFIED, `packages/protocol/src/groups/event.ts:44-52`
-  @52a10f57). The only replay is per session and experimental: `GET
+  @843a6c51). The only replay is per session and experimental: `GET
   /api/experimental/session/:sessionID/log` with `after` (exclusive aggregate sequence) and
-  `follow=true` (VERIFIED, `packages/protocol/src/groups/session.ts:650-665` @52a10f57). So after a
+  `follow=true` (VERIFIED, `packages/protocol/src/groups/session.ts:726-742` @843a6c51). So after a
   reconnect a full snapshot resync is still required.
 - v2 is moving fast (32 releases in ~5 weeks) and undocumented.
 - Rejected: v2's in-process `@opencode/sdk` ("executes Server's assembled HTTP router in memory",
-  `packages/sdk/README.md` @dev, VERIFIED). It would run the whole agent (DB, PTY, watchers, tools)
+  `packages/sdk/README.md` @v2.0.32, VERIFIED). It would run the whole agent (DB, PTY, watchers, tools)
   inside the extension host process shared by every extension, and ignore the user's installed CLI.
 
 ## 2. Upstream UI packages
 
 ### 2.1 What exists
 
-**`packages/ui`** — `@opencode-ai/ui@1.19.3` on npm, MIT (renamed `@opencode/ui` 2.0.32 on `dev`).
+**`packages/ui`** — `@opencode-ai/ui@1.19.3` on npm, MIT (renamed `@opencode/ui` 2.0.32 at tag `v2.0.32`).
 VERIFIED in `packages/ui/package.json` @v1.19.3 and `npm view`.
 - ~45 primitives (button, dialog, tooltip, select, tabs, toast, accordion, list, popover...) built
   on `@kobalte/core` 0.13.11, plus theme, i18n, marked/Shiki and file contexts, icon sprites, fonts.
@@ -90,8 +99,8 @@ VERIFIED in `packages/ui/package.json` @v1.19.3 and `npm view`.
 - `theme/context.tsx` creates a `<style>` element at runtime and writes `textContent`, and uses
   `localStorage` (lines ~92-155).
 
-**`packages/session-ui`** — `@opencode-ai/session-ui`, `"private": true`, **not on npm** (same on
-`dev` as `@opencode/session-ui`). VERIFIED (`package.json`, `npm view` → 404).
+**`packages/session-ui`** — `@opencode-ai/session-ui`, `"private": true`, **not on npm** (same at
+`v2.0.32`, where it is `@opencode/session-ui`). VERIFIED (`package.json`, `npm view` → 404).
 - Chat rendering: `message-part.tsx` (2,642 lines; every Part type and tool), `session-turn`,
   `basic-tool`, `markdown` + `markdown-stream` + `markdown-cache` + worker, `session-review` /
   diffs (`@pierre/diffs`), `dock-prompt`, `v2/prompt-input`.
@@ -182,7 +191,7 @@ integration with `@vscode/test-electron`, standalone dev page with a mock host).
 A terminal launcher: opens a terminal running `opencode` with `OPENCODE_CALLER=vscode` and pastes
 `@file` references; commands `opencode.openTerminal`, `opencode.openNewTerminal`,
 `opencode.addFilepathToTerminal`. No webview. VERIFIED (`sdks/vscode/src/extension.ts`,
-`package.json` @dev).
+`package.json` @v2.0.32).
 
 ## 4. SSE catalog — v1 line (opencode 1.19.3, `GET /event`)
 
@@ -246,10 +255,11 @@ Notes:
 ## 5. Event stream — v2 line (summary only)
 
 - `GET /api/event`; first frame `server.connected` with `data: {}`; heartbeat is an SSE comment
-  every 15 s (VERIFIED, `packages/server/src/handlers/event.ts` @dev). Exact frame encoding
+  every 15 s (VERIFIED, `packages/server/src/handlers/event.ts` @843a6c51). Exact frame encoding
   (`EventFeed.frame`) is HYPOTHESIS.
-- Session events (VERIFIED list, `packages/schema/src/session-event.ts` @dev):
-  `session.created/deleted/renamed/forked/moved/archived/unarchived/viewed`,
+- Session events (VERIFIED list, `packages/schema/src/session-event.ts` @843a6c51, i.e. what
+  `@opencode/client@2.0.32` ships):
+  `session.created/deleted/renamed/forked/moved/viewed`,
   `session.agent.selected`, `session.model.selected`,
   `session.execution.started/succeeded/failed/interrupted`,
   `session.step.started/streamed/ended/failed`, `session.text.started/delta/ended`,
@@ -259,19 +269,51 @@ Notes:
   `session.shell.started/ended`, `session.usage.recorded/updated`, `session.inbox.*`,
   `session.message.content.updated`, `session.metadata.updated`, `session.permissions`,
   `session.skill.activated`, `session.instructions.updated`, `session.synthetic`.
+  Coming on `dev` @52a10f57, not in the tag: `session.archived` / `session.unarchived` (the
+  tag's `session-event.ts` has no `archived` at all).
 - Durable events: `aggregateID`, `seq`, `version`; "`after` cursors accept only values that came
-  from those sources" (VERIFIED comment, `packages/schema/src/event.ts`).
-- Permission / question / todo events for v2: UNVERIFIED (not catalogued; deferred to #8/#9, see
-  section 8). Sources to read then, all present @52a10f57 (VERIFIED, HTTP 200):
-  `packages/schema/src/permission.ts`, `packages/schema/src/question.ts`,
-  `packages/schema/src/form.ts`, `packages/protocol/src/groups/permission.ts`. Where todos are
-  defined is UNVERIFIED (`packages/schema/src/todo.ts` does not exist).
+  from those sources" (VERIFIED comment, `packages/schema/src/event.ts:19` @843a6c51).
+- **Permissions and questions in v2.** There is no `question.*` event family. Permissions have
+  `permission.asked` / `permission.replied` (VERIFIED, `packages/schema/src/permission.ts:45-47`
+  @843a6c51). A model question is a **form**: the `question` tool creates a form whose
+  `metadata.kind` is `"question"`, with fields `q0..qN`, announced by `form.created` /
+  `form.replied` / `form.cancelled` (VERIFIED, `packages/schema/src/form.ts:173-175` and
+  `packages/core/src/tool/plugin/question.ts:74-121` @843a6c51) and answered with
+  `session.form.reply` (`POST /api/session/:sessionID/form/:formID/reply`, VERIFIED,
+  `packages/protocol/src/groups/session.ts:842` @843a6c51). Before creating the form the tool
+  asserts a `question` permission (`question.ts:63-72`), so a `permission.asked` may precede
+  `form.created` (HYPOTHESIS about ordering on the wire; check in #8/#9). Detailed shapes are deferred to #8/#9
+  (section 8): the full v2 catalog lives with the server implementation (#8/#9).
+- **What does not exist in v2** (VERIFIED against the `v2.0.32` tree and the files named; absence
+  is read from the tree listing and from the absence of matches, not from a running server):
+  - **Todos**: no tool (`packages/core/src/tool/plugin/` has no todo tool), no event (none in
+    `packages/schema/src/session-event.ts`) and no endpoint (none under
+    `packages/protocol/src/groups/`). `packages/schema/src/todo.ts` does not exist (HTTP 404).
+  - **Share / unshare**: no endpoint in `packages/protocol/src/groups/session.ts` and no
+    `share` protocol group.
+  - **A dedicated init endpoint**: there is none, but `init` ("guided AGENTS.md setup") **is
+    available** as a built-in command with its own `execute`, which sends the `initialize.txt`
+    prompt (`packages/core/src/plugin/command.ts:29-41` @843a6c51). It runs through the generic
+    command route `POST /api/session/:sessionID/command` with `name: "init"`
+    (`packages/protocol/src/groups/session.ts:418-436`).
+  - **LSP status**: `LspEvent` (`packages/schema/src/lsp-event.ts`) is in `Definitions` but not in
+    `ServerDefinitions` (`packages/schema/src/event-manifest.ts:71-81` and `:90`), and the public
+    stream is built only from `ServerDefinitions` (`packages/protocol/src/groups/event.ts:62`,
+    filter `isServer` at `:68`), so it is not on `/api/event`; there is no LSP route in the
+    session group.
+  - **`unrevert`**: the session group has only `revert.stage`, `revert.commit` and
+    `revert.clear` (`session.ts:535-560`); `clear` is the closest equivalent.
 
 ## 6. Implications for the next issues
 
-Note: section 4 (v1 catalog) is kept as reference only. The v2 catalog for permissions, questions
-and todos is UNVERIFIED and is to be completed in the server issue (#8/#9), reading the v2 sources
-listed in section 5. No v2 event shapes beyond those marked VERIFIED in section 5 should be assumed.
+Note: section 4 (v1 catalog) is kept as reference only, and its `question.*` and `todo.*` entries
+do not exist in v2 (section 5). The v2 catalog for permissions and forms is to be completed in the
+server issue (#8/#9), reading, at tag `v2.0.32`: `packages/schema/src/permission.ts`,
+`packages/schema/src/form.ts`, `packages/schema/src/question.ts` (used through forms, by
+`packages/core/src/tool/plugin/question.ts`), `packages/protocol/src/groups/permission.ts` and the
+per-session form routes in `packages/protocol/src/groups/session.ts:796-867` (the `form` group
+itself only has `GET /api/form`).
+No v2 event shapes beyond those marked VERIFIED in section 5 should be assumed.
 
 **#1 Scaffold**
 - Pin `@opencode/client` exactly (no `^`). It is ESM-only → bundle the host with esbuild
@@ -284,15 +326,19 @@ listed in section 5. No v2 event shapes beyond those marked VERIFIED in section 
 - `spawn` with `cwd` = workspace folder, `shell: false`, random password in env, `--stdio` mode;
   parse the v2 `--stdio` JSON line (`{"url": ...}`) from stdout; the server exits when our stdin
   closes. Windows: kill the tree (`taskkill /pid <pid> /T /F`) as a fallback.
-  VERIFIED @52a10f57: the `--stdio` flag (`packages/cli/src/commands/commands.ts:561`); the stdout
-  line `{"url":"..."}` printed with `console.log(JSON.stringify({ url }))` and the exit when stdin
-  closes (`packages/cli/src/server-process.ts:206,210`, `waitForStdinClose`). Load-bearing details
-  (`server-process.ts:68,84-94,207`, `packages/cli/src/commands/handlers/serve.ts:9`):
+  VERIFIED @843a6c51 (tag `v2.0.32`): the `--stdio` flag (`packages/cli/src/commands/commands.ts:561`);
+  the stdout line `{"url":"..."}` printed with `console.log(JSON.stringify({ url }))` and the exit
+  when stdin closes (`packages/cli/src/server-process.ts:202,205-207`, `waitForStdinClose`, defined
+  at line 227). Load-bearing details
+  (`server-process.ts:67,80-92,203`, `packages/cli/src/commands/handlers/serve.ts:9`; on `dev`
+  @52a10f57 the same lines sit about 4 further down):
   - In `--stdio` mode the password is NOT printed (only the default/foreground mode prints it), so
-    the host must generate it and pass it via env (`OPENCODE_SERVER_PASSWORD` or
-    `OPENCODE_PASSWORD`). If neither is set the server invents a random one nobody can read.
+    the host must generate it and pass it via env. `OPENCODE_PASSWORD` wins; the legacy
+    `OPENCODE_SERVER_PASSWORD` is read only if the first is unset (`packages/cli/src/env.ts:10-11`
+    @843a6c51), so the host sets `OPENCODE_PASSWORD` and removes the legacy one from the child's
+    env. If neither is set the server invents a random one nobody can read.
   - In `--stdio` mode, v2 deletes both variables from its own `process.env` after reading them
-    (so tools it spawns do not inherit them; `server-process.ts:86`).
+    (so tools it spawns do not inherit them; `server-process.ts:82-84`).
   - `--service` and `--stdio` cannot be combined (`serve.ts` fails with "--service and --stdio
     cannot be combined").
   Not executed against a running server (see section 7).
@@ -316,18 +362,24 @@ listed in section 5. No v2 event shapes beyond those marked VERIFIED in section 
     `message.upserted`, `message.removed`, `part.upserted`, `part.delta`, `part.removed`,
     `permission.asked`, `permission.resolved`, `question.asked`, `question.resolved`,
     `todos.updated`, `error`.
+    These are host-protocol names, not wire names: in v2 `question.*` would be derived from forms
+    (`form.created` with `metadata.kind = "question"`, answered via `session.form.reply`;
+    `question.reject` maps to `session.form.cancel`, `DELETE /api/session/:sessionID/form/:formID`,
+    `session.ts:858`), and
+    `todos.updated` has no v2 source at all (section 5), so it should not be implemented.
   - `WebviewToHost`: `ready`, `session.select`, `session.create`, `prompt.send`,
     `session.abort`, `permission.reply`, `question.reply`, `question.reject`.
 - Runtime guards on both sides (`isHostToWebview`, `isWebviewToHost`); never forward raw SSE.
 - After every reconnect the host resyncs with a `snapshot`: `GET /api/event` is volatile and has no
-  `after` (VERIFIED, `packages/protocol/src/groups/event.ts:44-52` @52a10f57). Using the
+  `after` (VERIFIED, `packages/protocol/src/groups/event.ts:44-52` @843a6c51). Using the
   experimental per-session log (`/api/experimental/session/:sessionID/log?after=&follow=`,
-  VERIFIED to exist in `packages/protocol/src/groups/session.ts:650-665`) to avoid a full snapshot
+  VERIFIED to exist in `packages/protocol/src/groups/session.ts:726-742` @843a6c51) to avoid a full snapshot
   for the open session is HYPOTHESIS of usefulness: it is experimental and was never run.
 
 ## 7. Not verified / open
 - Nothing ran against a real server (either line).
-- v2 frame encoding and v2 permission/question/todo events.
+- v2 frame encoding and the v2 permission and form event shapes (the absence of `question.*` and
+  todos was read from the `v2.0.32` tree, not observed on a running server).
 - Web Worker loading inside a VS Code webview.
 - Whether `@kobalte/core` injects styles at runtime.
 
@@ -342,8 +394,8 @@ Decided by the maintainer on 2026-10-19.
 - Reason: it is upstream's `latest` and what new installs receive; `serve --stdio` ties the
   server's lifetime to our stdin, which is what solves orphan processes. v2 does NOT provide global
   replay: `/api/event` is volatile and has no `after` (VERIFIED, `packages/protocol/src/groups/event.ts:44-52`
-  @52a10f57), so after a reconnect a full snapshot is still needed. The experimental per-session log
-  (`GET /api/experimental/session/:sessionID/log?after=&follow=`, `packages/protocol/src/groups/session.ts:650-665`)
+  @843a6c51), so after a reconnect a full snapshot is still needed. The experimental per-session log
+  (`GET /api/experimental/session/:sessionID/log?after=&follow=`, `packages/protocol/src/groups/session.ts:726-742` @843a6c51)
   could narrow that resync for the open session; its usefulness is HYPOTHESIS.
 - Discarded alternatives: v1 plus an adapter (new users would see "unsupported"), and supporting
   both lines (double event mapping and double fixtures).
@@ -356,26 +408,42 @@ Decided by the maintainer on 2026-10-19.
 `session-ui/src/components/markdown-stream.ts` and `markdown-projection.ts` (MIT; keep upstream's
 copyright notice in the file header or in a `NOTICE`). Never a dependency on `@opencode-ai/ui`.
 When the copy is made, pin the exact upstream commit it is taken from and record it in the file
-header: `markdown-stream.ts` exists both at `v1.19.3` and on `dev` @52a10f57 (VERIFIED, HTTP 200 on
-both raw URLs), so the pin must say which. The vendored file adds a runtime dependency on `remend`
+header: `markdown-stream.ts` exists at `v1.19.3`, at `v2.0.32` (`@843a6c51`) and on `dev` @52a10f57
+(VERIFIED, HTTP 200 on the raw URLs; `markdown-projection.ts` checked at the `v2.0.32` tag only),
+so the pin must say which. The vendored file adds a runtime dependency on `remend`
 (it imports `marked`, `remend` and `./markdown-projection`).
 
 **Minimum VS Code: `engines.vscode ^1.105.0`**, to cover forks (Cursor ~1.105 HYPOTHESIS,
 VSCodium).
 
-**v2 permission / question / todo catalog: deferred** to the server issues (#8/#9). Issue #6 closes
-with the v1 catalog (section 4) and the v2 session-event list (section 5); the missing v2 shapes
-are read from the sources listed in section 5 when the host adapter is written.
+**v2 permission / form catalog: deferred** to the server issues (#8/#9). Issue #6 closes with the v1
+catalog (section 4) and the v2 session-event list (section 5); the missing v2 shapes are read from
+the sources listed in section 6 (at tag `v2.0.32`) when the host adapter is written. The full v2
+catalog lives with the server implementation (#8/#9).
+
+**Not in v2, so not in scope** (section 5, read from the `v2.0.32` tree): `question.*` events
+(questions are forms: `form.created` with `metadata.kind = "question"`, fields `q0..qN`, reply with
+`session.form.reply`), todos (no tool, event or endpoint), share / unshare, LSP status on the
+public stream, and `unrevert`. Features built on those (todo panel, share button, LSP indicator)
+have no v2 counterpart to wire to. `init` (AGENTS.md generation) stays **in scope**: it has no
+dedicated endpoint but runs as the built-in command `init` through
+`POST /api/session/:sessionID/command` (section 5).
 
 ## Sources
 - https://github.com/anomalyco/opencode/tree/v1.19.3 — `packages/ui`, `packages/session-ui`,
   `packages/opencode/src/{server/routes/instance/httpapi/handlers/event.ts,permission/index.ts,session/processor.ts,event-v2-bridge.ts}`, `LICENSE`, `README.md`
-- https://github.com/anomalyco/opencode/tree/52a10f573f1da5103c85990da9341e3645a39365 —
-  `packages/cli/src/server-process.ts`, `packages/cli/src/commands/handlers/serve.ts`,
-  `packages/server/src/{handlers/event.ts,routes.ts,api.ts}`,
-  `packages/protocol/src/groups/{session,event,server}.ts`,
-  `packages/schema/src/{event.ts,session-event.ts}`, `packages/{client,sdk}/README.md`,
-  `packages/ui/package.json`, `packages/session-ui/package.json`, `sdks/vscode`, `README.md`
+- https://github.com/anomalyco/opencode/tree/843a6c514e606b436a7fe713422ace0a93ad3d61 (tag
+  `v2.0.32`, source of the v2 claims) —
+  `packages/cli/src/{server-process.ts,commands/commands.ts,commands/handlers/serve.ts}`,
+  `packages/server/src/{handlers/event.ts,routes.ts}`,
+  `packages/protocol/src/groups/{session,event,server,permission,form}.ts`,
+  `packages/schema/src/{event.ts,event-manifest.ts,session-event.ts,permission.ts,form.ts,question.ts,lsp-event.ts}`,
+  `packages/core/src/tool/plugin/question.ts`, `packages/core/src/plugin/command.ts`,
+  `packages/{client,sdk}/README.md`, `packages/ui/package.json`, `packages/session-ui/package.json`,
+  `sdks/vscode`, `README.md`
+- https://github.com/anomalyco/opencode/tree/52a10f573f1da5103c85990da9341e3645a39365 (branch `dev`,
+  72 commits ahead of the tag; "what is coming" only) — `README.md` (v2 install lines),
+  `packages/schema/src/session-event.ts` (`session.archived` / `unarchived`)
 - https://www.npmjs.com/package/@opencode-ai/sdk (1.19.3, `dist/v2/gen/types.gen.d.ts`)
 - https://www.npmjs.com/package/@opencode-ai/ui · https://www.npmjs.com/package/@opencode/cli ·
   https://www.npmjs.com/package/@opencode/client
