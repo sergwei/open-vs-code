@@ -142,9 +142,10 @@ export default defineConfig(
   // through webview-ui/tsconfig.node.json, but the ESLint project service only discovers files
   // listed in a tsconfig.json it can find by name, and that name there is the browser one
   // (webview-ui/tsconfig.json, which excludes it on purpose: no DOM in Node code). Hence no
-  // type information here, like the root configs.
+  // type information here, like the root configs. `src/**/*.mjs` is the plain-JS test fixture of
+  // issue #8 (src/extension/test-fixtures/fake-opencode.mjs): it runs in Node, no tsconfig lists it.
   {
-    files: ['*.{mjs,mts}', 'webview-ui/*.{mjs,mts}', 'scripts/*.{mjs,mts}'],
+    files: ['*.{mjs,mts}', 'webview-ui/*.{mjs,mts}', 'scripts/*.{mjs,mts}', 'src/**/*.mjs'],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: { globals: globals.node },
   },
