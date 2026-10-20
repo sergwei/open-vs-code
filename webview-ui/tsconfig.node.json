@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // Typechecks the Vite config only. It runs in Node, so no DOM and no webview globals.
+    "module": "preserve",
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["vite.config.mts"]
+}

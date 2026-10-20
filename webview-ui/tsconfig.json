@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // "preserve" implies bundler resolution; Vite does the bundling. The webview runs in a
+    // browser, so it gets the DOM lib and Solid's JSX transform, and no Node types.
+    "module": "preserve",
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM"],
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    // TS 6 defaults `types` to []: `vite/client` provides the `*.css` module declaration
+    // and `vscode-webview` provides the global `acquireVsCodeApi`.
+    "types": ["vite/client", "vscode-webview"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}

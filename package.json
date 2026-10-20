@@ -60,20 +60,28 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "build:webview": "node webview-ui/build.mjs",
+    "package:webview": "node webview-ui/build.mjs --production",
+    "watch:webview": "node webview-ui/build.mjs --watch",
+    "check-types:webview": "tsc --noEmit -p webview-ui && tsc --noEmit -p webview-ui/tsconfig.node.json"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "22.x",
     "@types/vscode": "1.105.0",
+    "@types/vscode-webview": "^1.57.5",
     "esbuild": "^0.28.2",
     "eslint": "^10.13.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.13.0",
     "npm-run-all2": "^9.0.3",
     "prettier": "3.9.10",
+    "solid-js": "~1.9.17",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.72.0",
+    "vite": "~8.3.4",
+    "vite-plugin-solid": "~2.11.14",
     "vitest": "5.0.5"
   }
 }
