@@ -1,0 +1,109 @@
+# CI for open-vs-code (issue #5).
+#
+# Runs on every pull request to main and every push to main, on Windows, macOS and Linux:
+# install, typecheck, lint, format check, unit tests, build, (integration tests, issue #41),
+# `vsce package` and a check of what ends up inside the .vsix. The extension must work on all
+# three systems (CLAUDE.md, architecture rule 7), so each step runs on each of them.
+#
+# Decisions:
+# - Actions are pinned to a commit SHA, with the tag in a comment: tags can be moved, SHAs not.
+#   Nothing updates them automatically (no dependabot yet): bump them by hand.
+# - `permissions: contents: read` and `persist-credentials: false`: the workflow never pushes.
+# - `fail-fast: false`: a failure on one OS must not hide the result on the others.
+# - Canary files (CLAUDE.md, .claude/canary.md) are created before packaging. They are not
+#   versioned, so without them "CLAUDE.md and .claude/ do not ship" would be checked against
+#   files that do not exist in CI.
+# - `vsix` uses `--skip-license` until a LICENSE exists (issue #42): drop the flag then.
+# - The integration step is a placeholder for issue #41: `--if-present` skips it until a
+#   `test:integration` script exists. If #41 names it differently it will be skipped silently.
+#
+# UNVERIFIED until the first run on the pull request: nothing here has run on macOS or Linux.
+# Check there: Node version (>= 24.15), "117 passed | 1 skipped" from Vitest, "OK: N files"
+# from the "Check package contents" step printed after the canaries, and one .vsix artifact per OS.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run check-types
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # Placeholder for issue #41 (integration tests with @vscode/test-electron).
+      - name: Integration tests
+        if: runner.os != 'Linux'
+        run: npm run test:integration --if-present
+
+      - name: Integration tests (Linux, virtual display)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:integration --if-present
+
+      - name: Create canary files
+        shell: bash
+        run: |
+          printf 'canary\n' > CLAUDE.md
+          mkdir -p .claude
+          printf 'canary\n' > .claude/canary.md
+
+      - name: Package
+        run: npm run vsix
+
+      - name: Check package contents
+        shell: bash
+        run: |
+          npx vsce ls --no-dependencies > "$RUNNER_TEMP/vsix-files.txt"
+          node scripts/check-vsix.mjs "$RUNNER_TEMP/vsix-files.txt"
+
+      - name: Upload .vsix
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: open-vs-code-vsix-${{ matrix.os }}
+          path: '*.vsix'
+          if-no-files-found: error
+          retention-days: 30

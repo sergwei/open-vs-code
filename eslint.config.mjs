@@ -2,7 +2,7 @@
 //
 // Block order matters, the last matching block wins per rule:
 //   1. ignores, 2. JS recommended, 3. typed TypeScript rules, 4. Node-side config files
-//   (root `*.{mjs,mts}` and `webview-ui/*.{mjs,mts}`: not in a tsconfig the project service
+//   (root `*.{mjs,mts}`, `webview-ui/*.{mjs,mts}` and `scripts/*.{mjs,mts}`: not in a tsconfig the project service
 //   finds, so no type information and NO architecture boundaries), 5. architecture boundaries,
 //   6. eslint-config-prettier last, so it can switch off any formatting rule.
 //
@@ -144,7 +144,7 @@ export default defineConfig(
   // (webview-ui/tsconfig.json, which excludes it on purpose: no DOM in Node code). Hence no
   // type information here, like the root configs.
   {
-    files: ['*.{mjs,mts}', 'webview-ui/*.{mjs,mts}'],
+    files: ['*.{mjs,mts}', 'webview-ui/*.{mjs,mts}', 'scripts/*.{mjs,mts}'],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: { globals: globals.node },
   },
