@@ -156,8 +156,9 @@ export function describeServerFailure(
  * process side, against the synthetic fixture. The process functions it is wired to were
  * VERIFIED against the real opencode 2.0.32 on Windows 11 (npm @opencode/cli, spike on
  * 2026-10-20: start, `/api/info`, version check and stop end to end, `--port 0` giving the real
- * port so plan B did not trigger). UNVERIFIED inside VS Code until the opt-in
- * `realOpencode.test.ts` or F5 is run; POSIX UNVERIFIED.
+ * port so plan B did not trigger). Inside VS Code 1.142.0 on Windows 11 the start against a
+ * real opencode reached `running` (opt-in `realOpencode.test.ts`, 2026-10-20: VERIFIED);
+ * the stop inside VS Code and POSIX remain UNVERIFIED.
  */
 export class ServerManager {
   private current: ServerState = { kind: 'idle' };

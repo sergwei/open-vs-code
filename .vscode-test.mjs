@@ -16,8 +16,11 @@ import path from 'node:path';
  * (the IPC pipe name is a hash of it), so a private dir lets the tests run while the developer's
  * own VS Code is open, and it keeps `settings.json` of the user untouched (the tests change
  * `openVsCode.opencodePath` in THIS profile). It is also where the tests read `OpenCode.log`.
- * HYPOTHESIS (read in the VS Code sources, not run): coexistence with an open Stable window is
- * confirmed by the first local run.
+ * HYPOTHESIS (read in the VS Code sources, not reproduced): the mechanism, i.e. that the pipe
+ * name is what lets both instances coexist; no control run without the private dir was made.
+ * VERIFIED (first local run of the `real-opencode` configuration, Windows 11, VS Code 1.142.0,
+ * 2026-10-20): the test instance started and passed while the developer's own VS Code was open.
+ * POSIX UNVERIFIED.
  */
 const userDataDir = path.join(import.meta.dirname, '.vscode-test', 'user-data');
 
@@ -97,8 +100,9 @@ const main = {
  * empty directory under the OS temp dir (created here, never deleted by us): inside the repo it
  * would make opencode treat the checkout as the project, and an empty dir cannot be tracked by
  * git. `--disable-workspace-trust` because the extension does not activate in Restricted Mode and
- * the trust prompt would block it (HYPOTHESIS: the flag is honoured by the test instance; not
- * run yet).
+ * the trust prompt would block it (VERIFIED, first local run, Windows 11, VS Code 1.142.0,
+ * 2026-10-20: the extension activated in the temp folder with no prompt and the suite passed;
+ * POSIX UNVERIFIED).
  */
 const realOpencode = {
   ...common,

@@ -34,9 +34,10 @@ const SHOW_LOGS = 'Show Logs';
  * activate in Restricted Mode and nothing is launched against an untrusted folder (HYPOTHESIS:
  * VS Code's documented default, not exercised).
  * The underlying start and stop are VERIFIED against the real opencode 2.0.32 on Windows 11
- * (bundled code under plain Node, spike on 2026-10-20). UNVERIFIED in VS Code: log lines,
- * notification and its button, and the whole path against a real opencode (the opt-in
- * `realOpencode.test.ts` or F5 would cover the log lines); POSIX UNVERIFIED.
+ * (bundled code under plain Node, spike on 2026-10-20). VERIFIED in VS Code 1.142.0 on Windows
+ * 11 (opt-in `realOpencode.test.ts`, 2026-10-20): the start against a real opencode and its
+ * `starting the server` and `server ready` log lines. UNVERIFIED in VS Code: the notification
+ * and its button, and that the stop on `deactivate` leaves no process behind; POSIX UNVERIFIED.
  */
 export function registerServerLifecycle(channel: vscode.LogOutputChannel): {
   manager: ServerManager;
