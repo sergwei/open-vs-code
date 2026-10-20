@@ -3,6 +3,8 @@
 # untracked local files (CLAUDE.md, .claude/) would otherwise leak into a public package.
 # vsce always includes package.json and the README. Never combine with `files` in
 # package.json: vsce aborts when both exist.
+# CI checks the result with scripts/check-vsix.mjs: any new file that must ship needs its `!`
+# line here AND, if it is essential, an entry in that script's required list.
 **
 !dist/extension.js
 !dist/webview/**
