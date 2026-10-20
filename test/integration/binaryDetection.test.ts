@@ -6,8 +6,9 @@
 // real VS Code. The setting is written with the API into the isolated profile
 // (`.vscode-test/user-data`), never into the user's own settings.json.
 // The "opencode" is the Node that runs the tests (answers `--version` with a v24 number), or a
-// shell script on POSIX; no real opencode is installed (decision of Sergio: real server stays
-// UNVERIFIED). Out of scope: the notification and its buttons (no API reads notifications).
+// shell script on POSIX; this suite never uses a real opencode, the opt-in realOpencode.test.ts
+// covers the real server. Out of scope: the notification and its buttons (no API reads
+// notifications).
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -25,9 +26,11 @@ const WAIT_MS = 8000;
 /**
  * Writes `openVsCode.opencodePath` in the global (user) scope of the test profile.
  *
- * HYPOTHESIS: a `scope: machine` setting accepts `ConfigurationTarget.Global`; if VS Code
- * refuses, `update` rejects and every test here fails at this call (plan B: write the profile's
- * settings.json before activation).
+ * VERIFIED: a `scope: machine` setting accepts `ConfigurationTarget.Global` (first local run of
+ * realOpencode.test.ts, Windows 11, VS Code 1.142.0, 2026-10-20: the detection logged the
+ * setting as `ok`; POSIX UNVERIFIED). If a future VS Code refuses it, `update` rejects and
+ * every test here fails at this call (plan B: write the profile's settings.json before
+ * activation).
  */
 async function setPath(value: string | undefined): Promise<void> {
   await vscode.workspace

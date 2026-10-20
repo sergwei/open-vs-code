@@ -66,9 +66,12 @@ describe('real opencode', function () {
    * because a restored view may have activated the extension earlier, the assertions do not
    * compare the binary path with the variable: they need `starting the server for <folder>` and
    * `binary detection: setting ...: ok`.
-   * UNVERIFIED until the first run: the whole test, including that a `scope: machine` setting
-   * accepts `ConfigurationTarget.Global` (same assumption as binaryDetection.test.ts) and that
-   * the server started from the setting when the extension was already active.
+   * VERIFIED (first local run, Windows 11, VS Code 1.142.0, 2026-10-20): passes in ~1.2 s
+   * against a real opencode 2.0.32 on a real port, and `binary detection: setting ...: ok` shows
+   * that a `scope: machine` setting accepts `ConfigurationTarget.Global`.
+   * UNVERIFIED: whether the server came from the setting or from a PATH binary detected before
+   * the setting was written (the output does not say whether the extension was already active,
+   * and the manager does not restart on a binary change, issue #10). POSIX UNVERIFIED.
    */
   it('starts the server and reports it ready', async function () {
     this.timeout(READY_WAIT_MS + 10_000);
