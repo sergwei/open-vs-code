@@ -1,0 +1,22 @@
+/* Theme colors come only from VS Code variables (--vscode-*): no literal colors here. */
+body {
+  margin: 0;
+  padding: 0 12px;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+}
+
+.app-title {
+  font-size: 1.2em;
+  font-weight: 600;
+}
+
+.app-hint {
+  color: var(--vscode-descriptionForeground);
+}
+
+:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}

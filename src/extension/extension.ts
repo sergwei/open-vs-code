@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
+import { registerChatView } from './chatViewProvider';
 import { LOG_CHANNEL_NAME, SHOW_LOGS_COMMAND_ID } from './ids';
 
 /**
- * Extension entry point: creates the log channel and registers the commands.
+ * Extension entry point: creates the log channel, registers the commands and the chat view.
  *
  * Kept thin on purpose, with one call per feature, so that parallel issues
  * (#2 webview provider, #7 binary detection) each add a single line here and
@@ -17,6 +18,9 @@ import { LOG_CHANNEL_NAME, SHOW_LOGS_COMMAND_ID } from './ids';
  * read narrows it with an assertion to `{ version?: unknown }` to satisfy the typed lint rules;
  * a missing version would print "undefined". UNVERIFIED: F5 was NOT run after that narrowing;
  * confirm the channel still shows `open-vs-code 0.0.1 activated`.
+ *
+ * The chat view provider (issue #2) is UNVERIFIED until F5: that the view resolves
+ * and renders the bundled app.
  */
 export function activate(context: vscode.ExtensionContext): void {
   const channel = vscode.window.createOutputChannel(LOG_CHANNEL_NAME, { log: true });
@@ -27,6 +31,8 @@ export function activate(context: vscode.ExtensionContext): void {
       channel.show();
     }),
   );
+
+  context.subscriptions.push(registerChatView(context.extensionUri, channel));
 
   const { version } = context.extension.packageJSON as { version?: unknown };
   channel.info(`open-vs-code ${String(version)} activated`);
