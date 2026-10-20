@@ -14,7 +14,8 @@
  */
 
 /** Any JSON value; used where opencode sends free-form data (tool input, metadata). */
-export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue =
+  string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
 /** A JSON object. */
 export type JsonObject = { [key: string]: JsonValue };
@@ -32,7 +33,13 @@ export type ErrorInfo = { code: string; message: string; detail?: string };
 export type ModelRef = { providerID: string; id: string; variant?: string };
 
 /** Token counters of one assistant message. */
-export type TokenUsage = { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number };
+export type TokenUsage = {
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+};
 
 /** Row of the session list. Timestamps are epoch milliseconds. */
 export type SessionSummary = {
@@ -43,14 +50,14 @@ export type SessionSummary = {
   model?: ModelRef;
   createdAt: number;
   updatedAt: number;
-  outcome?: "succeeded" | "failed" | "interrupted";
+  outcome?: 'succeeded' | 'failed' | 'interrupted';
 };
 
 /** Live state of a session. `nextAt` of `retry` is an epoch-milliseconds timestamp. */
 export type SessionStatus =
-  | { type: "idle" }
-  | { type: "busy" }
-  | { type: "retry"; attempt: number; message: string; nextAt: number };
+  | { type: 'idle' }
+  | { type: 'busy' }
+  | { type: 'retry'; attempt: number; message: string; nextAt: number };
 
 /** File attached to a user message. Never carries the file contents (no base64). */
 export type AttachmentInfo = { name?: string; mime: string; uri?: string };
@@ -60,33 +67,40 @@ export type AttachmentInfo = { name?: string; mime: string; uri?: string };
  * `notice` collapses opencode's synthetic/system/compaction/model-switched messages into one line.
  */
 export type MessageInfo =
-  | { kind: "user"; id: string; createdAt: number; text: string; files: AttachmentInfo[] }
+  | { kind: 'user'; id: string; createdAt: number; text: string; files: AttachmentInfo[] }
   | {
-      kind: "assistant";
+      kind: 'assistant';
       id: string;
       createdAt: number;
       completedAt?: number;
       agent: string;
       model: ModelRef;
-      finish?: "stop" | "length" | "tool-calls" | "content-filter" | "error" | "unknown";
+      finish?: 'stop' | 'length' | 'tool-calls' | 'content-filter' | 'error' | 'unknown';
       error?: ErrorInfo;
       cost?: number;
       tokens?: TokenUsage;
     }
-  | { kind: "notice"; id: string; createdAt: number; text: string };
+  | { kind: 'notice'; id: string; createdAt: number; text: string };
 
 /** Output item of a finished tool call. */
-export type ToolOutput = { type: "text"; text: string } | { type: "file"; uri: string; mime: string; name?: string };
+export type ToolOutput =
+  { type: 'text'; text: string } | { type: 'file'; uri: string; mime: string; name?: string };
 
 /**
  * Lifecycle of a tool call. While `streaming`, `input` is the raw JSON text still arriving
  * (`part.delta` with `field: "input"` appends to it); afterwards it is the parsed object.
  */
 export type ToolState =
-  | { status: "streaming"; input: string }
-  | { status: "running"; input: JsonObject; metadata?: JsonObject }
-  | { status: "completed"; input: JsonObject; output: ToolOutput[]; metadata?: JsonObject }
-  | { status: "error"; input: JsonObject; error: ErrorInfo; output?: ToolOutput[]; metadata?: JsonObject };
+  | { status: 'streaming'; input: string }
+  | { status: 'running'; input: JsonObject; metadata?: JsonObject }
+  | { status: 'completed'; input: JsonObject; output: ToolOutput[]; metadata?: JsonObject }
+  | {
+      status: 'error';
+      input: JsonObject;
+      error: ErrorInfo;
+      output?: ToolOutput[];
+      metadata?: JsonObject;
+    };
 
 /**
  * Content block of an assistant message.
@@ -97,15 +111,15 @@ export type ToolState =
  * reference it (`ToolRef.partID`).
  */
 export type Part =
-  | { type: "text"; id: string; text: string }
-  | { type: "reasoning"; id: string; text: string; completed: boolean }
-  | { type: "tool"; id: string; name: string; state: ToolState };
+  | { type: 'text'; id: string; text: string }
+  | { type: 'reasoning'; id: string; text: string; completed: boolean }
+  | { type: 'tool'; id: string; name: string; state: ToolState };
 
 /** Points at the tool block that triggered a permission or a form. */
 export type ToolRef = { messageID: string; partID: string };
 
 /** User answer to a permission request. `reject` also rejects every pending one of the session (server side). */
-export type PermissionDecision = "once" | "always" | "reject";
+export type PermissionDecision = 'once' | 'always' | 'reject';
 
 /**
  * Pending permission request. `save` empty means opencode will treat "always" as "once",
@@ -133,25 +147,37 @@ type FieldBase = { key: string; title?: string; description?: string; required?:
  * which reaches the webview through `request.result`.
  */
 export type FormField =
-  | (FieldBase & { type: "string"; placeholder?: string; default?: string; options?: FormOption[]; custom?: boolean })
   | (FieldBase & {
-      type: "multiselect";
+      type: 'string';
+      placeholder?: string;
+      default?: string;
+      options?: FormOption[];
+      custom?: boolean;
+    })
+  | (FieldBase & {
+      type: 'multiselect';
       options: FormOption[];
       minItems?: number;
       maxItems?: number;
       custom?: boolean;
       default?: string[];
     })
-  | (FieldBase & { type: "boolean"; default?: boolean })
-  | (FieldBase & { type: "number"; integer: boolean; minimum?: number; maximum?: number; default?: number })
-  | (FieldBase & { type: "external"; url: string });
+  | (FieldBase & { type: 'boolean'; default?: boolean })
+  | (FieldBase & {
+      type: 'number';
+      integer: boolean;
+      minimum?: number;
+      maximum?: number;
+      default?: number;
+    })
+  | (FieldBase & { type: 'external'; url: string });
 
 /** Pending form. The `question` tool of opencode arrives as `kind: "question"`. */
 export type FormAsk = {
   id: string;
   sessionID: string;
   title: string;
-  kind: "question" | "form";
+  kind: 'question' | 'form';
   tool?: ToolRef;
   fields: FormField[];
 };
