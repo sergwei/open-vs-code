@@ -36,6 +36,17 @@
         }
       ]
     },
+    "configuration": {
+      "title": "OpenCode",
+      "properties": {
+        "openVsCode.opencodePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Absolute path to the opencode **v2** executable. Leave empty to search `PATH` for `opencode2`, then `opencode`."
+        }
+      }
+    },
     "commands": [
       {
         "command": "openVsCode.showLogs",
