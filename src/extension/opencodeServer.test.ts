@@ -73,6 +73,21 @@ async function waitDead(pid: number): Promise<boolean> {
   return true;
 }
 
+/**
+ * Extracts the pid from the `spawned pid N` line `startServer` logs right after the spawn.
+ *
+ * Unlike the fixture's own `argv` line, it exists even when the child is killed before it runs
+ * a single instruction, so tests that abort early can still prove the process is gone. Returns
+ * `undefined` when nothing was spawned. Synthetic: parses our own log, not a real server.
+ */
+function spawnedPid(lines: string[]): number | undefined {
+  for (const line of lines) {
+    const match = /^spawned pid (\d+)$/.exec(line);
+    if (match?.[1] !== undefined) return Number(match[1]);
+  }
+  return undefined;
+}
+
 /** Finds the JSON line `{ fake: kind, ... }` the fixture wrote to stderr, as logged. */
 function fakeLine(lines: string[], kind: string): Record<string, unknown> | undefined {
   for (const line of lines) {
@@ -372,8 +387,9 @@ describe('against the synthetic fixture (real processes)', () => {
       startupTimeoutMs: 10_000,
     });
     expect(error.code).toBe('aborted');
-    const argv = await waitFor(() => fakeLine(lines, 'argv'));
-    expect(await waitDead(argv['pid'] as number)).toBe(true);
+    const pid = spawnedPid(lines);
+    expect(pid).toBeDefined();
+    expect(await waitDead(pid as number)).toBe(true);
   }, 15_000);
 
   it('an abort that lands after the listener check is not lost (aborted flips during the folder stat)', async () => {
@@ -393,8 +409,15 @@ describe('against the synthetic fixture (real processes)', () => {
     });
     expect(error.code).toBe('aborted');
     expect(Date.now() - started).toBeLessThan(5000);
-    const argv = await waitFor(() => fakeLine(lines, 'argv'));
-    expect(await waitDead(argv['pid'] as number)).toBe(true);
+    // The second read of `aborted` happens after the spawn, and the kill that follows can land
+    // before the fixture prints its `argv` line (it did on every CI runner), so the pid comes
+    // from our own log, not from the child. If nothing was spawned, nothing can be alive.
+    const pid = spawnedPid(lines);
+    if (pid === undefined) {
+      expect(lines.some((line) => line.startsWith('launching'))).toBe(false);
+    } else {
+      expect(await waitDead(pid)).toBe(true);
+    }
   }, 15_000);
 
   it('exit while a grandchild holds stdout open still rejects fast with "exited"', async () => {
