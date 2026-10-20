@@ -5,6 +5,8 @@
 // `npm run test:integration` builds the host and the webview first, because `main` of the
 // extension points to `dist/extension.js` and the chat view needs `dist/webview`.
 import { defineConfig } from '@vscode/test-cli';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 /**
@@ -48,11 +50,13 @@ const env = {
   ),
   OPEN_VS_CODE_TEST_USER_DATA_DIR: userDataDir,
   OPEN_VS_CODE_TEST_NODE: process.execPath,
+  // Opt-in suite `realOpencode.test.ts`: absolute path to a real opencode v2 executable. Passed
+  // through only when set; the suite and its configuration below exist only in that case.
+  OPEN_VS_CODE_REAL_OPENCODE: process.env.OPEN_VS_CODE_REAL_OPENCODE,
 };
 
-export default defineConfig({
-  // Relative to this file. Compiled by `npm run compile:integration`, not by Vitest.
-  files: 'out/test/integration/**/*.test.js',
+/** Settings shared by every configuration below. */
+const common = {
   // Decision of Sergio (wave3/decisions): test on what users run. Cost: a new VS Code release
   // can break the suite without a change on our side.
   version: 'stable',
@@ -66,4 +70,50 @@ export default defineConfig({
   // the waits inside a single test (see WAIT_MS in binaryDetection.test.ts), or Mocha's generic
   // timeout hides the log diagnostic of the helper.
   mocha: { ui: 'bdd', timeout: 20000 },
-});
+};
+
+/**
+ * Main configuration: every suite except the opt-in one, with NO folder open (the binary
+ * detection suite depends on that: without a workspace folder the server manager never starts a
+ * process). The extglob `!(realOpencode)` keeps the opt-in suite out; the recursive part is
+ * meant to also pick up suites in subfolders (HYPOTHESIS: there is none yet).
+ * VERIFIED with the `glob` package that test-cli uses, against the real
+ * `out/test/integration` (Windows 11, Node 24, 2026-10-20): it matches `activation`,
+ * `binaryDetection` and `chatView`, and skips `realOpencode`.
+ */
+const main = {
+  ...common,
+  label: 'main',
+  // Relative to this file. Compiled by `npm run compile:integration`, not by Vitest.
+  files: 'out/test/integration/**/!(realOpencode).test.js',
+};
+
+/**
+ * Opt-in configuration for `realOpencode.test.ts`: runs only when `OPEN_VS_CODE_REAL_OPENCODE`
+ * is set, so a plain `npm run test:integration` does not launch a second VS Code just to skip.
+ *
+ * Why a second configuration and not a folder for everyone: the manager only starts a server
+ * with a folder open, and the other suites must keep running without one. The folder is a fixed
+ * empty directory under the OS temp dir (created here, never deleted by us): inside the repo it
+ * would make opencode treat the checkout as the project, and an empty dir cannot be tracked by
+ * git. `--disable-workspace-trust` because the extension does not activate in Restricted Mode and
+ * the trust prompt would block it (HYPOTHESIS: the flag is honoured by the test instance; not
+ * run yet).
+ */
+const realOpencode = {
+  ...common,
+  label: 'real-opencode',
+  files: 'out/test/integration/realOpencode.test.js',
+  workspaceFolder: path.join(os.tmpdir(), 'open-vs-code-real-opencode-workspace'),
+  launchArgs: [...common.launchArgs, '--disable-workspace-trust'],
+  // A real server boots in well under a second (~280 ms to the port, spike 2026-10-20) but the
+  // startup budget of the extension is 30 s (STARTUP_TIMEOUT_MS); the wait inside the test is
+  // 35 s, so this stays above it and the log diagnostic wins over Mocha's generic timeout.
+  mocha: { ...common.mocha, timeout: 45000 },
+};
+
+if (process.env.OPEN_VS_CODE_REAL_OPENCODE) {
+  fs.mkdirSync(realOpencode.workspaceFolder, { recursive: true });
+}
+
+export default defineConfig(process.env.OPEN_VS_CODE_REAL_OPENCODE ? [main, realOpencode] : [main]);
