@@ -1,6 +1,11 @@
 import * as vscode from 'vscode';
 import { CONFIG_SECTION, OPENCODE_PATH_KEY, OPENCODE_PATH_SETTING } from './ids';
-import { describeDetection, detectOpencodeBinary, nodeDeps } from './opencodeBinary';
+import {
+  describeDetection,
+  detectOpencodeBinary,
+  nodeDeps,
+  type DetectionResult,
+} from './opencodeBinary';
 
 const OPEN_SETTINGS = 'Open Settings';
 const SHOW_LOGS = 'Show Logs';
@@ -14,14 +19,20 @@ const SHOW_LOGS = 'Show Logs';
  * `viewsWelcome` does not apply; HYPOTHESIS: per the VS Code contribution-points docs,
  * not run, F5 will show it). Fire-and-forget so `activate` never waits on a child
  * process. A run counter drops stale results when the setting changes mid-detection.
- * The result is not cached or exposed: issue #8 decides how it consumes the detection.
- * UNVERIFIED in VS Code: notification, both buttons and the config listener are only
- * checked by hand with F5 (no integration tests yet). HYPOTHESIS that
+ * The result is not cached; it is handed to the optional `onResult` callback (issue #8 uses it
+ * to start the server), called after stale results are dropped and before the notification, so
+ * the server start never waits for the user to dismiss it. A throwing callback is logged.
+ * VERIFIED in a real VS Code 1.142 on Windows, macOS and Linux by the integration tests of
+ * issue #41 (CI run 39414371746, 2026-10-20): the detection log lines for unsupported, relative
+ * and missing paths, an accepted v2 binary (POSIX) and re-detection when the setting changes.
+ * The notification and its buttons have no test API: seen by hand with F5 on Windows only
+ * (2026-10-19). HYPOTHESIS that
  * `workbench.action.openSettings` with a query filters by the setting id.
  */
 export function registerBinaryDetection(
   context: vscode.ExtensionContext,
   channel: vscode.LogOutputChannel,
+  onResult?: (result: DetectionResult) => void,
 ): void {
   let run = 0;
 
@@ -44,6 +55,13 @@ export function registerBinaryDetection(
     const description = describeDetection(result);
     if (description.level === 'info') channel.info(description.message);
     else channel.warn(description.message);
+    try {
+      onResult?.(result);
+    } catch (error) {
+      channel.error(
+        `binary detection consumer failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     if (description.notify === 'none') return;
 
     const buttons = description.notify === 'actions' ? [OPEN_SETTINGS, SHOW_LOGS] : [];
