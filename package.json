@@ -45,17 +45,35 @@
     ]
   },
   "scripts": {
-    "check-types": "tsc --noEmit",
+    "check-types": "run-p \"check-types:*\"",
+    "check-types:host": "tsc --noEmit",
     "check-types:shared": "tsc --noEmit -p src/shared",
+    "build": "run-s check-types \"build:*\"",
     "build:host": "node esbuild.mjs",
+    "watch": "run-p \"watch:*\"",
     "watch:host": "node esbuild.mjs --watch",
-    "watch:types": "tsc --noEmit --watch"
+    "watch:types": "tsc --noEmit --watch",
+    "package": "run-s check-types lint \"package:*\"",
+    "package:host": "node esbuild.mjs --production",
+    "vscode:prepublish": "npm run package",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "22.x",
     "@types/vscode": "1.105.0",
     "esbuild": "^0.28.2",
+    "eslint": "^10.13.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.13.0",
+    "npm-run-all2": "^9.0.3",
+    "prettier": "3.9.10",
     "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.0",
     "vitest": "5.0.5"
   }
 }

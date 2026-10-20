@@ -12,6 +12,11 @@ import { LOG_CHANNEL_NAME, SHOW_LOGS_COMMAND_ID } from './ids';
  * icon shows up, "OpenCode: Show Logs" activates the extension and the channel
  * shows `open-vs-code 0.0.1 activated`, in light and dark themes.
  * macOS/Linux UNVERIFIED.
+ *
+ * `ExtensionContext.extension.packageJSON` is `any` in @types/vscode 1.105.0, so the `version`
+ * read narrows it with an assertion to `{ version?: unknown }` to satisfy the typed lint rules;
+ * a missing version would print "undefined". UNVERIFIED: F5 was NOT run after that narrowing;
+ * confirm the channel still shows `open-vs-code 0.0.1 activated`.
  */
 export function activate(context: vscode.ExtensionContext): void {
   const channel = vscode.window.createOutputChannel(LOG_CHANNEL_NAME, { log: true });
@@ -23,8 +28,8 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  const version = String(context.extension.packageJSON.version);
-  channel.info(`open-vs-code ${version} activated`);
+  const { version } = context.extension.packageJSON as { version?: unknown };
+  channel.info(`open-vs-code ${String(version)} activated`);
 }
 
 /**

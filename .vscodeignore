@@ -1,0 +1,11 @@
+# Allowlist: ignore everything, then re-include only what ships in the .vsix.
+# An allowlist (instead of a denylist) because vsce does not read .gitignore, and
+# untracked local files (CLAUDE.md, .claude/) would otherwise leak into a public package.
+# vsce always includes package.json and the README. Never combine with `files` in
+# package.json: vsce aborts when both exist.
+**
+!dist/extension.js
+!dist/webview/**
+!media/**
+!LICENSE*
+!CHANGELOG.md
