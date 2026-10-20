@@ -46,6 +46,7 @@
   },
   "scripts": {
     "check-types": "tsc --noEmit",
+    "check-types:shared": "tsc --noEmit -p src/shared",
     "build:host": "node esbuild.mjs",
     "watch:host": "node esbuild.mjs --watch",
     "watch:types": "tsc --noEmit --watch"
@@ -54,6 +55,7 @@
     "@types/node": "22.x",
     "@types/vscode": "1.105.0",
     "esbuild": "^0.28.2",
-    "typescript": "~6.0.3"
+    "typescript": "~6.0.3",
+    "vitest": "5.0.5"
   }
 }

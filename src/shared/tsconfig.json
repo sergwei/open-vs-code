@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Neutrality guard (issue #3), PARTIAL: `types: []` and `lib: ES2023` block ambient globals
+    // (Node, DOM). They do NOT block `import "vscode"`: TS resolves it to node_modules/@types/vscode
+    // regardless of `types`. Package imports are blocked by neutrality.test.ts (and by the ESLint
+    // rule of issue #4, once it lands).
+    // Tests are excluded because they are test code and may use Node/vitest globals later; they
+    // are type-checked by the root tsconfig instead.
+    "module": "preserve",
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "types": []
+  },
+  "include": ["*.ts"],
+  "exclude": ["*.test.ts"]
+}
