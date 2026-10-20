@@ -20,8 +20,9 @@ let logChannel: vscode.LogOutputChannel | undefined;
  * Extension entry point: creates the log channel, registers the commands and the chat view,
  * and starts opencode binary detection, whose usable results start `opencode serve` in the
  * first workspace folder (issue #8; the manager is kept for `deactivate`).
- * UNVERIFIED in VS Code and against a real opencode: the server start path has not been run
- * with F5 (no opencode installed on the development machine).
+ * The server start path is VERIFIED against the real opencode 2.0.32 outside VS Code (bundled
+ * code under plain Node, Windows 11, spike on 2026-10-20). UNVERIFIED inside VS Code (F5 or
+ * the opt-in `realOpencode.test.ts`) and on POSIX.
  *
  * Kept thin on purpose, with one call per feature, so that parallel issues
  * (#2 webview provider, #7 binary detection) each add a single line here and
@@ -80,8 +81,10 @@ export function activate(context: vscode.ExtensionContext): void {
  * up any async deactivate", `extHostExtensionService.ts` on the microsoft/vscode main branch,
  * read 2026-10-20; HYPOTHESIS for the 1.105 line, not run). If `deactivate` never runs, the OS
  * closes the child's stdin when the host dies and the server exits by itself (read in
- * `server-process.ts@v2.0.32`, UNVERIFIED with a real opencode). Without a manager (activation
- * did not get that far) it only disposes the channel and returns `undefined`.
+ * `server-process.ts@v2.0.32`; VERIFIED with the real opencode 2.0.32 on Windows 11, spike on
+ * 2026-10-20: it exits by itself when its parent process dies, but the parent was a plain Node
+ * process, not an extension host; POSIX UNVERIFIED). Without a manager (activation did not get
+ * that far) it only disposes the channel and returns `undefined`.
  */
 export function deactivate(): Promise<void> | undefined {
   if (serverManager === undefined) {

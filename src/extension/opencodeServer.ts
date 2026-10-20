@@ -5,10 +5,17 @@
 //
 // Everything here is based on `references/arranque.md` of the opencode-api skill (reviewed code,
 // itself never run against a real opencode) plus the improvements listed on each function.
-// UNVERIFIED against a real opencode binary: `--port 0` printing the real port, the shape of
-// `/api/info`, the server exiting when stdin closes, and its children dying with the tree kill
-// were read in the v2.0.32 sources and never seen running (Sergio decided on 2026-10-20 not to
-// install opencode for this issue). Everything tested here ran against the synthetic fixture.
+// VERIFIED against the real opencode 2.0.32 (npm @opencode/cli), Windows 11, spike on 2026-10-20:
+// `--version` prints `opencode v2.0.32`; `--port 0` prints the real port in ~280 ms; `/api/info`
+// answers 200 `{version,pid,urls,paths:{tmp},capabilities}` (401 without auth and with a wrong
+// password); closing stdin makes it exit 0 in ~30 ms and its only child (`conhost.exe`)
+// disappears; it exits by itself when the parent process dies (the parent was a plain Node
+// process in the spike, not a VS Code extension host); and this module, bundled, ran
+// detect, start, fetch, check and stop end to end (`how: 'stdin'`, 26 ms, no leftovers).
+// Still UNVERIFIED: POSIX with a real opencode, the children opencode spawns on demand (LSP,
+// MCP, PTY) dying with the tree kill, and the proxy layer of the host's `fetch`.
+// Unit tests run against the synthetic fixture (`test-fixtures/fake-opencode.mjs`); the opt-in
+// integration test `realOpencode.test.ts` runs the real binary inside VS Code (not run yet).
 
 import {
   execFile,
@@ -153,9 +160,10 @@ export interface VersionCheck {
  * Arguments for `opencode serve`, always with `--stdio` and loopback.
  *
  * `--port 0` is our choice (Sergio, Engram 841) so the fixed 4096 other tools expect is left
- * alone. HYPOTHESIS: that the printed URL carries the real port; if it carries `:0`
- * {@link startServer} fails with `port-zero` and the manager retries with `undefined`, in which
- * case the server searches upwards from 4096 (read in `process.ts@v2.0.32`, not run).
+ * alone. VERIFIED (Windows 11, real opencode 2.0.32, spike on 2026-10-20): the printed URL
+ * carries the real port, so plan B (`port-zero`, where the manager retries with `undefined` and
+ * the server searches upwards from 4096) did not trigger. Kept as a safety net; POSIX
+ * UNVERIFIED.
  */
 export function serveArgs(port: 0 | undefined): string[] {
   const args = ['serve', '--stdio', '--hostname', '127.0.0.1'];
@@ -199,8 +207,9 @@ export function buildServeEnv(
  * port is `0` (trigger of plan B) and `bad-url` for anything that is not plain `http` on
  * loopback with an explicit port, because the Basic credentials would travel to that URL.
  * The returned `url` is the normalized origin (no trailing slash). A trailing `\r` (CRLF) is fine
- * because `JSON.parse` ignores it. VERIFIED by unit tests (synthetic lines); the real line
- * format is read in `server-process.ts:201-203@v2.0.32`, never seen from a running server.
+ * because `JSON.parse` ignores it. VERIFIED by unit tests (synthetic lines) and by the line of
+ * the real opencode 2.0.32 (Windows 11, spike on 2026-10-20: `{"url":"http://127.0.0.1:<port>"}`
+ * with the real port under `--port 0`).
  */
 export function parseUrlLine(
   line: string,
@@ -245,9 +254,9 @@ export function parseUrlLine(
  * Value of the `Authorization` header for the server: Basic with the fixed user `opencode`.
  *
  * Exported so the SDK client of issue #9 can reuse it in `OpenCode.make({ headers })`. The user
- * name is fixed by the server (`auth.ts:18-37@v2.0.32`, read not run). VERIFIED by a unit test
- * against a hand-computed base64 string; the server accepting it is verified only against the
- * synthetic fixture.
+ * name is fixed by the server (`auth.ts:18-37@v2.0.32`). VERIFIED by a unit test against a
+ * hand-computed base64 string, and the real opencode 2.0.32 accepted it (200 on `/api/info`;
+ * 401 without it and with a wrong password; Windows 11, spike on 2026-10-20).
  */
 export function basicAuthHeader(password: string): string {
   return `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`;
@@ -415,8 +424,9 @@ async function assertDirectory(folder: string): Promise<void> {
  * an abort that lands during the `stat` of the folder would otherwise be lost (an `abort` event
  * is not replayed to listeners added afterwards) and the stop would wait for the 30 s timeout.
  * Rejects with {@link ServerStartError}; the unhandled-rejection trap of ENOENT is covered by
- * a test. VERIFIED only against the synthetic fixture on Windows 11; the real binary and POSIX
- * are UNVERIFIED (see the file header). The lost-abort window is VERIFIED only by a test that
+ * a test. VERIFIED against the synthetic fixture on Windows 11 and against the real opencode
+ * 2.0.32 on Windows 11 (npm @opencode/cli, spike on 2026-10-20: started and stopped with no
+ * leftovers); POSIX is UNVERIFIED. The lost-abort window is VERIFIED only by a test that
  * simulates it (a signal whose `aborted` flips after the first read), not by a real race.
  * That abort is seen right after the spawn, so the kill can land before the child runs a single
  * line: after the spawn it logs `spawned pid N` so a test can prove the process is gone without
@@ -512,11 +522,14 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
  * Stops a server politely and escalates: closes stdin, waits `graceMs` for `exit`, then kills
  * the tree and waits `killWaitMs`. Always resolves (never hangs) and reports how it ended.
  *
- * The server shuts down when stdin ends (`server-process.ts:204-239@v2.0.32`, read not run), and
+ * The server shuts down when stdin ends (`server-process.ts:204-239@v2.0.32`, read and run on Windows, see below), and
  * also when the extension host dies and the OS closes the pipe. The log is guarded with
  * {@link safeLog} and the kill never depends on it: a log that throws (a closed channel) does not
- * skip `killTree`. UNVERIFIED against a real opencode; VERIFIED against the synthetic fixture on
- * Windows 11 (stdin path, kill path, and the kill path with a log that throws).
+ * skip `killTree`. VERIFIED against the real opencode 2.0.32 on Windows 11 (npm @opencode/cli,
+ * spike on 2026-10-20): the stdin path exited 0 in ~30 ms and its only child (`conhost.exe`)
+ * went away. VERIFIED against the synthetic fixture on Windows 11 (stdin path, kill path, and
+ * the kill path with a log that throws). The kill path with a real opencode, and POSIX, are
+ * UNVERIFIED.
  */
 export async function stopServer(
   child: ChildProcess,
@@ -550,8 +563,10 @@ export async function stopServer(
  * the password. The request ends at the first of `timeoutMs` and the optional `signal`
  * (combined with `AbortSignal.any`), so the manager can cancel it when `stop()` is called
  * instead of waiting up to {@link INFO_TIMEOUT_MS}. The body shape `{ version, pid, urls, paths }`
- * was read in `process.ts@v2.0.32`, not seen from a real server: UNVERIFIED, only the fixture
- * answers this in tests; the abort is VERIFIED against a synthetic `fetchImpl` that honours it.
+ * is VERIFIED against the real opencode 2.0.32 (Windows 11, spike on 2026-10-20: 200 with
+ * `{version,pid,urls,paths:{tmp},capabilities}`); the abort is VERIFIED against a synthetic
+ * `fetchImpl` that honours it. Inside the extension host the global `fetch` is UNVERIFIED (the
+ * spike ran under plain Node).
  */
 export async function fetchServerInfo(
   url: string,

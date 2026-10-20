@@ -105,9 +105,10 @@ export function parseOpencodeVersion(
  * cmd.exe concatenates `%dp0%` textually: an absolute or UNC capture yields a path that does
  * not exist, which the caller's `isFile` check rejects. Deliberately NOT restricted to stay
  * inside the shim directory, because legitimate `.bin` shims use `%dp0%\..\`.
- * HYPOTHESIS, read and not executed in npm/cmd-shim `lib/index.js` (`writeShim_`, no-shebang branch) on
- * 2026-10-20; the shim of the cmd-shim version bundled with the user's npm and the
- * `%~dp0\` variant (assumed for pnpm) are HYPOTHESIS. Shims from yarn, bun, scoop or choco
+ * VERIFIED: the exact text of the shim that npm writes for the real @opencode/cli 2.0.32 on
+ * Windows 11 (spike on 2026-10-20) is resolved to the existing `.exe`. Read in npm/cmd-shim
+ * `lib/index.js` (`writeShim_`, no-shebang branch) and not executed: other cmd-shim versions and
+ * the `%~dp0\` variant (assumed for pnpm), HYPOTHESIS. Shims from yarn, bun, scoop or choco
  * are UNVERIFIED: if they do not match, the candidate is discarded.
  */
 export function resolveCmdShim(shimPath: string, shimText: string): string | undefined {
@@ -196,8 +197,10 @@ async function resolveShimFile(shimPath: string, deps: BinaryDeps): Promise<stri
  * cannot be run (the text must not tell the user to set what is already set). Never throws and has no side effects beyond the
  * injected `deps`; nothing is cached.
  * VERIFIED with fake dependencies and, on this Windows host, real child processes
- * (`node.exe` standing in for opencode). UNVERIFIED against a real opencode install, which
- * is not on the development machine.
+ * (`node.exe` standing in for opencode). VERIFIED against a real opencode 2.0.32 install (npm
+ * @opencode/cli, Windows 11, spike on 2026-10-20): detection through `opencode2` on PATH and
+ * the resolution of its npm shim to the `.exe`. UNVERIFIED on macOS/Linux and for installs
+ * other than npm.
  */
 export async function detectOpencodeBinary(
   options: { settingPath: string },
