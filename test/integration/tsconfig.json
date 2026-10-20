@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Exists for two reasons: `npm run check-types:integration` type-checks the integration tests,
+    // and ESLint's project service needs a tsconfig that includes them to lint with types.
+    // It never emits (`noEmit` comes from the base): the tests are bundled to CommonJS by
+    // `npm run compile:integration` (esbuild), because the test-cli runner `require`s them.
+    "module": "preserve",
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "types": ["node", "vscode", "mocha"]
+  },
+  "include": ["**/*.ts"]
+}
