@@ -1,8 +1,9 @@
 // ESLint flat config (ESLint 10: flat config only).
 //
 // Block order matters, the last matching block wins per rule:
-//   1. ignores, 2. JS recommended, 3. typed TypeScript rules, 4. root config files
-//   (not in any tsconfig, so no type information), 5. architecture boundaries,
+//   1. ignores, 2. JS recommended, 3. typed TypeScript rules, 4. Node-side config files
+//   (root `*.{mjs,mts}` and `webview-ui/*.{mjs,mts}`: not in a tsconfig the project service
+//   finds, so no type information and NO architecture boundaries), 5. architecture boundaries,
 //   6. eslint-config-prettier last, so it can switch off any formatting rule.
 //
 // Architecture boundaries, each protects a rule of CLAUDE.md:
@@ -11,7 +12,8 @@
 //   - `@opencode/client` only inside src/extension/**: the webview never talks to the opencode
 //     server (architecture rule 1).
 //   - The v1 SDK (`@opencode-ai/sdk`) is forbidden in src/** and webview-ui/**, src/extension
-//     included: v1 is not supported. Root config files (esbuild.mjs, ...) are not covered.
+//     included: v1 is not supported. The Node-side config files of block 4 (esbuild.mjs,
+//     webview-ui/build.mjs, webview-ui/vite.config.mts, ...) are not covered.
 //   - Node built-ins are forbidden in src/shared/** and webview-ui/src/**: the former is code
 //     shared with the browser (src/shared/README.md: "No Node-only APIs"), the latter runs in
 //     the webview. Tests (`*.test.ts(x)`) are exempt: they run in Node and may read fixtures.
@@ -28,9 +30,12 @@
 // VERIFIED with ESLint's `lintText` on virtual paths (typed rules off, nothing written to disk,
 // Windows 11, 2026-10-20): static and dynamic imports of vscode / node: / @opencode in
 // src/shared and webview-ui/src are reported, `./extensionHelpers` is not.
-// HYPOTHESIS: `webview-ui/src/**` is the layout of the webview code until issue #2 lands.
-// UNVERIFIED: that the typed rules keep working for webview-ui/** once its tsconfig exists
-// (it must include its own tests, or typed linting fails on them).
+// VERIFIED (issue #2 review, Windows 11, 2026-10-20): `npm run lint` exits 0 with
+// webview-ui/src/** linted with types through webview-ui/tsconfig.json, and `lintText` on the
+// real paths webview-ui/src/vscode.ts and App.tsx (content swapped in memory, typed rules on)
+// reports static and dynamic imports of vscode, node:fs, fs, @opencode/client and
+// ../../src/extension/ids. UNVERIFIED: that future webview tests are included by that tsconfig
+// (otherwise typed linting fails on them).
 import js from '@eslint/js';
 import { defineConfig, globalIgnores } from 'eslint/config';
 import prettier from 'eslint-config-prettier/flat';
@@ -132,8 +137,14 @@ export default defineConfig(
     },
   },
 
+  // Node-side config and tooling files. `webview-ui/build.mjs` and `webview-ui/vite.config.mts`
+  // run in Node, not in the webview. The Vite config is typechecked by `check-types:webview`
+  // through webview-ui/tsconfig.node.json, but the ESLint project service only discovers files
+  // listed in a tsconfig.json it can find by name, and that name there is the browser one
+  // (webview-ui/tsconfig.json, which excludes it on purpose: no DOM in Node code). Hence no
+  // type information here, like the root configs.
   {
-    files: ['*.{mjs,mts}'],
+    files: ['*.{mjs,mts}', 'webview-ui/*.{mjs,mts}'],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: { globals: globals.node },
   },
