@@ -74,8 +74,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 /**
  * Registers the chat view provider and returns its disposable.
  *
- * One call from `activate`. UNVERIFIED until F5: that the view id matches the
- * `contributes.views` entry (both come from `CHAT_VIEW_ID` / package.json).
+ * One call from `activate`. VERIFIED that the view id matches the `contributes.views` entry and
+ * the view resolves with its bundle: F5 on Windows (2026-10-20) and the integration tests of
+ * issue #41 in a real VS Code 1.142 on Windows, macOS and Linux (CI run 39414371746).
  */
 export function registerChatView(
   extensionUri: vscode.Uri,
