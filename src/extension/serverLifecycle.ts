@@ -33,8 +33,10 @@ const SHOW_LOGS = 'Show Logs';
  * Workspace Trust: the extension declares no `capabilities.untrustedWorkspaces`, so it does not
  * activate in Restricted Mode and nothing is launched against an untrusted folder (HYPOTHESIS:
  * VS Code's documented default, not exercised).
- * UNVERIFIED in VS Code: log lines, notification and its button, and the whole path against a
- * real opencode. The real server start and stop were never run (no opencode on this machine).
+ * The underlying start and stop are VERIFIED against the real opencode 2.0.32 on Windows 11
+ * (bundled code under plain Node, spike on 2026-10-20). UNVERIFIED in VS Code: log lines,
+ * notification and its button, and the whole path against a real opencode (the opt-in
+ * `realOpencode.test.ts` or F5 would cover the log lines); POSIX UNVERIFIED.
  */
 export function registerServerLifecycle(channel: vscode.LogOutputChannel): {
   manager: ServerManager;

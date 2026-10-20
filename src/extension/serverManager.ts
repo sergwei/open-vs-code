@@ -153,8 +153,11 @@ export function describeServerFailure(
  * running becomes `unavailable/exited`; restarting is issue #10.
  * The injected log is wrapped with `safeLog`, so a log that throws (a closed channel) can never
  * interrupt a transition or the stop. VERIFIED with fake dependencies (unit tests) and, for the
- * process side, against the synthetic fixture. UNVERIFIED inside VS Code and against a real
- * opencode.
+ * process side, against the synthetic fixture. The process functions it is wired to were
+ * VERIFIED against the real opencode 2.0.32 on Windows 11 (npm @opencode/cli, spike on
+ * 2026-10-20: start, `/api/info`, version check and stop end to end, `--port 0` giving the real
+ * port so plan B did not trigger). UNVERIFIED inside VS Code until the opt-in
+ * `realOpencode.test.ts` or F5 is run; POSIX UNVERIFIED.
  */
 export class ServerManager {
   private current: ServerState = { kind: 'idle' };
