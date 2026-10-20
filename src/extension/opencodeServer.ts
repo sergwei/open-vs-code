@@ -418,6 +418,12 @@ async function assertDirectory(folder: string): Promise<void> {
  * a test. VERIFIED only against the synthetic fixture on Windows 11; the real binary and POSIX
  * are UNVERIFIED (see the file header). The lost-abort window is VERIFIED only by a test that
  * simulates it (a signal whose `aborted` flips after the first read), not by a real race.
+ * That abort is seen right after the spawn, so the kill can land before the child runs a single
+ * line: after the spawn it logs `spawned pid N` so a test can prove the process is gone without
+ * waiting for output the killed child never wrote (VERIFIED: CI run 39425766653 failed on
+ * ubuntu, macOS and Windows waiting for the fixture's `argv` line; reproduced locally on
+ * Windows by passing `platform: 'linux'`, where `process.kill(-pid)` throws and the fallback
+ * `child.kill('SIGKILL')` is immediate, unlike the ~200 ms of `taskkill.exe`).
  */
 export async function startServer(options: StartServerOptions): Promise<RunningServer> {
   const { command, folder, port, signal } = options;
@@ -441,6 +447,9 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
     shell: false,
     detached: platform !== 'win32', // own process group, so killTree can signal -pgid
   });
+  // Logged synchronously after the spawn: it is the only record of the pid when an immediate
+  // abort kills the child before it prints anything (see the header). Undefined on ENOENT.
+  if (child.pid !== undefined) log.info(`spawned pid ${String(child.pid)}`);
 
   const stderrTail: string[] = [];
   let exitInfo: string | undefined;
