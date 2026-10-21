@@ -30,7 +30,21 @@
 // focused prompt, the "Fork" word in the session list, and that the crumb returns to the intact
 // original; then it asks the model to call the `subagent` tool and, if it does, follows the link
 // to the child ("‹ parent" crumb), back, and through "Subagent sessions (1)". If the model does not
-// call the tool the subagent half is SKIPPED with a warning. Things that depend on
+// call the tool the subagent half is SKIPPED with a warning. Since E5-model-agent-selectors (issues
+// #23/#24) step 11 drives the selectors of the prompt row with the real mouse and keyboard: the
+// model panel (focus in the search box, groups, the four themes), filtering and choosing with the
+// keyboard, Escape, the Build | Plan switch (mouse, Tab with a visible ring, arrows, and that Enter on
+// it does NOT send the prompt), a real prompt whose reply line must read "Plan · <chosen model>", the
+// last used model proposed to the next new session, the `openVsCode.defaultModel` setting beating it
+// (and a malformed value being reported once and ignored) and reopening the session; it also presses
+// the prompt box with the real mouse while the model panel is open and asserts the panel closes (and
+// the same for "More agents" when the server has a custom agent, else SKIPPED). It runs after
+// steps 1-10, which keep the free default model. The reply half is SKIPPED with a warning when the
+// free model fails. Step 13 (review #1015 S1) attaches a real file with the real Attach button (the
+// file dialog is VS Code's own quick input, `files.simpleDialog.enable` in `vscodeProcess.mjs`),
+// sends, and asserts the message leaves with its attachment and the webview logs no exception: a
+// prompt with an attachment used to throw DataCloneError (VERIFIED by running this step against the
+// old code on 21/10/2026: the exception was logged and the message never left). Things that depend on
 // what the model happens to write (a file reference in the reply, say) are SKIPPED with a
 // warning when absent, never failed.
 //
@@ -50,8 +64,12 @@
 // timeout (`webviewCdp.mjs`), so cleanup is reached. Exit codes: 0 all good, 1 an assertion
 // failed, 2 the run could not start (missing variable or build, VS Code download or launch).
 //
-// VERIFIED on Windows 11, VS Code 1.142.0, opencode 2.0.32, Node 24 (see the run recorded in
-// Engram `E2-mvp-prototype/implementation-visual`). macOS and Linux UNVERIFIED.
+// VERIFIED on Windows 11, VS Code 1.143.0 (the `stable` archive that `@vscode/test-electron`
+// resolved on 21/10/2026, read from the run's main.log; earlier runs used 1.142.0), opencode 2.0.32,
+// Node 24 (see the run recorded in Engram `E2-mvp-prototype/implementation-visual`). One earlier run
+// of the same day failed in step 9 (a rename left in edit mode, then no delete modal) and passed on
+// the next, with no code change in between: HYPOTHESIS that step 9 has a timing flake.
+// macOS and Linux UNVERIFIED.
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -1539,6 +1557,399 @@ try {
     const again = await waitFor(async () => (await chat()).path.startsWith('‹'), 20_000);
     check(again === true, 'the list opens the same child session');
     assertNoWebviewErrors('subagent');
+  });
+
+  // Issues #23/#24. The LAST step on purpose: steps 1-10 ran with the free default model and the
+  // default agent, because the profile (and so `globalState` and the setting) is wiped at start.
+  await step('11 model and agent selectors (issues #23/#24)', async () => {
+    /** What the prompt row and the model panel show. Self-contained (it is serialized). */
+    const ui = () =>
+      web.inDoc((doc) => {
+        const trigger = doc.querySelector('button.model-trigger');
+        const radio = doc.querySelector('.agent-toggle input:checked');
+        const active = doc.activeElement;
+        const label = active?.id ? doc.querySelector(`label[for="${active.id}"]`) : null;
+        const metas = [...doc.querySelectorAll('.message-assistant .message-meta')];
+        return {
+          trigger: trigger?.textContent ?? '',
+          triggerName: trigger?.getAttribute('aria-label') ?? '',
+          expanded: trigger?.getAttribute('aria-expanded') ?? '',
+          agent: radio?.value ?? '',
+          panel: doc.querySelector('.model-panel') !== null,
+          groups: [...doc.querySelectorAll('.model-panel .model-group > h3')].map(
+            (h) => h.textContent ?? '',
+          ),
+          options: [...doc.querySelectorAll('.model-panel button.model-option')].map((b) => ({
+            id: b.getAttribute('data-model') ?? '',
+            name: b.querySelector('.model-name')?.textContent ?? '',
+            current: b.getAttribute('aria-current') === 'true',
+          })),
+          live: (doc.querySelector('.model-panel [role="status"]')?.textContent ?? '').trim(),
+          panelTop: doc.querySelector('.model-panel')?.getBoundingClientRect().top ?? null,
+          focus: {
+            tag: active?.tagName ?? '',
+            cls: active?.className ?? '',
+            aria: active?.getAttribute?.('aria-label') ?? '',
+            visible: active?.matches?.(':focus-visible') ?? false,
+            ring: label ? doc.defaultView.getComputedStyle(label).outlineStyle : '',
+          },
+          lastMeta: metas.at(-1)?.textContent ?? '',
+          metas: metas.length,
+          blocks: doc.querySelectorAll('[role="log"] > *').length,
+          headerHasMarker: doc.querySelector('header .model-marker') !== null,
+          draft: doc.querySelector('textarea')?.value ?? '',
+          alerts: doc.querySelectorAll('[role="alert"]').length,
+          text: doc.body.innerText,
+        };
+      });
+    const setTheme = async (theme) => {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+    };
+    const press = async (key) => {
+      await page.keyboard.press(key);
+      await sleep(250);
+    };
+    const THEMES = [
+      ['light', 'Default Light Modern'],
+      ['dark', 'Default Dark Modern'],
+      ['hc-dark', 'Default High Contrast'],
+      ['hc-light', 'Default High Contrast Light'],
+    ];
+
+    // --- A new session proposes the default agent and the server's default model --------------
+    check(await clickButton('New session'), 'New session is pressed');
+    await page.waitForTimeout(1500);
+    let state = await ui();
+    check(state.agent === 'build', `a new session starts on Build (got "${state.agent}")`);
+    check(
+      state.trigger.endsWith('(default)') && state.triggerName === `Model: ${state.trigger}`,
+      `the model button names the server default ("${state.trigger}" / "${state.triggerName}")`,
+    );
+    check(!state.headerHasMarker, 'the header no longer has the Agent · model marker');
+    await shot('12a-prompt-row');
+
+    // --- The panel: focus in the search box, groups, the four themes ---------------------------
+    check(await clickIn('button.model-trigger'), 'the model button is pressed');
+    await sleep(400);
+    state = await ui();
+    check(state.panel && state.expanded === 'true', 'the model panel opened');
+    check(
+      state.focus.cls.includes('session-search') && state.focus.aria === 'Search models',
+      `the focus is in "Search models" (${JSON.stringify(state.focus)})`,
+    );
+    check(
+      state.groups.length >= 1 && state.options.length >= 1,
+      `the models are grouped by provider (${JSON.stringify(state.groups)}, ${String(state.options.length)} models)`,
+    );
+    check(
+      state.options.filter((o) => o.current).length === 1,
+      'exactly one model is marked as the current one',
+    );
+    check(
+      state.panelTop !== null && state.panelTop >= 0,
+      `the panel is inside the view (top ${String(state.panelTop)})`,
+    );
+    check(
+      // eslint-disable-next-line no-irregular-whitespace -- the next line strips a literal no-break space
+      /^\d+ models?$/.test(state.live.replace(/ /g, '')),
+      `the live region counts the models ("${state.live}")`,
+    );
+    for (const [name, theme] of THEMES) {
+      await setTheme(theme);
+      await shot(`12b-model-panel-${name}`);
+    }
+    await setTheme('Default Dark Modern');
+
+    // --- Filter and pick with the keyboard -----------------------------------------------------
+    const options = state.options;
+    const target = options.find((o) => !o.current);
+    if (target === undefined) {
+      warn(
+        'SKIPPED: the server lists a single model, so picking a different one was not exercised',
+      );
+      await press('Escape');
+      return;
+    }
+    await page.keyboard.type(target.name);
+    await sleep(400);
+    state = await ui();
+    check(
+      state.options.length >= 1 && state.options.length <= options.length,
+      `typing the name filters the list (${String(options.length)} -> ${String(state.options.length)})`,
+    );
+    check(
+      state.options.some((o) => o.id === target.id),
+      'the typed model is still listed',
+    );
+    await press('ArrowDown');
+    state = await ui();
+    check(
+      state.focus.cls.includes('model-option') && state.focus.visible,
+      `ArrowDown enters the list with a visible focus (${JSON.stringify(state.focus)})`,
+    );
+    const chosen = state.options[0];
+    await press('Enter');
+    state = await ui();
+    check(!state.panel && state.expanded === 'false', 'choosing a model closes the panel');
+    check(
+      state.trigger.startsWith(chosen.name) && !state.trigger.endsWith('(default)'),
+      `the button shows the chosen model ("${state.trigger}" for "${chosen.name}")`,
+    );
+    check(
+      state.focus.cls.includes('model-trigger'),
+      `the focus returns to the model button (${JSON.stringify(state.focus)})`,
+    );
+
+    // --- Escape closes without choosing ---------------------------------------------------------
+    check(await clickIn('button.model-trigger'), 'the model button is pressed again');
+    await sleep(400);
+    state = await ui();
+    check(
+      state.panel && state.focus.cls.includes('session-search'),
+      'the panel reopened with the focus in the box',
+    );
+    await press('Escape');
+    state = await ui();
+    check(
+      !state.panel &&
+        state.trigger.startsWith(chosen.name) &&
+        state.focus.cls.includes('model-trigger'),
+      `Escape closes it, keeps the model and returns the focus (${JSON.stringify(state.focus)})`,
+    );
+
+    // --- A press outside the panel closes it (dismissOutside, review #1015 C1) ------------------
+    // A real mouse click on the prompt box: it is outside the panel, so the panel must close, the
+    // model must stay, and the focus must stay where the user clicked (the rule does not move it).
+    check(
+      await clickIn('button.model-trigger'),
+      'the model button is pressed to test an outside click',
+    );
+    await sleep(400);
+    check((await ui()).panel, 'the panel is open before the outside click');
+    check(await clickIn('textarea'), 'the prompt box is pressed (outside the panel)');
+    await sleep(400);
+    state = await ui();
+    check(
+      !state.panel && state.expanded === 'false' && state.trigger.startsWith(chosen.name),
+      `a press outside closes the model panel and keeps the model ("${state.trigger}")`,
+    );
+    check(
+      state.focus.tag === 'TEXTAREA',
+      `...and the focus stays where the user clicked (${JSON.stringify(state.focus)})`,
+    );
+    const moreAgents = await web.inDoc(
+      (doc) => doc.querySelector('button[data-agent-more-trigger]') !== null,
+    );
+    if (moreAgents) {
+      check(await clickIn('button[data-agent-more-trigger]'), '"More agents" is pressed');
+      await sleep(400);
+      const opened = await web.inDoc((doc) => doc.querySelector('#agent-more-panel') !== null);
+      check(opened, 'the "More agents" panel opened');
+      check(await clickIn('textarea'), 'the prompt box is pressed (outside "More agents")');
+      await sleep(400);
+      check(
+        !(await web.inDoc((doc) => doc.querySelector('#agent-more-panel') !== null)),
+        'a press outside closes "More agents"',
+      );
+    } else {
+      warn(
+        'SKIPPED: the server has no custom agent, so "More agents" (and its outside click) was not exercised',
+      );
+    }
+
+    // --- The agent switch: mouse, then Tab and arrows ------------------------------------------
+    check(await clickIn('label[for="agent-plan"]'), '"Plan" is pressed');
+    state = await ui();
+    check(state.agent === 'plan', `Plan is checked (got "${state.agent}")`);
+    await clickIn('textarea');
+    await page.keyboard.type('keep this text');
+    await press('Tab');
+    state = await ui();
+    check(
+      state.focus.tag === 'INPUT' && state.focus.cls.includes('agent-radio'),
+      `Tab from the prompt lands on the agent switch (${JSON.stringify(state.focus)})`,
+    );
+    check(
+      state.focus.visible && state.focus.ring !== '' && state.focus.ring !== 'none',
+      `the focused segment shows a ring (${JSON.stringify(state.focus)})`,
+    );
+    await shot('12c-agent-focus');
+    await press('ArrowLeft');
+    state = await ui();
+    check(state.agent === 'build', `ArrowLeft moves to Build (got "${state.agent}")`);
+    await press('ArrowRight');
+    state = await ui();
+    check(state.agent === 'plan', `ArrowRight moves back to Plan (got "${state.agent}")`);
+    const before = state.blocks;
+    await press('Enter');
+    await sleep(800);
+    state = await ui();
+    check(
+      state.draft === 'keep this text' && state.blocks === before && !(await isBusy()),
+      `Enter on the agent switch does NOT send the prompt ("${state.draft}")`,
+    );
+    for (const [name, theme] of THEMES) {
+      await setTheme(theme);
+      await shot(`12d-agent-${name}`);
+    }
+    await setTheme('Default Dark Modern');
+
+    // --- A prompt carries the choice, and the reply says who answered --------------------------
+    await send('Reply with exactly: OK. Do not use any tools.');
+    const finished = await waitIdle(120_000);
+    state = await ui();
+    if (!finished) {
+      warn(
+        'SKIPPED: the free model did not finish the turn in 120 s; the reply line was not judged',
+      );
+    } else if (state.metas === 0 || state.alerts > 0) {
+      warn(
+        `SKIPPED: the free model gave no usable reply (${String(state.metas)} replies, ${String(state.alerts)} alerts); ` +
+          'the "Plan · model" line was not judged',
+      );
+    } else {
+      check(
+        state.lastMeta === `Plan · ${chosen.name}`,
+        `the reply says who answered ("${state.lastMeta}", expected "Plan · ${chosen.name}")`,
+      );
+    }
+    check(
+      state.agent === 'plan' && state.trigger.startsWith(chosen.name),
+      `the session now holds Plan and the chosen model ("${state.agent}", "${state.trigger}")`,
+    );
+    await shot('12e-reply-meta');
+    for (const [name, theme] of THEMES) {
+      await setTheme(theme);
+      await shot(`12f-reply-meta-${name}`);
+    }
+    await setTheme('Default Dark Modern');
+
+    // --- A NEW session proposes the last model used; the setting wins over it --------------------
+    check(await clickButton('New session'), 'New session is pressed after the reply');
+    await page.waitForTimeout(1500);
+    state = await ui();
+    check(
+      state.trigger.startsWith(chosen.name) && !state.trigger.endsWith('(default)'),
+      `a new session proposes the LAST model used ("${state.trigger}")`,
+    );
+    check(
+      state.agent === 'build',
+      `the agent is not remembered: Build again (got "${state.agent}")`,
+    );
+
+    const other = options.find((o) => o.id !== chosen.id && o.id !== target.id) ?? target;
+    const settingFile = writeSettings(vscode.userDataDir, { 'openVsCode.defaultModel': other.id });
+    const applied = await waitFor(
+      async () => (await ui()).trigger.startsWith(other.name),
+      15_000,
+      300,
+    );
+    state = await ui();
+    check(
+      applied === true,
+      `the setting wins over the last used model ("${state.trigger}", setting ${other.id} in ${settingFile})`,
+    );
+    await shot('12g-setting');
+
+    writeSettings(vscode.userDataDir, { 'openVsCode.defaultModel': 'nope' });
+    const ignored = await waitFor(
+      async () => (await ui()).text.includes('is not written provider/model'),
+      15_000,
+      300,
+    );
+    state = await ui();
+    check(ignored === true, 'a badly written setting is reported to the user once');
+    check(
+      state.trigger.startsWith(chosen.name),
+      `...and ignored: the last used model applies again ("${state.trigger}")`,
+    );
+    writeSettings(vscode.userDataDir, { 'openVsCode.defaultModel': '' });
+
+    // --- Reopening the session shows ITS model and agent -------------------------------------------
+    check(await clickButton('Sessions'), 'Sessions is pressed');
+    const rows = await waitFor(
+      () => web.inDoc((doc) => doc.querySelectorAll('button.session-main').length > 0),
+      20_000,
+      300,
+    );
+    check(rows === true, 'the session list has rows');
+    check(await clickIn('button.session-main'), 'the newest session is pressed');
+    const reopened = await waitFor(async () => (await ui()).agent === 'plan', 20_000, 300);
+    state = await ui();
+    check(
+      reopened === true && state.trigger.startsWith(chosen.name),
+      `the reopened session shows its own model and agent ("${state.agent}", "${state.trigger}")`,
+    );
+    await shot('12h-reopened');
+    assertNoWebviewErrors('selectors');
+  });
+
+  // Review #1015 S1: a prompt WITH an attachment threw DataCloneError in a real VS Code (the picked
+  // files were Solid store Proxies and `postMessage` cannot clone them). jsdom cannot see it, so this
+  // attaches a real file through the real Attach button and sends. The file dialog is the quick-input
+  // one (`files.simpleDialog.enable`, see `vscodeProcess.mjs`), which is DOM that Playwright can type in.
+  await step('13 attach a real file and send it (review #1015 S1)', async () => {
+    const target = path.join(workspace, 'src', 'sample.ts');
+    const chips = () =>
+      web.inDoc((doc) => ({
+        pending: [...doc.querySelectorAll('.chips .chip-name')].map((c) => c.textContent ?? ''),
+        sent: [...doc.querySelectorAll('[role="log"] .message-files .chip')].map(
+          (c) => c.textContent ?? '',
+        ),
+        alerts: doc.querySelectorAll('[role="alert"]').length,
+      }));
+    assertNoWebviewErrors('before attaching');
+    // A fresh session: when the model of step 11 ignores "do not use tools" its turn waits for a
+    // permission forever (seen on 21/10/2026, screenshot 12e), and a busy session would swallow Enter.
+    check(await clickButton('New session'), 'New session is pressed');
+    await page.waitForTimeout(1500);
+    check(await clickButton('Attach'), 'Attach is pressed');
+    const dialog = page.locator('.quick-input-widget input').first();
+    await dialog.waitFor({ state: 'visible', timeout: 15_000 });
+    await sleep(400);
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.type(target);
+    await sleep(600);
+    await shot('13a-attach-dialog');
+    await page.keyboard.press('Enter');
+    const attached = await waitFor(async () => (await chips()).pending.length > 0, 15_000, 300);
+    let state = await chips();
+    check(
+      attached === true && state.pending.some((name) => name.endsWith('sample.ts')),
+      `the picked file shows as a chip ("${state.pending.join(', ')}")`,
+    );
+    await shot('13b-attached');
+    // The quick input gives the focus back to the editor when it closes, a moment later: let it
+    // happen, then take the focus into the prompt box before typing (else the text lands in a file).
+    await sleep(1000);
+    await clickIn('textarea');
+    await sleep(300);
+    const focus = await web.inDoc((doc) => ({
+      tag: doc.activeElement?.tagName ?? '',
+      focused: doc.hasFocus(),
+    }));
+    check(
+      focus.tag === 'TEXTAREA' && focus.focused,
+      `the prompt box has the keyboard focus (${JSON.stringify(focus)})`,
+    );
+    await send('Reply with exactly: OK. Do not use any tools.');
+    const left = await waitFor(async () => (await chips()).sent.length > 0, 20_000, 300);
+    state = await chips();
+    check(
+      left === true && state.sent.some((name) => name.endsWith('sample.ts')),
+      `the message left with its attachment ("${state.sent.join(', ')}")`,
+    );
+    check(state.pending.length === 0, 'the chip left the prompt box once sent');
+    check(
+      state.alerts === 0,
+      `no alert after sending with an attachment (${String(state.alerts)})`,
+    );
+    assertNoWebviewErrors('attach');
+    if (!(await waitIdle(120_000))) {
+      warn('SKIPPED: the free model did not finish the attachment turn in 120 s');
+    }
+    await shot('13c-attachment-reply');
   });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.

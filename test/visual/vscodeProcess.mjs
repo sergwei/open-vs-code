@@ -117,6 +117,11 @@ export async function startVSCode({ repoRoot, workDir, workspace, opencodePath }
     // Windows 11 (21/10/2026): step 9 of `npm run test:visual` found the dialog in the DOM and
     // pressed Cancel and Delete with this setting. UNVERIFIED on macOS and Linux.
     'window.dialogStyle': 'custom',
+    // Step 13 (review #1015 S1) presses Attach, whose `showOpenDialog` would be the OS file dialog.
+    // `files.simpleDialog.enable` draws VS Code's own dialog (a quick input) in the DOM instead.
+    // VERIFIED by step 13 (Windows 11, VS Code 1.143.0, 21/10/2026): it applies to
+    // `showOpenDialog` from an extension. UNVERIFIED on macOS and Linux.
+    'files.simpleDialog.enable': true,
   });
   const port = await freePort();
   const detached = process.platform !== 'win32'; // own process group, to kill the tree on POSIX
