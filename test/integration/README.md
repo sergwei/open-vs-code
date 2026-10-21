@@ -34,6 +34,13 @@ path and format are internal to VS Code. If a test fails with "OpenCode.log not 
 listing in the error and at that folder. Settings are written into the isolated profile, never into
 your own `settings.json`.
 
+The opt-in `real-opencode` suite sends real prompts, so `.vscode-test.mjs` points opencode's
+`XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` to `.vscode-test/real-opencode-xdg` (in the
+environment of the test VS Code, inherited by the extension host and by `opencode serve`). It does
+not add sessions to your `~/.local/share/opencode`. Checked on Windows 11 with opencode 2.0.32 (a
+new `opencode.db` appears there, the real one keeps its modification time, and the free model
+works); POSIX is unchecked.
+
 ## Running it from inside VS Code (agents, integrated terminals)
 
 A process that descends from a VS Code extension host inherits `ELECTRON_RUN_AS_NODE=1` and many
@@ -48,4 +55,5 @@ HYPOTHESIS until the first local run (read in the VS Code sources, never run).
 ## What is not covered
 
 The notification and its buttons, and anything inside the webview iframe (DOM, CSP, themes). Those
-stay with the manual F5 check.
+are covered by the opt-in visual run, `npm run test:visual` (see `test/visual/README.md`), which
+drives a real VS Code over CDP; only what is subjective stays with a human F5.

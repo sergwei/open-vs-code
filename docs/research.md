@@ -412,6 +412,14 @@ header: `markdown-stream.ts` exists at `v1.19.3`, at `v2.0.32` (`@843a6c51`) and
 (VERIFIED, HTTP 200 on the raw URLs; `markdown-projection.ts` checked at the `v2.0.32` tag only),
 so the pin must say which. The vendored file adds a runtime dependency on `remend`
 (it imports `marked`, `remend` and `./markdown-projection`).
+*Update 2026-10-20 (E2-mvp-prototype phase 2, issue #15):* the copy is pinned to `v2.0.32`
+(`843a6c51`), not `v1.19.3` as §2.3 assumed. At that tag `markdown-stream.ts` is no longer pure: it
+imports `markdownMath` from `@opencode/ui/context/marked-parser` and builds `new Marked(markdownMath)`
+(VERIFIED with `curl` on the raw files of both tags). We vendored it WITHOUT the math extension
+(plain `new Marked()`), because depending on `@opencode/ui` is forbidden above; the header of the
+vendored files in `webview-ui/src/markdown/` says so, with the MIT notice. `marked` and `remend`
+are pinned exact to the catalog of that tag (18.0.11 and 1.3.1) because the file depends on the
+shape of the lexer tokens.
 
 **Minimum VS Code: `engines.vscode ^1.105.0`**, to cover forks (Cursor ~1.105 HYPOTHESIS,
 VSCodium).
