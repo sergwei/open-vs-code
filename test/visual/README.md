@@ -33,10 +33,11 @@ OPEN_VS_CODE_REAL_OPENCODE=/path/to/opencode npm run test:visual
 | 2 Markdown | code actions, highlighting, no inline `style`, only http(s)/mailto links, click on `src/sample.ts:20` gives `Ln 20`, New file gets a language | `02a`, `02b`, `02c` |
 | 3 Stop | Stop visible, Escape stops, a neutral "Stopped" note (message level) with no `role="alert"` and no red box, ArrowUp recalls the prompt | `03a`, `03b` |
 | 4 themes | code and token contrast >= 4.5 (tokens only in the high-contrast themes; weak tokens elsewhere are warnings) | `04-theme-{light,dark,hc-dark,hc-light}` |
-| 5 permission | starts in a new session (step 3 told the model not to use tools), toast and badge with the view hidden, focus in the card, the "Always" panel has one primary button, "Allow once", badge cleared | `05a`-`05d` |
-| 6 question | question card shown and focused, answered, gone | `07a`, `07b` |
-| 7 Restart Server | same conversation and title afterwards | `08a` |
-| 8 Reload Window | same conversation and title afterwards | `09` |
+| 5 permission | starts in a new session (step 3 told the model not to use tools), toast and badge with the view hidden, focus in the card, the "Always" panel has one primary button, "Allow once", badge cleared, and an "Allowed once" line under the tool in the conversation (not in the dock, not an alert) | `05a`-`05d` |
+| 6 question | "Allowed once" survives the next prompt; question card shown and focused, answered, gone, and an "Answered … Blue" line in the conversation | `07a`, `07b` |
+| 6b reject | a plain Reject (never Always): a "Rejected" line under the tool, no alert, no red box, earlier lines still there. Skipped with a warning if the model never calls `read` | `07c` |
+| 7 Restart Server | same conversation and title afterwards, and the same answered-request lines | `08a` |
+| 8 Reload Window | same conversation and title afterwards; "Answered … Blue" and "Rejected" are read back from the tool blocks (this also checks that REST `message.list` returns what the database holds); "Allowed once" is asserted GONE, because opencode keeps no trace of an allowed permission and the host memory dies with the window | `09` |
 
 After every step it asserts the webview logged **no CSP violation and no uncaught exception**.
 Things that depend on what the model writes (a file reference in the reply, a table) are skipped
