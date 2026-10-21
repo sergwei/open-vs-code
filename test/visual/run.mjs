@@ -14,7 +14,11 @@
 // no CSP violation and no uncaught exception in the webview, a neutral "Stopped" note without
 // role=alert after Stop, text/background contrast of code in the four themes, the toast and the badge with
 // the view hidden, focus in the permission card, one primary button at a time, "Ln 20" after a
-// file link, the session kept after Restart Server and after Reload Window. Things that depend on
+// file link, the session kept after Restart Server and after Reload Window. Since
+// E3-resolved-history (issues #56/#18) it also asserts that what the user answered stays in the
+// conversation under its tool ("Allowed once", "Answered … Blue", a plain "Rejected" that is not an
+// alert), survives another prompt and Restart Server unchanged, and after Reload Window keeps only
+// what the tool blocks say ("Answered", "Rejected") while "Allowed once" is gone. Things that depend on
 // what the model happens to write (a file reference in the reply, say) are SKIPPED with a
 // warning when absent, never failed.
 //
@@ -315,6 +319,22 @@ const snapshotOfChat = () =>
   web.inDoc((doc) => ({
     messages: doc.querySelectorAll('[role="log"] > *').length,
     title: doc.querySelector('.chat-title')?.textContent ?? '',
+  }));
+
+/**
+ * The lines of answered requests: those in the conversation (`log`, with their hidden prefix, e.g.
+ * "Permission: Allowed once · Read .env"), those in the dock (`dock`) and the number of
+ * `role="alert"` elements. E3-resolved-history (issues #56/#18).
+ */
+const outcomeLines = () =>
+  web.inDoc((doc) => ({
+    log: [...doc.querySelectorAll('[role="log"] .request-outcome')].map((p) =>
+      (p.textContent ?? '').trim(),
+    ),
+    dock: [...doc.querySelectorAll('.request-results li')].map((li) =>
+      (li.textContent ?? '').trim(),
+    ),
+    alerts: doc.querySelectorAll('[role="alert"]').length,
   }));
 
 /** Fails when the webview logged a CSP violation or an uncaught exception since the last call. */
@@ -699,6 +719,17 @@ try {
       await page.waitForTimeout(1000);
       const after = (await badge.allInnerTexts().catch(() => [])).join(',');
       check(after === '', `the badge is gone after answering ("${after}")`);
+      // E3-resolved-history: the answer stays in the conversation, under the tool, not in the dock.
+      const once = await outcomeLines();
+      check(
+        once.log.some((line) => /Allowed once/.test(line)),
+        `the history says "Allowed once" under the tool (${JSON.stringify(once.log)})`,
+      );
+      check(
+        !once.dock.some((line) => /Allowed once/.test(line)),
+        'the dock no longer prints the answer of the open session',
+      );
+      check(once.alerts === 0, 'an answered permission is not an alert');
       await shot('05d-after-once');
       assertNoWebviewErrors('permission');
     },
@@ -731,6 +762,12 @@ try {
       check(true, 'the question card is shown');
       await shot('07a-question');
     }
+    // A new prompt (the one of the question) does not erase the answer given in step 5.
+    const afterPrompt = await outcomeLines();
+    check(
+      afterPrompt.log.some((line) => /Allowed once/.test(line)),
+      `sending another prompt keeps the "Allowed once" line (${JSON.stringify(afterPrompt.log)})`,
+    );
     if (form) {
       await web.inDoc((doc) => {
         const option = [
@@ -746,13 +783,70 @@ try {
       check(await waitIdle(90_000), 'the turn ends after answering');
       const gone = await web.inDoc((doc) => doc.querySelector('.form-card') === null);
       check(gone === true, 'the question card is gone after the answer');
+      await page.waitForTimeout(800);
+      const answered = await outcomeLines();
+      check(
+        answered.log.some((line) => /Answered/.test(line) && /Blue/.test(line)),
+        `the history says what was answered ("Answered … Blue"): ${JSON.stringify(answered.log)}`,
+      );
+      check(answered.dock.length === 0, 'the dock prints no result line for the open session');
       await shot('07b-answered');
     }
     assertNoWebviewErrors('question');
   });
 
+  await step('6b a plain Reject is kept in the history, not painted as an error', async () => {
+    // Same reasoning as step 6: whether the model calls `read` is up to the model, so two tries and
+    // then SKIP with a warning.
+    let card;
+    for (const attempt of [1, 2]) {
+      await waitIdle(90_000);
+      await clickIn('textarea');
+      await page.keyboard.type(
+        'Use the read tool to read the file .env in the workspace root once more and tell me its content.',
+      );
+      await page.keyboard.press('Enter');
+      card = await waitFor(
+        () => web.inDoc((doc) => doc.querySelector('.permission-card')?.innerText?.slice(0, 200)),
+        attempt === 1 ? 60_000 : 90_000,
+      );
+      if (card) break;
+    }
+    if (card === undefined) {
+      await shot('07c-reject-not-asked');
+      warn('the model never called the read tool again (2 attempts); Reject not tested');
+      return;
+    }
+    check(await clickButton('Reject'), 'Reject is pressed (the plain one, never Always)');
+    check(await waitIdle(90_000), 'the turn ends after Reject');
+    await page.waitForTimeout(1000);
+    const lines = await outcomeLines();
+    check(
+      lines.log.some((line) => /Rejected/.test(line) && !/feedback/.test(line)),
+      `the history says "Rejected" under the tool: ${JSON.stringify(lines.log)}`,
+    );
+    check(
+      lines.log.some((line) => /Allowed once/.test(line)),
+      'the earlier "Allowed once" line is still there',
+    );
+    const painted = await web.inDoc((doc) => ({
+      red: doc.querySelectorAll('.alert-error').length,
+      alerts: doc.querySelectorAll('[role="alert"]').length,
+      outcomeIsError: [...doc.querySelectorAll('.request-outcome')].some(
+        (p) => p.matches('.alert, .alert-error') || p.closest('[role="alert"]') !== null,
+      ),
+    }));
+    check(
+      painted.red === 0 && painted.alerts === 0 && !painted.outcomeIsError,
+      'a Reject is not an alert and not red',
+    );
+    await shot('07c-rejected');
+    assertNoWebviewErrors('reject');
+  });
+
   await step('7 Restart Server keeps the session', async () => {
     const before = await snapshotOfChat();
+    const linesBefore = await outcomeLines();
     check(
       before.messages > 0,
       `there is a conversation to keep (${String(before.messages)} blocks, "${before.title}")`,
@@ -770,11 +864,21 @@ try {
       afterRestart.title === before.title,
       `same title after Restart Server ("${afterRestart.title}")`,
     );
+    // The host (not the webview, not the server) remembers the exact decisions, and it survives.
+    const linesAfter = await outcomeLines();
+    check(
+      linesBefore.log.length > 0 &&
+        JSON.stringify(linesAfter.log) === JSON.stringify(linesBefore.log),
+      `the answered-request lines are the same after Restart Server (${JSON.stringify(linesBefore.log)} -> ${JSON.stringify(linesAfter.log)})`,
+    );
     await shot('08a-after-restart');
   });
 
   await step('8 Reload Window keeps the session', async () => {
     const preReload = await snapshotOfChat();
+    const linesPreReload = await outcomeLines();
+    const hadRejected = linesPreReload.log.some((line) => /Rejected/.test(line));
+    const hadAnswered = linesPreReload.log.some((line) => /Answered/.test(line));
     await command('Developer: Reload Window');
     web?.close();
     await browser.close().catch(() => undefined);
@@ -805,6 +909,28 @@ try {
       afterReload.title === preReload.title,
       `same title after Reload Window ("${afterReload.title}")`,
     );
+    // Reload Window kills the extension host and with it the memory of exact decisions (decision of
+    // Sergio, 21/10/2026: nothing is persisted). What the tool blocks say survives, and it comes
+    // from REST `message.list` (that is the check of the HYPOTHESIS that REST returns the same
+    // `content[]` as the database). "Allowed once" is ASSERTED gone, so the documented limit cannot
+    // change silently.
+    const linesAfterReload = await outcomeLines();
+    check(
+      !linesAfterReload.log.some((line) => /Allowed once|Always allowed/.test(line)),
+      `after Reload Window "Allowed once" is gone (the server keeps no trace): ${JSON.stringify(linesAfterReload.log)}`,
+    );
+    if (hadAnswered) {
+      check(
+        linesAfterReload.log.some((line) => /Answered/.test(line) && /Blue/.test(line)),
+        `after Reload Window "Answered … Blue" is read back from the tool block: ${JSON.stringify(linesAfterReload.log)}`,
+      );
+    }
+    if (hadRejected) {
+      check(
+        linesAfterReload.log.some((line) => /Rejected/.test(line)),
+        `after Reload Window "Rejected" is read back from the tool block: ${JSON.stringify(linesAfterReload.log)}`,
+      );
+    }
     await shot('09-after-reload');
     assertNoWebviewErrors('reload');
   });
