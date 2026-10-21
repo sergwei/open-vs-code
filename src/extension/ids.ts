@@ -19,6 +19,38 @@ export const CHAT_VIEW_ID = 'openVsCode.chat';
 /** Command id of "OpenCode: Show Logs" (`contributes.commands[].command`). */
 export const SHOW_LOGS_COMMAND_ID = 'openVsCode.showLogs';
 
+/**
+ * Internal command that feeds a webview message to the host as if the webview had sent it
+ * (issue #14). It is registered ONLY when the extension runs in `ExtensionMode.Test` and it is
+ * deliberately NOT declared in `contributes`: it is not a user command. `manifest.test.ts` only
+ * demands a constant for what IS contributed, so having one here for an uncontributed id is fine.
+ */
+export const INJECT_WEBVIEW_MESSAGE_COMMAND_ID = 'openVsCode.test.injectWebviewMessage';
+
+/** Command id of "OpenCode: Restart Server" (contributed; issue #10). */
+export const RESTART_SERVER_COMMAND_ID = 'openVsCode.restartServer';
+
+/** Command id of "OpenCode: Select Workspace Folder" (contributed; multi-root, issue #10). */
+export const SELECT_FOLDER_COMMAND_ID = 'openVsCode.selectFolder';
+
+/** Command id of "OpenCode: Manage Saved Permissions" (contributed; issue #18). */
+export const MANAGE_PERMISSIONS_COMMAND_ID = 'openVsCode.managePermissions';
+
+/**
+ * Internal command behind the "Open chat" link of an attention notification (issue #19): shows
+ * the chat view and focuses the request. Registered always, deliberately NOT declared in
+ * `contributes` (it takes arguments and is no user command), like the injection command above.
+ * `manifest.test.ts` only demands constants for what IS contributed.
+ */
+export const SHOW_REQUEST_COMMAND_ID = 'openVsCode.internal.showRequest';
+
+/**
+ * Internal command behind the "Allow once" / "Reject" links of a permission notification (issue
+ * #19). Same status as {@link SHOW_REQUEST_COMMAND_ID}: registered, not contributed. Its arguments
+ * come from a link in a notification, so the handler validates them before using them.
+ */
+export const REPLY_PERMISSION_COMMAND_ID = 'openVsCode.internal.replyPermission';
+
 /** Configuration section (the prefix of every setting id). */
 export const CONFIG_SECTION = 'openVsCode';
 

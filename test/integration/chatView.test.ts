@@ -33,4 +33,25 @@ describe('chat view', () => {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     log.assertAbsent('Webview bundle file missing');
   });
+
+  /**
+   * The webview document loads, runs its bundle and its `ready` message reaches the host through
+   * the guard `isWebviewToHost` (issue #14: the controller logs `webview ready`).
+   *
+   * This is the only automatic proof that the bundle EXECUTES under the CSP and that the
+   * webview-to-host path works end to end, without reaching into the iframe. It does not say how
+   * the chat looks. 8000 ms is our own choice (margin for a slow CI), not a VS Code value.
+   * VERIFIED on Windows 11 in VS Code 1.142 (20/10/2026, `npm run test:integration` main suite,
+   * `sends ready from the bundled webview` passing; the real-opencode run's OpenCode.log shows
+   * `Chat view resolved` then `webview ready`). macOS and Linux are UNVERIFIED until the CI of
+   * the PR runs.
+   */
+  it('sends ready from the bundled webview', async () => {
+    const extension = vscode.extensions.getExtension(EXTENSION_ID);
+    await extension?.activate();
+    const log = await openLogFromStart();
+    await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
+    await log.waitFor('webview ready', 8000);
+    log.assertAbsent('rejected a message from the webview');
+  });
 });

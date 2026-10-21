@@ -50,6 +50,19 @@ describe('ids.ts matches package.json contributes', () => {
     expect(commands).toContain(ids.SHOW_LOGS_COMMAND_ID);
   });
 
+  it('declares the phase 3 commands (restart, select folder, manage permissions)', () => {
+    const commands = manifest.contributes.commands.map((c) => c.command);
+    expect(commands).toContain(ids.RESTART_SERVER_COMMAND_ID);
+    expect(commands).toContain(ids.SELECT_FOLDER_COMMAND_ID);
+    expect(commands).toContain(ids.MANAGE_PERMISSIONS_COMMAND_ID);
+  });
+
+  it('does NOT contribute the internal commands (they take link arguments)', () => {
+    const commands = manifest.contributes.commands.map((c) => c.command);
+    expect(commands).not.toContain(ids.SHOW_REQUEST_COMMAND_ID);
+    expect(commands).not.toContain(ids.REPLY_PERMISSION_COMMAND_ID);
+  });
+
   it('has a constant for every contributed command', () => {
     const missing = manifest.contributes.commands
       .map((c) => c.command)

@@ -1,11 +1,17 @@
-// Tests for `serverManager.ts` (issue #8).
+// Tests for `serverManager.ts` (issues #8 and #10).
 //
 // What they protect: the rules of WHEN the server starts and stops (usable detection starts it,
 // a fixed setting recovers without a reload, plan B for port 0, stop is idempotent and final,
 // an unexpected exit is reported, nothing starts without a folder) and the texts of the
-// notifications. Everything here is SYNTHETIC: `start`, `stop` and `fetchInfo` are fakes and the
-// "child" is an EventEmitter, so these tests say nothing about real processes (those are in
-// `opencodeServer.test.ts`, against the fixture) nor about a real opencode (UNVERIFIED).
+// notifications. Phase 3 adds the restart rules: a restart is serialized, aborts a start in
+// progress without a spurious `start-failed`, a crash is retried after 1 s / 5 s / 15 s and then
+// given up, a server that lived 120 s resets the counter, `stop()` cancels a pending retry (a
+// server launched after the window began closing would be an orphan), a changed binary or folder
+// restarts a running server, and the multi-root folder choice. Everything here is SYNTHETIC:
+// `start`, `stop`, `fetchInfo`, the timer and the clock are fakes and the "child" is an
+// EventEmitter, so these tests say nothing about real processes (those are in
+// `opencodeServer.test.ts`, against the fixture, and in the opt-in `realOpencode.test.ts`) nor
+// about a real opencode (UNVERIFIED).
 
 import { EventEmitter } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -23,10 +29,12 @@ import {
   type StartServerOptions,
 } from './opencodeServer';
 import {
+  AUTO_RESTART_DELAYS_MS,
   describeServerFailure,
   describeServerState,
   pickWorkspaceFolder,
   ServerManager,
+  STABLE_RUN_MS,
   type ServerState,
 } from './serverManager';
 
@@ -86,15 +94,55 @@ function harness(
   const fetchInfo = vi.fn(
     overrides.fetchInfo ?? (() => Promise.resolve({ version: '2.0.32', pid: 4242 })),
   );
+  // Manual timer and clock: the backoff is observed and fired by hand, nothing really waits.
+  const timers: Array<{ ms: number; fn: () => void; cancelled: boolean }> = [];
+  let clock = 0;
   const manager = new ServerManager({
     start,
     stop,
     fetchInfo,
     log: { info: push, warn: push, error: push, debug: push },
+    schedule: (ms, fn) => {
+      const timer = { ms, fn, cancelled: false };
+      timers.push(timer);
+      return {
+        cancel: () => {
+          timer.cancelled = true;
+        },
+      };
+    },
+    now: () => clock,
   });
   const states: ServerState[] = [];
   manager.onDidChangeState((state) => states.push(state));
-  return { manager, start, stop, fetchInfo, messages, states, created };
+  return {
+    manager,
+    start,
+    stop,
+    fetchInfo,
+    messages,
+    states,
+    created,
+    timers,
+    advance: (ms: number): void => {
+      clock += ms;
+    },
+    /** Fires the newest timer that is still armed, like the clock reaching it. */
+    fire: (): void => {
+      const armed = timers.filter((timer) => !timer.cancelled);
+      const last = armed[armed.length - 1];
+      if (last === undefined) throw new Error('no armed timer');
+      last.cancelled = true;
+      last.fn();
+    },
+  };
+}
+
+/** Resolves once the manager reaches `kind`, failing with the states seen so far otherwise. */
+async function reach(manager: ServerManager, kind: ServerState['kind']): Promise<void> {
+  await vi.waitFor(() => {
+    expect(manager.state.kind).toBe(kind);
+  });
 }
 
 const folderChoice = { folder: '/work/project', ignored: [] };
@@ -113,6 +161,38 @@ describe('pickWorkspaceFolder', () => {
       { uri: { scheme: 'file', fsPath: '/b' }, name: 'b' },
     ];
     expect(pickWorkspaceFolder(folders)).toEqual({ folder: '/a', ignored: ['/b'] });
+  });
+
+  it('takes the preferred folder while it is still open and on disk', () => {
+    const folders = [
+      { uri: { scheme: 'file', fsPath: '/a' }, name: 'a' },
+      { uri: { scheme: 'file', fsPath: '/b' }, name: 'b' },
+    ];
+    expect(pickWorkspaceFolder(folders, '/b')).toEqual({ folder: '/b', ignored: ['/a'] });
+  });
+
+  it('falls back to the first folder when the preferred one was removed', () => {
+    const folders = [
+      { uri: { scheme: 'file', fsPath: '/a' }, name: 'a' },
+      { uri: { scheme: 'file', fsPath: '/c' }, name: 'c' },
+    ];
+    expect(pickWorkspaceFolder(folders, '/b')).toEqual({ folder: '/a', ignored: ['/c'] });
+  });
+
+  it('skips a virtual first folder and serves the first one on disk', () => {
+    const folders = [
+      { uri: { scheme: 'vscode-vfs', fsPath: '/x' }, name: 'remote' },
+      { uri: { scheme: 'file', fsPath: '/b' }, name: 'b' },
+    ];
+    expect(pickWorkspaceFolder(folders)).toEqual({ folder: '/b', ignored: ['/x'] });
+  });
+
+  it('never serves a preferred folder that is not on disk', () => {
+    const folders = [
+      { uri: { scheme: 'file', fsPath: '/a' }, name: 'a' },
+      { uri: { scheme: 'vscode-vfs', fsPath: '/x' }, name: 'remote' },
+    ];
+    expect(pickWorkspaceFolder(folders, '/x')).toMatchObject({ folder: '/a' });
   });
 });
 
@@ -195,17 +275,21 @@ describe('ServerManager', () => {
     expect(fail.stop).toHaveBeenCalledTimes(1);
   });
 
-  it('a different binary while running does not restart and is logged', async () => {
-    const { manager, start, messages } = harness();
+  it('a different binary while running restarts the server with the new one (issue #10)', async () => {
+    const { manager, start, stop, states, created } = harness();
     manager.setFolder(folderChoice);
     manager.onDetection(okResult('/bin/one'));
+    await reach(manager, 'running');
+    const before = states.length;
+    manager.onDetection(okResult('/bin/two'));
     await vi.waitFor(() => {
+      expect(start).toHaveBeenCalledTimes(2);
       expect(manager.state.kind).toBe('running');
     });
-    manager.onDetection(okResult('/bin/two'));
-    expect(start).toHaveBeenCalledTimes(1);
-    expect(manager.state.kind).toBe('running');
-    expect(messages.some((m) => m.includes('issue #10'))).toBe(true);
+    expect(start.mock.calls[1]?.[0].command).toBe('/bin/two');
+    expect(stop).toHaveBeenCalledWith(created[0]);
+    expect(states.slice(before).map((s) => s.kind)).toEqual(['restarting', 'starting', 'running']);
+    expect(states[before]).toEqual({ kind: 'restarting', reason: 'binary-changed' });
   });
 
   it('stop() during startup aborts, ends in stopped, is idempotent and final', async () => {
@@ -288,23 +372,30 @@ describe('ServerManager', () => {
     expect(manager.state).toMatchObject({ reason: 'exited' });
   });
 
-  it('a different binary detected during a start that succeeds is logged, not silently dropped', async () => {
-    let finish: (server: RunningServer) => void = () => undefined;
-    const { manager, messages, start } = harness({
-      start: () =>
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-    });
+  it('a different binary detected during a start that succeeds is not dropped: it restarts with it', async () => {
+    const first = fakeServer();
+    const second = fakeServer();
+    const start = vi
+      .fn<(options: StartServerOptions) => Promise<RunningServer>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            // Resolved by hand below, after the second detection arrived.
+            setTimeout(() => {
+              resolve(first);
+            }, 0);
+          }),
+      )
+      .mockResolvedValueOnce(second);
+    const { manager } = harness({ start });
     manager.setFolder(folderChoice);
     manager.onDetection(okResult('/bin/one'));
     manager.onDetection(okResult('/bin/two'));
-    finish(fakeServer());
     await vi.waitFor(() => {
+      expect(start).toHaveBeenCalledTimes(2);
       expect(manager.state.kind).toBe('running');
     });
-    expect(start).toHaveBeenCalledTimes(1);
-    expect(messages.some((m) => m.includes('binary changed'))).toBe(true);
+    expect(start.mock.calls[1]?.[0].command).toBe('/bin/two');
   });
 
   it('port 0 in the url relaunches once without --port; a second failure is start-failed', async () => {
@@ -383,6 +474,274 @@ describe('ServerManager', () => {
       expect(manager.state.kind).toBe('running');
     });
     expect(start.mock.calls[1]?.[0].command).toBe('/bin/fixed');
+  });
+});
+
+describe('restart (issue #10)', () => {
+  /** A manager already `running` on `/bin/opencode` in `/work/project`. */
+  async function running(overrides: Parameters<typeof harness>[0] = {}) {
+    const h = harness(overrides);
+    h.manager.setFolder(folderChoice);
+    h.manager.onDetection(okResult());
+    await reach(h.manager, 'running');
+    return h;
+  }
+
+  it('goes restarting -> starting -> running, stops the old server and reuses the binary and folder', async () => {
+    const { manager, start, stop, states, created } = await running();
+    const before = states.length;
+    await expect(manager.restart('command')).resolves.toBe('attempted');
+    expect(states.slice(before).map((s) => s.kind)).toEqual(['restarting', 'starting', 'running']);
+    expect(states[before]).toEqual({ kind: 'restarting', reason: 'command' });
+    expect(stop).toHaveBeenCalledWith(created[0]);
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(start.mock.calls[1]?.[0]).toMatchObject({
+      command: '/bin/opencode',
+      folder: '/work/project',
+    });
+  });
+
+  it('two restarts at once share one stop and one start', async () => {
+    const { manager, start, stop } = await running();
+    const first = manager.restart('command');
+    const second = manager.restart('command');
+    expect(second).toBe(first);
+    await first;
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts a start in progress without publishing a spurious start-failed', async () => {
+    const start = vi
+      .fn<(options: StartServerOptions) => Promise<RunningServer>>()
+      .mockImplementationOnce(
+        (options) =>
+          new Promise((_resolve, reject) => {
+            options.signal?.addEventListener('abort', () => {
+              reject(new ServerStartError('aborted', 'cancelled'));
+            });
+          }),
+      )
+      .mockResolvedValueOnce(fakeServer());
+    const { manager, states } = harness({ start });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    expect(manager.state.kind).toBe('starting');
+    await manager.restart('command');
+    expect(manager.state.kind).toBe('running');
+    expect(states.some((s) => s.kind === 'unavailable')).toBe(false);
+    expect(start).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers no-binary before any detection and no-workspace for a command without a folder', async () => {
+    const bare = harness();
+    bare.manager.setFolder(folderChoice);
+    await expect(bare.manager.restart('command')).resolves.toBe('no-binary');
+    expect(bare.start).not.toHaveBeenCalled();
+
+    const none = harness();
+    none.manager.onDetection(okResult());
+    none.manager.setFolder(pickWorkspaceFolder(undefined));
+    await expect(none.manager.restart('command')).resolves.toBe('no-workspace');
+    expect(none.start).not.toHaveBeenCalled();
+  });
+
+  it('a restart after stop() does nothing', async () => {
+    const { manager, start } = await running();
+    await manager.stop();
+    await expect(manager.restart('command')).resolves.toBe('disposed');
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it('a different folder restarts a running server; the same one does not', async () => {
+    const { manager, start, states } = await running();
+    manager.setFolder({ folder: '/work/project', ignored: [] });
+    expect(start).toHaveBeenCalledTimes(1);
+    manager.setFolder({ folder: '/work/other', ignored: [] });
+    await vi.waitFor(() => {
+      expect(start).toHaveBeenCalledTimes(2);
+      expect(manager.state.kind).toBe('running');
+    });
+    expect(start.mock.calls[1]?.[0].folder).toBe('/work/other');
+    expect(states.find((s) => s.kind === 'restarting')).toEqual({
+      kind: 'restarting',
+      reason: 'folder-changed',
+    });
+  });
+
+  /**
+   * A manager running, whose SECOND start (the one of a restart) waits for `release()`. Lets a test
+   * change the folder or the binary while the relaunch of a restart is in `starting` (W1).
+   */
+  async function restartHeldInStarting() {
+    const servers = [fakeServer(), fakeServer(), fakeServer()];
+    let call = 0;
+    let release: () => void = () => undefined;
+    const h = harness({
+      start: () => {
+        const server = servers[call++] ?? fakeServer();
+        if (call !== 2) return Promise.resolve(server);
+        return new Promise((resolve) => {
+          release = () => {
+            resolve(server);
+          };
+        });
+      },
+    });
+    h.manager.setFolder(folderChoice);
+    h.manager.onDetection(okResult());
+    await reach(h.manager, 'running');
+    const restarting = h.manager.restart('command');
+    await vi.waitFor(() => {
+      expect(h.start).toHaveBeenCalledTimes(2);
+    });
+    return { ...h, restarting, release: () => release() };
+  }
+
+  it('a folder change during the relaunch of a restart is not lost: it restarts again on the new folder', async () => {
+    const { manager, start, restarting, release } = await restartHeldInStarting();
+    manager.setFolder({ folder: '/work/other', ignored: [] });
+    release();
+    await restarting;
+    await vi.waitFor(() => {
+      expect(manager.state.kind).toBe('running');
+    });
+    expect(start).toHaveBeenCalledTimes(3);
+    expect(start.mock.calls[2]?.[0].folder).toBe('/work/other');
+    expect(manager.state).toMatchObject({ server: { folder: '/work/other' } });
+  });
+
+  it('a binary change during the relaunch of a restart is not lost either', async () => {
+    const { manager, start, restarting, release } = await restartHeldInStarting();
+    manager.onDetection(okResult('/bin/two'));
+    release();
+    await restarting;
+    await vi.waitFor(() => {
+      expect(manager.state.kind).toBe('running');
+    });
+    expect(start).toHaveBeenCalledTimes(3);
+    expect(start.mock.calls[2]?.[0].command).toBe('/bin/two');
+  });
+
+  it('losing every folder stops the server and reports no-workspace', async () => {
+    const { manager, stop, created } = await running();
+    manager.setFolder(pickWorkspaceFolder([]));
+    await reach(manager, 'unavailable');
+    expect(manager.state).toMatchObject({ reason: 'no-workspace' });
+    expect(stop).toHaveBeenCalledWith(created[0]);
+  });
+
+  it('logs the folder it serves', () => {
+    const { manager, messages } = harness();
+    manager.setFolder({ folder: '/work/project', ignored: ['/work/other'] });
+    expect(messages).toContain('serving folder /work/project');
+    expect(messages.some((m) => m.includes('/work/other'))).toBe(true);
+  });
+});
+
+describe('automatic restart after a crash (issue #10)', () => {
+  async function running() {
+    const h = harness();
+    h.manager.setFolder(folderChoice);
+    h.manager.onDetection(okResult());
+    await reach(h.manager, 'running');
+    return h;
+  }
+
+  it('retries after 1 s, 5 s and 15 s and then gives up, notifying only then', async () => {
+    const h = await running();
+    expect([...AUTO_RESTART_DELAYS_MS]).toEqual([1000, 5000, 15000]);
+    const seen: Array<ServerState> = [];
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      h.created.at(-1)?.child.emit('exit', 1, null);
+      expect(h.manager.state).toMatchObject({
+        kind: 'unavailable',
+        reason: 'exited',
+        retryInMs: AUTO_RESTART_DELAYS_MS[attempt - 1],
+        attempt,
+      });
+      seen.push(h.manager.state);
+      h.fire();
+      await reach(h.manager, 'running');
+    }
+    const previous = h.manager.state;
+    h.created.at(-1)?.child.emit('exit', 1, null);
+    const last = h.manager.state;
+    expect(last).toMatchObject({ kind: 'unavailable', reason: 'exited' });
+    expect('retryInMs' in last).toBe(false);
+    expect(h.timers.filter((timer) => !timer.cancelled)).toEqual([]);
+    expect(h.messages).toContain('giving up restarting the server after 3 attempts');
+    // The scheduled states are silent; the surrender is not.
+    for (const state of seen) expect(describeServerFailure(previous, state)).toBeUndefined();
+    expect(describeServerFailure(previous, last)).toMatch(/exited unexpectedly/);
+    expect(h.start).toHaveBeenCalledTimes(4);
+  });
+
+  it('starts the backoff over when the server stayed up for the stable period', async () => {
+    const h = await running();
+    h.created.at(-1)?.child.emit('exit', 1, null);
+    h.fire();
+    await reach(h.manager, 'running');
+    h.created.at(-1)?.child.emit('exit', 1, null);
+    expect(h.manager.state).toMatchObject({ retryInMs: 5000, attempt: 2 });
+    h.fire();
+    await reach(h.manager, 'running');
+    h.advance(STABLE_RUN_MS);
+    h.created.at(-1)?.child.emit('exit', 1, null);
+    expect(h.manager.state).toMatchObject({ retryInMs: 1000, attempt: 1 });
+  });
+
+  it('a restart the user asked for resets the counter', async () => {
+    const h = await running();
+    h.created.at(-1)?.child.emit('exit', 1, null);
+    h.fire();
+    await reach(h.manager, 'running');
+    await h.manager.restart('command');
+    h.created.at(-1)?.child.emit('exit', 1, null);
+    expect(h.manager.state).toMatchObject({ retryInMs: 1000, attempt: 1 });
+  });
+
+  it('stop() cancels a pending retry: nothing is launched after it', async () => {
+    const h = await running();
+    h.created.at(-1)?.child.emit('exit', 1, null);
+    expect(h.timers.filter((timer) => !timer.cancelled)).toHaveLength(1);
+    await h.manager.stop();
+    expect(h.timers.filter((timer) => !timer.cancelled)).toEqual([]);
+    expect(h.start).toHaveBeenCalledTimes(1);
+    expect(h.manager.state.kind).toBe('stopped');
+  });
+
+  it('a retry that arrives after stop() through a stale callback launches nothing', async () => {
+    const h = await running();
+    h.created.at(-1)?.child.emit('exit', 1, null);
+    const callback = h.timers[0]?.fn;
+    await h.manager.stop();
+    callback?.();
+    await Promise.resolve();
+    expect(h.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('a new detection while waiting overrides the retry', async () => {
+    const h = await running();
+    h.created.at(-1)?.child.emit('exit', 1, null);
+    h.manager.onDetection(okResult('/bin/fixed'));
+    await reach(h.manager, 'running');
+    expect(h.timers.filter((timer) => !timer.cancelled)).toEqual([]);
+    expect(h.start.mock.calls[1]?.[0].command).toBe('/bin/fixed');
+  });
+
+  it('a restart that fails to start is not retried automatically', async () => {
+    const start = vi
+      .fn<(options: StartServerOptions) => Promise<RunningServer>>()
+      .mockResolvedValueOnce(fakeServer())
+      .mockRejectedValueOnce(new Error('spawn failed'));
+    const h = harness({ start });
+    h.manager.setFolder(folderChoice);
+    h.manager.onDetection(okResult());
+    await reach(h.manager, 'running');
+    await h.manager.restart('command');
+    expect(h.manager.state).toMatchObject({ kind: 'unavailable', reason: 'start-failed' });
+    expect(h.timers.filter((timer) => !timer.cancelled)).toEqual([]);
   });
 });
 
@@ -488,6 +847,31 @@ describe('describeServerState / describeServerFailure', () => {
     const { message } = describeServerState(running);
     expect(message).toBe('server ready at http://127.0.0.1:5555 (opencode 2.0.32, pid 7)');
     expect(message).not.toContain('secret');
+  });
+
+  it('the restart lines are the stable ones the integration test waits for', () => {
+    expect(describeServerState({ kind: 'restarting', reason: 'command' })).toEqual({
+      level: 'info',
+      message: 'restarting the server (command)',
+    });
+    expect(
+      describeServerState({
+        kind: 'unavailable',
+        reason: 'exited',
+        message: 'x',
+        retryInMs: 1000,
+        attempt: 1,
+      }).message,
+    ).toBe('server exited unexpectedly; restarting in 1 s (attempt 1 of 3)');
+    expect(
+      describeServerState({
+        kind: 'unavailable',
+        reason: 'exited',
+        message: 'x',
+        retryInMs: 15000,
+        attempt: 3,
+      }).message,
+    ).toBe('server exited unexpectedly; restarting in 15 s (attempt 3 of 3)');
   });
 
   it('only failures after an attempt notify', () => {
