@@ -3,7 +3,7 @@ import type { AttachmentRef } from '../../src/shared/protocol';
 import { EmptyState } from './chat/EmptyState';
 import { Header } from './chat/Header';
 import { HostContext, type SendToHost } from './chat/hostContext';
-import { MessageList } from './chat/MessageList';
+import { MessageList, type UserMessage } from './chat/MessageList';
 import { nextRequestId, PromptInput } from './chat/PromptInput';
 import { createHistory } from './chat/promptHistory';
 import { StatusBar } from './chat/StatusBar';
@@ -17,6 +17,13 @@ const NO_BREAK_SPACE = String.fromCharCode(0xa0);
 
 /** What the last `prompt.send` carried, so a failed send can give the user their text back. */
 interface LastSend {
+  requestId: string;
+  text: string;
+  files: AttachmentRef[];
+}
+
+/** What the last `session.fork` carried: the text (and known files) to refill the prompt with. */
+interface LastFork {
   requestId: string;
   text: string;
   files: AttachmentRef[];
@@ -43,6 +50,15 @@ interface LastSend {
  * delete) and makes New session lazy. Deleting the open session leaves the view empty (the store
  * does it on `session.removed`); the focus is not moved, because the user is inside the list.
  *
+ * Issue #21 adds "Fork from here" on user messages (`forkFrom`): the host forks the session before
+ * that message and opens the fork; when its `request.result` arrives without an error the prompt is
+ * refilled with the message text, but ONLY if the draft is empty (never over what the user was
+ * typing), together with the attachments of that message this document picked itself (the same
+ * rule as Retry), and gets the focus. A failure leaves everything as it was and the notice says
+ * why. While the fork is in flight the buttons are `aria-disabled` and Send is blocked by the
+ * pending request, so a prompt cannot go to the old session in the middle of the switch. It also
+ * hands `openSession` to the subagent links of the conversation.
+ *
  * Decisions: Send is disabled while the session is busy and Stop takes its place (plan decision
  * 6; `steer`/`queue` while busy is not offered); every prompt goes with `delivery: 'queue'`;
  * Retry resends the text of the last user message of the open session, with the attachments of
@@ -64,6 +80,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   const [announcement, setAnnouncement] = createSignal('');
   let focusInput: (() => void) | undefined;
   let lastSend: LastSend | undefined;
+  const [lastFork, setLastFork] = createSignal<LastFork | undefined>(undefined);
   let stopRequested = false;
   let announcementFlip = false;
   /** Every file picked in this document, to validate what Retry may re-attach. */
@@ -137,6 +154,28 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     // URIs, e.g. after it restarted): putting the chips back would make the next send fail the
     // same way, so only the text comes back and the user attaches again.
     if (failure.error.code !== 'AttachmentRejected') props.store.addDraftFiles(sent.files);
+    focusInput?.();
+  });
+
+  /** True while a fork waits for its result, or when there is no host to ask. */
+  const forkDisabled = () => {
+    const fork = lastFork();
+    return !connected() || (fork !== undefined && state.pending.includes(fork.requestId));
+  };
+
+  // A finished fork refills the prompt (only an empty draft) and focuses it. Reads `pending` and
+  // `notices` BEFORE the early return, like the effect above, so both stay dependencies.
+  createEffect(() => {
+    const pending = state.pending.slice();
+    const notices = state.notices.slice();
+    const fork = lastFork();
+    if (fork === undefined || pending.includes(fork.requestId)) return;
+    setLastFork(undefined);
+    if (notices.some((notice) => notice.requestId === fork.requestId)) return;
+    if (untrack(draft).trim() === '') {
+      setDraft(fork.text);
+      props.store.addDraftFiles(fork.files);
+    }
     focusInput?.();
   });
 
@@ -235,6 +274,29 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     focusInput?.();
   };
 
+  /**
+   * Asks the host to fork the open session before `message` (a user message). The text and the
+   * attachments it carried that this document knows are kept for the refill once the host answers
+   * (see the effect above). Does nothing without an open session, without a connection or while
+   * another fork is in flight.
+   */
+  const forkFrom = (message: UserMessage): void => {
+    const sessionID = state.open.sessionID;
+    if (sessionID === undefined || forkDisabled()) return;
+    const files: AttachmentRef[] = [];
+    for (const file of message.files) {
+      const known = file.uri === undefined ? undefined : knownFiles.get(file.uri);
+      if (known !== undefined) files.push(known);
+    }
+    const requestId = nextRequestId();
+    // `begin` BEFORE `setLastFork`: the click handler is not batched, so the effect that refills
+    // the prompt runs as soon as `lastFork` is set and must already find the request pending
+    // (caught by the first run of its test: the prompt was refilled before the host answered).
+    props.store.begin(requestId);
+    setLastFork({ requestId, text: message.text, files });
+    props.send({ type: 'session.fork', requestId, sessionID, messageID: message.id });
+  };
+
   /** Opens a session chosen in the session list (the same message the request dock uses). */
   const openSession = (sessionID: string): void => {
     const requestId = nextRequestId();
@@ -264,7 +326,10 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
               resolutions={state.resolutions}
               busy={busy()}
               canRetry={lastUser() !== undefined}
+              forkDisabled={forkDisabled()}
               onRetry={retry}
+              onFork={forkFrom}
+              onOpenSession={openSession}
             />
           </Show>
         </main>

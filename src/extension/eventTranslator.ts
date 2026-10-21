@@ -709,7 +709,8 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
 
         default:
           // Includes `session.status` / `session.idle` (not published by 2.0.32, ignored on
-          // purpose), `server.connected` and `location.shutdown` (the controller handles those).
+          // purpose), `server.connected`, `location.shutdown` and `session.forked` (the controller
+          // handles those; the last has no title, so it reads the row, issue #21).
           return [];
       }
     },

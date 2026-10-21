@@ -1,6 +1,8 @@
-import { createEffect, createMemo, createSignal, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js';
+import type { SessionSummary } from '../../../src/shared/model';
+import { childrenOf } from '../sessions/lineage';
 import { SessionPicker } from '../sessions/SessionPicker';
-import { EMPTY_TITLE } from '../sessions/sessionGroups';
+import { EMPTY_TITLE, sessionLabel } from '../sessions/sessionGroups';
 import type { ChatStore } from '../store/chatStore';
 
 /** Label of the agent/model marker before the first assistant message gives it a value. */
@@ -25,8 +27,20 @@ const PICKER_ID = 'session-picker';
  * The marker is a DISABLED button that shows `agent · providerID/id` of the newest assistant
  * message; the real selector (and the `switchModel`/`switchAgent` calls) is epic E5, so the
  * title says so. It is a button and not plain text so the place and the tab order are already
- * right when E5 lands. VERIFIED in jsdom (`App.test.tsx`, `SessionPicker.test.tsx`) and by
- * `npm run test:visual` (steps 1-9, Windows 11, real VS Code); macOS/Linux UNVERIFIED.
+ * right when E5 lands.
+ *
+ * Issue #21 adds the navigation between related sessions, all driven by the rows the snapshot
+ * brings (`state.sessions`), not by the session list (which stays roots only): above the title a
+ * `<nav aria-label="Session path">` with "‹ <parent title>" when the open session is a subagent
+ * child, or "Forked from <title>" when it is a fork (a plain "Forked session" text when the
+ * original is no longer known: nothing to open); under the bar a `<details>` "Subagent sessions
+ * (N)" listing the children of the open session, closed by default, one button each with the
+ * agent and "Running" / "Needs input" as text. `<details>` gives the keyboard and the expanded
+ * state for free. Every phrase is built as one string (lesson #926). The accessible names carry
+ * the visible words: "Forked from <title>: open the original session" for the fork crumb, and
+ * "Open subagent session <title>, <agent · Running · Needs input>" for each child.
+ * VERIFIED in jsdom (`App.test.tsx`, `SessionPicker.test.tsx`) and by `npm run test:visual`
+ * (steps 1-9, Windows 11, real VS Code; step 10 for the lineage); macOS/Linux UNVERIFIED.
  */
 export function Header(props: {
   store: ChatStore;
@@ -46,6 +60,66 @@ export function Header(props: {
     const id = state.open.sessionID;
     return (id === undefined ? undefined : state.sessions[id]?.title) ?? EMPTY_TITLE;
   });
+  /** The summary row of the open session, if the host has sent it. */
+  const openRow = createMemo(() => {
+    const id = state.open.sessionID;
+    return id === undefined ? undefined : state.sessions[id];
+  });
+  /** What the path above the title says and, when there is something to open, where it goes. */
+  const path = createMemo(() => {
+    const row = openRow();
+    if (row === undefined) return undefined;
+    if (row.parentID !== undefined) {
+      const label = sessionLabel(state.sessions[row.parentID] ?? {});
+      return {
+        text: `‹ ${label}`,
+        name: `Back to parent session ${label}`,
+        target: row.parentID,
+      };
+    }
+    if (row.forkOf !== undefined) {
+      const origin = state.sessions[row.forkOf];
+      if (origin === undefined)
+        return { text: 'Forked session', name: undefined, target: undefined };
+      const label = sessionLabel(origin);
+      return {
+        text: `Forked from ${label}`,
+        // Starts with the visible text so voice control ("click Forked from") finds it (WCAG 2.5.3).
+        name: `Forked from ${label}: open the original session`,
+        target: row.forkOf,
+      };
+    }
+    return undefined;
+  });
+  const children = createMemo(() => {
+    const id = state.open.sessionID;
+    return id === undefined ? [] : childrenOf(state.sessions, id);
+  });
+  /** "agent · Running · Needs input" for a child row; the words are the state, not a colour. */
+  const childMeta = (child: SessionSummary): string => {
+    const status = state.statuses[child.id]?.type;
+    const fields: string[] = [];
+    if (child.agent !== undefined) fields.push(child.agent);
+    if (status === 'busy' || status === 'retry') fields.push('Running');
+    if (
+      state.requests.permissions.some((ask) => ask.sessionID === child.id) ||
+      state.requests.forms.some((ask) => ask.sessionID === child.id)
+    ) {
+      fields.push('Needs input');
+    }
+    return fields.join(' · ');
+  };
+  /**
+   * Accessible name of a child button: the action, the title and then the same state words the
+   * button shows, so a screen reader hears "Running" / "Needs input" too (an `aria-label` replaces
+   * the content, it does not add to it). HYPOTHESIS: a real screen reader was not run; jsdom
+   * (`App.test.tsx`) checks the string only.
+   */
+  const childName = (child: SessionSummary): string => {
+    const meta = childMeta(child);
+    const base = `Open subagent session ${sessionLabel(child)}`;
+    return meta === '' ? base : `${base}, ${meta}`;
+  };
   const marker = createMemo(() => {
     const messages = state.open.messages;
     for (let index = messages.length - 1; index >= 0; index--) {
@@ -65,6 +139,30 @@ export function Header(props: {
 
   return (
     <div class="header-area">
+      <Show when={path()}>
+        {(current) => (
+          <nav class="session-path" aria-label="Session path">
+            <Show
+              when={current().target}
+              fallback={<span class="session-path-text">{current().text}</span>}
+            >
+              {(target) => (
+                <button
+                  type="button"
+                  class="secondary session-path-link"
+                  aria-label={current().name}
+                  onClick={() => {
+                    setPickerOpen(false);
+                    props.onOpenSession(target());
+                  }}
+                >
+                  {current().text}
+                </button>
+              )}
+            </Show>
+          </nav>
+        )}
+      </Show>
       <header class="chat-header">
         <h1 class="chat-title" title={title()}>
           {title()}
@@ -106,6 +204,33 @@ export function Header(props: {
           New session
         </button>
       </header>
+      <Show when={children().length > 0}>
+        <details class="subagent-sessions">
+          <summary>{`Subagent sessions (${String(children().length)})`}</summary>
+          <ul class="subagent-list">
+            <For each={children()}>
+              {(child) => (
+                <li>
+                  <button
+                    type="button"
+                    class="secondary subagent-child"
+                    aria-label={childName(child)}
+                    onClick={() => {
+                      setPickerOpen(false);
+                      props.onOpenSession(child.id);
+                    }}
+                  >
+                    <span class="session-title">{sessionLabel(child)}</span>
+                    <Show when={childMeta(child) !== ''}>
+                      <span class="session-meta">{childMeta(child)}</span>
+                    </Show>
+                  </button>
+                </li>
+              )}
+            </For>
+          </ul>
+        </details>
+      </Show>
       <Show when={pickerOpen()}>
         <div id={PICKER_ID}>
           <SessionPicker

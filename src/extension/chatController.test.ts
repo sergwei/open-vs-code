@@ -83,6 +83,14 @@ type FakeOptions = Partial<{
   sessionRemoveError: object;
   /** Replaces `session.remove`; a test uses it to publish the event BEFORE the answer, as the server does. */
   removeImpl: (input: { sessionID: string }) => Promise<void>;
+  /** Rows `session.list({ parentID })` answers with (issue #21). */
+  children: SessionInfo[];
+  /** Rejects the children read of the lineage (`session.list({ parentID })`) with this body. */
+  childrenError: object;
+  /** Replaces `session.get` entirely (issue #21: rows with `parentID` / `fork`, or failures). */
+  getImpl: (sessionID: string) => Promise<SessionInfo>;
+  /** Replaces `session.fork` (issue #21). */
+  forkImpl: (input: { sessionID: string; before?: string }) => Promise<SessionInfo>;
   messageListImpl: () => Promise<{ data: SessionMessageInfo[]; cursor: object }>;
   promptImpl: () => Promise<unknown>;
   active: Record<string, { type: 'running' }>;
@@ -136,6 +144,8 @@ function fakeApi(options: FakeOptions = {}) {
   const formCancels: unknown[] = [];
   const removed: string[] = [];
   const listInputs: Array<SessionListInput | undefined> = [];
+  const childListInputs: Array<SessionListInput | undefined> = [];
+  const forks: Array<{ sessionID: string; before?: string }> = [];
   const updates: unknown[] = [];
   const sessionRemoves: unknown[] = [];
   /** Rejects like the real client: with the server's error BODY, an object, not an Error. */
@@ -150,6 +160,14 @@ function fakeApi(options: FakeOptions = {}) {
     },
     session: {
       list: (input) => {
+        // Issue #21: the children read of the lineage is its own call, kept out of `session.list`
+        // so the tests that count snapshots by counting root reads keep meaning one per resync.
+        if (typeof input?.parentID === 'string') {
+          calls.push('session.list.children');
+          childListInputs.push(input);
+          if (options.childrenError !== undefined) return failWith(options.childrenError);
+          return Promise.resolve({ data: options.children ?? [], cursor: {} });
+        }
         calls.push('session.list');
         listInputs.push(input);
         return (
@@ -167,6 +185,7 @@ function fakeApi(options: FakeOptions = {}) {
       },
       get: ({ sessionID }) => {
         calls.push('session.get');
+        if (options.getImpl !== undefined) return options.getImpl(sessionID);
         if (options.getError !== undefined) return failWith(options.getError);
         const title = options.titles?.[sessionID];
         return Promise.resolve(
@@ -187,6 +206,13 @@ function fakeApi(options: FakeOptions = {}) {
         return options.sessionRemoveError === undefined
           ? Promise.resolve()
           : failWith(options.sessionRemoveError);
+      },
+      fork: (input) => {
+        calls.push('session.fork');
+        forks.push(input);
+        return (options.forkImpl ?? ((i) => Promise.resolve(sessionInfo(`${i.sessionID}_fork`))))(
+          input,
+        );
       },
       prompt: (input) => {
         calls.push('session.prompt');
@@ -273,6 +299,8 @@ function fakeApi(options: FakeOptions = {}) {
     formCancels,
     removed,
     listInputs,
+    childListInputs,
+    forks,
     updates,
     sessionRemoves,
   };
@@ -2178,5 +2206,355 @@ describe('the open session row (issue #20)', () => {
       { type: 'session.removed', sessionID: 'ses_gone' },
       { type: 'request.result', requestId: 'o1', error: { code: 'SessionNotFoundError' } },
     ]);
+  });
+});
+
+// Issue #21 (E4-fork-subsessions). The fake client answers with hand-made rows shaped like the
+// ones the planner spike saw in a real opencode 2.0.32 (Windows 11, 21/10/2026): a fork is a ROOT
+// row with `fork.sessionID`, a subagent child has `parentID`. These tests pin the controller's
+// coordination; the contract with the server is the spike's, and the HTTP wiring is covered by
+// `chatController.e2e.test.ts` against the synthetic server.
+
+/** A session row with extra wire fields (`parentID`, `fork`, `title`) merged into the default. */
+const rowWith = (id: string, extra: object): SessionInfo =>
+  wire<SessionInfo>(JSON.stringify({ ...sessionInfo(id), ...extra }));
+
+/** Rejects like the real client does: with the server's error body, not an Error. */
+const reject = (body: object): Promise<never> =>
+  // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+  Promise.reject(body);
+
+const forkBoundary = { type: 'before', messageID: 'msg_2' };
+
+describe('session.fork (issue #21)', () => {
+  it('forks before the message, publishes the row, then opens the new session', async () => {
+    const { api, forks } = fakeApi({
+      forkImpl: () =>
+        Promise.resolve(
+          rowWith('ses_fork', { fork: { sessionID: 'ses_1', boundary: forkBoundary } }),
+        ),
+    });
+    const { controller, posted, memoryWrites, logs } = setup(api, 'ses_1');
+    controller.onServerState(RUNNING);
+    await controller.handle({
+      type: 'session.fork',
+      requestId: 'f1',
+      sessionID: 'ses_1',
+      messageID: 'msg_2',
+    });
+    expect(forks).toEqual([{ sessionID: 'ses_1', before: 'msg_2' }]);
+    const sent = withoutConnection(posted);
+    expect(sent.map((m) => m.type)).toEqual(['session.upserted', 'snapshot', 'request.result']);
+    expect(sent[0]).toMatchObject({ session: { id: 'ses_fork', forkOf: 'ses_1' } });
+    expect(sent[1]).toMatchObject({ snapshot: { open: { sessionID: 'ses_fork' } } });
+    expect(sent[2]).toEqual({ type: 'request.result', requestId: 'f1' });
+    expect(memoryWrites).toEqual([{ folder: SERVER.folder, id: 'ses_fork' }]);
+    expect(logs).toContain('info: session forked ses_1 -> ses_fork');
+  });
+
+  it('keeps the open session, and answers the error, when the message does not exist', async () => {
+    const { api } = fakeApi({
+      forkImpl: () => reject({ _tag: 'MessageNotFoundError', message: 'Message not found' }),
+    });
+    const { controller, posted, memoryWrites } = setup(api, 'ses_1');
+    controller.onServerState(RUNNING);
+    await controller.handle({
+      type: 'session.fork',
+      requestId: 'f1',
+      sessionID: 'ses_1',
+      messageID: 'msg_gone',
+    });
+    expect(withoutConnection(posted)).toMatchObject([
+      { type: 'request.result', requestId: 'f1', error: { code: 'MessageNotFoundError' } },
+    ]);
+    expect(memoryWrites).toEqual([]);
+  });
+
+  it('also reports the source session as removed when the server says it is gone', async () => {
+    const { api } = fakeApi({
+      forkImpl: () => reject({ _tag: 'SessionNotFoundError', message: 'Session not found' }),
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({
+      type: 'session.fork',
+      requestId: 'f1',
+      sessionID: 'ses_gone',
+      messageID: 'msg_1',
+    });
+    expect(withoutConnection(posted)).toMatchObject([
+      { type: 'session.removed', sessionID: 'ses_gone' },
+      { type: 'request.result', requestId: 'f1', error: { code: 'SessionNotFoundError' } },
+    ]);
+  });
+
+  it('answers ServerUnavailable without a server, and when the server changed meanwhile', async () => {
+    const idle = setup(fakeApi().api);
+    await idle.controller.handle({
+      type: 'session.fork',
+      requestId: 'f1',
+      sessionID: 'ses_1',
+      messageID: 'msg_1',
+    });
+    expect(idle.posted).toMatchObject([
+      { type: 'request.result', requestId: 'f1', error: { code: 'ServerUnavailable' } },
+    ]);
+
+    let release: (info: SessionInfo) => void = () => undefined;
+    const slow = setup(
+      fakeApi({
+        forkImpl: () =>
+          new Promise<SessionInfo>((resolve) => {
+            release = resolve;
+          }),
+      }).api,
+      'ses_1',
+    );
+    slow.controller.onServerState(RUNNING);
+    const pending = slow.controller.handle({
+      type: 'session.fork',
+      requestId: 'f2',
+      sessionID: 'ses_1',
+      messageID: 'msg_1',
+    });
+    slow.controller.onServerState({ kind: 'stopped' });
+    release(sessionInfo('ses_fork'));
+    await pending;
+    expect(slow.posted.some((m) => m.type === 'session.upserted')).toBe(false);
+    expect(slow.posted.at(-1)).toMatchObject({
+      type: 'request.result',
+      requestId: 'f2',
+      error: { code: 'ServerUnavailable' },
+    });
+  });
+
+  it('reads and publishes the row of a fork made by another client (session.forked has no title)', async () => {
+    const { api, calls } = fakeApi({
+      getImpl: (id) =>
+        Promise.resolve(
+          rowWith(id, {
+            title: 'Chat (fork #1)',
+            fork: { sessionID: 'ses_1', boundary: forkBoundary },
+          }),
+        ),
+    });
+    const { controller, posted, streams } = setup(api);
+    controller.onServerState(RUNNING);
+    emit(streams, 'session.forked', {
+      sessionID: 'ses_fork',
+      parentID: 'ses_1',
+      boundary: forkBoundary,
+    });
+    await flush();
+    expect(calls).toContain('session.get');
+    expect(posted).toContainEqual({
+      type: 'session.upserted',
+      session: {
+        id: 'ses_fork',
+        title: 'Chat (fork #1)',
+        forkOf: 'ses_1',
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    });
+  });
+
+  /**
+   * Protects review S2 of #21: a `session.deleted` that lands while the row of a bare
+   * `session.forked` is being read must win over the late answer. SYNTHETIC: ordering forced
+   * with a deferred `session.get`.
+   */
+  it('does not republish the row of a forked session deleted while it was being read', async () => {
+    let answer: (row: SessionInfo) => void = () => undefined;
+    const { api } = fakeApi({
+      getImpl: (id) =>
+        new Promise<SessionInfo>((resolve) => {
+          answer = () => {
+            resolve(rowWith(id, { title: 'Chat (fork #1)' }));
+          };
+        }),
+    });
+    const { controller, posted, streams } = setup(api);
+    controller.onServerState(RUNNING);
+    emit(streams, 'session.forked', {
+      sessionID: 'ses_fork',
+      parentID: 'ses_1',
+      boundary: forkBoundary,
+    });
+    await flush();
+    emit(streams, 'session.deleted', { sessionID: 'ses_fork' });
+    answer(sessionInfo('ses_fork'));
+    await flush();
+    expect(posted.some((m) => m.type === 'session.upserted')).toBe(false);
+  });
+
+  it('ignores a forked session that is already gone, and survives other read failures', async () => {
+    const gone = setup(
+      fakeApi({ getError: { _tag: 'SessionNotFoundError', message: 'nope' } }).api,
+    );
+    gone.controller.onServerState(RUNNING);
+    emit(gone.streams, 'session.forked', {
+      sessionID: 'ses_fork',
+      parentID: 'ses_1',
+      boundary: forkBoundary,
+    });
+    await flush();
+    expect(gone.posted.some((m) => m.type === 'session.upserted' || m.type === 'notice')).toBe(
+      false,
+    );
+
+    const broken = setup(fakeApi({ getError: { _tag: 'Transport', message: 'down' } }).api);
+    broken.controller.onServerState(RUNNING);
+    emit(broken.streams, 'session.forked', {
+      sessionID: 'ses_fork',
+      parentID: 'ses_1',
+      boundary: forkBoundary,
+    });
+    await flush();
+    expect(
+      broken.logs.some((l) => l.startsWith('warn: could not read forked session ses_fork')),
+    ).toBe(true);
+  });
+});
+
+describe('the lineage of the open session (issue #21)', () => {
+  it('adds the children, the parent and nothing twice', async () => {
+    const { api, childListInputs } = fakeApi({
+      sessions: ['ses_other'],
+      children: [
+        rowWith('ses_kid1', { parentID: 'ses_open' }),
+        rowWith('ses_kid2', { parentID: 'ses_open' }),
+      ],
+      getImpl: (id) =>
+        Promise.resolve(
+          id === 'ses_open' ? rowWith(id, { parentID: 'ses_parent' }) : sessionInfo(id),
+        ),
+    });
+    const { controller, snapshots } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(
+      snapshots()
+        .at(-1)
+        ?.sessions.map((s) => s.id),
+    ).toEqual(['ses_other', 'ses_open', 'ses_kid1', 'ses_kid2', 'ses_parent']);
+    expect(childListInputs).toEqual([
+      { directory: SERVER.folder, parentID: 'ses_open', order: 'desc', limit: 50 },
+    ]);
+  });
+
+  it('adds the original of an open fork', async () => {
+    const { api } = fakeApi({
+      getImpl: (id) =>
+        Promise.resolve(
+          id === 'ses_fork'
+            ? rowWith(id, { fork: { sessionID: 'ses_orig', boundary: forkBoundary } })
+            : rowWith(id, { title: 'Original' }),
+        ),
+    });
+    const { controller, snapshots } = setup(api, 'ses_fork');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    const rows = snapshots().at(-1)?.sessions ?? [];
+    expect(rows.map((s) => [s.id, s.forkOf, s.title])).toEqual([
+      ['ses_fork', 'ses_orig', undefined],
+      ['ses_orig', undefined, 'Original'],
+    ]);
+  });
+
+  it('does not look the parent up again when it is already among the newest rows', async () => {
+    const { api, calls } = fakeApi({
+      listImpl: () =>
+        Promise.resolve({
+          data: [rowWith('ses_parent', {}), rowWith('ses_open', { parentID: 'ses_parent' })],
+          cursor: {},
+        }),
+    });
+    const { controller } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(calls).not.toContain('session.get');
+  });
+
+  it('still sends the snapshot when the parent read fails', async () => {
+    const { api } = fakeApi({
+      listImpl: () =>
+        Promise.resolve({
+          data: [rowWith('ses_open', { parentID: 'ses_parent' })],
+          cursor: {},
+        }),
+      getImpl: () => reject({ _tag: 'SessionNotFoundError', message: 'gone' }),
+    });
+    const { controller, snapshots } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(
+      snapshots()
+        .at(-1)
+        ?.sessions.map((s) => s.id),
+    ).toEqual(['ses_open']);
+    expect(snapshots().at(-1)?.open?.sessionID).toBe('ses_open');
+  });
+
+  /**
+   * Protects the plan's promise that a failing children list never costs the snapshot (review W3
+   * of #21). SYNTHETIC: the failure is injected by the fake client, not seen on a real server.
+   */
+  it('still sends the snapshot when the children list fails', async () => {
+    const { api, calls } = fakeApi({
+      sessions: ['ses_open'],
+      childrenError: { _tag: 'Transport', message: 'down' },
+    });
+    const { controller, snapshots, logs } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(calls).toContain('session.list.children');
+    expect(snapshots().at(-1)?.open?.sessionID).toBe('ses_open');
+    expect(
+      snapshots()
+        .at(-1)
+        ?.sessions.map((s) => s.id),
+    ).toEqual(['ses_open']);
+    expect(logs.some((l) => l.startsWith('debug: could not read the children'))).toBe(true);
+  });
+
+  /**
+   * Protects the fault tolerance of the parent/original reads (review S3): both rows arrive, and
+   * one failing read does not lose the other. It does NOT prove the reads run in parallel (it
+   * passes with sequential awaits too; review E4-fork-subsessions/review-2). SYNTHETIC fake client.
+   */
+  it('reads the parent and the original together and keeps the one that worked', async () => {
+    const { api } = fakeApi({
+      listImpl: () =>
+        Promise.resolve({
+          data: [
+            rowWith('ses_open', {
+              parentID: 'ses_parent',
+              fork: { sessionID: 'ses_orig', boundary: forkBoundary },
+            }),
+          ],
+          cursor: {},
+        }),
+      getImpl: (id) =>
+        id === 'ses_parent'
+          ? reject({ _tag: 'SessionNotFoundError', message: 'gone' })
+          : Promise.resolve(rowWith(id, { title: 'Original' })),
+    });
+    const { controller, snapshots } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(
+      snapshots()
+        .at(-1)
+        ?.sessions.map((s) => s.id),
+    ).toEqual(['ses_open', 'ses_orig']);
+  });
+
+  it('asks for no children when no session is open', async () => {
+    const { api, calls } = fakeApi({ sessions: ['ses_a'] });
+    const { controller } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(calls).not.toContain('session.list.children');
   });
 });

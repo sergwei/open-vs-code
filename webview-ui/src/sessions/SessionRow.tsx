@@ -19,10 +19,12 @@ import { formatSessionTime, sessionLabel } from './sessionGroups';
  * with the mouse leaves it where the user went); Escape is stopped there so it does not also
  * close the list. The two action buttons carry the title in their accessible name
  * ("Rename session Fix the build"), because a bare "Rename" repeated 50 times says nothing.
- * "Running", "Needs input" and the in-flight "Renaming…" / "Deleting…" are TEXT, never only a
- * colour, and the phrase is built as one string (JSX eats the line break between `{expr}` and the
- * text on the next line: lesson #926). A row being renamed or deleted by the host is locked with
- * `aria-disabled` and ignores clicks and keys, instead of `disabled`: a button that is disabled
+ * "Fork" (issue #21: the row was forked from another session; a fork gets its original's title,
+ * so without it two rows read the same), "Running", "Needs input" and the in-flight "Renaming…" /
+ * "Deleting…" are TEXT, never only a colour, and the phrase is built as one string (JSX eats the
+ * line break between `{expr}` and the text on the next line: lesson #926). A row being renamed or
+ * deleted by the host is locked with `aria-disabled` and ignores clicks and keys, instead of
+ * `disabled`: a button that is disabled
  * while it holds the focus drops the keyboard user onto the page.
  * VERIFIED by `SessionPicker.test.tsx` in jsdom; look, hover and focus ring are checked by
  * `npm run test:visual` (step 9) on Windows only.
@@ -57,6 +59,8 @@ export function SessionRow(props: {
   const badges = createMemo(() => {
     if (busyText() !== '') return busyText();
     const parts: string[] = [];
+    // A fork is titled like its original (or "Untitled session"), so the row says what it is.
+    if (props.row.forkOf !== undefined) parts.push('Fork');
     if (props.running) parts.push('Running');
     if (props.needsInput) parts.push('Needs input');
     return parts.join(' · ');

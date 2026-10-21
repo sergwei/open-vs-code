@@ -60,6 +60,18 @@
 // time; a blank one is a 204 with no event) and `DELETE /api/session/:id` (interrupts a running
 // session, deletes children first, `session.deleted` per session, 404 afterwards). What is
 // INVENTED: the inner format of the cursor and the `InvalidCursorError` 400.
+// E4-fork-subsessions (issue #21) adds, SYNTHETIC but copying what the planner saw in a spike
+// against a real opencode 2.0.32 (Windows 11, 21/10/2026): `POST /api/session/:id/fork` (body
+// `{before?}`) answers `{data: SessionInfo}` for a ROOT session (no `parentID`) with
+// `fork: {sessionID, boundary}`, the title of `forkTitle`, the settled history copied with NEW
+// message ids (everything before `before`, or all of it) and publishes ONLY `session.forked` (no
+// `session.created`); an unknown `before` is 404 `MessageNotFoundError` and an empty session
+// without `before` is 400 `InvalidRequestError {kind: "empty_session"}`. A prompt containing
+// SUBAGENT plays a turn whose `subagent` tool creates a child session (`session.created` with
+// `parentID`, title "Say hello", agent "general"), publishes the volatile `session.tool.progress`
+// with `metadata {sessionID, status: "running"}`, runs a short turn in the child and ends with
+// `session.tool.success` carrying `metadata {sessionID, status: "completed", truncated: false}`
+// (the event ORDER is the spike's; the ids, texts and timing are INVENTED).
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running.
 
@@ -253,6 +265,80 @@ function askingTool(kind, a) {
   return { before, after, block };
 }
 
+/**
+ * Builds the steps of a `subagent` tool call (issue #21): the tool starts, a child session is
+ * created under `a.sessionID`, the tool reports progress with the child's id, the child runs a
+ * one-exchange turn and the tool succeeds with the child's id in its metadata. SYNTHETIC; the
+ * event order and the metadata shape copy the planner's spike (opencode 2.0.32, 21/10/2026).
+ * `block()` is the completed tool block of the REST message. The child's history is written
+ * when the child is created, so opening it right away shows a user and an assistant message.
+ */
+function subagentTool(a) {
+  const toolID = nextId('call');
+  const input = { agent: 'general', description: 'Say hello', prompt: 'Say hello' };
+  const childID = nextId('ses');
+  const parent = sessions.get(a.sessionID);
+  const metadata = { sessionID: childID, status: 'completed', truncated: false };
+  const content = [
+    { type: 'text', text: `<subagent sessionID="${childID}" state="completed">hello</subagent>` },
+  ];
+  const steps = [
+    () => broadcast('session.tool.input.started', { ...a, id: toolID, name: 'subagent' }),
+    () => broadcast('session.tool.called', { ...a, id: toolID, input }),
+    () => {
+      const now = Date.now();
+      sessions.set(childID, {
+        id: childID,
+        projectID: 'prj_fake',
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: now, updated: now },
+        location: parent.location,
+        title: input.description,
+        parentID: a.sessionID,
+        agent: 'general',
+      });
+      history.set(childID, [
+        { id: nextId('msg'), type: 'user', text: input.prompt, time: { created: now } },
+        {
+          id: nextId('msg'),
+          type: 'assistant',
+          agent: 'general',
+          model: { id: 'big-pickle', providerID: 'opencode' },
+          time: { created: now, completed: now },
+          finish: 'stop',
+          content: [{ type: 'text', text: 'hello' }],
+        },
+      ]);
+      broadcast('session.created', {
+        sessionID: childID,
+        projectID: 'prj_fake',
+        slug: childID,
+        version: '2.0.32',
+        location: parent.location,
+        title: input.description,
+        parentID: a.sessionID,
+        agent: 'general',
+      });
+    },
+    () =>
+      broadcast('session.tool.progress', {
+        ...a,
+        id: toolID,
+        metadata: { sessionID: childID, status: 'running' },
+      }),
+    () => broadcast('session.tool.success', { ...a, id: toolID, content, metadata }),
+  ];
+  const block = () => ({
+    type: 'tool',
+    id: toolID,
+    name: 'subagent',
+    state: { status: 'completed', input, content, metadata },
+    time: { created: Date.now() },
+  });
+  return { steps, block };
+}
+
 /** Plays the recorded turn for a prompt, one event every few milliseconds. */
 function playTurn(sessionID, inboxID, text) {
   const assistantMessageID = nextId('msg');
@@ -338,7 +424,11 @@ function playTurn(sessionID, inboxID, text) {
         broadcast('session.execution.succeeded', { sessionID });
       },
     ];
-    if (asking === undefined) {
+    if (text.includes('SUBAGENT')) {
+      const subagent = subagentTool(a);
+      toolBlock = subagent.block;
+      steps.push(stepStarted, ...subagent.steps, ...body);
+    } else if (asking === undefined) {
       steps.push(stepStarted, ...body);
     } else {
       // The turn pauses at the ask and the rest is held in `gates` until a reply resumes it.
@@ -456,6 +546,81 @@ function removeSession(sessionID) {
   sessions.delete(sessionID);
   history.delete(sessionID);
   broadcast('session.deleted', { sessionID });
+}
+
+/**
+ * Title of a fork, copied from `forkTitle` in `packages/core/src/session/projector.ts` (L51-56) of
+ * https://github.com/anomalyco/opencode at tag v2.0.32 (commit 843a6c51), MIT licence: `"<t> (fork
+ * #1)"`, and a fork of a fork counts up (`#2`). An untitled original gives an untitled fork
+ * (VERIFIED by the planner spike, opencode 2.0.32, 21/10/2026).
+ */
+function forkTitle(title) {
+  if (title === undefined) return undefined;
+  const numbered = /^(.*) \(fork #(\d+)\)$/.exec(title);
+  return numbered === null
+    ? `${title} (fork #1)`
+    : `${numbered[1]} (fork #${Number(numbered[2]) + 1})`;
+}
+
+/**
+ * `POST /api/session/:id/fork` (issue #21), see the header for what is copied and invented.
+ * Copies the SETTLED history (an assistant message without `time.completed` is left out) before
+ * `body.before`, or all of it, with new ids, into a new root session, answers it and publishes
+ * only `session.forked`. Answers the error itself and returns when `before` is unknown or there is
+ * nothing to copy.
+ */
+function forkSession(response, source, body) {
+  const original = history.get(source.id);
+  let cut = original.length;
+  let boundary;
+  if (typeof body.before === 'string') {
+    const at = original.findIndex((message) => message.id === body.before);
+    if (at < 0) {
+      json(response, 404, {
+        _tag: 'MessageNotFoundError',
+        message: `Message not found: ${body.before}`,
+        sessionID: source.id,
+        messageID: body.before,
+      });
+      return;
+    }
+    cut = at;
+    boundary = { type: 'before', messageID: body.before };
+  } else {
+    if (original.length === 0) {
+      json(response, 400, {
+        _tag: 'InvalidRequestError',
+        message: 'The session has no messages',
+        kind: 'empty_session',
+      });
+      return;
+    }
+    boundary = { type: 'through', messageID: original.at(-1).id };
+  }
+  const id = nextId('ses');
+  const now = Date.now();
+  const title = forkTitle(source.title);
+  const info = {
+    id,
+    projectID: 'prj_fake',
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: now, updated: now },
+    location: source.location,
+    fork: { sessionID: source.id, boundary },
+    ...(title === undefined ? {} : { title }),
+    ...(source.agent === undefined ? {} : { agent: source.agent }),
+  };
+  sessions.set(id, info);
+  history.set(
+    id,
+    original
+      .slice(0, cut)
+      .filter((message) => message.type !== 'assistant' || message.time.completed !== undefined)
+      .map((message) => ({ ...structuredClone(message), id: nextId('msg') })),
+  );
+  json(response, 200, { data: info });
+  broadcast('session.forked', { sessionID: id, parentID: source.id, boundary });
 }
 
 /**
@@ -628,9 +793,8 @@ function handleChat(request, response) {
   }
   const act = /^\/api\/session\/([^/]+)\/(permission|form)\/([^/]+)(?:\/(reply))?$/.exec(path);
   if (act !== null) return handleAnswer(request, response, act);
-  const match = /^\/api\/session\/([^/]+)(?:\/(message|permission|form|prompt|interrupt))?$/.exec(
-    path,
-  );
+  const match =
+    /^\/api\/session\/([^/]+)(?:\/(message|permission|form|prompt|interrupt|fork))?$/.exec(path);
   if (match === null) return false;
   const [, id, sub] = match;
   const session = sessions.get(decodeURIComponent(id));
@@ -668,6 +832,10 @@ function handleChat(request, response) {
   if (method === 'DELETE' && sub === undefined) {
     removeSession(session.id);
     noContent(response);
+    return true;
+  }
+  if (method === 'POST' && sub === 'fork') {
+    readBody(request).then((body) => forkSession(response, session, body));
     return true;
   }
   if (method === 'POST' && sub === 'interrupt') {

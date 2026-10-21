@@ -141,8 +141,10 @@ export function toModelRef(model: { id: string; providerID: string; variant?: st
 
 /**
  * Maps a REST session to a row of the session list: `time.created/updated` become
- * `createdAt/updatedAt` (epoch ms). The sidebar needs no more in phase 1.
- * Shape VERIFIED on a real opencode 2.0.32 (`session.list`, Windows 11, 2026-10-20).
+ * `createdAt/updatedAt` (epoch ms). The sidebar needs no more in phase 1. `fork.sessionID`
+ * becomes `forkOf` (issue #21); the fork boundary is dropped because nothing in the UI uses it.
+ * Shape VERIFIED on a real opencode 2.0.32 (`session.list`, Windows 11, 2026-10-20); `fork`
+ * VERIFIED by the issue #21 spike (`session.fork`, same version, 2026-10-21).
  */
 export function toSessionSummary(info: SessionInfo): SessionSummary {
   const summary: SessionSummary = {
@@ -152,6 +154,7 @@ export function toSessionSummary(info: SessionInfo): SessionSummary {
   };
   if (info.title !== undefined) summary.title = info.title;
   if (info.parentID !== undefined) summary.parentID = info.parentID;
+  if (info.fork !== undefined) summary.forkOf = info.fork.sessionID;
   if (info.agent !== undefined) summary.agent = info.agent;
   if (info.model !== undefined) summary.model = toModelRef(info.model);
   if (info.outcome !== undefined) summary.outcome = info.outcome;
