@@ -10,6 +10,10 @@
 // made-up ids and texts. A pass proves our wiring against the client's own request/stream code, NOT
 // that a real opencode answers like the fixture; the real-server run is the opt-in
 // `realOpencode.test.ts`.
+// E3-resolved-history: the cases tagged `E3:` protect the record of answered requests. The final
+// states of the asking tool in the fixture copy rows of a real opencode 2.0.32 database (a rejected
+// `read`, an answered `question`); the rejection WITH feedback and the dismissals are read in the
+// sources only. The webview-side derivation of those states is `toolOutcome.test.ts`.
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -272,11 +276,21 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
       () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
       'the turn to finish after the reply',
     );
-    expect(posted).toContainEqual({
+    // E3-resolved-history: the message leaves the host with the record of the answer attached.
+    expect(posted.find((m) => m.type === 'permission.resolved')).toMatchObject({
       type: 'permission.resolved',
       sessionID,
       permissionID: id,
       decision: 'once',
+      resolution: {
+        kind: 'permission',
+        id,
+        sessionID,
+        decision: 'once',
+        action: 'read',
+        resource: '.env',
+        withFeedback: false,
+      },
     });
     expect(attention.at(-1)).toEqual([]);
   }, 20_000);
@@ -376,11 +390,135 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
       () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
       'the turn to finish after the answer',
     );
-    expect(posted).toContainEqual({
+    expect(posted.find((m) => m.type === 'form.resolved')).toMatchObject({
       type: 'form.resolved',
       sessionID,
       formID: id,
       outcome: 'answered',
+      resolution: { kind: 'form', id, sessionID, outcome: 'answered', formKind: 'question' },
+    });
+  }, 20_000);
+
+  /** The last snapshot posted, or fails the test. */
+  function lastSnapshot(posted: HostToWebview[]) {
+    const snapshot = posted.filter((m) => m.type === 'snapshot').at(-1);
+    if (snapshot?.type !== 'snapshot') throw new Error('no snapshot was posted');
+    return snapshot.snapshot;
+  }
+
+  it('E3: a rejection with feedback is recorded, and a later snapshot carries the record AND the failed tool block', async () => {
+    const { controller, posted, sessionID, id } = await askAndWait('ASK_PERMISSION', 'permission');
+    await controller.handle({
+      type: 'permission.reply',
+      requestId: 'p1',
+      sessionID,
+      permissionID: id,
+      decision: 'reject',
+      message: "don't read secrets",
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn to finish after the reject',
+    );
+    expect(posted.find((m) => m.type === 'permission.resolved')).toMatchObject({
+      resolution: { decision: 'reject', withFeedback: true },
+    });
+    // What a reconnection (or a view that was hidden) does: ask for a fresh snapshot.
+    await controller.handle({ type: 'ready' });
+    const snapshot = lastSnapshot(posted);
+    expect(snapshot.resolutions).toMatchObject([{ kind: 'permission', id, withFeedback: true }]);
+    const tool = Object.values(snapshot.open?.parts ?? {})
+      .flat()
+      .find((part) => part.type === 'tool');
+    // The feedback text travels in the tool block, NOT in the record.
+    expect(tool).toMatchObject({
+      name: 'read',
+      state: {
+        status: 'error',
+        error: { code: 'permission.rejected', message: "don't read secrets" },
+      },
+    });
+    expect(JSON.stringify(snapshot.resolutions)).not.toContain("don't read secrets");
+  }, 20_000);
+
+  it('E3: a plain rejection leaves the aborted/declined tool block in the snapshot', async () => {
+    const { controller, posted, sessionID, id } = await askAndWait('ASK_PERMISSION', 'permission');
+    await controller.handle({
+      type: 'permission.reply',
+      requestId: 'p1',
+      sessionID,
+      permissionID: id,
+      decision: 'reject',
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn to finish after the reject',
+    );
+    await controller.handle({ type: 'ready' });
+    const snapshot = lastSnapshot(posted);
+    expect(snapshot.resolutions).toMatchObject([{ decision: 'reject', withFeedback: false }]);
+    const tool = Object.values(snapshot.open?.parts ?? {})
+      .flat()
+      .find((part) => part.type === 'tool');
+    expect(tool).toMatchObject({
+      state: {
+        status: 'error',
+        error: { code: 'aborted', message: 'The user declined this tool call' },
+      },
+    });
+  }, 20_000);
+
+  it('E3: an answered question completes the tool with metadata.answers; the record has no answer', async () => {
+    const { controller, posted, sessionID, id } = await askAndWait('ASK_QUESTION pick', 'form');
+    await controller.handle({
+      type: 'form.reply',
+      requestId: 'f1',
+      sessionID,
+      formID: id,
+      answer: { q0: 'A', q1: ['x'] },
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn to finish after the answer',
+    );
+    await controller.handle({ type: 'ready' });
+    const snapshot = lastSnapshot(posted);
+    expect(snapshot.resolutions).toMatchObject([
+      { kind: 'form', id, outcome: 'answered', formKind: 'question', withMessage: false },
+    ]);
+    expect(JSON.stringify(snapshot.resolutions)).not.toContain('"x"');
+    const tool = Object.values(snapshot.open?.parts ?? {})
+      .flat()
+      .find((part) => part.type === 'tool');
+    expect(tool).toMatchObject({
+      name: 'question',
+      state: { status: 'completed', metadata: { answers: [['A'], ['x']] } },
+    });
+  }, 20_000);
+
+  it('E3: a dismissal with a note is recorded as withMessage and the block carries the note', async () => {
+    const { controller, posted, sessionID, id } = await askAndWait('ASK_QUESTION', 'form');
+    await controller.handle({
+      type: 'form.cancel',
+      requestId: 'c1',
+      sessionID,
+      formID: id,
+      message: 'in my own words',
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn to finish after the dismissal',
+    );
+    await controller.handle({ type: 'ready' });
+    const snapshot = lastSnapshot(posted);
+    expect(snapshot.resolutions).toMatchObject([
+      { kind: 'form', outcome: 'cancelled', withMessage: true },
+    ]);
+    const tool = Object.values(snapshot.open?.parts ?? {})
+      .flat()
+      .find((part) => part.type === 'tool');
+    expect(tool).toMatchObject({
+      state: { status: 'error', error: { code: 'tool.execution', message: 'in my own words' } },
     });
   }, 20_000);
 

@@ -14,7 +14,7 @@
 import { createRoot } from 'solid-js';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { MessageInfo, SessionStatus } from '../../src/shared/model';
+import type { MessageInfo, Part, RequestResolution, SessionStatus } from '../../src/shared/model';
 import type { HostToWebview, WebviewToHost } from '../../src/shared/protocol';
 import { App } from './App';
 import { createChatStore, type ChatStore } from './store/chatStore';
@@ -128,6 +128,7 @@ function openSession(
         statuses: { [SES]: status },
         open: { sessionID: SES, messages, parts },
         requests: { permissions: [], forms: [] },
+        resolutions: [],
       },
     },
   ];
@@ -516,6 +517,7 @@ describe('request dock in the app', () => {
     expect(h.container.textContent).toContain('Permission needed: Read');
   });
 
+  // The host sent no `resolution` (it never saw the request asked): the dock line is the fallback.
   it('answering a card posts the reply and sending the next prompt clears the result line', () => {
     const h = start();
     h.apply(...openSession([user('m1', 'hi')]));
@@ -530,6 +532,161 @@ describe('request dock in the app', () => {
       permissionID: 'per_1',
       decision: 'once',
     });
+    expect(must(h.container, '.request-results').textContent).toContain('Allowed once: Read .env');
+    h.type('next question');
+    h.button('Send').click();
+    expect(h.container.querySelector('.request-results')).toBeNull();
+  });
+});
+
+// E3-resolved-history (issues #56/#18): what the user answered stays in the conversation, under the
+// tool that asked. FABRICATED host messages, except the rejected `read` state, which copies a real
+// opencode 2.0.32 row (see `toolOutcome.test.ts`). Lessons #906 (writes after mount), #926 (whole
+// strings), #918 (no role="alert" for a decision).
+describe('answered requests in the conversation', () => {
+  const TOOL = { messageID: 'm2', partID: 'call_1' };
+  const permission = {
+    id: 'per_1',
+    sessionID: SES,
+    action: 'read',
+    resources: ['.env'],
+    save: ['*'],
+    tool: TOOL,
+  };
+  const record = (
+    extra: Partial<Extract<RequestResolution, { kind: 'permission' }>> = {},
+  ): RequestResolution => ({
+    kind: 'permission',
+    id: 'per_1',
+    sessionID: SES,
+    tool: TOOL,
+    at: 5,
+    decision: 'once',
+    action: 'read',
+    resource: '.env',
+    withFeedback: false,
+    ...extra,
+  });
+  const readPart = (state: Extract<Part, { type: 'tool' }>['state']): Part => ({
+    type: 'tool',
+    id: 'call_1',
+    name: 'read',
+    state,
+  });
+  const allowed = readPart({ status: 'completed', input: { path: '.env' }, output: [] });
+  const declined = readPart({
+    status: 'error',
+    input: { path: '.env' },
+    error: { code: 'aborted', message: 'The user declined this tool call' },
+  });
+
+  /** A snapshot with a user message and an assistant message `m2` holding `part`. */
+  const withTool = (part: Part, resolutions: RequestResolution[] = []): HostToWebview => ({
+    type: 'snapshot',
+    snapshot: {
+      sessions: [{ id: SES, createdAt: 1, updatedAt: 2 }],
+      statuses: { [SES]: { type: 'idle' } },
+      open: {
+        sessionID: SES,
+        messages: [user('m1', 'read it'), assistant('m2')],
+        parts: { m2: [part] },
+      },
+      requests: { permissions: [], forms: [] },
+      resolutions,
+    },
+  });
+  const lines = (h: Harness) =>
+    [...h.container.querySelectorAll('[role="log"] .request-outcome')].map((p) => p.textContent);
+
+  it('shows "Allowed once" under the tool, not in the dock, and without an alert', () => {
+    const h = start();
+    h.apply(connected, withTool(allowed));
+    h.apply({ type: 'permission.asked', permission });
+    h.apply({
+      type: 'permission.resolved',
+      sessionID: SES,
+      permissionID: 'per_1',
+      decision: 'once',
+      resolution: record(),
+    });
+    expect(lines(h)).toEqual(['Permission: Allowed once · Read .env']);
+    const article = must(h.container, '.message-assistant');
+    // Right after the tool line, nested in the message so the log keeps one child per message.
+    expect(article.querySelector('.part-tool + .request-outcome')).not.toBeNull();
+    expect(h.container.querySelector('.request-results')).toBeNull();
+    expect(h.container.querySelector('[role="alert"]')).toBeNull();
+    expect(must(h.container, '.request-outcome .visually-hidden').textContent).toBe('Permission: ');
+    expect(h.container.querySelectorAll('[role="log"] > *')).toHaveLength(2);
+  });
+
+  it('is not erased by sending the next prompt', () => {
+    const h = start();
+    h.apply(connected, withTool(allowed));
+    h.apply({ type: 'permission.asked', permission });
+    h.apply({
+      type: 'permission.resolved',
+      sessionID: SES,
+      permissionID: 'per_1',
+      decision: 'once',
+      resolution: record(),
+    });
+    h.type('next question');
+    h.button('Send').click();
+    expect(lines(h)).toEqual(['Permission: Allowed once · Read .env']);
+  });
+
+  it('a record without a tool block goes to the end of the latest message before it was answered', () => {
+    const h = start();
+    h.apply(connected, withTool(allowed, [record({ tool: undefined, at: 1 })]));
+    // user m1 and assistant m2 have createdAt 1 and 2: `at: 1` lands on the user message.
+    expect(
+      [...h.container.querySelectorAll('.message-user .request-outcome')].map((p) => p.textContent),
+    ).toEqual(['Permission: Allowed once · Read .env']);
+    h.apply(connected, withTool(allowed, [record({ tool: undefined, at: 50 })]));
+    expect(
+      [...h.container.querySelectorAll('.message-assistant .request-outcome')].map(
+        (p) => p.textContent,
+      ),
+    ).toEqual(['Permission: Allowed once · Read .env']);
+  });
+
+  it('after Reload Window (a snapshot with no records) a rejected tool still says Rejected', () => {
+    const h = start();
+    h.apply(connected, withTool(declined, []));
+    expect(lines(h)).toEqual(['Permission: Rejected · Read .env']);
+    // ...and a merely allowed tool shows nothing: the server keeps no trace of that permission.
+    h.apply(withTool(allowed, []));
+    expect(lines(h)).toEqual([]);
+  });
+
+  it('the host record wins over the block, and the rejection feedback comes from the block', () => {
+    const h = start();
+    const feedback = readPart({
+      status: 'error',
+      input: { path: '.env' },
+      error: { code: 'permission.rejected', message: "don't read secrets" },
+    });
+    h.apply(connected, withTool(feedback, [record({ decision: 'reject', withFeedback: true })]));
+    expect(lines(h)).toEqual([
+      "Permission: Rejected with feedback · Read .env — “don't read secrets”",
+    ]);
+  });
+
+  it('a request of ANOTHER session keeps the dock line and adds nothing to the history', () => {
+    const h = start();
+    h.apply(connected, withTool(allowed));
+    h.apply({
+      type: 'permission.asked',
+      permission: { ...permission, id: 'per_c', sessionID: 'ses_child', tool: undefined },
+    });
+    h.apply({
+      type: 'permission.resolved',
+      sessionID: 'ses_child',
+      permissionID: 'per_c',
+      decision: 'once',
+      resolution: record({ id: 'per_c', sessionID: 'ses_child', tool: undefined }),
+    });
+    expect(lines(h)).toEqual([]);
     expect(must(h.container, '.request-results').textContent).toContain('Allowed once: Read .env');
     h.type('next question');
     h.button('Send').click();

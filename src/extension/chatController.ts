@@ -13,13 +13,19 @@
 // `permission asked <id> for <sid> (<action>)`, `permission <id> resolved: <decision>`,
 // `form asked <id> for <sid>`, `form <id> resolved: answered|cancelled`,
 // `permission reply sent for <id> (<decision>)`, `form reply sent for <id>`,
-// `form cancel sent for <id>`). Never log the password or a token, nor the RESOURCES of a
+// `form cancel sent for <id>`, and from E3-resolved-history `resolution recorded <id>
+// (<decision|outcome>)`). Never log the password or a token, nor the RESOURCES of a
 // permission (they can be shell commands with secrets) nor the text of an answer.
 //
 // Phase 3 (issues #18/#44/#19/#10): permissions and forms belong to the location, so the snapshot
 // reads them with `permission.request.list()` / `form.list()` and the stream forwards every
 // session's; a host-side registry (`pendingRequests.ts`) feeds the badge and the notifications
 // (`deps.attention`); replies, cancels and the saved-permissions manager call the client.
+//
+// E3-resolved-history (issues #56/#18): a second host-side memory (`requestResolutions.ts`) turns
+// each `*.resolved` into a `RequestResolution` that travels with the message and, for the open
+// session, inside every snapshot. Unlike the pending registry it is NOT emptied when the stream
+// stops: it must survive a reconnection, a hidden view and Restart Server.
 
 import type { V2Event } from '@opencode/client';
 import type { ErrorInfo, SessionStatus, SessionSummary } from '../shared/model';
@@ -39,6 +45,7 @@ import { runEventStream, type StreamState } from './eventStream';
 import type { ChatApi } from './opencodeClient';
 import { safeLog, type ServerLog } from './opencodeServer';
 import { createPendingRequests, type PendingSummary } from './pendingRequests';
+import { createRequestResolutions } from './requestResolutions';
 import type { RunningServerInfo, ServerState } from './serverManager';
 import {
   toErrorInfo,
@@ -172,6 +179,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
   sessions: [],
   statuses: {},
   requests: { permissions: [], forms: [] },
+  resolutions: [],
 };
 
 /**
@@ -208,6 +216,12 @@ export class ChatController {
   /** `uri`s emitted by the file picker; `prompt.send` accepts no other attachment. */
   private readonly pickedUris = new Set<string>();
   private readonly pending = createPendingRequests();
+  /**
+   * What the user answered, kept for the history (E3-resolved-history). Created ONCE for the life of
+   * the controller and never emptied by `stopStream`/`onServerState`: that is what makes the lines
+   * survive Restart Server (the controller is not recreated, only the client).
+   */
+  private readonly resolutions = createRequestResolutions({ now: () => Date.now() });
   /**
    * Requests the stream announced or resolved while a resync was reading REST, so the snapshot can
    * be completed with them (same problem and cure as `translator.mergeLive` for messages: the
@@ -319,6 +333,8 @@ export class ChatController {
    * Aborts the stream and forgets the client and the pending requests; the next `running` creates
    * new ones. The requests die with the server (opencode rejects its pending ones on shutdown), so
    * the registry is emptied and the attention feature told, which closes its notifications.
+   * The asks remembered for the resolutions die with them (`forgetAsks`), but the RESOLUTIONS
+   * already recorded stay: they are history, and Restart Server must not wipe them.
    */
   private stopStream(): void {
     this.streamAbort?.abort();
@@ -327,6 +343,7 @@ export class ChatController {
     this.server = undefined;
     this.generation++; // a snapshot in flight for the old server must not be published
     this.clearPending();
+    this.resolutions.forgetAsks();
   }
 
   /** Empties the registry of pending requests and tells the attention feature, if it held any. */
@@ -378,6 +395,8 @@ export class ChatController {
    *
    * Every translated message goes through the registry of pending requests (and the in-flight
    * resync's `live` record); when the set changed, the attention feature is told once per event.
+   * It then goes through the memory of answered requests ({@link withResolution}), so a
+   * `*.resolved` leaves for the webview already carrying its `resolution`.
    * `session.execution.interrupted` / `.failed` of a session that had pending requests triggers a
    * resync: opencode deletes a pending permission on interrupt WITHOUT publishing
    * `permission.replied` (read in `permission.ts@v2.0.32` L247-258), so the stream alone would
@@ -414,7 +433,7 @@ export class ChatController {
       let changed = false;
       for (const message of this.translator.translate(event)) {
         if (this.trackRequest(message)) changed = true;
-        this.post(message);
+        this.post(this.withResolution(message));
       }
       if (changed) this.deps.attention.update(this.pending.list());
       if (
@@ -427,6 +446,26 @@ export class ChatController {
     } catch (error) {
       this.log.error(`handling event ${event.type} failed: ${String(error)}`);
     }
+  }
+
+  /**
+   * Feeds one translated message to the memory of answered requests. For a `permission.resolved`
+   * or `form.resolved` of a request it knew, returns the message with its `resolution` attached
+   * (and writes the stable line `resolution recorded <id> (<decision|outcome>)`: ids and decision
+   * only, never resources, answers or feedback); any other message comes back unchanged.
+   */
+  private withResolution(message: HostToWebview): HostToWebview {
+    const resolution = this.resolutions.observe(message);
+    if (resolution === undefined) return message;
+    if (message.type === 'permission.resolved' && resolution.kind === 'permission') {
+      this.log.info(`resolution recorded ${resolution.id} (${resolution.decision})`);
+      return { ...message, resolution };
+    }
+    if (message.type === 'form.resolved' && resolution.kind === 'form') {
+      this.log.info(`resolution recorded ${resolution.id} (${resolution.outcome})`);
+      return { ...message, resolution };
+    }
+    return message;
   }
 
   /**
@@ -518,6 +557,9 @@ export class ChatController {
    * meanwhile, this result is dropped. A remembered session that no longer exists is forgotten
    * and the snapshot goes out with no open session. The requests are completed with those the
    * stream announced or resolved during the reads (`live`), then become the registry's content.
+   * The snapshot also carries `resolutions`: the answered requests of the OPEN session that the
+   * host remembers (E3-resolved-history), read at publication time so a `*.resolved` that arrived
+   * during the REST reads is included; they come from memory, not from REST.
    *
    * The REST reads are older than the stream by the time they are published, so the snapshot is
    * reconciled with it in three steps: `translator.beginResync()` before the reads;
@@ -604,6 +646,9 @@ export class ChatController {
       if (this.pending.replaceAll(requests.permissions, requests.forms)) {
         this.deps.attention.update(this.pending.list());
       }
+      // So a request first seen here (asked before this host connected) can still be resolved
+      // into a record when its `*.resolved` arrives.
+      this.resolutions.rememberAsks(requests.permissions, requests.forms);
       // The webview replaces its state with the snapshot, and the stream may have produced
       // messages after the REST reads: complete the snapshot with them (review BLOCKER). The
       // statuses need the same care in the other direction: `session.active()` can say `busy`
@@ -619,6 +664,7 @@ export class ChatController {
           statuses: this.translator.mergeStatuses(statuses),
           ...(complete ? { open: complete } : {}),
           requests,
+          resolutions: this.open === undefined ? [] : this.resolutions.forSession(this.open),
         },
       });
       this.log.info(
@@ -750,6 +796,8 @@ export class ChatController {
    * The `message` travels only with `reject` and only when it has text: the server uses it as the
    * correction the model sees (`CorrectedError`, the turn goes on), and an empty one would turn a
    * plain rejection into a "correction" with no content. `once` and `always` take no message.
+   * A rejection with feedback is flagged in the memory of answered requests before the call (and
+   * unflagged if the call fails), so the record says `withFeedback`; the text itself is not kept.
    * `requestID` is the permission id (`POST /api/session/:sid/permission/:rid/reply`, 204).
    * VERIFIED against a real opencode 2.0.32 (Windows 11, VS Code 1.142.0, 2026-10-20, opt-in
    * `realOpencode.test.ts`, two runs): `once` and a bare `reject` were accepted for a `read` of
@@ -772,14 +820,21 @@ export class ChatController {
     const problem = this.checkPending('permission', permissionID, sessionID, decision === 'always');
     // eslint-disable-next-line @typescript-eslint/only-throw-error
     if (problem !== undefined) throw problem;
-    await client.permission.reply({
-      sessionID,
-      requestID: permissionID,
-      decision,
-      ...(decision === 'reject' && message !== undefined && message.trim() !== ''
-        ? { message }
-        : {}),
-    });
+    const feedback =
+      decision === 'reject' && message !== undefined && message.trim() !== '' ? message : undefined;
+    // Marked BEFORE the call: the `permission.resolved` event can reach us before the HTTP answer.
+    if (feedback !== undefined) this.resolutions.markReplied('permission', permissionID);
+    try {
+      await client.permission.reply({
+        sessionID,
+        requestID: permissionID,
+        decision,
+        ...(feedback === undefined ? {} : { message: feedback }),
+      });
+    } catch (error) {
+      if (feedback !== undefined) this.resolutions.unmark('permission', permissionID);
+      throw error;
+    }
     this.log.info(`permission reply sent for ${permissionID} (${decision})`);
   }
 
@@ -857,7 +912,8 @@ export class ChatController {
    * `form.cancel`: dismisses a form (`DELETE .../form/:fid?message=`, 204). Without a message the
    * model STOPS (`CancelledError`); with one it goes on and reads it as feedback (read in
    * `question.ts@v2.0.32`; the real-server run of the opt-in suite does not cancel a question).
-   * A blank message is dropped so "Dismiss" can never turn into an empty correction.
+   * A blank message is dropped so "Dismiss" can never turn into an empty correction. A non-blank
+   * one is flagged in the memory of answered requests (`withMessage`), like a rejection's feedback.
    */
   private async cancelForm(
     message: Extract<WebviewToHost, { type: 'form.cancel' }>,
@@ -869,17 +925,20 @@ export class ChatController {
       this.result(message.requestId, problem);
       return this.healIfStale(problem);
     }
+    const note =
+      message.message !== undefined && message.message.trim() !== '' ? message.message : undefined;
+    // Marked BEFORE the call, as in `sendPermissionReply`.
+    if (note !== undefined) this.resolutions.markReplied('form', message.formID);
     try {
       await client.session.form.cancel({
         sessionID: message.sessionID,
         formID: message.formID,
-        ...(message.message !== undefined && message.message.trim() !== ''
-          ? { message: message.message }
-          : {}),
+        ...(note === undefined ? {} : { message: note }),
       });
       this.log.info(`form cancel sent for ${message.formID}`);
       this.result(message.requestId);
     } catch (error) {
+      if (note !== undefined) this.resolutions.unmark('form', message.formID);
       this.result(message.requestId, error);
       await this.healIfStale(error);
     }

@@ -191,3 +191,43 @@ export type FormAsk = {
 
 /** Answer to a form, keyed by `FormField.key`. */
 export type FormAnswer = { [key: string]: string | number | boolean | string[] };
+
+/**
+ * What the host remembers about a request the user already answered (issues #56/#18), so the
+ * history can say "Allowed once · Read .env" next to the tool that asked.
+ *
+ * opencode v2.0.32 keeps NO record of a resolved permission, and a resolved form only for ten
+ * minutes in memory (read in `permission.ts` and `form.ts@843a6c51`), so this record is the only
+ * source of the exact decision (once / always / reject). It lives in the host's memory and is lost
+ * with the extension host (Reload Window); what the tool block itself still says afterwards is
+ * derived in the webview (`toolOutcome.ts`). `at` is an epoch-milliseconds timestamp of the HOST
+ * clock. It NEVER carries a form answer (a form may hold credentials) nor the feedback text: the
+ * `question` tool block carries the answers and the rejection error carries the feedback, and both
+ * travel as the tool state the webview already has. `resource` is only the first resource, as the
+ * card shows it.
+ */
+export type RequestResolution =
+  | {
+      kind: 'permission';
+      id: string;
+      sessionID: string;
+      tool?: ToolRef;
+      at: number;
+      decision: PermissionDecision;
+      action: string;
+      resource?: string;
+      /** True when the user sent a rejection with a message (the model reads it as feedback). */
+      withFeedback: boolean;
+    }
+  | {
+      kind: 'form';
+      id: string;
+      sessionID: string;
+      tool?: ToolRef;
+      at: number;
+      outcome: 'answered' | 'cancelled';
+      formKind: 'question' | 'form';
+      title: string;
+      /** True when the form was dismissed with a message (the model reads it as feedback). */
+      withMessage: boolean;
+    };

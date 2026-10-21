@@ -1,4 +1,5 @@
 import {
+  createMemo,
   createSignal,
   ErrorBoundary,
   For,
@@ -8,7 +9,15 @@ import {
   Show,
   Switch,
 } from 'solid-js';
-import type { MessageInfo } from '../../../src/shared/model';
+import type { MessageInfo, Part, RequestResolution } from '../../../src/shared/model';
+import { RequestOutcome } from '../requests/RequestOutcome';
+import {
+  byToolPart,
+  outcomeView,
+  toolOutcomeViews,
+  unanchoredByMessage,
+  type OutcomeView,
+} from '../requests/resolutionPlacement';
 import type { OpenView } from '../store/chatStore';
 import { isStopError } from '../store/activity';
 import { PartView } from './PartView';
@@ -60,15 +69,39 @@ function prefersReducedMotion(): boolean {
  * cut prompt can be re-run in one click. Any other error stays the red alert with its code.
  * VERIFIED by `App.test.tsx` for the rendering; the scrolling is UNVERIFIED (jsdom has no layout):
  * check it with the F5 (points 2 and 6).
+ *
+ * Answered requests (E3-resolved-history, issues #56/#18): `resolutions` are the host's records for
+ * the open session. Under each tool block go the lines of the records that name it, completed with
+ * what the block itself says (`toolOutcomeViews`, which also reads a rejection or an answer from a
+ * block that has no record, e.g. after a Reload Window); a record without a tool block in this
+ * history goes at the end of the latest user/assistant message before it was answered, NESTED in
+ * that message's `article` so `[role="log"] > *` (counted by `test:visual`) does not change. The
+ * lines never move the focus nor carry a role: the log region announces their insertion.
  */
 export function MessageList(props: {
   open: OpenView;
+  resolutions: { readonly [requestId: string]: RequestResolution };
   busy: boolean;
   canRetry: boolean;
   onRetry(): void;
 }) {
   let list: HTMLDivElement | undefined;
   const [stick, setStick] = createSignal(true);
+
+  const records = createMemo(() => Object.values(props.resolutions));
+  const byTool = createMemo(() => byToolPart(records()));
+  const unanchored = createMemo(() =>
+    unanchoredByMessage(props.open.messages, props.open.parts, records()),
+  );
+  /** Lines under a tool block; none for text and reasoning. */
+  const outcomesOf = (part: Part): OutcomeView[] =>
+    part.type === 'tool' ? toolOutcomeViews(part, byTool().get(part.id) ?? []) : [];
+  /** Lines at the end of message `id`, for records with no tool block in this history. */
+  const looseOutcomes = (id: string): OutcomeView[] =>
+    (unanchored().get(id) ?? []).flatMap((record) => {
+      const view = outcomeView(record, undefined, '');
+      return view === undefined ? [] : [view];
+    });
 
   const isLast = (id: string): boolean =>
     props.open.messages[props.open.messages.length - 1]?.id === id;
@@ -163,6 +196,9 @@ export function MessageList(props: {
                           </For>
                         </ul>
                       </Show>
+                      <For each={looseOutcomes(user().id)}>
+                        {(view) => <RequestOutcome view={view} />}
+                      </For>
                     </article>
                   )}
                 </Match>
@@ -173,7 +209,16 @@ export function MessageList(props: {
                       aria-busy={props.busy && isLast(assistant().id)}
                     >
                       <For each={props.open.parts[assistant().id] ?? []}>
-                        {(part) => <PartView part={part} live={isLive(assistant())} />}
+                        {(part) => (
+                          <PartView
+                            part={part}
+                            live={isLive(assistant())}
+                            outcomes={outcomesOf(part)}
+                          />
+                        )}
+                      </For>
+                      <For each={looseOutcomes(assistant().id)}>
+                        {(view) => <RequestOutcome view={view} />}
                       </For>
                       <Show when={assistant().error}>
                         {(error) => (

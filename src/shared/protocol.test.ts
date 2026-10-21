@@ -5,12 +5,16 @@
  * untrusted input), a union member added without its validator or sample, `dispatch` calling
  * the wrong handler, and positional part ids drifting between snapshot and stream.
  *
+ * E3-resolved-history (#56/#18): the samples also carry `Snapshot.resolutions` and the optional
+ * `resolution` of `*.resolved`; `isHostToWebview` is shallow, so they only need to stay accepted.
+ *
  * ALL DATA HERE IS FABRICATED by hand from the types. These tests prove the logic of the
  * guards; they do NOT prove that opencode emits these shapes (that needs a real `opencode
  * serve`, issues #8/#9) nor that VS Code delivers them unchanged (issue #2, F5).
  * Run with `npx vitest run src/shared` (no vitest config or `test` script until issue #4).
  */
 import { describe, expect, it, vi } from 'vitest';
+import type { RequestResolution } from './model';
 import {
   contentPartId,
   dispatch,
@@ -37,6 +41,28 @@ const form = {
   fields: [{ key: 'q0', type: 'string' as const }],
 };
 
+const permissionResolution: RequestResolution = {
+  kind: 'permission',
+  id: 'perm1',
+  sessionID: 's1',
+  tool: { messageID: 'm2', partID: 'call_1' },
+  at: 1_700_000_000_000,
+  decision: 'once',
+  action: 'bash',
+  resource: 'ls',
+  withFeedback: false,
+};
+const formResolution: RequestResolution = {
+  kind: 'form',
+  id: 'f1',
+  sessionID: 's1',
+  at: 1_700_000_000_500,
+  outcome: 'answered',
+  formKind: 'question',
+  title: 'Pick',
+  withMessage: false,
+};
+
 /** One valid sample per host-to-webview type; a missing key is a compile error. */
 const HOST_SAMPLES: SamplesOf<HostToWebview> = {
   'connection.state': {
@@ -55,6 +81,8 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
       },
       // Phase 3: pending requests are per location, not per open session.
       requests: { permissions: [permission], forms: [form] },
+      // E3-resolved-history: the host's records of the open session's answered requests.
+      resolutions: [permissionResolution, formResolution],
     },
   },
   'session.upserted': { type: 'session.upserted', session },
@@ -95,9 +123,16 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
     sessionID: 's1',
     permissionID: 'perm1',
     decision: 'once',
+    resolution: permissionResolution,
   },
   'form.asked': { type: 'form.asked', form },
-  'form.resolved': { type: 'form.resolved', sessionID: 's1', formID: 'f1', outcome: 'answered' },
+  'form.resolved': {
+    type: 'form.resolved',
+    sessionID: 's1',
+    formID: 'f1',
+    outcome: 'answered',
+    resolution: formResolution,
+  },
   'request.result': { type: 'request.result', requestId: 'r1' },
   'attachments.picked': {
     type: 'attachments.picked',

@@ -12,7 +12,7 @@
 // protected by the host tests and the opt-in integration suite.
 import { createEffect, createRoot } from 'solid-js';
 import { describe, expect, it } from 'vitest';
-import type { MessageInfo, Part } from '../../../src/shared/model';
+import type { MessageInfo, Part, RequestResolution } from '../../../src/shared/model';
 import { createChatStore, MAX_NOTICES, MAX_RESOLVED, type ChatStore } from './chatStore';
 
 const SES = 'ses_1';
@@ -33,6 +33,7 @@ function openSnapshot() {
     statuses: { [SES]: { type: 'idle' as const } },
     open: { sessionID: SES, messages: [], parts: {} },
     requests: { permissions: [], forms: [] },
+    resolutions: [] as RequestResolution[],
   };
 }
 
@@ -63,6 +64,7 @@ describe('snapshot', () => {
             parts: { msg_a: [text('hi')] },
           },
           requests: { permissions: [], forms: [] },
+          resolutions: [],
         },
       });
       expect(Object.keys(store.state.sessions)).toEqual(['ses_2']);
@@ -85,6 +87,7 @@ describe('snapshot', () => {
             parts: { msg_a: [text(value)] },
           },
           requests: { permissions: [], forms: [] },
+          resolutions: [],
         },
       });
       store.apply(snapshot('one'));
@@ -99,7 +102,12 @@ describe('snapshot', () => {
     withStore((store) => {
       store.apply({
         type: 'snapshot',
-        snapshot: { sessions: [], statuses: {}, requests: { permissions: [], forms: [] } },
+        snapshot: {
+          sessions: [],
+          statuses: {},
+          requests: { permissions: [], forms: [] },
+          resolutions: [],
+        },
       });
       expect(store.state.open.sessionID).toBeUndefined();
       expect(store.state.open.messages).toEqual([]);
@@ -391,6 +399,137 @@ describe('requests', () => {
         id: 'frm_1',
         outcome: 'Dismissed',
         label: 'Question from the agent',
+      });
+    });
+  });
+
+  // E3-resolved-history (issues #56/#18). FABRICATED host messages.
+  describe('resolutions', () => {
+    const record = (
+      id: string,
+      sessionID = SES,
+      decision: 'once' | 'always' | 'reject' = 'once',
+    ): RequestResolution => ({
+      kind: 'permission',
+      id,
+      sessionID,
+      tool: { messageID: 'msg_a', partID: 'call_1' },
+      at: 5,
+      decision,
+      action: 'read',
+      resource: '.env',
+      withFeedback: false,
+    });
+
+    it('a resolved request of the OPEN session with a record goes to resolutions and adds no dock line', () => {
+      withStore((store) => {
+        store.apply({ type: 'permission.asked', permission: permission('per_1') });
+        store.apply({
+          type: 'permission.resolved',
+          sessionID: SES,
+          permissionID: 'per_1',
+          decision: 'once',
+          resolution: record('per_1'),
+        });
+        expect(store.state.requests.permissions).toEqual([]);
+        expect(store.state.resolved).toEqual([]);
+        expect(store.state.resolutions['per_1']).toMatchObject({ id: 'per_1', decision: 'once' });
+      });
+    });
+
+    it('a resolved form of the open session behaves the same', () => {
+      withStore((store) => {
+        store.apply({ type: 'form.asked', form: question('frm_1') });
+        store.apply({
+          type: 'form.resolved',
+          sessionID: SES,
+          formID: 'frm_1',
+          outcome: 'answered',
+          resolution: {
+            kind: 'form',
+            id: 'frm_1',
+            sessionID: SES,
+            at: 5,
+            outcome: 'answered',
+            formKind: 'question',
+            title: 'Questions',
+            withMessage: false,
+          },
+        });
+        expect(store.state.resolved).toEqual([]);
+        expect(store.state.resolutions['frm_1']).toMatchObject({ kind: 'form' });
+      });
+    });
+
+    it('a request of ANOTHER session keeps the dock line and stores no record', () => {
+      withStore((store) => {
+        store.apply({ type: 'permission.asked', permission: permission('per_c', 'ses_child') });
+        store.apply({
+          type: 'permission.resolved',
+          sessionID: 'ses_child',
+          permissionID: 'per_c',
+          decision: 'reject',
+          resolution: record('per_c', 'ses_child', 'reject'),
+        });
+        expect(store.state.resolved).toEqual([
+          { id: 'per_c', outcome: 'Rejected', label: 'Read .env' },
+        ]);
+        expect(store.state.resolutions).toEqual({});
+      });
+    });
+
+    it('a resolved message with no record falls back to the dock line, even for the open session', () => {
+      withStore((store) => {
+        store.apply({ type: 'permission.asked', permission: permission('per_1') });
+        resolve(store, 'per_1', 'once');
+        expect(store.state.resolved).toHaveLength(1);
+        expect(store.state.resolutions).toEqual({});
+      });
+    });
+
+    it('clearResolved empties the dock lines and NEVER the records (they are history)', () => {
+      withStore((store) => {
+        store.apply({ type: 'permission.asked', permission: permission('per_1') });
+        store.apply({
+          type: 'permission.resolved',
+          sessionID: SES,
+          permissionID: 'per_1',
+          decision: 'once',
+          resolution: record('per_1'),
+        });
+        store.apply({ type: 'permission.asked', permission: permission('per_c', 'ses_child') });
+        resolve(store, 'per_c');
+        store.clearResolved();
+        expect(store.state.resolved).toEqual([]);
+        expect(Object.keys(store.state.resolutions)).toEqual(['per_1']);
+      });
+    });
+
+    it('a snapshot replaces the records, and a snapshot without records empties them', () => {
+      withStore((store) => {
+        store.apply({
+          type: 'snapshot',
+          snapshot: { ...openSnapshot(), resolutions: [record('per_1'), record('per_2')] },
+        });
+        expect(Object.keys(store.state.resolutions)).toEqual(['per_1', 'per_2']);
+        store.apply({
+          type: 'snapshot',
+          snapshot: { ...openSnapshot(), resolutions: [record('per_2')] },
+        });
+        expect(Object.keys(store.state.resolutions)).toEqual(['per_2']);
+        store.apply({ type: 'snapshot', snapshot: openSnapshot() });
+        expect(store.state.resolutions).toEqual({});
+      });
+    });
+
+    it('removing the open session empties the records', () => {
+      withStore((store) => {
+        store.apply({
+          type: 'snapshot',
+          snapshot: { ...openSnapshot(), resolutions: [record('per_1')] },
+        });
+        store.apply({ type: 'session.removed', sessionID: SES });
+        expect(store.state.resolutions).toEqual({});
       });
     });
   });

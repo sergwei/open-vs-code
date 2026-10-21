@@ -22,6 +22,7 @@ import type {
   Part,
   PermissionAsk,
   PermissionDecision,
+  RequestResolution,
   SessionStatus,
   SessionSummary,
 } from './model';
@@ -63,12 +64,17 @@ export type PendingAsks = {
  * volatile and has no replay, so the host sends one after `ready`, after each reconnection
  * and when the open session changes. `requests` is the whole pending set of the location
  * (phase 3: it used to travel inside `open`, which hid the requests of other sessions).
+ * `resolutions` are the answered requests the host remembers for the OPEN session only (issues
+ * #56/#18), in the order they were answered; empty when no session is open. They replace what the
+ * webview held, like everything else in the snapshot. The host keeps them in memory, so they
+ * survive a reconnection, a hidden view and Restart Server, but not a Reload Window.
  */
 export type Snapshot = {
   sessions: SessionSummary[];
   statuses: { [sessionID: string]: SessionStatus };
   open?: OpenSession;
   requests: PendingAsks;
+  resolutions: RequestResolution[];
 };
 
 /**
@@ -79,6 +85,9 @@ export type Snapshot = {
  * sending it (architecture rule 1); nothing in this module does it.
  * `permission.*` and `form.*` are forwarded for EVERY session of the location, not only the open
  * one, and `ui.focus` asks the webview to bring a pending request into view (phase 3).
+ * `permission.resolved` and `form.resolved` carry the host's `resolution` record when the host
+ * knew the request (it is absent for one it never saw asked, e.g. answered by another client
+ * before the first snapshot); the webview files it in the history when the session is the open one.
  */
 export type HostToWebview =
   | { type: 'connection.state'; connection: ConnectionState }
@@ -103,9 +112,16 @@ export type HostToWebview =
       sessionID: string;
       permissionID: string;
       decision: PermissionDecision;
+      resolution?: RequestResolution;
     }
   | { type: 'form.asked'; form: FormAsk }
-  | { type: 'form.resolved'; sessionID: string; formID: string; outcome: 'answered' | 'cancelled' }
+  | {
+      type: 'form.resolved';
+      sessionID: string;
+      formID: string;
+      outcome: 'answered' | 'cancelled';
+      resolution?: RequestResolution;
+    }
   | { type: 'request.result'; requestId: string; error?: ErrorInfo }
   | { type: 'attachments.picked'; requestId: string; files: AttachmentRef[] }
   | { type: 'ui.focus'; target: { kind: 'permission' | 'form'; sessionID: string; id: string } }

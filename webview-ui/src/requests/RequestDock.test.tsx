@@ -10,7 +10,7 @@
 // or a screen reader: those are UNVERIFIED (F5 points 1, 5).
 import { createRoot, createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { FormAsk, PermissionAsk } from '../../../src/shared/model';
+import type { FormAsk, PermissionAsk, RequestResolution } from '../../../src/shared/model';
 import { createChatStore, type ChatStore } from '../store/chatStore';
 import { must, mount, splitRequestId, type Mounted } from '../testing';
 import { RequestDock } from './RequestDock';
@@ -58,6 +58,7 @@ function snapshot(
       statuses: {},
       open: { sessionID: 'ses_1', messages: [], parts: {} },
       requests: { permissions: requests.permissions ?? [], forms: requests.forms ?? [] },
+      resolutions: [],
     },
   };
 }
@@ -160,6 +161,7 @@ describe('listing', () => {
     expect(must(container, '.request-tool').textContent).toContain('read');
   });
 
+  // The host sent no record, so the dock line is the fallback (E3-resolved-history).
   it('keeps the one-line result of an answered request until the store clears it', () => {
     const { store, container } = setup();
     store.apply(snapshot({ permissions: [permission('per_1')] }));
@@ -173,6 +175,46 @@ describe('listing', () => {
     expect(must(container, '.request-results').textContent).toContain('Rejected: Read .env');
     store.clearResolved();
     expect(container.querySelector('.request-results')).toBeNull();
+  });
+
+  // E3-resolved-history, decision of Sergio (21/10/2026): the dock line is only for requests whose
+  // history is not on screen (another session's); the open session's go under their tool.
+  it('prints the result line for a request of another session, never for the open one', () => {
+    const { store, container } = setup();
+    store.apply(
+      snapshot(
+        {
+          permissions: [permission('per_open'), permission('per_child', 'ses_child')],
+        },
+        [{ id: 'ses_child', title: 'explore subagent', parentID: 'ses_1' }],
+      ),
+    );
+    const record = (id: string, sessionID: string): RequestResolution => ({
+      kind: 'permission',
+      id,
+      sessionID,
+      at: 5,
+      decision: 'once',
+      action: 'read',
+      resource: '.env',
+      withFeedback: false,
+    });
+    store.apply({
+      type: 'permission.resolved',
+      sessionID: 'ses_1',
+      permissionID: 'per_open',
+      decision: 'once',
+      resolution: record('per_open', 'ses_1'),
+    });
+    store.apply({
+      type: 'permission.resolved',
+      sessionID: 'ses_child',
+      permissionID: 'per_child',
+      decision: 'once',
+      resolution: record('per_child', 'ses_child'),
+    });
+    expect(must(container, '.request-results').querySelectorAll('li')).toHaveLength(1);
+    expect(must(container, '.request-results').textContent).toContain('Allowed once: Read .env');
   });
 
   it('locks the card of a request whose answer is in flight', () => {

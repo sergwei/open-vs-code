@@ -34,8 +34,10 @@ interface LastSend {
  * host refused those files, so putting them back would fail again), and the text announced to
  * screen readers when a turn ends. The sender reaches deeper components through `HostContext`. Phase 3 mounts the
  * `RequestDock` between the conversation and the status strip (it needs only the store, whether
- * the draft has text, and the prompt's `focus`) and clears the one-line results of answered
- * requests whenever a prompt is sent.
+ * the draft has text, and the prompt's `focus`) and clears the dock's one-line results (those of
+ * other sessions' requests) whenever a prompt is sent. The answered requests of the open session
+ * are not in the dock: `MessageList` shows them under their tool (E3-resolved-history), so sending
+ * a prompt does not erase them.
  *
  * Decisions: Send is disabled while the session is busy and Stop takes its place (plan decision
  * 6; `steer`/`queue` while busy is not offered); every prompt goes with `delivery: 'queue'`;
@@ -161,7 +163,9 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   const sendPrompt = (text: string, files: AttachmentRef[]): void => {
     const requestId = nextRequestId();
     lastSend = { requestId, text, files };
-    props.store.clearResolved(); // a new prompt starts a new turn: the old answers are history
+    // Only the dock lines of other sessions' requests go; the answers of the open session are
+    // history in the conversation (`state.resolutions`) and stay.
+    props.store.clearResolved();
     props.store.begin(requestId);
     props.send({
       type: 'prompt.send',
@@ -240,6 +244,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
           >
             <MessageList
               open={state.open}
+              resolutions={state.resolutions}
               busy={busy()}
               canRetry={lastUser() !== undefined}
               onRetry={retry}

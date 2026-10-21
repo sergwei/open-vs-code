@@ -86,6 +86,7 @@ function open(messages: MessageInfo[], status: SessionStatus): HostToWebview {
       statuses: { [SES]: status },
       open: { sessionID: SES, messages, parts: {} },
       requests: { permissions: [], forms: [] },
+      resolutions: [],
     },
   };
 }
