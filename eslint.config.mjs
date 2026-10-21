@@ -145,7 +145,13 @@ export default defineConfig(
   // type information here, like the root configs. `src/**/*.mjs` is the plain-JS test fixture of
   // issue #8 (src/extension/test-fixtures/fake-opencode.mjs): it runs in Node, no tsconfig lists it.
   {
-    files: ['*.{mjs,mts}', 'webview-ui/*.{mjs,mts}', 'scripts/*.{mjs,mts}', 'src/**/*.mjs'],
+    files: [
+      '*.{mjs,mts}',
+      'webview-ui/*.{mjs,mts}',
+      'scripts/*.{mjs,mts}',
+      'test/visual/*.mjs',
+      'src/**/*.mjs',
+    ],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: { globals: globals.node },
   },
