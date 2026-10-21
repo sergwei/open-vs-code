@@ -7,6 +7,10 @@
 //     other tests and still never re-run an effect; not run. The browser dev build IS the one
 //     loaded here, seen in a stack trace: `node_modules/solid-js/dist/dev.js`).
 //
+// E4-session-management (#20), at the end: a session-list page counts only for the newest query,
+// queries and renames/deletes never touch `pending` (Send stays usable), events keep a loaded list
+// in step, and a removed session takes its request cards with it.
+//
 // Provenance of the data: messages FABRICATED by hand in the shape of the protocol of
 // `src/shared`. They confirm the reducer's logic, not what the host actually sends: that is
 // protected by the host tests and the opt-in integration suite.
@@ -753,5 +757,133 @@ describe('attachments and notices (phase 2)', () => {
       { pending: 1, notices: 0 },
       { pending: 0, notices: 1 },
     ]);
+  });
+});
+
+// E4-session-management (issue #20). Fabricated messages: they prove the reducer, not the host.
+describe('the session list (issue #20)', () => {
+  const permission = (id: string, sessionID: string) => ({
+    id,
+    sessionID,
+    action: 'read',
+    resources: ['.env'],
+    save: [],
+  });
+  const summary = (id: string, updatedAt: number, title?: string) => ({
+    id,
+    createdAt: 0,
+    updatedAt,
+    ...(title === undefined ? {} : { title }),
+  });
+  const page = (requestId: string, sessions: ReturnType<typeof summary>[], extra = {}) =>
+    ({
+      type: 'sessions.page',
+      requestId,
+      search: '',
+      sessions,
+      append: false,
+      hasMore: false,
+      ...extra,
+    }) as const;
+
+  it('shows loading until the page of the NEWEST query arrives, and ignores an older one', () => {
+    withStore((store) => {
+      store.beginQuery('q1', 'a');
+      store.beginQuery('q2', 'ab');
+      expect(store.state.browser).toMatchObject({ search: 'ab', loading: true, loaded: false });
+      store.apply(page('q1', [summary('old', 1)]));
+      expect(store.state.browser.rows).toEqual([]);
+      expect(store.state.browser.loading).toBe(true);
+      store.apply(page('q2', [summary('new', 2)], { hasMore: true }));
+      expect(store.state.browser.rows.map((r) => r.id)).toEqual(['new']);
+      expect(store.state.browser).toMatchObject({ loading: false, loaded: true, hasMore: true });
+    });
+  });
+
+  it('a query and its result never touch `pending`, so Send stays usable', () => {
+    withStore((store) => {
+      store.beginQuery('q1', '');
+      expect(store.state.pending).toEqual([]);
+      store.apply({ type: 'request.result', requestId: 'q1' });
+      expect(store.state.pending).toEqual([]);
+    });
+  });
+
+  it('request.result closes loading when the query failed, and raises the error as a notice', () => {
+    withStore((store) => {
+      store.beginQuery('q1', '');
+      store.apply({ type: 'request.result', requestId: 'q1', error: { code: 'X', message: 'no' } });
+      expect(store.state.browser.loading).toBe(false);
+      expect(store.state.notices.map((n) => n.error.code)).toEqual(['X']);
+    });
+  });
+
+  it('appends a page without duplicating, keeping the identity of the rows that stay', () => {
+    withStore((store) => {
+      store.beginQuery('q1', '');
+      store.apply(page('q1', [summary('a', 3), summary('b', 2)]));
+      const before = store.state.browser.rows[0];
+      store.beginQuery('q2', '');
+      store.apply(page('q2', [summary('b', 2), summary('c', 1)], { append: true }));
+      expect(store.state.browser.rows.map((r) => r.id)).toEqual(['a', 'b', 'c']);
+      expect(store.state.browser.rows[0]).toBe(before);
+    });
+  });
+
+  it('events keep a LOADED list in step: a rename moves the row up, a delete removes it, a child never enters', () => {
+    withStore((store) => {
+      store.apply({ type: 'session.upserted', session: summary('early', 5, 'early') });
+      expect(store.state.browser.rows).toEqual([]); // nobody asked for the list yet
+      store.beginQuery('q1', '');
+      store.apply(page('q1', [summary('a', 3), summary('b', 2)]));
+      store.apply({ type: 'session.upserted', session: summary('b', 9, 'renamed') });
+      expect(store.state.browser.rows.map((r) => r.id)).toEqual(['b', 'a']);
+      expect(store.state.sessions['b']?.title).toBe('renamed');
+      store.apply({
+        type: 'session.upserted',
+        session: { ...summary('kid', 10, 'sub'), parentID: 'a' },
+      });
+      expect(store.state.browser.rows.map((r) => r.id)).toEqual(['b', 'a']);
+      store.apply({ type: 'session.removed', sessionID: 'a' });
+      expect(store.state.browser.rows.map((r) => r.id)).toEqual(['b']);
+      expect(store.state.sessions['a']).toBeUndefined();
+    });
+  });
+
+  it('a rename or delete in flight locks its row until the result of THAT request', () => {
+    withStore((store) => {
+      store.beginSessionOp('a', 'renaming', 'r1');
+      store.beginSessionOp('b', 'deleting', 'r2');
+      expect(store.state.pending).toEqual([]);
+      store.apply({ type: 'request.result', requestId: 'r1' });
+      expect(store.state.sessionOps).toEqual({ b: { op: 'deleting', requestId: 'r2' } });
+      // A declined delete answers success without removing anything: the row unlocks.
+      store.apply({ type: 'request.result', requestId: 'r2' });
+      expect(store.state.sessionOps).toEqual({});
+    });
+  });
+
+  it('removing a session drops its in-flight op, its cards and their state, and the open view', () => {
+    withStore((store) => {
+      store.beginSessionOp(SES, 'deleting', 'r1');
+      store.apply({ type: 'permission.asked', permission: permission('per_1', SES) });
+      store.apply({ type: 'permission.asked', permission: permission('per_2', 'ses_other') });
+      store.apply({
+        type: 'form.asked',
+        form: { id: 'frm_1', sessionID: SES, title: 'Q', kind: 'question', fields: [] },
+      });
+      store.beginReply('per_1', 'rep1');
+      store.apply({
+        type: 'ui.focus',
+        target: { kind: 'permission', sessionID: SES, id: 'per_1' },
+      });
+      store.apply({ type: 'session.removed', sessionID: SES });
+      expect(store.state.requests.permissions.map((p) => p.id)).toEqual(['per_2']);
+      expect(store.state.requests.forms).toEqual([]);
+      expect(store.state.replying).toEqual({});
+      expect(store.state.sessionOps).toEqual({});
+      expect(store.state.focusTarget).toBeUndefined();
+      expect(store.state.open.sessionID).toBeUndefined();
+    });
   });
 });

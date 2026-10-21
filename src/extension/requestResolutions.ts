@@ -41,7 +41,8 @@ export interface RequestResolutions {
    * Feeds one protocol message. A `*.asked` is remembered and returns `undefined`; a `*.resolved`
    * of a remembered request returns its {@link RequestResolution} (and stores it for
    * {@link RequestResolutions.forSession}); a `*.resolved` of an unknown request, and any other
-   * message, return `undefined`.
+   * message, return `undefined`. A `session.removed` forgets the asks and the resolutions of that
+   * session (issue #20) and also returns `undefined`.
    */
   observe(message: HostToWebview): RequestResolution | undefined;
   /**
@@ -171,6 +172,22 @@ export function createRequestResolutions(options: RequestResolutionsOptions): Re
           };
           store(resolution);
           return resolution;
+        }
+        case 'session.removed': {
+          // Issue #20 / lesson #969: a deleted session never resolves its asks, and its recorded
+          // history can no longer be shown. Without this the maps would keep both for ever.
+          for (const [id, ask] of permissionAsks) {
+            if (ask.sessionID !== message.sessionID) continue;
+            permissionAsks.delete(id);
+            replied.delete(keyOf('permission', id));
+          }
+          for (const [id, ask] of formAsks) {
+            if (ask.sessionID !== message.sessionID) continue;
+            formAsks.delete(id);
+            replied.delete(keyOf('form', id));
+          }
+          bySession.delete(message.sessionID);
+          return undefined;
         }
         default:
           return undefined;

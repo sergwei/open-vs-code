@@ -144,6 +144,15 @@ export interface EventTranslator {
    */
   seed(seed: TranslatorSeed): void;
   /**
+   * Adds (or overwrites) `rows` in the mirror of sessions WITHOUT emptying it (issue #20). The
+   * snapshot only mirrors its 50 newest sessions, and a `session.renamed` of a row that is not
+   * mirrored is dropped (a snapshot is supposed to bring the full row); a page of the session list
+   * can show an older session, so the host mirrors each page and a rename of that session reaches
+   * the webview as `session.upserted`. The next `seed` replaces the mirror again, which is what
+   * bounds its size.
+   */
+  mirror(rows: readonly SessionSummary[]): void;
+  /**
    * Returns `open` completed with what the stream knows and the REST snapshot lacks, so the
    * webview, which REPLACES its state with a snapshot, does not lose a message in flight:
    *  - user and assistant messages not in `open` whose `createdAt` is >= `restNewest` of the last
@@ -196,6 +205,10 @@ export interface EventTranslator {
  * Phase 3 (issues #18/#44): the `permission.*` / `form.*` events are no longer filtered by the
  * open session, because the event names are `form.*` (not `session.form.*`) and a subagent asks
  * from its own child session; dropping those left the agent waiting on a request nobody saw.
+ * Issue #20 added `mirror`: the mirror of sessions is no longer only the snapshot's 50 rows, it also
+ * holds the rows of the pages the user browsed, so a rename of an older session is forwarded.
+ * VERIFIED by `eventTranslator.test.ts` (fabricated rows); a rename of an old session by another
+ * client has only been seen through the synthetic server of `chatController.e2e.test.ts`.
  */
 export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslator {
   const sessions = new Map<string, SessionSummary>();
@@ -322,6 +335,10 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
           if (listed.has(id) || user.createdAt < newest) liveUsers.delete(id);
         }
       }
+    },
+
+    mirror(rows) {
+      for (const row of rows) sessions.set(row.id, row);
     },
 
     mergeLive(snapshot) {

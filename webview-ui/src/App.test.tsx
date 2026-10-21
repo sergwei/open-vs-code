@@ -160,11 +160,68 @@ describe('empty state and header', () => {
     expect(h.container.querySelector('.suggestion')).toBeNull();
   });
 
-  it('starts a new session from the header', () => {
+  // Issue #20, decision of 21/10/2026: "New session" is LAZY. The webview only asks the host to
+  // forget the open session; the host creates nothing, and the snapshot that comes back (no `open`)
+  // is what empties the view. The input takes the focus so the user can type at once.
+  it('"New session" asks the host to forget the open session, focuses the prompt, and the empty snapshot empties the view', () => {
     const h = start();
-    h.apply(connected);
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    expect(h.container.querySelector('.suggestion')).toBeNull();
     h.button('New session').click();
     expect(h.sent).toMatchObject([{ type: 'session.new' }]);
+    expect(document.activeElement).toBe(h.textarea());
+    h.apply({
+      type: 'snapshot',
+      snapshot: {
+        sessions: [],
+        statuses: {},
+        requests: { permissions: [], forms: [] },
+        resolutions: [],
+      },
+    });
+    expect(h.container.querySelector('.suggestion')).not.toBeNull();
+    expect(must(h.container, '.chat-title').textContent).toBe('Untitled session');
+  });
+
+  it('has a "Sessions" button that needs a connection and opens the list', () => {
+    const h = start();
+    expect(h.button('Sessions').disabled).toBe(true);
+    h.apply(connected);
+    const button = h.button('Sessions');
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    button.click();
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    expect(h.sent).toMatchObject([{ type: 'sessions.query', search: '', more: false }]);
+    expect(h.container.querySelector('[role="dialog"][aria-label="Sessions"]')).not.toBeNull();
+  });
+
+  it('opening a session from the list sends session.open, closes the list and focuses the prompt', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]));
+    h.button('Sessions').click();
+    const query = h.sent[0];
+    h.apply({
+      type: 'sessions.page',
+      requestId: query !== undefined && 'requestId' in query ? query.requestId : '',
+      search: '',
+      sessions: [{ id: 'ses_2', title: 'Other work', createdAt: 1, updatedAt: Date.now() }],
+      append: false,
+      hasMore: false,
+    });
+    must<HTMLButtonElement>(h.container, 'button.session-main').click();
+    expect(h.sent.at(-1)).toMatchObject({ type: 'session.open', sessionID: 'ses_2' });
+    expect(h.container.querySelector('.session-picker')).toBeNull();
+    expect(document.activeElement).toBe(h.textarea());
+  });
+
+  it('deleting the open session (here from another client) leaves the empty view', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    expect(must(h.container, '.chat-title').textContent).toBe('Fix the build');
+    h.apply({ type: 'session.removed', sessionID: SES });
+    expect(h.container.querySelector('.suggestion')).not.toBeNull();
+    expect(must(h.container, '.chat-title').textContent).toBe('Untitled session');
   });
 
   it('has the landmarks: header, main with a log, a labelled form', () => {

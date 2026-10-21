@@ -52,6 +52,14 @@
 // E3-resolved-history: the tool of an asking turn ends in the state a real opencode 2.0.32 gives it
 // (see `askingTool`) and its block is part of the REST message, so a snapshot read after a
 // reconnection shows what the tool block says about the answer.
+// E4-session-management (issue #20) adds, SYNTHETIC but copying the behaviour the planner saw in a
+// spike against a real opencode 2.0.32 (Windows 11, 21/10/2026): `GET /api/session` with
+// `parentID=null|<id>`, `search`, `limit` and an opaque `cursor` returned on every non-empty page;
+// `POST /api/session` with `title` and `parentID` (a child inherits its parent's location);
+// `PATCH /api/session/:id` (a non-blank title publishes `session.renamed` and bumps the update
+// time; a blank one is a 204 with no event) and `DELETE /api/session/:id` (interrupts a running
+// session, deletes children first, `session.deleted` per session, 404 afterwards). What is
+// INVENTED: the inner format of the cursor and the `InvalidCursorError` 400.
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running.
 
@@ -389,6 +397,68 @@ function interrupt(sessionID) {
 }
 
 /**
+ * `GET /api/session` (issue #20): filters by `directory` (equality), `parentID` (`null` = roots,
+ * an id = its children, absent = all) and `search` (case-insensitive substring of the title, so an
+ * untitled session never matches), orders by `time.updated` descending with the id as tie-break,
+ * cuts `limit` rows (default 50) and, like the real server, returns `cursor.next` on EVERY
+ * non-empty page, the last one included. A request with only `cursor` keeps the filters of the
+ * query that made it. The cursor is base64url JSON of `{ query, anchor }` (SYNTHETIC format: the
+ * real one is also base64url JSON, but its fields were not copied). An undecodable cursor is 400
+ * `InvalidCursorError`. The behaviours are copied from the planner spike (opencode 2.0.32, Windows
+ * 11, 21/10/2026); the cursor's inner format and the 400 are invented.
+ */
+function listSessions(params) {
+  const cursorText = params.get('cursor');
+  let query = Object.fromEntries(params.entries());
+  let anchor;
+  if (cursorText !== null) {
+    try {
+      ({ query, anchor } = JSON.parse(Buffer.from(cursorText, 'base64url').toString('utf8')));
+    } catch {
+      return { error: { _tag: 'InvalidCursorError', message: 'Invalid cursor' } };
+    }
+  }
+  const limit = Number(query.limit ?? 50);
+  const needle = typeof query.search === 'string' ? query.search.toLowerCase() : undefined;
+  const ordered = (a, b) => b.time.updated - a.time.updated || (a.id < b.id ? 1 : -1);
+  const rows = [...sessions.values()]
+    .filter((row) => query.directory === undefined || row.location.directory === query.directory)
+    .filter((row) => {
+      if (query.parentID === undefined) return true;
+      return query.parentID === 'null'
+        ? row.parentID === undefined
+        : row.parentID === query.parentID;
+    })
+    .filter((row) => needle === undefined || (row.title ?? '').toLowerCase().includes(needle))
+    .sort(ordered);
+  const start = anchor === undefined ? 0 : rows.findIndex((row) => row.id === anchor) + 1;
+  const page = rows.slice(start, start + limit);
+  const last = page.at(-1);
+  const next =
+    last === undefined
+      ? undefined
+      : Buffer.from(JSON.stringify({ query, anchor: last.id })).toString('base64url');
+  return { data: page, cursor: next === undefined ? {} : { next } };
+}
+
+/**
+ * `DELETE /api/session/:id` (issue #20): interrupts the session if it runs (event
+ * `session.execution.interrupted`), deletes its children the same way, then drops its requests,
+ * history and row and publishes `session.deleted`; children first, so the order of events is the
+ * one the planner spike saw (interrupted, child deleted, parent deleted). No `SessionBusyError`.
+ */
+function removeSession(sessionID) {
+  interrupt(sessionID);
+  for (const child of [...sessions.values()].filter((row) => row.parentID === sessionID)) {
+    removeSession(child.id);
+  }
+  dropRequests(sessionID, false);
+  sessions.delete(sessionID);
+  history.delete(sessionID);
+  broadcast('session.deleted', { sessionID });
+}
+
+/**
  * Answers the routes that settle a request: `POST .../permission/:rid/reply`,
  * `POST .../form/:fid/reply` and `DELETE .../form/:fid`. SYNTHETIC (see the header). Every
  * successful route answers 204 and then publishes the event, and resumes the paused turn through
@@ -503,22 +573,28 @@ function handleChat(request, response) {
     return true;
   }
   if (method === 'GET' && path === '/api/session') {
-    json(response, 200, { data: [...sessions.values()].reverse(), cursor: {} });
+    const listed = listSessions(url.searchParams);
+    if (listed.error === undefined) json(response, 200, listed);
+    else json(response, 400, listed.error);
     return true;
   }
   if (method === 'POST' && path === '/api/session') {
-    readBody(request).then(() => {
+    readBody(request).then((body) => {
       const id = nextId('ses');
       const now = Date.now();
+      const parent = typeof body.parentID === 'string' ? sessions.get(body.parentID) : undefined;
       const info = {
         id,
         projectID: 'prj_fake',
         cost: 0,
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
         time: { created: now, updated: now },
-        location: {
+        // A child inherits the location of its parent, like the real one (VERIFIED by the spike).
+        location: parent?.location ?? {
           directory: decodeURIComponent(String(request.headers['x-opencode-directory'] ?? '')),
         },
+        ...(typeof body.title === 'string' ? { title: body.title } : {}),
+        ...(typeof body.parentID === 'string' ? { parentID: body.parentID } : {}),
       };
       sessions.set(id, info);
       history.set(id, []);
@@ -529,6 +605,8 @@ function handleChat(request, response) {
         slug: id,
         version: '2.0.32',
         location: info.location,
+        ...(info.title === undefined ? {} : { title: info.title }),
+        ...(info.parentID === undefined ? {} : { parentID: info.parentID }),
       });
     });
     return true;
@@ -570,6 +648,26 @@ function handleChat(request, response) {
   }
   if (method === 'GET' && (sub === 'permission' || sub === 'form')) {
     json(response, 200, { data: [] });
+    return true;
+  }
+  if (method === 'PATCH' && sub === undefined) {
+    // Issue #20. A non-blank title renames (event + `time.updated` bump, so the session moves to
+    // the top of the list, like the spike saw); a blank one answers 204 and does NOTHING here (the
+    // real server runs the LLM title generator, which this fake does not imitate).
+    readBody(request).then((body) => {
+      const title = typeof body.title === 'string' ? body.title : undefined;
+      if (title !== undefined && title !== '') {
+        session.title = title;
+        session.time.updated = Date.now();
+        broadcast('session.renamed', { sessionID: session.id, title });
+      }
+      noContent(response);
+    });
+    return true;
+  }
+  if (method === 'DELETE' && sub === undefined) {
+    removeSession(session.id);
+    noContent(response);
     return true;
   }
   if (method === 'POST' && sub === 'interrupt') {

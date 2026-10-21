@@ -29,6 +29,12 @@
  *    asked. A `*.resolved` of the open session that carries its record goes there and adds NO line
  *    to `resolved`; one of another session (a subagent) or without a record keeps the dock line
  *    until the next prompt (decision of Sergio, 21/10/2026). A snapshot replaces `resolutions`.
+ *  - E4-session-management (issue #20) adds the rows of the session list (`browser`, filled by
+ *    `sessions.page` and kept in step by `session.upserted` / `session.removed`) and the rename /
+ *    delete in flight (`sessionOps`). Neither goes through `pending`: a list query or a rename must
+ *    not disable Send. A page is accepted only if it answers the LAST query (`browser.requestId`),
+ *    so typing quickly cannot show the rows of an older search. `session.removed` also drops the
+ *    request cards of that session: the server deletes its pending requests WITHOUT a `*.replied`.
  * VERIFIED by `chatStore.test.ts` with fabricated messages (confirms this logic, not the host
  * contract). UNVERIFIED in a real webview until the F5 of issue #14.
  */
@@ -52,6 +58,7 @@ import {
   type HostToWebview,
 } from '../../../src/shared/protocol';
 import { describeRequest, outcomeLabel } from '../requests/permissionText';
+import { applyPage, removeRow, upsertRow } from '../sessions/browserRows';
 
 /** Most one-line results kept after requests are answered. Our own choice for a narrow view. */
 export const MAX_RESOLVED = 5;
@@ -103,11 +110,36 @@ export interface OpenView {
   parts: { [messageID: string]: Part[] };
 }
 
+/**
+ * The session list the picker shows: root sessions of the folder, newest activity first, for the
+ * current `search`. `loaded` is false until the first page of this document arrives, so events
+ * cannot fill a list nobody asked for; `loading` is true between a query and its answer.
+ */
+export interface SessionBrowserState {
+  search: string;
+  rows: SessionSummary[];
+  hasMore: boolean;
+  loading: boolean;
+  loaded: boolean;
+  /** `requestId` of the newest query; only its page is accepted. */
+  requestId: string | undefined;
+}
+
+/** A rename or delete of one session waiting for the host, with the request that will end it. */
+export interface SessionOp {
+  op: 'renaming' | 'deleting';
+  requestId: string;
+}
+
 /** Everything the UI reads. */
 export interface ChatState {
   connection: ConnectionState;
   sessions: { [sessionID: string]: SessionSummary };
   statuses: { [sessionID: string]: SessionStatus };
+  /** The session list of the picker (issue #20). */
+  browser: SessionBrowserState;
+  /** Renames and deletes in flight, by session id. */
+  sessionOps: { [sessionID: string]: SessionOp };
   open: OpenView;
   /** Pending permissions and forms of ANY session of the location, in order of arrival. */
   requests: { permissions: PermissionAsk[]; forms: FormAsk[] };
@@ -142,6 +174,16 @@ export interface ChatStore {
   apply: (message: HostToWebview) => void;
   /** Marks `requestId` as in flight, until a `request.result` with that id arrives. */
   begin: (requestId: string) => void;
+  /**
+   * Starts a session-list query: remembers `search` and `requestId` as the newest (a page for any
+   * other id is ignored) and shows "loading". Does NOT touch `pending`, so Send stays usable.
+   */
+  beginQuery: (requestId: string, search: string) => void;
+  /**
+   * Marks `sessionID` as being renamed or deleted until the `request.result` of `requestId`
+   * arrives. Does NOT touch `pending`.
+   */
+  beginSessionOp: (sessionID: string, op: SessionOp['op'], requestId: string) => void;
   /** Removes the notice with that id (the user dismissed it). */
   dismissNotice: (id: number) => void;
   /** Adds files to the draft attachments, skipping any `uri` already there. */
@@ -179,6 +221,15 @@ export function createChatStore(): ChatStore {
     connection: { state: 'starting' },
     sessions: {},
     statuses: {},
+    browser: {
+      search: '',
+      rows: [],
+      hasMore: false,
+      loading: false,
+      loaded: false,
+      requestId: undefined,
+    },
+    sessionOps: {},
     open: emptyOpen(),
     requests: { permissions: [], forms: [] },
     resolved: [],
@@ -311,27 +362,81 @@ export function createChatStore(): ChatStore {
     },
 
     'session.upserted': (m) => {
-      setState('sessions', m.session.id, reconcile(m.session));
+      batch(() => {
+        setState('sessions', m.session.id, reconcile(m.session));
+        // A list nobody has asked for yet is not filled by events (it would show a partial list
+        // that looks complete); once loaded they keep it in step.
+        if (state.browser.loaded) {
+          setState(
+            'browser',
+            'rows',
+            reconcile(upsertRow(state.browser.rows, m.session, state.browser.search), {
+              key: 'id',
+            }),
+          );
+        }
+      });
     },
 
     'session.removed': (m) => {
-      setState(
-        'sessions',
-        produce((sessions) => {
-          delete sessions[m.sessionID];
-        }),
-      );
-      setState(
-        'statuses',
-        produce((statuses) => {
-          delete statuses[m.sessionID];
-        }),
-      );
-      if (isOpen(m.sessionID)) {
-        setState('open', reconcile(emptyOpen(), { key: 'id' }));
-        setState('resolutions', reconcile({}));
-        rebuildIndexes();
-      }
+      batch(() => {
+        setState(
+          'sessions',
+          produce((sessions) => {
+            delete sessions[m.sessionID];
+          }),
+        );
+        setState(
+          'statuses',
+          produce((statuses) => {
+            delete statuses[m.sessionID];
+          }),
+        );
+        setState(
+          'browser',
+          'rows',
+          reconcile(removeRow(state.browser.rows, m.sessionID), { key: 'id' }),
+        );
+        setState(
+          'sessionOps',
+          produce((ops) => {
+            delete ops[m.sessionID];
+          }),
+        );
+        // The server deletes the pending requests of a deleted session WITHOUT a `*.replied`
+        // (lesson #969), so their cards would stay with buttons that can only fail.
+        const goneAsks = [
+          ...state.requests.permissions.filter((ask) => ask.sessionID === m.sessionID),
+          ...state.requests.forms.filter((ask) => ask.sessionID === m.sessionID),
+        ];
+        if (goneAsks.length > 0) {
+          setState('requests', 'permissions', (asks) =>
+            asks.filter((ask) => ask.sessionID !== m.sessionID),
+          );
+          setState('requests', 'forms', (asks) =>
+            asks.filter((ask) => ask.sessionID !== m.sessionID),
+          );
+          for (const ask of goneAsks) forgetAsk(ask.id);
+          const target = state.focusTarget;
+          if (target !== undefined && target.sessionID === m.sessionID) {
+            setState('focusTarget', undefined);
+          }
+        }
+        if (isOpen(m.sessionID)) {
+          setState('open', reconcile(emptyOpen(), { key: 'id' }));
+          setState('resolutions', reconcile({}));
+          rebuildIndexes();
+        }
+      });
+    },
+
+    'sessions.page': (m) => {
+      // Only the answer to the newest query counts: typing fast leaves older ones in flight.
+      if (m.requestId !== state.browser.requestId) return;
+      batch(() => {
+        setState('browser', 'rows', reconcile(applyPage(state.browser.rows, m), { key: 'id' }));
+        setState('browser', { hasMore: m.hasMore, loading: false, loaded: true });
+      });
     },
 
     'session.status': (m) => {
@@ -457,6 +562,20 @@ export function createChatStore(): ChatStore {
       // from `pending` before its failure notice exists.
       batch(() => {
         setState('pending', (pending) => pending.filter((id) => id !== m.requestId));
+        // Issue #20: the end of a list query or of a rename/delete. The page itself arrives in
+        // `sessions.page`; this only unlocks what was waiting (a failure included).
+        if (m.requestId === state.browser.requestId) setState('browser', 'loading', false);
+        const opSession = Object.keys(state.sessionOps).find(
+          (id) => state.sessionOps[id]?.requestId === m.requestId,
+        );
+        if (opSession !== undefined) {
+          setState(
+            'sessionOps',
+            produce((ops) => {
+              delete ops[opSession];
+            }),
+          );
+        }
         const askId = Object.keys(state.replying).find((id) => state.replying[id] === m.requestId);
         if (askId !== undefined) {
           // The answer of a card: the card shows its own error, so no notice, except when the
@@ -500,6 +619,12 @@ export function createChatStore(): ChatStore {
     },
     begin: (requestId) => {
       setState('pending', (pending) => [...pending, requestId]);
+    },
+    beginQuery: (requestId, search) => {
+      setState('browser', { search, requestId, loading: true });
+    },
+    beginSessionOp: (sessionID, op, requestId) => {
+      setState('sessionOps', sessionID, { op, requestId });
     },
     dismissNotice: (id) => {
       setState('notices', (notices) => notices.filter((notice) => notice.id !== id));

@@ -30,7 +30,9 @@ import type {
   SessionListInput,
   SessionMessagesResponse,
   SessionPromptInput,
+  SessionRemoveInput,
   SessionsResponse,
+  SessionUpdateInput,
   V2Event,
 } from '@opencode/client';
 import { basicAuthHeader } from './opencodeServer';
@@ -53,6 +55,22 @@ export interface ChatApi {
     active(): Promise<{ [sessionID: string]: SessionActive }>;
     create(input?: SessionCreateInput): Promise<SessionInfo>;
     get(input: SessionGetInput): Promise<SessionInfo>;
+    /**
+     * `PATCH /api/session/:id` (issue #20): 204, empty body. A non-blank `title` publishes
+     * `session.renamed` and bumps `time.updated`; a BLANK one does not clear it, it makes the
+     * server run the LLM title generator, so the controller never sends one. An unknown session
+     * throws `SessionNotFoundError`. VERIFIED by the planner spike against opencode 2.0.32
+     * (Windows 11, 21/10/2026, node + `@opencode/client`).
+     */
+    update(input: SessionUpdateInput): Promise<void>;
+    /**
+     * `DELETE /api/session/:id` (issue #20): 204. Deletes the session AND its child sessions,
+     * interrupting it first if it is busy (no `SessionBusyError`); publishes
+     * `session.execution.interrupted`, a `session.deleted` per child and then the parent's, all
+     * BEFORE the HTTP answer. VERIFIED by the planner spike (busy session with one child),
+     * Windows 11, opencode 2.0.32, 21/10/2026.
+     */
+    remove(input: SessionRemoveInput): Promise<void>;
     prompt(input: SessionPromptInput): Promise<SessionInboxUser>;
     /**
      * `POST /api/session/:id/interrupt` (issue #16). Unlike `list`/`message.list`, the answer is
