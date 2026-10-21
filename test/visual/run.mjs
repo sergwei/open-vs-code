@@ -18,7 +18,13 @@
 // E3-resolved-history (issues #56/#18) it also asserts that what the user answered stays in the
 // conversation under its tool ("Allowed once", "Answered … Blue", a plain "Rejected" that is not an
 // alert), survives another prompt and Restart Server unchanged, and after Reload Window keeps only
-// what the tool blocks say ("Answered", "Rejected") while "Allowed once" is gone. Things that depend on
+// what the tool blocks say ("Answered", "Rejected") while "Allowed once" is gone. Since
+// E4-session-management (issue #20) step 9 drives the session list with the real mouse and
+// keyboard: groups, times, the open session marked in the four themes, ArrowDown and a visible focus
+// ring, Escape returning the focus, the lazy New session (no session until the first prompt), the
+// in-line rename (row and header), the server-side search, switching, and a delete confirmed in the
+// MODAL dialog of VS Code (`window.dialogStyle: custom`, so it is DOM that Playwright can press),
+// declined once and confirmed once. Things that depend on
 // what the model happens to write (a file reference in the reply, say) are SKIPPED with a
 // warning when absent, never failed.
 //
@@ -933,6 +939,313 @@ try {
     }
     await shot('09-after-reload');
     assertNoWebviewErrors('reload');
+  });
+
+  await step('9 sessions: list, search, rename, switch, delete (issue #20)', async () => {
+    /** What the open session list shows, and where the focus is. Self-contained (it is serialized). */
+    const picker = () =>
+      web.inDoc((doc) => ({
+        open: doc.querySelector('.session-picker') !== null,
+        rows: [...doc.querySelectorAll('.session-row')].map((li) => ({
+          title: li.querySelector('.session-title')?.textContent ?? '',
+          time: li.querySelector('.session-time')?.textContent ?? '',
+          badge: li.querySelector('.session-badge')?.textContent ?? '',
+          current: li.querySelector('.session-main')?.getAttribute('aria-current') === 'true',
+        })),
+        groups: [...doc.querySelectorAll('.session-group-title')].map((e) => e.textContent),
+        status: doc.querySelector('.session-status')?.textContent ?? '',
+        // The polite live region: "Loading sessions…" while a query is in flight, then the count.
+        // The only place that says "loading" when old rows are still on screen.
+        live: (doc.querySelector('.session-picker [role="status"]')?.textContent ?? '').trim(),
+        focus: {
+          tag: doc.activeElement?.tagName ?? '',
+          type: doc.activeElement?.getAttribute?.('type') ?? '',
+          cls: doc.activeElement?.className ?? '',
+          text: (doc.activeElement?.textContent ?? '').trim().slice(0, 40),
+          visible: doc.activeElement?.matches?.(':focus-visible') ?? false,
+        },
+        title: doc.querySelector('.chat-title')?.textContent ?? '',
+        suggestions: doc.querySelectorAll('.suggestion').length,
+        messages: doc.querySelectorAll('[role="log"] > *').length,
+        notices: (doc.body.innerText ?? '').includes('deleted outside'),
+      }));
+    /** Opens the list with a real click on "Sessions" and waits for its first page. */
+    const openList = async () => {
+      if ((await picker()).open) return true;
+      const clicked = await clickButton('Sessions');
+      // Loaded = the live region has left "Loading sessions…" (old rows may be on screen already,
+      // from an earlier opening, so the rows alone say nothing about the NEW page).
+      const loaded = await waitFor(async () => {
+        const state = await picker();
+        return state.open && state.live !== '' && !/^Loading/.test(state.live);
+      }, 20_000);
+      return clicked && loaded === true;
+    };
+    /** Closes the list with a real Escape (the focus is inside it). */
+    const closeList = async () => {
+      await page.keyboard.press('Escape');
+      await sleep(300);
+    };
+    /** Waits until `predicate(await picker())` holds. */
+    const until = (predicate, ms = 15_000) =>
+      waitFor(async () => predicate(await picker()), ms, 300);
+
+    check(await openList(), 'the Sessions button opens the list');
+    let state = await picker();
+    check(
+      state.rows.length >= 1,
+      `the list shows the sessions of the folder (${String(state.rows.length)})`,
+    );
+    check(
+      state.groups.includes('Today'),
+      `rows are grouped by date (${JSON.stringify(state.groups)})`,
+    );
+    check(
+      state.rows.every((row) => row.time !== ''),
+      'every row carries its time',
+    );
+    check(
+      state.rows.filter((row) => row.current).length === 1,
+      'exactly one row is marked as the open session (aria-current)',
+    );
+    check(
+      state.focus.tag === 'INPUT' && state.focus.type === 'search',
+      `the focus is in the search box on opening (${state.focus.tag} ${state.focus.type})`,
+    );
+    const countBefore = state.rows.length;
+    for (const [name, theme] of [
+      ['light', 'Default Light Modern'],
+      ['dark', 'Default Dark Modern'],
+      ['hc-dark', 'Default High Contrast'],
+      ['hc-light', 'Default High Contrast Light'],
+    ]) {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(3000);
+      await shot(`10a-sessions-${name}`);
+      const marker = await web.inDoc((doc) => {
+        const row = doc.querySelector('.session-row.current');
+        if (!row) return null;
+        const style = doc.defaultView.getComputedStyle(row);
+        return {
+          bar: style.borderLeftColor,
+          outline: style.outlineStyle,
+          background: style.backgroundColor,
+        };
+      });
+      const hc = name.startsWith('hc');
+      check(
+        marker !== null &&
+          (hc ? marker.outline !== 'none' : marker.bar !== 'rgba(0, 0, 0, 0)' && marker.bar !== ''),
+        `${name}: the open session has a visible marker (${JSON.stringify(marker)})`,
+      );
+    }
+    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
+    await page.waitForTimeout(2500);
+
+    // Keyboard: ArrowDown from the search box enters the list, with a visible focus ring.
+    await openList();
+    await clickIn('input[type="search"]');
+    await page.keyboard.press('ArrowDown');
+    state = await picker();
+    check(
+      state.focus.cls.includes('session-main') && state.focus.visible,
+      `ArrowDown enters the list with a visible focus (${JSON.stringify(state.focus)})`,
+    );
+    await shot('10b-sessions-keyboard');
+    await closeList();
+    state = await picker();
+    check(!state.open, 'Escape closes the list');
+    check(
+      state.focus.tag === 'BUTTON' && state.focus.text === 'Sessions',
+      `Escape returns the focus to the Sessions button (${JSON.stringify(state.focus)})`,
+    );
+
+    // "New session" is lazy: it empties the view and creates NOTHING until the first prompt.
+    check(await clickButton('New session'), 'New session is pressed');
+    await page.waitForTimeout(1500);
+    state = await picker();
+    check(
+      state.suggestions >= 3 && state.title === 'Untitled session',
+      `New session leaves the empty view (${String(state.suggestions)} suggestions, "${state.title}")`,
+    );
+    await openList();
+    state = await picker();
+    check(
+      state.rows.length === countBefore,
+      `New session created no session (${String(countBefore)} -> ${String(state.rows.length)})`,
+    );
+    check(
+      state.rows.every((row) => !row.current),
+      'no session is marked as open after New session',
+    );
+    await closeList();
+
+    // The first prompt creates the session.
+    const token = `vr${String(Date.now())}`;
+    await send(`Reply with exactly: ${token}. Do not use any tools.`);
+    await page.waitForTimeout(1200);
+    const busyNow = await isBusy();
+    await openList();
+    state = await picker();
+    check(
+      state.rows.length === countBefore + 1,
+      `the first prompt created the session (${String(countBefore)} -> ${String(state.rows.length)})`,
+    );
+    if (busyNow) {
+      const running = state.rows.find((row) => row.current);
+      check(
+        running !== undefined && /Running/.test(running.badge),
+        `a running session says "Running" in text (${JSON.stringify(running?.badge)})`,
+      );
+      await shot('10c-sessions-running');
+    } else {
+      warn('the turn had already ended when the list opened; "Running" not checked');
+    }
+    await closeList();
+    if (!(await waitIdle(120_000))) warn('the second session did not finish in 120 s; going on');
+
+    // Rename in line, with the real mouse and keyboard.
+    const renamed = `Visual ${token}`;
+    await openList();
+    check(await clickIn('.session-row.current .session-action'), 'the Rename button is pressed');
+    await page.waitForTimeout(400);
+    check(
+      (await web.inDoc((doc) => doc.activeElement?.classList.contains('session-rename-input'))) ===
+        true,
+      'the title becomes an input with the focus',
+    );
+    await shot('10d-sessions-renaming');
+    await page.keyboard.type(renamed);
+    await page.keyboard.press('Enter');
+    const renamedOk = await until(
+      (s) => s.rows.some((row) => row.current && row.title === renamed) && s.title === renamed,
+    );
+    check(
+      renamedOk === true,
+      `the row AND the header show the new title ("${(await picker()).title}")`,
+    );
+    await shot('10e-sessions-renamed');
+
+    // Search happens on the server: only the renamed session matches.
+    await clickIn('input[type="search"]');
+    await page.keyboard.type(token.toUpperCase());
+    const found = await until((s) => s.rows.length === 1 && s.rows[0].title === renamed);
+    check(
+      found === true,
+      `the search finds only the renamed session, case-insensitively (${JSON.stringify((await picker()).rows.map((r) => r.title))})`,
+    );
+    await shot('10f-sessions-search');
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('Backspace');
+    const cleared = await until((s) => s.rows.length >= countBefore + 1);
+    check(cleared === true, 'clearing the search brings the whole list back');
+
+    // Switch to the other session by clicking its row.
+    state = await picker();
+    const other = state.rows.find((row) => !row.current && row.title !== renamed);
+    check(other !== undefined, 'there is another session to switch to');
+    if (other !== undefined) {
+      await web.inDoc((doc, title) => {
+        const row = [...doc.querySelectorAll('.session-row')].find(
+          (li) => li.querySelector('.session-title')?.textContent === title,
+        );
+        row?.querySelector('.session-main')?.setAttribute('data-visual-pick', 'true');
+      }, other.title);
+      check(await clickIn('[data-visual-pick="true"]'), 'the other session is clicked');
+      const switched = await until((s) => !s.open && s.title === other.title, 20_000);
+      check(
+        switched === true,
+        `choosing a session opens it and closes the list ("${(await picker()).title}")`,
+      );
+      state = await picker();
+      check(
+        state.messages > 0,
+        `the other conversation is shown (${String(state.messages)} blocks)`,
+      );
+      await shot('10g-sessions-switched');
+    }
+
+    // Back to the renamed one, then delete it: the host asks with a native modal.
+    await openList();
+    await web.inDoc((doc, title) => {
+      const row = [...doc.querySelectorAll('.session-row')].find(
+        (li) => li.querySelector('.session-title')?.textContent === title,
+      );
+      row?.querySelector('.session-main')?.setAttribute('data-visual-pick', 'true');
+    }, renamed);
+    await clickIn('[data-visual-pick="true"]');
+    await until((s) => !s.open && s.title === renamed, 20_000);
+    await openList();
+    const dialog = page.locator('.monaco-dialog-box');
+    const askDelete = async () => {
+      check(
+        await clickIn('.session-row.current .session-action[aria-label^="Delete"]'),
+        'Delete is pressed',
+      );
+      return waitFor(
+        async () => ((await dialog.count()) ? await dialog.first().innerText() : null),
+        10_000,
+        300,
+      );
+    };
+    let modal = await askDelete();
+    check(
+      modal !== undefined && modal !== null,
+      `a modal dialog of VS Code asks for confirmation (${String(modal).replace(/\s+/g, ' ').slice(0, 160)})`,
+    );
+    if (modal === undefined || modal === null) {
+      await shot('10h-FAIL-no-modal');
+      throw new Error(
+        'the confirmation modal never appeared as DOM (window.dialogStyle custom): see PREGUNTA PENDIENTE',
+      );
+    }
+    check(modal.includes(renamed), 'the modal names the session');
+    check(/cannot be undone/i.test(modal), 'the modal says it cannot be undone');
+    await shot('10h-sessions-delete-modal');
+    // Declining deletes nothing.
+    await dialog
+      .first()
+      .getByRole('button', { name: /^Cancel$/ })
+      .click();
+    await page.waitForTimeout(800);
+    state = await picker();
+    check(
+      state.rows.some((row) => row.title === renamed) && state.title === renamed,
+      'Cancel keeps the session and its conversation',
+    );
+    check(
+      state.rows.every((row) => row.badge === ''),
+      `the row unlocks after a declined delete (${JSON.stringify(state.rows.map((r) => r.badge))})`,
+    );
+    // Confirming deletes it and empties the view.
+    modal = await askDelete();
+    check(modal !== undefined && modal !== null, 'the modal appears again');
+    await dialog
+      .first()
+      .getByRole('button', { name: /^Delete$/ })
+      .click();
+    const gone = await until(
+      (s) => !s.rows.some((row) => row.title === renamed) && s.suggestions >= 3,
+      20_000,
+    );
+    state = await picker();
+    check(gone === true, 'the deleted session leaves the list and the view is empty');
+    check(
+      state.title === 'Untitled session',
+      `the header is back to "Untitled session" ("${state.title}")`,
+    );
+    check(!state.notices, 'deleting from here does not announce "deleted outside"');
+    check((await dialog.count()) === 0, 'the dialog is closed');
+    await shot('10i-sessions-deleted');
+    // The native dialog took the keyboard focus out of the page: click into the list first.
+    await clickIn('input[type="search"]');
+    await closeList();
+    state = await picker();
+    check(
+      state.focus.tag === 'BUTTON' && state.focus.text === 'Sessions',
+      `Escape returns the focus to the Sessions button again (${JSON.stringify(state.focus)})`,
+    );
+    assertNoWebviewErrors('sessions');
   });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.

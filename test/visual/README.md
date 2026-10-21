@@ -38,6 +38,7 @@ OPEN_VS_CODE_REAL_OPENCODE=/path/to/opencode npm run test:visual
 | 6b reject | a plain Reject (never Always): a "Rejected" line under the tool, no alert, no red box, earlier lines still there. Skipped with a warning if the model never calls `read` | `07c` |
 | 7 Restart Server | same conversation and title afterwards, and the same answered-request lines | `08a` |
 | 8 Reload Window | same conversation and title afterwards; "Answered … Blue" and "Rejected" are read back from the tool blocks (this also checks that REST `message.list` returns what the database holds); "Allowed once" is asserted GONE, because opencode keeps no trace of an allowed permission and the host memory dies with the window | `09` |
+| 9 sessions (#20) | the Sessions button opens a list with groups, times and exactly one open session marked in the four themes; focus in the search box, ArrowDown enters the list with a visible focus, Escape returns the focus to the button; New session leaves the empty view and creates NO session; the first prompt creates it (and a running one says "Running" in text); in-line rename shows in the row AND the header; the search finds only that session, case-insensitively; clicking another row opens it and closes the list; Delete asks in the MODAL dialog of VS Code (named session, "cannot be undone"), Cancel keeps everything, Delete removes it and empties the view with no "deleted outside" notice | `10a`-`10i` |
 
 After every step it asserts the webview logged **no CSP violation and no uncaught exception**.
 Things that depend on what the model writes (a file reference in the reply, a table) are skipped
@@ -79,6 +80,10 @@ layout shift in the few milliseconds between the check and the click, nor clicks
 - `webviewCdp.mjs`: the webview is an out-of-process iframe that Playwright does not expose, so it
   is reached through its own CDP target (`type: iframe`, `extensionId=sergwei.open-vs-code`) with
   `Runtime.evaluate` inside `iframe#active-frame`, and `Log.enable` to catch CSP violations.
+- The profile sets `window.dialogStyle: custom` (step 9): a modal dialog drawn by the workbench is
+  DOM (`.monaco-dialog-box`) that Playwright can press, whereas a native one is an Electron message
+  box that CDP cannot see. If step 9 fails with "the confirmation modal never appeared as DOM", the
+  style was not honoured; do not work around it in production code (see the plan, risk 1).
 - Themes change by writing `workbench.colorTheme` into the profile's `settings.json`, which VS
   Code reloads live.
 

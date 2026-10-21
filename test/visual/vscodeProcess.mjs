@@ -111,6 +111,12 @@ export async function startVSCode({ repoRoot, workDir, workspace, opencodePath }
     'update.mode': 'none',
     'extensions.autoUpdate': false,
     'telemetry.telemetryLevel': 'off',
+    // Issue #20 (step 9): the confirmation of a session delete is a MODAL dialog of the workbench.
+    // With the native style it is an Electron message box that CDP cannot see or click; the custom
+    // style draws it in the DOM (`.monaco-dialog-box`), which Playwright can press. VERIFIED on
+    // Windows 11 (21/10/2026): step 9 of `npm run test:visual` found the dialog in the DOM and
+    // pressed Cancel and Delete with this setting. UNVERIFIED on macOS and Linux.
+    'window.dialogStyle': 'custom',
   });
   const port = await freePort();
   const detached = process.platform !== 'win32'; // own process group, to kill the tree on POSIX
