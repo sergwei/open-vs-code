@@ -15,10 +15,12 @@
  * v2.0.32 tag, never from a running server. See `model.ts`.
  */
 import type {
+  Catalog,
   ErrorInfo,
   FormAnswer,
   FormAsk,
   MessageInfo,
+  ModelRef,
   Part,
   PermissionAsk,
   PermissionDecision,
@@ -102,9 +104,13 @@ export type Snapshot = {
  * folder, newest activity first. `append` says whether the rows continue the list (a "Show more")
  * or replace it, and `hasMore` whether another page may exist. The paging cursor never travels:
  * it embeds the folder, and the webview is untrusted input, so the host keeps it.
+ * `catalog` (issues #23/#24) is the whole list of models, providers and selectable agents of the
+ * server, with the model the host proposes for a new session; it REPLACES the previous catalog,
+ * is re-sent after every `ready`, and is absent until the first load succeeds.
  */
 export type HostToWebview =
   | { type: 'connection.state'; connection: ConnectionState }
+  | { type: 'catalog'; catalog: Catalog }
   | { type: 'snapshot'; snapshot: Snapshot }
   | { type: 'session.upserted'; session: SessionSummary }
   | { type: 'session.removed'; sessionID: string }
@@ -165,6 +171,11 @@ export type HostToWebview =
  * `session.fork` (issue #21) asks for a new root session holding the history BEFORE `messageID`
  * (a user message): there is no dedicated answer, the result arrives as a `session.upserted` for
  * the new row, a `snapshot` of it and the usual `request.result`.
+ * `prompt.send` may carry the EFFECTIVE `model` and `agent` the user chose (issues #23/#24, decision
+ * of 21/10/2026: the choice is a draft in the webview and is applied ON SEND). The host validates
+ * both against its catalog before touching the server, because opencode accepts any agent or model
+ * on `switchAgent` / `switchModel` and only fails the next turn (VERIFIED, spike, opencode 2.0.32).
+ * Absent means "leave the session as it is" (the server defaults for a new one).
  */
 export type WebviewToHost =
   | { type: 'ready' }
@@ -181,6 +192,8 @@ export type WebviewToHost =
       text: string;
       delivery: 'steer' | 'queue';
       files: AttachmentRef[];
+      model?: ModelRef;
+      agent?: string;
     }
   | { type: 'session.abort'; requestId: string; sessionID: string }
   | {
@@ -346,6 +359,19 @@ function isFormAnswer(value: unknown): boolean {
   );
 }
 
+/**
+ * True for a model reference the host could apply: a plain object with non-empty `providerID` and
+ * `id`, and an optional non-empty `variant`. Whether it EXISTS is the host's catalog check.
+ */
+function isModelRef(value: unknown): boolean {
+  return (
+    isPlainObject(value) &&
+    isNonEmptyString(field(value, 'providerID')) &&
+    isNonEmptyString(field(value, 'id')) &&
+    isOptional(field(value, 'variant'), isNonEmptyString)
+  );
+}
+
 /** True for a boolean. */
 function isBoolean(value: unknown): value is boolean {
   return typeof value === 'boolean';
@@ -409,6 +435,8 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
     isString(field(m, 'text')) &&
     isDelivery(field(m, 'delivery')) &&
     isAttachmentList(field(m, 'files')) &&
+    isOptional(field(m, 'model'), isModelRef) &&
+    isOptional(field(m, 'agent'), isNonEmptyString) &&
     hasPromptContent(m),
   'session.abort': (m) =>
     isNonEmptyString(field(m, 'requestId')) && isNonEmptyString(field(m, 'sessionID')),
@@ -449,6 +477,7 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
  */
 const HOST_TYPE_SET: Record<HostToWebview['type'], true> = {
   'connection.state': true,
+  catalog: true,
   snapshot: true,
   'session.upserted': true,
   'session.removed': true,

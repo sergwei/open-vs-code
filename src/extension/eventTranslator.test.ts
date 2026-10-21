@@ -232,6 +232,75 @@ describe('sessions', () => {
     ]);
   });
 
+  // Issues #23/#24. The payload fields (`model`, `previous`, `agent`) are copied from the planner
+  // spike's recording of `session.model.selected` / `session.agent.selected` (opencode 2.0.32,
+  // Windows 11, 21/10/2026, including `variant: "default"` on a model chosen without a variant);
+  // ids and timestamps are made up. These pin OUR translation, not the contract.
+  it('mirrors a model and an agent switch into the session row', () => {
+    const t = createEventTranslator();
+    t.translate(
+      ev('session.created', { sessionID: SES, slug: 's', version: '2', projectID: 'p' }, 5000),
+    );
+    expect(
+      t.translate(
+        ev(
+          'session.model.selected',
+          { sessionID: SES, model: { providerID: 'opencode', id: 'glm', variant: 'default' } },
+          6000,
+        ),
+      ),
+    ).toEqual([
+      {
+        type: 'session.upserted',
+        session: {
+          id: SES,
+          createdAt: 5000,
+          updatedAt: 6000,
+          model: { providerID: 'opencode', id: 'glm' },
+        },
+      },
+    ]);
+    expect(
+      t.translate(
+        ev(
+          'session.model.selected',
+          { sessionID: SES, model: { providerID: 'opencode', id: 'glm', variant: 'low' } },
+          6100,
+        ),
+      ),
+    ).toMatchObject([
+      { session: { model: { providerID: 'opencode', id: 'glm', variant: 'low' } } },
+    ]);
+    expect(
+      t.translate(
+        ev('session.agent.selected', { sessionID: SES, agent: 'plan', previous: 'build' }, 6200),
+      ),
+    ).toEqual([
+      {
+        type: 'session.upserted',
+        session: {
+          id: SES,
+          createdAt: 5000,
+          updatedAt: 6200,
+          agent: 'plan',
+          model: { providerID: 'opencode', id: 'glm', variant: 'low' },
+        },
+      },
+    ]);
+  });
+
+  it('cannot rebuild a model or agent switch of a session it never saw', () => {
+    const t = createEventTranslator();
+    expect(
+      t.translate(
+        ev('session.model.selected', { sessionID: 'ses_new', model: { providerID: 'p', id: 'm' } }),
+      ),
+    ).toEqual([]);
+    expect(
+      t.translate(ev('session.agent.selected', { sessionID: 'ses_new', agent: 'plan' })),
+    ).toEqual([]);
+  });
+
   it('cannot rebuild a renamed session it never saw', () => {
     const t = createEventTranslator();
     expect(t.translate(ev('session.renamed', { sessionID: 'ses_new', title: 'T' }))).toEqual([]);

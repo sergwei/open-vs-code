@@ -74,6 +74,27 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
     type: 'connection.state',
     connection: { state: 'connected', serverVersion: '2.0.32' },
   },
+  catalog: {
+    type: 'catalog',
+    catalog: {
+      models: [
+        {
+          providerID: 'p',
+          id: 'm',
+          name: 'M',
+          status: 'active',
+          contextLimit: 200_000,
+          free: true,
+          variants: [],
+        },
+      ],
+      providers: [{ id: 'p', name: 'P' }],
+      agents: [{ id: 'build', name: 'Build' }],
+      serverDefault: model,
+      defaultAgent: 'build',
+      preferredModel: model,
+    },
+  },
   snapshot: {
     type: 'snapshot',
     snapshot: {
@@ -238,6 +259,35 @@ describe('isWebviewToHost', () => {
         files: [],
       }),
     ).toBe(true);
+  });
+
+  // Issues #23/#24. Fabricated messages: they pin the guard. That the SERVER accepts any model or
+  // agent (and only fails the next turn) was seen in the planner spike against opencode 2.0.32
+  // (Windows 11, 21/10/2026); this is why the host re-validates against its catalog.
+  it('validates the optional model and agent of prompt.send', () => {
+    const base = WEBVIEW_SAMPLES['prompt.send'];
+    expect(isWebviewToHost({ ...base, model: { providerID: 'p', id: 'm' }, agent: 'plan' })).toBe(
+      true,
+    );
+    expect(isWebviewToHost({ ...base, model: { providerID: 'p', id: 'm', variant: 'high' } })).toBe(
+      true,
+    );
+    const bad: unknown[] = [
+      { ...base, model: { providerID: 'p' } },
+      { ...base, model: { id: 'm' } },
+      { ...base, model: { providerID: '', id: 'm' } },
+      { ...base, model: { providerID: 'p', id: '' } },
+      { ...base, model: { providerID: 'p', id: 'm', variant: '' } },
+      { ...base, model: { providerID: 'p', id: 'm', variant: 3 } },
+      { ...base, model: [{ providerID: 'p', id: 'm' }] },
+      { ...base, model: 'p/m' },
+      { ...base, model: null },
+      { ...base, agent: '' },
+      { ...base, agent: 3 },
+    ];
+    for (const value of bad) {
+      expect(isWebviewToHost(value), JSON.stringify(value)).toBe(false);
+    }
   });
 
   it.each([

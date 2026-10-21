@@ -44,6 +44,12 @@
           "default": "",
           "scope": "machine",
           "markdownDescription": "Absolute path to the opencode **v2** executable. Leave empty to search `PATH` for `opencode2`, then `opencode`."
+        },
+        "openVsCode.defaultModel": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "Model that every **new** chat session starts with, written `provider/model` (for example `opencode/big-pickle`). It wins over the last model you sent a prompt with. Leave empty to start with that last model, or with opencode's own default if there is none. A value that is badly written or not offered by the server is ignored with a warning."
         }
       }
     },

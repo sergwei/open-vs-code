@@ -5,15 +5,14 @@ import { SessionPicker } from '../sessions/SessionPicker';
 import { EMPTY_TITLE, sessionLabel } from '../sessions/sessionGroups';
 import type { ChatStore } from '../store/chatStore';
 
-/** Label of the agent/model marker before the first assistant message gives it a value. */
-const NO_MODEL_LABEL = 'Agent · model';
-
 /** `id` of the session list panel, referenced by the `aria-controls` of its button. */
 const PICKER_ID = 'session-picker';
 
 /**
  * The top bar (issues #12 and #20): session title, the "Sessions" button that opens the session
- * list under the bar, a placeholder for the agent/model selector, and New session.
+ * list under the bar, and New session. The agent and model selectors are NOT here: since issues
+ * #23/#24 they live in the prompt row (decision of 21/10/2026, Engram #1012, which reverts the
+ * placeholder this bar used to hold), and each reply shows the agent and model that answered.
  *
  * "Sessions" is a disclosure button (`aria-haspopup="dialog"`, `aria-expanded`, `aria-controls`)
  * that shows {@link SessionPicker} inside the same `position: relative` area, so the panel hangs
@@ -23,11 +22,6 @@ const PICKER_ID = 'session-picker';
  * the connection drops closes, in an effect). New session is LAZY since issue #20: it only empties the view and
  * the first prompt creates the session; the title therefore reads "Untitled session" until the
  * model names the new session.
- *
- * The marker is a DISABLED button that shows `agent · providerID/id` of the newest assistant
- * message; the real selector (and the `switchModel`/`switchAgent` calls) is epic E5, so the
- * title says so. It is a button and not plain text so the place and the tab order are already
- * right when E5 lands.
  *
  * Issue #21 adds the navigation between related sessions, all driven by the rows the snapshot
  * brings (`state.sessions`), not by the session list (which stays roots only): above the title a
@@ -120,17 +114,6 @@ export function Header(props: {
     const base = `Open subagent session ${sessionLabel(child)}`;
     return meta === '' ? base : `${base}, ${meta}`;
   };
-  const marker = createMemo(() => {
-    const messages = state.open.messages;
-    for (let index = messages.length - 1; index >= 0; index--) {
-      const message = messages[index];
-      if (message?.kind === 'assistant') {
-        return `${message.agent} · ${message.model.providerID}/${message.model.id}`;
-      }
-    }
-    return NO_MODEL_LABEL;
-  });
-
   /** Closes the panel; `restoreFocus` puts the focus back on the "Sessions" button. */
   const closePicker = (restoreFocus: boolean): void => {
     setPickerOpen(false);
@@ -183,14 +166,6 @@ export function Header(props: {
           }}
         >
           Sessions
-        </button>
-        <button
-          type="button"
-          class="secondary model-marker"
-          disabled
-          title="Model and agent selection: coming in E5"
-        >
-          {marker()}
         </button>
         <button
           type="button"

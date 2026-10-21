@@ -28,10 +28,13 @@
 // server; the wiring with the real client over HTTP is covered by `chatController.e2e.test.ts`
 // against a synthetic server.
 import type {
+  AgentInfo,
   FormInfo,
   FormListOutput,
+  ModelInfo,
   PermissionRequest,
   PermissionSavedInfo,
+  ProviderInfo,
   SessionInfo,
   SessionListInput,
   SessionMessageInfo,
@@ -39,7 +42,8 @@ import type {
   V2Event,
 } from '@opencode/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { HostToWebview, Snapshot } from '../shared/protocol';
+import type { ModelRef } from '../shared/model';
+import type { HostToWebview, Snapshot, WebviewToHost } from '../shared/protocol';
 import type { AttachmentRef } from '../shared/protocol';
 import {
   ChatController,
@@ -101,7 +105,63 @@ type FakeOptions = Partial<{
   /** Rejects the next permission/form reply or cancel with this server error body. */
   replyError: object;
   removeError: object;
+  /** Models `model.list` answers with (default: {@link DEFAULT_MODELS}); `model.default` is the first. */
+  models: ModelInfo[];
+  /** Replaces what `model.default` answers with; `null` is the server's "no model". */
+  defaultModelInfo: ModelInfo | null;
+  /** Agents `agent.list` answers with (default: {@link DEFAULT_AGENTS}). */
+  agents: AgentInfo[];
+  /** Rejects `model.list` (the catalog load) with this server error body. */
+  catalogError: object;
+  /** `agent` / `model` fields `session.get` adds to every row (issues #23/#24). */
+  sessionSelection: {
+    agent?: string;
+    model?: { id: string; providerID: string; variant?: string };
+  };
+  /** Rejects `switchAgent` / `switchModel` with this server error body. */
+  switchError: object;
 }>;
+
+/** A catalog model in the shape of a real `ModelInfo` (fields trimmed to what the mapping reads). */
+const modelInfo = (id: string, name: string, cost = 0): ModelInfo =>
+  wire<ModelInfo>(
+    JSON.stringify({
+      id,
+      modelID: id,
+      providerID: 'opencode',
+      name,
+      capabilities: { tools: true, input: [], output: [] },
+      variants: [{ id: 'low' }, { id: 'high' }],
+      time: { released: 1 },
+      cost: [{ input: cost, output: cost, cache: { read: 0, write: 0 } }],
+      status: 'active',
+      enabled: true,
+      limit: { context: 200000, output: 32000 },
+    }),
+  );
+
+/** Two free models; the first is the server default. */
+const DEFAULT_MODELS: ModelInfo[] = [
+  modelInfo('big-pickle', 'Big Pickle'),
+  modelInfo('glm-5.3-flash-free', 'GLM-5.3-Flash Free'),
+];
+
+const PROVIDER = wire<ProviderInfo>(
+  '{"id":"opencode","name":"OpenCode","activation":"auto","package":"x"}',
+);
+
+/** What a real server lists: build (default, first), a subagent, a hidden agent and plan. */
+const DEFAULT_AGENTS: AgentInfo[] = [
+  'build:primary:false',
+  'general:subagent:false',
+  'title:primary:true',
+  'plan:primary:false',
+].map((spec) => {
+  const [id = '', mode = '', hidden = ''] = spec.split(':');
+  return wire<AgentInfo>(
+    `{"id":"${id}","name":"${id}","mode":"${mode}","hidden":${hidden},"request":{},"permissions":[]}`,
+  );
+});
 
 const LOCATION = wire<FormListOutput['location']>('{"directory":"C:\\\\work"}');
 
@@ -148,6 +208,8 @@ function fakeApi(options: FakeOptions = {}) {
   const forks: Array<{ sessionID: string; before?: string }> = [];
   const updates: unknown[] = [];
   const sessionRemoves: unknown[] = [];
+  const creates: unknown[] = [];
+  const switches: string[] = [];
   /** Rejects like the real client: with the server's error BODY, an object, not an Error. */
   const failWith = (body: object): Promise<never> =>
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
@@ -179,8 +241,9 @@ function fakeApi(options: FakeOptions = {}) {
         calls.push('session.active');
         return Promise.resolve(options.active ?? {});
       },
-      create: () => {
+      create: (input) => {
         calls.push('session.create');
+        creates.push(input);
         return Promise.resolve(sessionInfo('ses_new'));
       },
       get: ({ sessionID }) => {
@@ -188,9 +251,28 @@ function fakeApi(options: FakeOptions = {}) {
         if (options.getImpl !== undefined) return options.getImpl(sessionID);
         if (options.getError !== undefined) return failWith(options.getError);
         const title = options.titles?.[sessionID];
-        return Promise.resolve(
-          title === undefined ? sessionInfo(sessionID) : { ...sessionInfo(sessionID), title },
+        const stored = options.sessionSelection ?? {};
+        return Promise.resolve({
+          ...sessionInfo(sessionID),
+          ...(title === undefined ? {} : { title }),
+          ...stored,
+        });
+      },
+      switchAgent: (input) => {
+        calls.push('session.switchAgent');
+        switches.push(`agent:${input.agent}`);
+        return options.switchError === undefined
+          ? Promise.resolve()
+          : failWith(options.switchError);
+      },
+      switchModel: (input) => {
+        calls.push('session.switchModel');
+        switches.push(
+          `model:${input.model.providerID}/${input.model.id}${input.model.variant === undefined ? '' : `@${input.model.variant}`}`,
         );
+        return options.switchError === undefined
+          ? Promise.resolve()
+          : failWith(options.switchError);
       },
       update: (input) => {
         calls.push('session.update');
@@ -257,6 +339,35 @@ function fakeApi(options: FakeOptions = {}) {
         )();
       },
     },
+    model: {
+      list: () => {
+        calls.push('model.list');
+        if (options.catalogError !== undefined) return failWith(options.catalogError);
+        return Promise.resolve({ location: LOCATION, data: options.models ?? DEFAULT_MODELS });
+      },
+      default: () => {
+        calls.push('model.default');
+        return Promise.resolve({
+          location: LOCATION,
+          data:
+            options.defaultModelInfo === undefined
+              ? (DEFAULT_MODELS[0] ?? null)
+              : options.defaultModelInfo,
+        });
+      },
+    },
+    provider: {
+      list: () => {
+        calls.push('provider.list');
+        return Promise.resolve({ location: LOCATION, data: [PROVIDER] });
+      },
+    },
+    agent: {
+      list: () => {
+        calls.push('agent.list');
+        return Promise.resolve({ location: LOCATION, data: options.agents ?? DEFAULT_AGENTS });
+      },
+    },
     form: {
       list: () => {
         calls.push('form.list');
@@ -303,6 +414,8 @@ function fakeApi(options: FakeOptions = {}) {
     forks,
     updates,
     sessionRemoves,
+    creates,
+    switches,
   };
 }
 
@@ -354,7 +467,24 @@ function setup(
   const serverCalls: string[] = [];
   const picked: SavedPermission[][] = [];
   const streams: Array<{ options: EventStreamOptions<V2Event>; aborted: () => boolean }> = [];
+  /** The user's model preferences, editable by a test; `writes` records `setLastModel`. */
+  const prefs: {
+    setting: string | undefined;
+    last: ModelRef | undefined;
+    writes: ModelRef[];
+    writeError: Error | undefined;
+  } = { setting: undefined, last: undefined, writes: [], writeError: undefined };
   const deps: ChatControllerDeps = {
+    preferences: {
+      defaultModel: () => prefs.setting,
+      lastModel: () => prefs.last,
+      setLastModel: (ref) => {
+        if (prefs.writeError !== undefined) return Promise.reject(prefs.writeError);
+        prefs.writes.push(ref);
+        prefs.last = ref;
+        return Promise.resolve();
+      },
+    },
     createClient: () => api,
     editor,
     post: (message) => posted.push(message),
@@ -419,6 +549,7 @@ function setup(
     serverCalls,
     picked,
     confirmations,
+    prefs,
     /** Makes the host know a pending permission, as the stream would (needs a running server). */
     seedPermission: (id = 'per_1', sessionID = 'ses_1', save: string[] = ['*']) => {
       emit(streams, 'permission.asked', { id, sessionID, action: 'read', resources: ['x'], save });
@@ -2556,5 +2687,442 @@ describe('the lineage of the open session (issue #21)', () => {
     controller.onServerState(RUNNING);
     await controller.resync();
     expect(calls).not.toContain('session.list.children');
+  });
+});
+
+/**
+ * Issues #23/#24 (E5-model-agent-selectors): the catalog and the choice of model and agent.
+ *
+ * Protects against: a snapshot that waits for a slow `model.list`; a burst of reload events that
+ * costs a load each; a failed load that wipes the catalog the selectors hold; a model or agent that
+ * the server never validated reaching `switchModel` / `switchAgent` (the server accepts anything
+ * and fails the NEXT turn, VERIFIED in the planner spike, opencode 2.0.32, Windows 11,
+ * 21/10/2026, so the HOST must check); `switchAgent` called when the agent did not change (it does
+ * not deduplicate and `plan` injects a reminder); a prompt sent after a failed switch (it would be
+ * redelivered with the next good run); and the precedence setting > last used > server default.
+ * SYNTHETIC: a fake client with hand-made `ModelInfo` / `AgentInfo` in the shapes the spike saw.
+ */
+describe('catalog and selection (issues #23/#24)', () => {
+  const GLM = { providerID: 'opencode', id: 'glm-5.3-flash-free' };
+  const PICKLE = { providerID: 'opencode', id: 'big-pickle' };
+  type PromptSend = Extract<WebviewToHost, { type: 'prompt.send' }>;
+  const send = (extra: Partial<PromptSend> = {}): PromptSend => ({
+    type: 'prompt.send',
+    requestId: 'r1',
+    text: 'hi',
+    delivery: 'queue',
+    files: [],
+    ...extra,
+  });
+  const catalogs = (posted: HostToWebview[]) =>
+    posted.flatMap((m) => (m.type === 'catalog' ? [m.catalog] : []));
+  /** The last `request.result`: a refused send also reloads the catalog, which posts after it. */
+  const lastResult = (posted: HostToWebview[]) =>
+    posted.filter((m) => m.type === 'request.result').at(-1);
+  /** A client whose `model.list` stays pending until `release()` is called. */
+  const slowModels = () => {
+    const fake = fakeApi();
+    let release: () => void = () => undefined;
+    const api: ChatApi = {
+      ...fake.api,
+      model: {
+        ...fake.api.model,
+        list: () =>
+          new Promise((resolve) => {
+            release = () => {
+              resolve({ location: LOCATION, data: DEFAULT_MODELS });
+            };
+          }),
+      },
+    };
+    return { api, release: () => release() };
+  };
+
+  it('publishes the catalog on server.connected', async () => {
+    const { api, calls } = fakeApi();
+    const { controller, posted, streams, logs } = setup(api);
+    controller.onServerState(RUNNING);
+    emit(streams, 'server.connected', {});
+    await flush();
+    await flush();
+    expect(calls).toEqual(
+      expect.arrayContaining(['model.list', 'provider.list', 'agent.list', 'model.default']),
+    );
+    const [catalog] = catalogs(posted);
+    expect(catalog?.models.map((m) => m.id)).toEqual(['big-pickle', 'glm-5.3-flash-free']);
+    expect(catalog?.models[0]).toMatchObject({
+      free: true,
+      status: 'active',
+      contextLimit: 200000,
+    });
+    expect(catalog?.providers).toEqual([{ id: 'opencode', name: 'OpenCode' }]);
+    expect(catalog?.agents.map((a) => a.id)).toEqual(['build', 'plan']);
+    expect(catalog?.defaultAgent).toBe('build');
+    expect(catalog?.serverDefault).toEqual(PICKLE);
+    expect(catalog?.preferredModel).toBeUndefined();
+    expect(logs).toContain('info: catalog loaded (2 models, 2 agents)');
+  });
+
+  it('does not make the snapshot wait for a slow model.list', async () => {
+    const { api, release } = slowModels();
+    const { controller, snapshots, streams, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    emit(streams, 'server.connected', {});
+    await flush();
+    await flush();
+    expect(snapshots()).toHaveLength(1);
+    expect(catalogs(posted)).toHaveLength(0);
+    release();
+    await flush();
+    await flush();
+    expect(catalogs(posted)).toHaveLength(1);
+  });
+
+  it('coalesces a burst of reload events into at most two loads', async () => {
+    const { api, calls } = fakeApi();
+    const { controller, streams, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    for (const type of [
+      'model.updated',
+      'provider.updated',
+      'agent.updated',
+      'integration.updated',
+      'credential.updated',
+      'config.updated',
+    ]) {
+      emit(streams, type, {});
+    }
+    await flush();
+    await flush();
+    await flush();
+    const loads = calls.filter((c) => c === 'model.list').length;
+    expect(loads).toBeGreaterThanOrEqual(1);
+    expect(loads).toBeLessThanOrEqual(2);
+    expect(catalogs(posted).length).toBe(loads);
+  });
+
+  it('keeps the previous catalog, warns and shows no notice when a reload fails', async () => {
+    const good = fakeApi();
+    let failNext = false;
+    const flaky: ChatApi = {
+      ...good.api,
+      model: {
+        ...good.api.model,
+        list: (input) =>
+          failNext
+            ? // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+              Promise.reject({ _tag: 'ServerError', message: 'boom' })
+            : good.api.model.list(input),
+      },
+    };
+    const { controller, posted, logs, streams } = setup(flaky);
+    controller.onServerState(RUNNING);
+    emit(streams, 'model.updated', {});
+    await flush();
+    await flush();
+    expect(catalogs(posted)).toHaveLength(1);
+    failNext = true;
+    emit(streams, 'model.updated', {});
+    await flush();
+    await flush();
+    expect(catalogs(posted)).toHaveLength(1);
+    expect(logs.some((l) => l.startsWith('warn: catalog load failed: ServerError'))).toBe(true);
+    expect(posted.some((m) => m.type === 'notice')).toBe(false);
+    // The held catalog still serves a send that carries a model.
+    failNext = false;
+    await controller.handle(send({ model: GLM }));
+    expect(good.calls).toContain('session.prompt');
+  });
+
+  it('republishes the catalog AFTER the snapshot on ready', async () => {
+    const { api } = fakeApi();
+    const { controller, posted, streams } = setup(api);
+    controller.onServerState(RUNNING);
+    emit(streams, 'model.updated', {});
+    await flush();
+    await flush();
+    posted.length = 0;
+    await controller.onWebviewReady();
+    const types = posted.map((m) => m.type);
+    expect(types.indexOf('catalog')).toBeGreaterThan(types.indexOf('snapshot'));
+  });
+
+  it('drops a load that finishes after the server went away', async () => {
+    const { api, release } = slowModels();
+    const { controller, posted, streams } = setup(api);
+    controller.onServerState(RUNNING);
+    emit(streams, 'model.updated', {});
+    await flush();
+    controller.onServerState({ kind: 'stopped' });
+    release();
+    await flush();
+    await flush();
+    expect(catalogs(posted)).toHaveLength(0);
+  });
+
+  describe('which model a new session proposes', () => {
+    const loaded = async (configure: (p: ReturnType<typeof setup>['prefs']) => void) => {
+      const fake = fakeApi();
+      const harness = setup(fake.api);
+      configure(harness.prefs);
+      harness.controller.onServerState(RUNNING);
+      emit(harness.streams, 'model.updated', {});
+      await flush();
+      await flush();
+      return { ...harness, ...fake };
+    };
+
+    it('the setting wins over the last used model', async () => {
+      const { posted } = await loaded((p) => {
+        p.setting = 'opencode/big-pickle';
+        p.last = GLM;
+      });
+      expect(catalogs(posted).at(-1)?.preferredModel).toEqual(PICKLE);
+    });
+
+    it('without a setting the last used model applies', async () => {
+      const { posted } = await loaded((p) => {
+        p.last = GLM;
+      });
+      expect(catalogs(posted).at(-1)?.preferredModel).toEqual(GLM);
+    });
+
+    it('a setting the server does not offer is ignored: one warn line and one notice per value', async () => {
+      const { controller, posted, logs, prefs } = await loaded((p) => {
+        p.setting = 'opencode/nope';
+        p.last = GLM;
+      });
+      expect(catalogs(posted).at(-1)?.preferredModel).toEqual(GLM);
+      expect(logs).toContain('warn: default model setting ignored: unavailable');
+      expect(posted.filter((m) => m.type === 'notice')).toHaveLength(1);
+      controller.onPreferencesChanged();
+      expect(posted.filter((m) => m.type === 'notice')).toHaveLength(1);
+      prefs.setting = 'opencode/other';
+      controller.onPreferencesChanged();
+      expect(posted.filter((m) => m.type === 'notice')).toHaveLength(2);
+      expect(logs.join('\n')).not.toContain('opencode/nope');
+    });
+
+    it('a change of the setting republishes the catalog with no REST call', async () => {
+      const { controller, posted, prefs, calls } = await loaded(() => undefined);
+      const before = calls.length;
+      prefs.setting = 'opencode/glm-5.3-flash-free';
+      controller.onPreferencesChanged();
+      expect(calls.length).toBe(before);
+      expect(catalogs(posted).at(-1)?.preferredModel).toEqual(GLM);
+    });
+
+    it('does nothing without a catalog', () => {
+      const { api } = fakeApi();
+      const { controller, posted } = setup(api);
+      controller.onPreferencesChanged();
+      expect(posted).toEqual([]);
+    });
+  });
+
+  describe('prompt.send with a model and an agent', () => {
+    it('creates a NEW session with both and calls no switch', async () => {
+      const { api, creates, switches, calls } = fakeApi();
+      const { controller, logs } = setup(api);
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ model: GLM, agent: 'plan' }));
+      expect(creates).toEqual([{ agent: 'plan', model: GLM }]);
+      expect(switches).toEqual([]);
+      expect(calls).toContain('session.prompt');
+      expect(logs).toContain('info: agent selected plan for ses_new');
+      expect(logs).toContain('info: model selected opencode/glm-5.3-flash-free for ses_new');
+    });
+
+    it('creates a new session with no fields when the webview sends neither', async () => {
+      const { api, creates } = fakeApi();
+      const { controller } = setup(api);
+      controller.onServerState(RUNNING);
+      await controller.handle(send());
+      expect(creates).toEqual([{}]);
+    });
+
+    it('an existing session on the same agent and model: get, no switch, then the prompt', async () => {
+      const { api, calls, switches } = fakeApi({
+        sessions: ['ses_old'],
+        sessionSelection: { agent: 'plan', model: { ...GLM, variant: 'default' } },
+      });
+      const { controller } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      calls.length = 0;
+      await controller.handle(send({ sessionID: 'ses_old', model: GLM, agent: 'plan' }));
+      expect(switches).toEqual([]);
+      expect(calls).toContain('session.get');
+      expect(calls).toContain('session.prompt');
+    });
+
+    // Decision of Sergio (21/10/2026, review #1015 W1): a choice is PINNED. The server default here
+    // (PICKLE / build) equals the choice, and the session still stores nothing, so both switches go.
+    // Reverts the first design, which compared with the catalog default and skipped them.
+    it('a session with nothing stored is PINNED even when the choice equals the server default', async () => {
+      const { api, switches, calls } = fakeApi({ sessions: ['ses_old'] });
+      const { controller } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      calls.length = 0;
+      await controller.handle(send({ sessionID: 'ses_old', model: PICKLE, agent: 'build' }));
+      expect(switches).toEqual(['agent:build', 'model:opencode/big-pickle']);
+      expect(calls.filter((c) => c === 'session.prompt' || c.startsWith('session.switch'))).toEqual(
+        ['session.switchAgent', 'session.switchModel', 'session.prompt'],
+      );
+    });
+
+    it('a session that stores only the model still gets the agent switch', async () => {
+      const { api, switches } = fakeApi({
+        sessions: ['ses_old'],
+        sessionSelection: { model: PICKLE },
+      });
+      const { controller } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ sessionID: 'ses_old', model: PICKLE, agent: 'build' }));
+      expect(switches).toEqual(['agent:build']);
+    });
+
+    it('a different agent switches the agent BEFORE the model, both BEFORE the prompt', async () => {
+      const { api, calls, switches } = fakeApi({
+        sessions: ['ses_old'],
+        sessionSelection: { agent: 'build', model: PICKLE },
+      });
+      const { controller, logs } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      calls.length = 0;
+      await controller.handle(send({ sessionID: 'ses_old', model: GLM, agent: 'plan' }));
+      expect(switches).toEqual(['agent:plan', 'model:opencode/glm-5.3-flash-free']);
+      expect(calls.filter((c) => c === 'session.prompt' || c.startsWith('session.switch'))).toEqual(
+        ['session.switchAgent', 'session.switchModel', 'session.prompt'],
+      );
+      expect(logs).toContain('info: agent selected plan for ses_old');
+      expect(logs).toContain('info: model selected opencode/glm-5.3-flash-free for ses_old');
+    });
+
+    it('a different variant counts as a different model', async () => {
+      const { api, switches } = fakeApi({
+        sessions: ['ses_old'],
+        sessionSelection: { model: GLM },
+      });
+      const { controller } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ sessionID: 'ses_old', model: { ...GLM, variant: 'high' } }));
+      expect(switches).toEqual(['model:opencode/glm-5.3-flash-free@high']);
+    });
+
+    it('refuses a model the catalog does not list: ModelUnavailable, no server call, catalog reloaded', async () => {
+      const { api, calls, switches, creates } = fakeApi();
+      const { controller, posted } = setup(api);
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ model: { providerID: 'opencode', id: 'nope' } }));
+      expect(lastResult(posted)).toMatchObject({
+        type: 'request.result',
+        requestId: 'r1',
+        error: { code: 'ModelUnavailable' },
+      });
+      expect(creates).toEqual([]);
+      expect(switches).toEqual([]);
+      expect(calls).not.toContain('session.prompt');
+      await flush();
+      await flush();
+      expect(calls.filter((c) => c === 'model.list')).toHaveLength(2);
+    });
+
+    it('refuses a variant the model does not list', async () => {
+      const { api, calls } = fakeApi();
+      const { controller, posted } = setup(api);
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ model: { ...GLM, variant: 'ultra' } }));
+      expect(lastResult(posted)).toMatchObject({ error: { code: 'ModelUnavailable' } });
+      expect(calls).not.toContain('session.prompt');
+    });
+
+    it('refuses a hidden or subagent agent: AgentUnavailable', async () => {
+      const { api, calls } = fakeApi();
+      const { controller, posted } = setup(api);
+      controller.onServerState(RUNNING);
+      for (const agent of ['title', 'general', 'nope']) {
+        await controller.handle(send({ agent }));
+        expect(lastResult(posted)).toMatchObject({ error: { code: 'AgentUnavailable' } });
+      }
+      expect(calls).not.toContain('session.prompt');
+      expect(calls).not.toContain('session.create');
+    });
+
+    it('answers CatalogUnavailable when there is no catalog and loading it fails', async () => {
+      const { api, calls } = fakeApi({ catalogError: { _tag: 'ServerError', message: 'down' } });
+      const { controller, posted } = setup(api);
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ model: GLM }));
+      expect(posted.at(-1)).toMatchObject({ error: { code: 'CatalogUnavailable' } });
+      expect(calls).not.toContain('session.prompt');
+    });
+
+    it('loads the catalog first when there is none', async () => {
+      const { api, calls } = fakeApi();
+      const { controller } = setup(api);
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ model: GLM }));
+      expect(calls.indexOf('model.list')).toBeLessThan(calls.indexOf('session.prompt'));
+    });
+
+    it('a failing switch answers the error and sends NO prompt', async () => {
+      const { api, calls } = fakeApi({
+        sessions: ['ses_old'],
+        sessionSelection: { agent: 'build' },
+        switchError: { _tag: 'SessionNotFoundError', message: 'gone' },
+      });
+      const { controller, posted } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ sessionID: 'ses_old', agent: 'plan' }));
+      expect(posted.at(-1)).toMatchObject({ error: { code: 'SessionNotFoundError' } });
+      expect(calls).not.toContain('session.prompt');
+    });
+
+    it('without model or agent an existing session is left alone (no switch, no catalog)', async () => {
+      const { api, calls } = fakeApi({ sessions: ['ses_old'] });
+      const { controller } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      calls.length = 0;
+      await controller.handle(send({ sessionID: 'ses_old' }));
+      expect(calls).not.toContain('session.switchModel');
+      expect(calls).not.toContain('session.switchAgent');
+      expect(calls).not.toContain('model.list');
+    });
+
+    it('remembers the model only after the prompt is accepted, and republishes the catalog', async () => {
+      const failingApi = fakeApi({ promptImpl: () => Promise.reject(new Error('refused')) });
+      const failing = setup(failingApi.api);
+      failing.controller.onServerState(RUNNING);
+      await failing.controller.handle(send({ model: GLM }));
+      expect(failing.prefs.writes).toEqual([]);
+
+      const ok = fakeApi();
+      const good = setup(ok.api);
+      good.controller.onServerState(RUNNING);
+      await good.controller.handle(send({ model: GLM }));
+      expect(good.prefs.writes).toEqual([GLM]);
+      expect(catalogs(good.posted).at(-1)?.preferredModel).toEqual(GLM);
+    });
+
+    it('a failing write of the last model does not break the send', async () => {
+      const { api, calls } = fakeApi();
+      const { controller, posted, logs, prefs } = setup(api);
+      prefs.writeError = new Error('disk full');
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ model: GLM }));
+      expect(calls).toContain('session.prompt');
+      expect(posted.filter((m) => m.type === 'request.result')).toEqual([
+        { type: 'request.result', requestId: 'r1' },
+      ]);
+      expect(logs.some((l) => l.startsWith('warn: remembering the last model failed'))).toBe(true);
+    });
+
+    it('the log lines carry ids, never the text of the prompt', async () => {
+      const { api } = fakeApi();
+      const { controller, logs } = setup(api);
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ model: GLM, agent: 'plan', text: 'SECRET-PROMPT-TEXT' }));
+      expect(logs.join('\n')).not.toContain('SECRET-PROMPT-TEXT');
+    });
   });
 });

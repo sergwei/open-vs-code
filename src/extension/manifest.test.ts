@@ -9,6 +9,9 @@ interface Manifest {
     viewsContainers: { activitybar: { id: string }[] };
     views: Record<string, { id: string }[]>;
     commands: { command: string }[];
+    configuration: {
+      properties: Record<string, { type?: string; default?: unknown; scope?: string }>;
+    };
   };
 }
 
@@ -61,6 +64,15 @@ describe('ids.ts matches package.json contributes', () => {
     const commands = manifest.contributes.commands.map((c) => c.command);
     expect(commands).not.toContain(ids.SHOW_REQUEST_COMMAND_ID);
     expect(commands).not.toContain(ids.REPLY_PERMISSION_COMMAND_ID);
+  });
+
+  // Issue #23. Scope `window` (user and workspace), unlike the executable path: the value can only
+  // pick among models the server already offers, and a workspace in Restricted Mode never reaches
+  // this extension (it declares no `untrustedWorkspaces` capability).
+  it('declares the default-model setting with its id, type, default and scope', () => {
+    const setting = manifest.contributes.configuration.properties[ids.DEFAULT_MODEL_SETTING];
+    expect(ids.DEFAULT_MODEL_SETTING).toBe(`${ids.CONFIG_SECTION}.${ids.DEFAULT_MODEL_KEY}`);
+    expect(setting).toMatchObject({ type: 'string', default: '', scope: 'window' });
   });
 
   it('has a constant for every contributed command', () => {

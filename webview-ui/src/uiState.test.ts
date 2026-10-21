@@ -66,4 +66,55 @@ describe('createUiState', () => {
     createUiState(api).save({ draft: 'd', history: ['h'], files: [] });
     expect(writes).toEqual([{ draft: 'd', history: ['h'], files: [] }]);
   });
+
+  // Issues #23/#24. Fabricated states: they pin the validation, not what VS Code stores.
+  it('restores a valid model/agent selection', () => {
+    const selection = {
+      sessionID: 'ses_1',
+      model: { providerID: 'opencode', id: 'big-pickle', variant: 'low' },
+      agent: 'plan',
+    };
+    expect(createUiState(fakeApi({ selection }).api).selection).toEqual(selection);
+  });
+
+  it.each([
+    ['no selection at all', {}],
+    ['a selection that is not an object', { selection: 'plan' }],
+    ['a null selection', { selection: null }],
+    ['an array', { selection: [] }],
+  ])('restores an empty selection for %s', (_name, saved) => {
+    expect(createUiState(fakeApi(saved).api).selection).toEqual({});
+  });
+
+  it('keeps only the well-formed parts of a selection', () => {
+    const state = createUiState(
+      fakeApi({
+        selection: { sessionID: '', model: { providerID: 'p' }, agent: 7 },
+      }).api,
+    );
+    expect(state.selection).toEqual({});
+    const partly = createUiState(
+      fakeApi({
+        selection: {
+          sessionID: 'ses_1',
+          model: { providerID: 'p', id: 'm', variant: '' },
+          agent: 'plan',
+        },
+      }).api,
+    );
+    expect(partly.selection).toEqual({ sessionID: 'ses_1', agent: 'plan' });
+  });
+
+  it('writes the selection when given one', () => {
+    const { api, writes } = fakeApi(undefined);
+    createUiState(api).save({
+      draft: '',
+      history: [],
+      files: [],
+      selection: { sessionID: 'ses_1', agent: 'plan' },
+    });
+    expect(writes).toEqual([
+      { draft: '', history: [], files: [], selection: { sessionID: 'ses_1', agent: 'plan' } },
+    ]);
+  });
 });

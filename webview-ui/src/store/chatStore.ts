@@ -35,15 +35,24 @@
  *    not disable Send. A page is accepted only if it answers the LAST query (`browser.requestId`),
  *    so typing quickly cannot show the rows of an older search. `session.removed` also drops the
  *    request cards of that session: the server deletes its pending requests WITHOUT a `*.replied`.
+ *  - E5-model-agent-selectors (issues #23/#24) adds the `catalog` (models, providers, selectable
+ *    agents, replaced whole by each `catalog` message) and the user's `selection` DRAFT: the model
+ *    and agent picked for the NEXT prompt. The draft belongs to one session (`selection.sessionID`,
+ *    `undefined` before the first prompt creates it) and is emptied whenever a snapshot or a removal
+ *    changes which session is open; a snapshot that keeps the same open session leaves it alone.
+ *    Nothing is sent to the host when the user picks: `prompt.send` carries the choice (decision of
+ *    21/10/2026, Engram #1012). Alternative discarded: keep it only in the server's session.
  * VERIFIED by `chatStore.test.ts` with fabricated messages (confirms this logic, not the host
  * contract). UNVERIFIED in a real webview until the F5 of issue #14.
  */
 import { batch } from 'solid-js';
 import { createStore, produce, reconcile } from 'solid-js/store';
 import type {
+  Catalog,
   ErrorInfo,
   FormAsk,
   MessageInfo,
+  ModelRef,
   Part,
   PermissionAsk,
   RequestResolution,
@@ -131,9 +140,24 @@ export interface SessionOp {
   requestId: string;
 }
 
+/**
+ * The model and agent the user picked for the next prompt (issues #23/#24). `sessionID` is the
+ * session that was open when they picked, `undefined` for a session not created yet; a field left
+ * `undefined` means "nothing picked", and the selectors fall back to the session and the catalog.
+ */
+export interface SelectionDraft {
+  sessionID: string | undefined;
+  model: ModelRef | undefined;
+  agent: string | undefined;
+}
+
 /** Everything the UI reads. */
 export interface ChatState {
   connection: ConnectionState;
+  /** Models, providers and selectable agents of the server; `undefined` until the host sends it. */
+  catalog: Catalog | undefined;
+  /** The unsent model/agent choice. See {@link SelectionDraft}. */
+  selection: SelectionDraft;
   sessions: { [sessionID: string]: SessionSummary };
   statuses: { [sessionID: string]: SessionStatus };
   /** The session list of the picker (issue #20). */
@@ -190,7 +214,15 @@ export interface ChatStore {
   addDraftFiles: (files: readonly AttachmentRef[]) => void;
   /** Removes one draft attachment (the chip's remove button). */
   removeDraftFile: (uri: string) => void;
-  /** Returns the draft attachments and empties the list (the prompt is being sent). */
+  /**
+   * Returns the draft attachments and empties the list (the prompt is being sent).
+   *
+   * The result is PLAIN `{uri, name}` copies, never the store's own elements: those are Proxies
+   * and `postMessage` throws `DataCloneError` on a Proxy (the same mechanism that hit the model
+   * pick). VERIFIED with a probe on solid-js/store (browser build) in review #1015, and by the
+   * `structuredClone` cases in `App.test.tsx` (mutation-checked); a real VS Code is exercised by
+   * the attach step of `test:visual`.
+   */
   takeDraftFiles: () => AttachmentRef[];
   /**
    * Marks the card of `askId` as waiting for the server (reply or cancel with `requestId`) and
@@ -205,6 +237,15 @@ export interface ChatStore {
   clearResolved: () => void;
   /** Forgets the pending `ui.focus` target (the dock carried it out). */
   clearFocusTarget: () => void;
+  /** Picks the model for the next prompt of the open session (no message goes to the host). */
+  selectModel: (model: ModelRef) => void;
+  /** Picks the agent for the next prompt of the open session (no message goes to the host). */
+  selectAgent: (agent: string) => void;
+  /**
+   * Puts back the draft persisted before the view was hidden. It survives only if the first
+   * snapshot opens the same session it belonged to (otherwise the snapshot empties it).
+   */
+  restoreSelection: (saved: SelectionDraft) => void;
 }
 
 /** Empty open view: no session yet. */
@@ -219,6 +260,8 @@ function emptyOpen(): OpenView {
 export function createChatStore(): ChatStore {
   const [state, setState] = createStore<ChatState>({
     connection: { state: 'starting' },
+    catalog: undefined,
+    selection: { sessionID: undefined, model: undefined, agent: undefined },
     sessions: {},
     statuses: {},
     browser: {
@@ -305,7 +348,17 @@ export function createChatStore(): ChatStore {
     );
   };
 
+  /** Empties the draft unless it belongs to `sessionID` (the session that is open now). */
+  const dropForeignSelection = (sessionID: string | undefined): void => {
+    if (state.selection.sessionID === sessionID) return;
+    setState('selection', { sessionID, model: undefined, agent: undefined });
+  };
+
   const handlers: Handlers<HostToWebview> = {
+    catalog: (m) => {
+      setState('catalog', m.catalog);
+    },
+
     'connection.state': (m) => {
       batch(() => {
         setState('connection', reconcile(m.connection));
@@ -340,6 +393,7 @@ export function createChatStore(): ChatStore {
         ),
       );
       rebuildIndexes();
+      dropForeignSelection(open?.sessionID);
       setState(
         'resolutions',
         reconcile(Object.fromEntries(snapshot.resolutions.map((entry) => [entry.id, entry]))),
@@ -426,6 +480,7 @@ export function createChatStore(): ChatStore {
           setState('open', reconcile(emptyOpen(), { key: 'id' }));
           setState('resolutions', reconcile({}));
           rebuildIndexes();
+          dropForeignSelection(undefined);
         }
       });
     },
@@ -634,7 +689,9 @@ export function createChatStore(): ChatStore {
       setState('draftFiles', (files) => files.filter((file) => file.uri !== uri));
     },
     takeDraftFiles: () => {
-      const taken = [...state.draftFiles];
+      // Plain copies, not the store's own elements: those are Proxies and `postMessage` cannot
+      // structured-clone a Proxy (DataCloneError).
+      const taken = state.draftFiles.map((file) => ({ uri: file.uri, name: file.name }));
       setState('draftFiles', []);
       return taken;
     },
@@ -655,6 +712,19 @@ export function createChatStore(): ChatStore {
     },
     clearFocusTarget: () => {
       setState('focusTarget', undefined);
+    },
+    selectModel: (model) => {
+      setState('selection', { sessionID: state.open.sessionID, model });
+    },
+    selectAgent: (agent) => {
+      setState('selection', { sessionID: state.open.sessionID, agent });
+    },
+    restoreSelection: (saved) => {
+      setState('selection', {
+        sessionID: saved.sessionID,
+        model: saved.model,
+        agent: saved.agent,
+      });
     },
   };
 }

@@ -8,6 +8,14 @@ import { nextRequestId, PromptInput } from './chat/PromptInput';
 import { createHistory } from './chat/promptHistory';
 import { StatusBar } from './chat/StatusBar';
 import { RequestDock } from './requests/RequestDock';
+import { AgentToggle } from './selectors/AgentToggle';
+import { ModelPicker } from './selectors/ModelPicker';
+import {
+  effectiveAgent,
+  effectiveModel,
+  selectionToSend,
+  type SelectionInput,
+} from './selectors/selection';
 import { deriveActivity } from './store/activity';
 import type { ChatStore } from './store/chatStore';
 import type { UiState } from './uiState';
@@ -59,6 +67,13 @@ interface LastFork {
  * pending request, so a prompt cannot go to the old session in the middle of the switch. It also
  * hands `openSession` to the subagent links of the conversation.
  *
+ * Issues #23/#24 put the agent switch and the model picker in the prompt row (decision of 21/10/2026,
+ * Engram #1012: both in the row, not the header) and make the choice a DRAFT in the store:
+ * `sendPrompt` (Send and Retry alike) adds the model and agent the next prompt would use
+ * (`selectionToSend`) and the host validates and applies them just before the prompt. Nothing is
+ * sent to the host when the user picks. The draft is persisted with the prompt draft, keyed by the
+ * open session, and restored into the store at start.
+ *
  * Decisions: Send is disabled while the session is busy and Stop takes its place (plan decision
  * 6; `steer`/`queue` while busy is not offered); every prompt goes with `delivery: 'queue'`;
  * Retry resends the text of the last user message of the open session, with the attachments of
@@ -76,6 +91,11 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   // emitted for as long as it lives, so they are still accepted; if the host restarted, the send
   // fails with AttachmentRejected and the user removes the chip.
   props.store.addDraftFiles(props.uiState.files);
+  props.store.restoreSelection({
+    sessionID: props.uiState.selection.sessionID,
+    model: props.uiState.selection.model,
+    agent: props.uiState.selection.agent,
+  });
   const [draft, setDraft] = createSignal(props.uiState.draft);
   const [announcement, setAnnouncement] = createSignal('');
   let focusInput: (() => void) | undefined;
@@ -123,19 +143,40 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   };
   const connected = () => state.connection.state === 'connected';
   const canSend = () => connected() && !busy() && state.pending.length === 0;
+  /** What the selectors and the next `prompt.send` read: catalog, open session row and draft. */
+  const selectionInput = (): SelectionInput => ({
+    catalog: state.catalog,
+    hasSession: state.open.sessionID !== undefined,
+    row: state.open.sessionID === undefined ? undefined : state.sessions[state.open.sessionID],
+    draft: { model: state.selection.model, agent: state.selection.agent },
+  });
 
-  /** Saves the draft, the history and the pending attachments; also tracked as an effect. */
+  /** Saves the draft, the history, the pending attachments and the model/agent draft; also tracked as an effect. */
   const persist = (): void => {
+    const picked = state.selection;
+    // Only a real pick is worth keeping: a bare session id says nothing the snapshot will not.
+    const hasPick = picked.model !== undefined || picked.agent !== undefined;
     props.uiState.save({
       draft: draft(),
       history: history.entries(),
       files: state.draftFiles.map((file) => ({ uri: file.uri, name: file.name })),
+      ...(hasPick
+        ? {
+            selection: {
+              ...(picked.sessionID === undefined ? {} : { sessionID: picked.sessionID }),
+              ...(picked.model === undefined ? {} : { model: { ...picked.model } }),
+              ...(picked.agent === undefined ? {} : { agent: picked.agent }),
+            },
+          }
+        : {}),
     });
   };
   createEffect(persist);
 
+  // Plain copies: Retry and fork put these in a `postMessage`, which cannot clone a store Proxy.
   createEffect(() => {
-    for (const file of state.draftFiles) knownFiles.set(file.uri, file);
+    for (const file of state.draftFiles)
+      knownFiles.set(file.uri, { uri: file.uri, name: file.name });
   });
 
   // A failed `prompt.send` gives the text and the attachments back. It reads `pending` and
@@ -217,6 +258,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       text,
       delivery: 'queue',
       files,
+      ...selectionToSend(selectionInput()),
     });
     focusInput?.();
   };
@@ -323,6 +365,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
           >
             <MessageList
               open={state.open}
+              catalog={state.catalog}
               resolutions={state.resolutions}
               busy={busy()}
               canRetry={lastUser() !== undefined}
@@ -365,6 +408,22 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
           onFocusReady={(focus) => {
             focusInput = focus;
           }}
+          selectors={
+            <>
+              <AgentToggle
+                catalog={state.catalog}
+                effective={effectiveAgent(selectionInput())}
+                disabled={!connected()}
+                onSelect={props.store.selectAgent}
+              />
+              <ModelPicker
+                catalog={state.catalog}
+                effective={effectiveModel(selectionInput())}
+                disabled={!connected()}
+                onSelect={props.store.selectModel}
+              />
+            </>
+          }
         />
       </div>
     </HostContext.Provider>

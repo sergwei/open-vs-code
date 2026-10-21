@@ -1,4 +1,4 @@
-import { For, Show } from 'solid-js';
+import { For, Show, type JSX } from 'solid-js';
 import type { AttachmentRef } from '../../../src/shared/protocol';
 import type { PromptHistory } from './promptHistory';
 
@@ -28,6 +28,8 @@ export function nextRequestId(): string {
  * HYPOTHESIS that the Chromium of VS Code 1.105+ supports it (Chrome has it since 123); where
  * it does not, the box keeps its minimum height and still works. `onFocusReady` hands the parent
  * a function that focuses the textarea, used after sending, stopping or retrying.
+ * The action row starts with the `selectors` slot (agent switch and model picker, E5), then Attach
+ * and Send/Stop; the row wraps in a narrow side bar (CSS `flex-wrap`).
  * VERIFIED by `PromptInput.test.tsx` in jsdom; keyboard feel, the auto-grow and the look are
  * UNVERIFIED until the F5.
  */
@@ -44,6 +46,11 @@ export function PromptInput(props: {
   onAttach(): void;
   onRemoveFile(uri: string): void;
   onFocusReady?(focus: () => void): void;
+  /**
+   * The agent and model selectors (issues #23/#24), drawn at the start of the action row. They are
+   * buttons and radios INSIDE this form, so their Enter must not submit it (each one cancels it).
+   */
+  selectors?: JSX.Element;
 }) {
   let textarea: HTMLTextAreaElement | undefined;
 
@@ -137,6 +144,7 @@ export function PromptInput(props: {
         onKeyDown={onKeyDown}
       />
       <div class="prompt-actions">
+        <div class="prompt-selectors">{props.selectors}</div>
         <button
           type="button"
           class="secondary"

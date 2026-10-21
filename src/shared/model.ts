@@ -29,8 +29,62 @@ export type JsonObject = { [key: string]: JsonValue };
  */
 export type ErrorInfo = { code: string; message: string; detail?: string };
 
-/** Provider/model pair as opencode names it. */
+/**
+ * Provider/model pair as opencode names it. `id` is the CATALOG id (`ModelInfo.id`), not the
+ * provider's API model id. An absent `variant` means "default": the host normalizes the
+ * `variant: "default"` the server echoes back (VERIFIED, issue #23 spike, opencode 2.0.32,
+ * Windows 11, 21/10/2026).
+ */
 export type ModelRef = { providerID: string; id: string; variant?: string };
+
+/**
+ * One model of the catalog the user can pick (issue #23), as the host maps `ModelInfo` of
+ * `GET /api/model`. `free` is true when every cost entry is zero for both input and output.
+ * `contextLimit` is `limit.context` in tokens. The server only lists ENABLED models of AVAILABLE
+ * providers, in its own order (newest first, free ones first when no session is started).
+ * VERIFIED shape against a real opencode 2.0.32 (issue #23 spike, Windows 11, 21/10/2026: ten
+ * models, all of provider `opencode`, all free); a paid provider was never listed (no credentials).
+ */
+export type ModelOption = {
+  providerID: string;
+  id: string;
+  name: string;
+  status: 'alpha' | 'beta' | 'deprecated' | 'active';
+  contextLimit: number;
+  free: boolean;
+  variants: string[];
+};
+
+/** Provider that owns some models of the catalog (`GET /api/provider`, available ones only). */
+export type ProviderOption = { id: string; name: string };
+
+/**
+ * Agent the user can choose (issue #24): only the SELECTABLE ones (`mode !== "subagent"` and not
+ * `hidden`, the filter of opencode's own `agent.ts` at v2.0.32). `id` ("build") is what a session
+ * and `switchAgent` use; `name` ("Build") is only a label.
+ */
+export type AgentOption = { id: string; name: string; description?: string };
+
+/**
+ * What the host knows about the server's models and agents (issues #23/#24), pushed to the
+ * webview in the `catalog` message and replaced whole whenever it reloads.
+ *
+ * `serverDefault` is `model.default()` (the config `model` if enabled, else the first available);
+ * `defaultAgent` is the first of `agent.list()` (the server puts the default first);
+ * `preferredModel` is what the host proposes for a NEW session after applying the precedence
+ * `openVsCode.defaultModel` setting > last used model > nothing (then the server default applies).
+ * It is always one of `models`. Provenance: VERIFIED against a real opencode 2.0.32 (issue
+ * #23/#24 spike, Windows 11, 21/10/2026); the server never validates a model or agent choice, so
+ * the host checks against this very catalog before applying one.
+ */
+export type Catalog = {
+  models: ModelOption[];
+  providers: ProviderOption[];
+  agents: AgentOption[];
+  serverDefault?: ModelRef;
+  defaultAgent?: string;
+  preferredModel?: ModelRef;
+};
 
 /** Token counters of one assistant message. */
 export type TokenUsage = {

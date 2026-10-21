@@ -60,5 +60,11 @@ export const OPENCODE_PATH_KEY = 'opencodePath';
 /** Full id of the opencode path setting (`contributes.configuration.properties`). */
 export const OPENCODE_PATH_SETTING = `${CONFIG_SECTION}.${OPENCODE_PATH_KEY}`;
 
+/** Key of the default-model setting (`provider/model`) inside {@link CONFIG_SECTION} (issue #23). */
+export const DEFAULT_MODEL_KEY = 'defaultModel';
+
+/** Full id of the default-model setting (`contributes.configuration.properties`). */
+export const DEFAULT_MODEL_SETTING = `${CONFIG_SECTION}.${DEFAULT_MODEL_KEY}`;
+
 /** Display name of the log output channel. */
 export const LOG_CHANNEL_NAME = 'OpenCode';

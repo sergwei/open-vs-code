@@ -4,7 +4,11 @@ import { createAttention } from './attention';
 import { ChatController, type FocusTarget } from './chatController';
 import { registerChatView } from './chatViewProvider';
 import { createEditorActions } from './editorActions';
+import type { ModelRef } from '../shared/model';
 import {
+  CONFIG_SECTION,
+  DEFAULT_MODEL_KEY,
+  DEFAULT_MODEL_SETTING,
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
   MANAGE_PERMISSIONS_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
@@ -25,6 +29,27 @@ import { confirmSessionDelete } from './sessionUi';
  * never published, and a session belongs to the folder it was created in.
  */
 const OPEN_SESSION_BY_FOLDER_KEY = 'openVsCode.openSessionByFolder';
+
+/**
+ * `globalState` key of the model the last accepted prompt was sent with (issue #23): a `ModelRef`.
+ * GLOBAL on purpose, not per folder (decision of the planner, revocable): it is a preference of
+ * the user, like the "recent models" of opencode's own app, and it is checked against the catalog
+ * of the server in use before it is proposed, so a model another server lacks is skipped.
+ */
+const LAST_MODEL_KEY = 'openVsCode.lastModel';
+
+/**
+ * Reads the last model used from `globalState`. The stored value is untrusted (an old version or
+ * another extension host could have written anything): only an object with non-empty string
+ * `providerID` and `id` counts, and a variant is dropped because the UI offers none.
+ */
+function readLastModel(context: vscode.ExtensionContext): ModelRef | undefined {
+  const stored = context.globalState.get<unknown>(LAST_MODEL_KEY);
+  if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) return undefined;
+  const { providerID, id } = stored as Record<string, unknown>;
+  if (!isFilled(providerID) || !isFilled(id)) return undefined;
+  return { providerID, id };
+}
 
 /** Reads the per-folder map; an absent or malformed value is an empty map. */
 function readSessionMap(context: vscode.ExtensionContext): Record<string, string> {
@@ -73,8 +98,12 @@ function parseReply(
  * Wires the chat (issues #9/#14) into VS Code: controller, view provider, server-state
  * subscription, the editor actions of the chat (`editorActions.ts`, phase 2), the attention
  * feature with its internal commands (issue #19), the saved-permissions command (issue #18), the
- * native confirmation of a session delete (`sessionUi.ts`, issue #20) and, only under test, the
- * message-injection command.
+ * native confirmation of a session delete (`sessionUi.ts`, issue #20), the model preferences of
+ * issue #23 (the `openVsCode.defaultModel` setting, re-read when it changes without touching the
+ * server, and the last model used in `globalState`) and, only under test, the message-injection
+ * command. VERIFIED that the setting is read and ignored/applied as the unit tests say, and that
+ * a change of it republishes the catalog, by the `test:visual` step 11 (real VS Code 1.143.0,
+ * Windows 11, run of 21/10/2026: the log of the run names the 1.143.0 archive); the `globalState` write surviving a window reload is UNVERIFIED.
  *
  * The controller starts its client and event stream when the manager reaches `running` and stops
  * them in any other state; the current state is applied right away, because registration can
@@ -141,6 +170,14 @@ export function registerChat(
     attention,
     savedPermissions: { pickToRevoke: pickSavedPermissionsToRevoke },
     sessions: { confirmDelete: confirmSessionDelete },
+    preferences: {
+      defaultModel: () =>
+        vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>(DEFAULT_MODEL_KEY),
+      lastModel: () => readLastModel(context),
+      setLastModel: async (ref) => {
+        await context.globalState.update(LAST_MODEL_KEY, ref);
+      },
+    },
     server: {
       restart: () => {
         void restartServerWithFeedback(manager);
@@ -170,6 +207,9 @@ export function registerChat(
     view.disposable,
     manager.onDidChangeState((state) => {
       controller.onServerState(state);
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration(DEFAULT_MODEL_SETTING)) controller.onPreferencesChanged();
     }),
     { dispose: () => controller.dispose() },
     { dispose: () => attention.dispose() },

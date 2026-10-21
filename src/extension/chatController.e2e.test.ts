@@ -25,6 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { ModelRef } from '../shared/model';
 import type { HostToWebview } from '../shared/protocol';
 import { ChatController } from './chatController';
 import { createOpencodeClient } from './opencodeClient';
@@ -82,6 +83,7 @@ async function boot(
   const posted: HostToWebview[] = [];
   const remembered: Array<string | undefined> = [];
   const attention: Array<readonly PendingSummary[]> = [];
+  let lastModel: ModelRef | undefined;
   const controller = new ChatController({
     createClient: createOpencodeClient,
     editor: {
@@ -107,6 +109,14 @@ async function boot(
     },
     savedPermissions: { pickToRevoke: () => Promise.resolve([]) },
     sessions: { confirmDelete },
+    preferences: {
+      defaultModel: () => undefined,
+      lastModel: () => lastModel,
+      setLastModel: (ref) => {
+        lastModel = ref;
+        return Promise.resolve();
+      },
+    },
     server: { restart: () => undefined, showLogs: () => undefined },
   });
   controllers.push(controller);
@@ -929,6 +939,134 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     expect(lastSnapshot(posted).sessions.find((row) => row.id === childID)).toMatchObject({
       parentID,
     });
+  }, 20_000);
+
+  // E5 / issues #23 and #24. The fixture copies what the planner spike saw in a real opencode 2.0.32
+  // (catalog answers `{location, data}`, switches that validate nothing, `agent-switched` /
+  // `model-switched` messages, `variant: "default"` echoed); a pass proves our wiring with the real
+  // client (the new methods exist and send these bodies), not that a real server behaves so. The
+  // real-server counterpart is the `model selected` case of `realOpencode.test.ts` (opt-in).
+  const GLM = { providerID: 'opencode', id: 'glm-5.3-flash-free' };
+  const PICKLE = { providerID: 'opencode', id: 'big-pickle' };
+
+  const catalogsOf = (posted: HostToWebview[]) =>
+    posted.flatMap((m) => (m.type === 'catalog' ? [m.catalog] : []));
+
+  /** Sends a prompt with a choice and waits for the `idleCount`-th idle. */
+  async function turnWith(
+    controller: ChatController,
+    posted: HostToWebview[],
+    idleCount: number,
+    choice: { model?: ModelRef; agent?: string; sessionID?: string },
+  ) {
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: `c${String(idleCount)}`,
+      text: 'hello',
+      delivery: 'queue',
+      files: [],
+      ...choice,
+    });
+    await waitUntil(
+      () =>
+        posted.filter((m) => m.type === 'session.status' && m.status.type === 'idle').length >=
+        idleCount,
+      `turn ${String(idleCount)} to finish`,
+    );
+  }
+
+  it('E5: publishes the catalog (real client, four GETs) once the stream connects', async () => {
+    const { posted } = await bootSessions();
+    await waitUntil(() => catalogsOf(posted).length > 0, 'the catalog');
+    const catalog = catalogsOf(posted)[0];
+    expect(catalog?.models.map((m) => m.id)).toEqual(['big-pickle', 'glm-5.3-flash-free']);
+    expect(catalog?.models[0]).toMatchObject({
+      free: true,
+      contextLimit: 200000,
+      variants: ['low', 'high'],
+    });
+    expect(catalog?.providers).toEqual([{ id: 'opencode', name: 'OpenCode' }]);
+    expect(catalog?.agents.map((a) => a.id)).toEqual(['build', 'plan']);
+    expect(catalog?.serverDefault).toEqual(PICKLE);
+    expect(catalog?.defaultAgent).toBe('build');
+  }, 20_000);
+
+  it('E5: a new session is created with the chosen agent and model, and that is what answers', async () => {
+    const { controller, posted, other } = await bootSessions();
+    await turnWith(controller, posted, 1, { model: GLM, agent: 'plan' });
+    const sessionID = lastSnapshot(posted).open?.sessionID ?? '';
+
+    const assistant = posted.find(
+      (m) => m.type === 'message.upserted' && m.message.kind === 'assistant',
+    );
+    expect(assistant).toMatchObject({ message: { agent: 'plan', model: GLM } });
+    expect(lastSnapshot(posted).sessions.find((row) => row.id === sessionID)).toMatchObject({
+      agent: 'plan',
+      model: GLM,
+    });
+    // Created with the choice: no switch message in the history of the server.
+    // (The fixture answers newest first, as the real server does for `order: 'desc'`.)
+    const history = await other.message.list({ sessionID, order: 'desc', limit: 50 });
+    expect(history.data.map((m) => m.type).reverse()).toEqual(['user', 'assistant']);
+
+    // The same choice again costs nothing: no `agent-switched`, no `model-switched`.
+    await turnWith(controller, posted, 2, { model: GLM, agent: 'plan', sessionID });
+    const again = await other.message.list({ sessionID, order: 'desc', limit: 50 });
+    expect(again.data.some((m) => m.type === 'agent-switched' || m.type === 'model-switched')).toBe(
+      false,
+    );
+  }, 30_000);
+
+  it('E5: changing agent and model in an existing session switches both before the prompt, and reopening shows them', async () => {
+    const { controller, posted, other } = await bootSessions();
+    await turnWith(controller, posted, 1, { model: GLM, agent: 'plan' });
+    const sessionID = lastSnapshot(posted).open?.sessionID ?? '';
+
+    await turnWith(controller, posted, 2, { model: PICKLE, agent: 'build', sessionID });
+    const upserts = posted.flatMap((m) =>
+      m.type === 'session.upserted' && m.session.id === sessionID ? [m.session] : [],
+    );
+    expect(upserts.at(-1)).toMatchObject({ agent: 'build', model: PICKLE });
+    const history = await other.message.list({ sessionID, order: 'desc', limit: 50 });
+    const kinds = history.data.map((m) => m.type).reverse();
+    expect(kinds).toEqual([
+      'user',
+      'assistant',
+      'agent-switched',
+      'model-switched',
+      'user',
+      'assistant',
+    ]);
+    const assistants = posted.flatMap((m) =>
+      m.type === 'message.upserted' && m.message.kind === 'assistant' ? [m.message] : [],
+    );
+    expect(assistants.at(-1)).toMatchObject({ agent: 'build', model: PICKLE });
+
+    await controller.handle({ type: 'session.new', requestId: 'n1' });
+    await controller.handle({ type: 'session.open', requestId: 'o1', sessionID });
+    expect(lastSnapshot(posted).sessions.find((row) => row.id === sessionID)).toMatchObject({
+      agent: 'build',
+      model: PICKLE,
+    });
+  }, 30_000);
+
+  it('E5: a model the catalog does not list is refused and the server is not touched', async () => {
+    const { controller, posted, other } = await bootSessions();
+    const before = await other.session.list({});
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'bad',
+      text: 'hello',
+      delivery: 'queue',
+      files: [],
+      model: { providerID: 'opencode', id: 'nope' },
+    });
+    expect(posted.filter((m) => m.type === 'request.result').at(-1)).toMatchObject({
+      requestId: 'bad',
+      error: { code: 'ModelUnavailable' },
+    });
+    const after = await other.session.list({});
+    expect(after.data).toHaveLength(before.data.length);
   }, 20_000);
 
   it('reconnects and sends a second snapshot when the stream is cut', async () => {
