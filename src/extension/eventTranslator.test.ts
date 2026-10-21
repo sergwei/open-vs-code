@@ -236,6 +236,33 @@ describe('sessions', () => {
     const t = createEventTranslator();
     expect(t.translate(ev('session.renamed', { sessionID: 'ses_new', title: 'T' }))).toEqual([]);
   });
+
+  // Issue #20. The snapshot mirrors only the 50 newest sessions; a page of the session list can show
+  // an older one, and its rename must still reach the webview. Fabricated rows.
+  it('mirror() lets a rename of a row from a browsed page through, without emptying the mirror', () => {
+    const t = createEventTranslator();
+    t.seed({ sessions: [{ id: 'ses_snap', createdAt: 1, updatedAt: 2 }], messages: [] });
+    t.mirror([{ id: 'ses_old', title: 'Before', createdAt: 3, updatedAt: 4 }]);
+    expect(
+      t.translate(ev('session.renamed', { sessionID: 'ses_old', title: 'After' }, 9000)),
+    ).toEqual([
+      {
+        type: 'session.upserted',
+        session: { id: 'ses_old', title: 'After', createdAt: 3, updatedAt: 9000 },
+      },
+    ]);
+    // The row the snapshot mirrored is still there.
+    expect(
+      t.translate(ev('session.renamed', { sessionID: 'ses_snap', title: 'S' }, 9100)),
+    ).toHaveLength(1);
+  });
+
+  it('a later seed() replaces the mirror again, which bounds its size', () => {
+    const t = createEventTranslator();
+    t.mirror([{ id: 'ses_old', createdAt: 3, updatedAt: 4 }]);
+    t.seed({ sessions: [], messages: [] });
+    expect(t.translate(ev('session.renamed', { sessionID: 'ses_old', title: 'T' }))).toEqual([]);
+  });
 });
 
 describe('tools', () => {

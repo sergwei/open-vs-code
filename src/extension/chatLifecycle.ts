@@ -16,6 +16,7 @@ import { safeLog } from './opencodeServer';
 import { pickSavedPermissionsToRevoke } from './savedPermissionsUi';
 import { restartServerWithFeedback } from './serverLifecycle';
 import type { ServerManager } from './serverManager';
+import { confirmSessionDelete } from './sessionUi';
 
 /**
  * `workspaceState` key of the sessions this extension opened last, one per served folder:
@@ -71,8 +72,9 @@ function parseReply(
 /**
  * Wires the chat (issues #9/#14) into VS Code: controller, view provider, server-state
  * subscription, the editor actions of the chat (`editorActions.ts`, phase 2), the attention
- * feature with its internal commands (issue #19), the saved-permissions command (issue #18) and,
- * only under test, the message-injection command.
+ * feature with its internal commands (issue #19), the saved-permissions command (issue #18), the
+ * native confirmation of a session delete (`sessionUi.ts`, issue #20) and, only under test, the
+ * message-injection command.
  *
  * The controller starts its client and event stream when the manager reaches `running` and stops
  * them in any other state; the current state is applied right away, because registration can
@@ -138,6 +140,7 @@ export function registerChat(
     },
     attention,
     savedPermissions: { pickToRevoke: pickSavedPermissionsToRevoke },
+    sessions: { confirmDelete: confirmSessionDelete },
     server: {
       restart: () => {
         void restartServerWithFeedback(manager);

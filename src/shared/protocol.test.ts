@@ -8,6 +8,9 @@
  * E3-resolved-history (#56/#18): the samples also carry `Snapshot.resolutions` and the optional
  * `resolution` of `*.resolved`; `isHostToWebview` is shallow, so they only need to stay accepted.
  *
+ * E4-session-management (#20): samples and bounds for `sessions.query`, `session.rename`,
+ * `session.delete` and `sessions.page`.
+ *
  * ALL DATA HERE IS FABRICATED by hand from the types. These tests prove the logic of the
  * guards; they do NOT prove that opencode emits these shapes (that needs a real `opencode
  * serve`, issues #8/#9) nor that VS Code delivers them unchanged (issue #2, F5).
@@ -21,6 +24,8 @@ import {
   HOST_TO_WEBVIEW_TYPES,
   isHostToWebview,
   isWebviewToHost,
+  MAX_SESSION_SEARCH_LENGTH,
+  MAX_SESSION_TITLE_LENGTH,
   WEBVIEW_TO_HOST_TYPES,
   type Handlers,
   type HostToWebview,
@@ -134,6 +139,14 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
     resolution: formResolution,
   },
   'request.result': { type: 'request.result', requestId: 'r1' },
+  'sessions.page': {
+    type: 'sessions.page',
+    requestId: 'r1',
+    search: 'beta',
+    sessions: [session],
+    append: false,
+    hasMore: true,
+  },
   'attachments.picked': {
     type: 'attachments.picked',
     requestId: 'r1',
@@ -148,6 +161,14 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   ready: { type: 'ready' },
   'session.new': { type: 'session.new', requestId: 'r1' },
   'session.open': { type: 'session.open', requestId: 'r1', sessionID: 's1' },
+  'sessions.query': { type: 'sessions.query', requestId: 'r1', search: 'beta', more: false },
+  'session.rename': {
+    type: 'session.rename',
+    requestId: 'r1',
+    sessionID: 's1',
+    title: 'A new title',
+  },
+  'session.delete': { type: 'session.delete', requestId: 'r1', sessionID: 's1' },
   'prompt.send': {
     type: 'prompt.send',
     requestId: 'r1',
@@ -254,6 +275,8 @@ describe('isWebviewToHost', () => {
     // Explicit cases for the ones the review found untested.
     for (const type of [
       'session.open',
+      'session.rename',
+      'session.delete',
       'session.abort',
       'permission.reply',
       'form.reply',
@@ -275,6 +298,34 @@ describe('isWebviewToHost', () => {
       isWebviewToHost({ ...base, text: 'hi', files: [{ uri: 'file:///a.ts', name: '' }] }),
     ).toBe(false);
     expect(isWebviewToHost({ type: 'clipboard.write', text: '' })).toBe(true);
+  });
+
+  // Issue #20. Fabricated messages: they pin the guard, not what the server does with a title.
+  // The blank-title case matters: the server answers `title: ""` by running the LLM title
+  // generator instead of clearing the title (VERIFIED by the planner spike, opencode 2.0.32).
+  it('bounds the session list and rename messages (issue #20)', () => {
+    const query = WEBVIEW_SAMPLES['sessions.query'];
+    const rename = WEBVIEW_SAMPLES['session.rename'];
+    expect(isWebviewToHost({ ...query, search: '' })).toBe(true);
+    expect(isWebviewToHost({ ...query, search: 'x'.repeat(MAX_SESSION_SEARCH_LENGTH) })).toBe(true);
+    expect(isWebviewToHost({ ...query, search: 'x'.repeat(MAX_SESSION_SEARCH_LENGTH + 1) })).toBe(
+      false,
+    );
+    expect(isWebviewToHost({ ...query, search: 3 })).toBe(false);
+    expect(isWebviewToHost({ ...query, more: 'yes' })).toBe(false);
+    expect(isWebviewToHost({ ...query, more: 1 })).toBe(false);
+    expect(isWebviewToHost({ ...rename, title: '   ' })).toBe(false);
+    expect(isWebviewToHost({ ...rename, title: '' })).toBe(false);
+    expect(isWebviewToHost({ ...rename, title: 5 })).toBe(false);
+    expect(isWebviewToHost({ ...rename, title: 'x'.repeat(MAX_SESSION_TITLE_LENGTH) })).toBe(true);
+    expect(isWebviewToHost({ ...rename, title: 'x'.repeat(MAX_SESSION_TITLE_LENGTH + 1) })).toBe(
+      false,
+    );
+    // Padding does not count: the host trims before storing.
+    expect(
+      isWebviewToHost({ ...rename, title: `  ${'x'.repeat(MAX_SESSION_TITLE_LENGTH)}  ` }),
+    ).toBe(true);
+    expect(isWebviewToHost({ ...WEBVIEW_SAMPLES['session.delete'], sessionID: '' })).toBe(false);
   });
 
   it('bounds editor.open line and column to safe integers >= 1', () => {

@@ -39,6 +39,10 @@ interface LastSend {
  * are not in the dock: `MessageList` shows them under their tool (E3-resolved-history), so sending
  * a prompt does not erase them.
  *
+ * Issue #20 adds the session list to the header (open, search, rename, delete; the host confirms a
+ * delete) and makes New session lazy. Deleting the open session leaves the view empty (the store
+ * does it on `session.removed`); the focus is not moved, because the user is inside the list.
+ *
  * Decisions: Send is disabled while the session is busy and Stop takes its place (plan decision
  * 6; `steer`/`queue` while busy is not offered); every prompt goes with `delivery: 'queue'`;
  * Retry resends the text of the last user message of the open session, with the attachments of
@@ -219,17 +223,30 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     props.send({ type: 'attachments.pick', requestId });
   };
 
-  /** Asks the host for a new session and opens it. */
+  /**
+   * "New session" is LAZY (issue #20, decision of 21/10/2026): the host creates nothing, it only
+   * forgets the open session, and the snapshot that follows empties the view; the first prompt then
+   * creates the session. The input gets the focus so the user can start typing at once.
+   */
   const newSession = (): void => {
     const requestId = nextRequestId();
     props.store.begin(requestId);
     props.send({ type: 'session.new', requestId });
+    focusInput?.();
+  };
+
+  /** Opens a session chosen in the session list (the same message the request dock uses). */
+  const openSession = (sessionID: string): void => {
+    const requestId = nextRequestId();
+    props.store.begin(requestId);
+    props.send({ type: 'session.open', requestId, sessionID });
+    focusInput?.();
   };
 
   return (
     <HostContext.Provider value={props.send}>
       <div class="app">
-        <Header state={state} onNewSession={newSession} />
+        <Header store={props.store} onNewSession={newSession} onOpenSession={openSession} />
         <main class="chat-main">
           <Show
             when={state.open.messages.length > 0}

@@ -1,5 +1,7 @@
 /*
- * Styles of the chat webview (issues #12, #15, #17, and from phase 3 #18/#44 for the request dock).
+ * Styles of the chat webview (issues #12, #15, #17, and from phase 3 #18/#44 for the request dock,
+ * and #20 for the session list dropdown: it uses the quickInput / widget / list variables, marks
+ * the open session with a bar and `aria-current`, and keeps its row actions reachable by Tab).
  * The request cards use the editorWidget variables for the surface, the warning border of
  * inputValidation for the frame and the `.primary` / `.secondary` buttons; they have no
  * transitions or animations, so reduced motion needs no extra rule for them.
@@ -115,6 +117,176 @@ button.secondary:hover:not(:disabled),
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---------- session list (issue #20) ---------- */
+
+/* Holds the header and the dropdown that hangs under it, over the conversation. */
+.header-area {
+  position: relative;
+}
+
+.session-picker {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  margin-top: 4px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 70vh;
+  box-sizing: border-box;
+  color: var(--vscode-quickInput-foreground, var(--vscode-foreground));
+  background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background));
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, transparent);
+}
+
+.session-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+}
+
+.session-search::placeholder,
+.session-rename-input::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+.session-status {
+  margin: 0;
+  padding: 2px 4px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.session-groups {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.session-group-title {
+  margin: 6px 4px 2px;
+  font-size: 0.85em;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--vscode-descriptionForeground);
+}
+
+.session-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.session-row {
+  position: relative; /* the row actions are laid over its right end */
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-left: 3px solid transparent;
+}
+
+.session-row:hover,
+.session-row:focus-within {
+  background: var(--vscode-list-hoverBackground);
+}
+
+/* The open session: a bar and a tint, plus aria-current for assistive technology. */
+.session-row.current {
+  background: var(--vscode-list-inactiveSelectionBackground);
+  border-left-color: var(--vscode-focusBorder);
+}
+
+.session-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 3px 6px;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  border: 0;
+}
+
+.session-title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* A row the host is renaming or deleting: dimmed, and the script ignores its buttons. */
+.session-row[aria-busy='true'] button {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* "Running" and friends are words, so the state never depends on colour alone. */
+.session-badge {
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+/*
+ * Hidden until hover or focus, but still reachable with Tab (opacity, not display). Laid over the
+ * right end of the row instead of beside the title: in the narrow side bar they would take half
+ * of the row and cut every title even when nobody is pointing at it (seen in the first
+ * `test:visual` screenshots of step 9, 21/10/2026).
+ */
+.session-row-actions {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  background: var(--vscode-list-hoverBackground);
+}
+
+.session-row:hover .session-row-actions,
+.session-row:focus-within .session-row-actions {
+  opacity: 1;
+}
+
+.session-rename-input {
+  flex: 1;
+  min-width: 0;
+  margin: 2px 6px;
+  padding: 2px 4px;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-focusBorder);
+}
+
+.session-more {
+  align-self: center;
+}
+
+/* Locked while a page loads, but still focusable (aria-disabled, not disabled). */
+.session-more[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* ---------- conversation ---------- */
@@ -891,8 +1063,23 @@ button.secondary:hover:not(:disabled),
 [class*='vscode-high-contrast'] .request-feedback textarea,
 [class*='vscode-high-contrast'] button.primary,
 [class*='vscode-high-contrast'] button.secondary,
+[class*='vscode-high-contrast'] .session-picker,
+[class*='vscode-high-contrast'] .session-search,
 [class*='vscode-high-contrast'] .code-action {
   border-color: var(--vscode-contrastBorder);
+}
+
+/* The open session needs a visible mark that does not rely on a tint: a bar and an outline. */
+[class*='vscode-high-contrast'] .session-row.current {
+  background: transparent;
+  outline: 1px solid var(--vscode-contrastBorder);
+  border-left-color: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+}
+
+[class*='vscode-high-contrast'] .session-row:hover,
+[class*='vscode-high-contrast'] .session-row:focus-within {
+  background: transparent;
+  outline: 1px dashed var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
 }
 
 [class*='vscode-high-contrast'] .message-assistant {

@@ -15,6 +15,13 @@
 // reconnecting banner during a scheduled restart, the session remembered per folder, and that the
 // log never carries the resources of a permission nor the text of an answer.
 //
+// E4-session-management (issue #20), at the end of the file: the paged session list (first page
+// input, cursor-only "more", the cursor never reaching the webview, `hasMore` from the page size),
+// rename (trim, a blank title never reaches the server), delete (the user is asked first, with the
+// title and running flag read from the server), the open session being deleted (forgotten with its
+// memory, a notice only when the delete was not ours, its pending requests dropped) and the lazy
+// "New session".
+//
 // Provenance of the data: a FAKE `ChatApi` with hand-made JSON shaped like the REST answers a
 // real opencode 2.0.32 gave the planner (2026-10-20, Windows 11); the permission and form shapes
 // come from the TYPES only. These tests confirm the controller's logic, not the contract with the
@@ -26,7 +33,9 @@ import type {
   PermissionRequest,
   PermissionSavedInfo,
   SessionInfo,
+  SessionListInput,
   SessionMessageInfo,
+  SessionsResponse,
   V2Event,
 } from '@opencode/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -65,7 +74,15 @@ const sessionInfo = (id: string): SessionInfo =>
 type FakeOptions = Partial<{
   sessions: string[];
   messages: SessionMessageInfo[];
-  listImpl: () => Promise<{ data: SessionInfo[]; cursor: object }>;
+  listImpl: (input?: SessionListInput) => Promise<SessionsResponse>;
+  /** Titles `session.get` answers with, by session id (the default row has none). */
+  titles: Record<string, string>;
+  /** Rejects `session.get` / `session.update` / `session.remove` with this server error body. */
+  getError: object;
+  updateError: object;
+  sessionRemoveError: object;
+  /** Replaces `session.remove`; a test uses it to publish the event BEFORE the answer, as the server does. */
+  removeImpl: (input: { sessionID: string }) => Promise<void>;
   messageListImpl: () => Promise<{ data: SessionMessageInfo[]; cursor: object }>;
   promptImpl: () => Promise<unknown>;
   active: Record<string, { type: 'running' }>;
@@ -118,6 +135,9 @@ function fakeApi(options: FakeOptions = {}) {
   const formReplies: unknown[] = [];
   const formCancels: unknown[] = [];
   const removed: string[] = [];
+  const listInputs: Array<SessionListInput | undefined> = [];
+  const updates: unknown[] = [];
+  const sessionRemoves: unknown[] = [];
   /** Rejects like the real client: with the server's error BODY, an object, not an Error. */
   const failWith = (body: object): Promise<never> =>
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
@@ -129,12 +149,13 @@ function fakeApi(options: FakeOptions = {}) {
       }),
     },
     session: {
-      list: () => {
+      list: (input) => {
         calls.push('session.list');
+        listInputs.push(input);
         return (
           options.listImpl ??
           (() => Promise.resolve({ data: (options.sessions ?? []).map(sessionInfo), cursor: {} }))
-        )();
+        )(input);
       },
       active: () => {
         calls.push('session.active');
@@ -146,7 +167,26 @@ function fakeApi(options: FakeOptions = {}) {
       },
       get: ({ sessionID }) => {
         calls.push('session.get');
-        return Promise.resolve(sessionInfo(sessionID));
+        if (options.getError !== undefined) return failWith(options.getError);
+        const title = options.titles?.[sessionID];
+        return Promise.resolve(
+          title === undefined ? sessionInfo(sessionID) : { ...sessionInfo(sessionID), title },
+        );
+      },
+      update: (input) => {
+        calls.push('session.update');
+        updates.push(input);
+        return options.updateError === undefined
+          ? Promise.resolve()
+          : failWith(options.updateError);
+      },
+      remove: (input) => {
+        calls.push('session.remove');
+        sessionRemoves.push(input);
+        if (options.removeImpl !== undefined) return options.removeImpl(input);
+        return options.sessionRemoveError === undefined
+          ? Promise.resolve()
+          : failWith(options.sessionRemoveError);
       },
       prompt: (input) => {
         calls.push('session.prompt');
@@ -223,7 +263,19 @@ function fakeApi(options: FakeOptions = {}) {
       },
     },
   };
-  return { api, calls, prompts, interrupts, permissionReplies, formReplies, formCancels, removed };
+  return {
+    api,
+    calls,
+    prompts,
+    interrupts,
+    permissionReplies,
+    formReplies,
+    formCancels,
+    removed,
+    listInputs,
+    updates,
+    sessionRemoves,
+  };
 }
 
 /**
@@ -261,7 +313,10 @@ function setup(
   remembered?: string,
   editor: EditorActions = fakeEditor().editor,
   picker: (items: SavedPermission[]) => Promise<string[]> = () => Promise.resolve([]),
+  confirmDelete: (info: { title: string; running: boolean }) => Promise<boolean> = () =>
+    Promise.resolve(true),
 ) {
+  const confirmations: Array<{ title: string; running: boolean }> = [];
   const posted: HostToWebview[] = [];
   const logs: string[] = [];
   const memoryWrites: Array<{ folder: string; id: string | undefined }> = [];
@@ -301,6 +356,12 @@ function setup(
         return picker(items);
       },
     },
+    sessions: {
+      confirmDelete: (info) => {
+        confirmations.push(info);
+        return confirmDelete(info);
+      },
+    },
     server: {
       restart: () => {
         serverCalls.push('restart');
@@ -329,6 +390,7 @@ function setup(
     attentionCalls,
     serverCalls,
     picked,
+    confirmations,
     /** Makes the host know a pending permission, as the stream would (needs a running server). */
     seedPermission: (id = 'per_1', sessionID = 'ses_1', save: string[] = ['*']) => {
       emit(streams, 'permission.asked', { id, sessionID, action: 'read', resources: ['x'], save });
@@ -1670,5 +1732,451 @@ describe('answered requests (E3-resolved-history)', () => {
       outcome: 'cancelled',
       resolution: { withMessage: true },
     });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// E4-session-management (issue #20). Fake client and hand-made events: they prove the controller's
+// logic (what it asks `session.list`, what it forgets, who is asked before a delete), NOT the
+// contract with the server; the HTTP wiring against a synthetic server is in
+// `chatController.e2e.test.ts` and the real server's behaviour was only seen by the planner spike
+// (opencode 2.0.32, Windows 11, 21/10/2026).
+// ---------------------------------------------------------------------------------------------
+
+/** The messages without the `connection.state` that `onServerState` posts first. */
+const withoutConnection = (posted: HostToWebview[]): HostToWebview[] =>
+  posted.filter((message) => message.type !== 'connection.state');
+
+/** `count` rows ses_p0.. as a full page of the session list. */
+const pageOf = (count: number, prefix = 'ses_p'): SessionInfo[] =>
+  Array.from({ length: count }, (_, index) => sessionInfo(`${prefix}${String(index)}`));
+
+describe('sessions.query (issue #20)', () => {
+  it('asks for the first page of ROOT sessions of the folder and publishes it, mirrored', async () => {
+    const { api, listInputs } = fakeApi({
+      listImpl: () => Promise.resolve({ data: pageOf(2), cursor: { next: 'CUR1' } }),
+    });
+    const { controller, posted, streams, logs } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({
+      type: 'sessions.query',
+      requestId: 'q1',
+      search: '  beta  ',
+      more: false,
+    });
+    expect(listInputs).toEqual([
+      { directory: 'C:\\work', order: 'desc', limit: 50, parentID: null, search: 'beta' },
+    ]);
+    const page = posted.find((m) => m.type === 'sessions.page');
+    expect(page).toMatchObject({
+      type: 'sessions.page',
+      requestId: 'q1',
+      append: false,
+      hasMore: false, // 2 rows < 50: the cursor the server returns anyway does not mean "more"
+    });
+    expect(page?.type === 'sessions.page' && page.sessions.map((s) => s.id)).toEqual([
+      'ses_p0',
+      'ses_p1',
+    ]);
+    expect(posted.at(-1)).toEqual({ type: 'request.result', requestId: 'q1' });
+    // Never the search text in the log.
+    expect(logs).toContain('info: sessions page (2, more: false)');
+    expect(logs.join('\n')).not.toContain('beta');
+
+    // Mirrored: a rename of a row that only this page showed reaches the webview.
+    emit(streams, 'session.renamed', { sessionID: 'ses_p1', title: 'Renamed elsewhere' });
+    expect(posted.at(-1)).toMatchObject({
+      type: 'session.upserted',
+      session: { id: 'ses_p1', title: 'Renamed elsewhere' },
+    });
+  });
+
+  it('continues with ONLY the stored cursor, and a full page says there may be more', async () => {
+    const answers = [
+      { data: pageOf(50), cursor: { next: 'CUR1' } },
+      { data: pageOf(3, 'ses_q'), cursor: { next: 'CUR2' } },
+    ];
+    const { api, listInputs } = fakeApi({
+      listImpl: () => Promise.resolve(answers.shift() ?? { data: [], cursor: {} }),
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'sessions.query', requestId: 'q1', search: '', more: false });
+    await controller.handle({ type: 'sessions.query', requestId: 'q2', search: '', more: true });
+    expect(listInputs[1]).toEqual({ cursor: 'CUR1' });
+    const pages = posted.flatMap((m) => (m.type === 'sessions.page' ? [m] : []));
+    expect(pages.map((p) => [p.requestId, p.append, p.hasMore])).toEqual([
+      ['q1', false, true],
+      ['q2', true, false], // CUR2 exists but 3 < 50: this was the last page
+    ]);
+    // The cursor itself never travels to the webview.
+    expect(JSON.stringify(posted)).not.toContain('CUR1');
+    expect(JSON.stringify(posted)).not.toContain('CUR2');
+  });
+
+  it('starts again when "more" arrives for another search, and after a refused cursor', async () => {
+    let mode: 'ok' | 'bad' = 'ok';
+    const { api, listInputs } = fakeApi({
+      listImpl: () =>
+        mode === 'ok'
+          ? Promise.resolve({ data: pageOf(50), cursor: { next: 'CUR1' } })
+          : // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+            Promise.reject({ _tag: 'InvalidCursorError', message: 'bad cursor' }),
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'sessions.query', requestId: 'q1', search: 'a', more: false });
+    await controller.handle({ type: 'sessions.query', requestId: 'q2', search: 'b', more: true });
+    expect(listInputs[1]).toMatchObject({ search: 'b', limit: 50 }); // a new list, not the cursor
+    mode = 'bad';
+    await controller.handle({ type: 'sessions.query', requestId: 'q3', search: 'b', more: true });
+    expect(posted.at(-1)).toMatchObject({
+      type: 'request.result',
+      requestId: 'q3',
+      error: { code: 'InvalidCursorError' },
+    });
+    mode = 'ok';
+    await controller.handle({ type: 'sessions.query', requestId: 'q4', search: 'b', more: true });
+    expect(listInputs[3]).toMatchObject({ search: 'b', limit: 50 }); // the cursor was dropped
+  });
+
+  /**
+   * Protects against the webview staying in "loading" for ever: if the server goes away while a
+   * page is in flight, the page is dropped but the request must still be answered (review S3 of
+   * E4-session-management). ALL DATA FABRICATED: the server change is forced from inside the fake
+   * `session.list`; no real server was stopped mid-query.
+   */
+  it('answers ServerUnavailable, and publishes no page, when the server goes away mid-query', async () => {
+    let stop: () => void = () => undefined;
+    const { api } = fakeApi({
+      listImpl: () => {
+        stop();
+        return Promise.resolve({ data: pageOf(2), cursor: {} });
+      },
+    });
+    const { controller, posted } = setup(api);
+    stop = () => {
+      controller.onServerState({ kind: 'stopped' });
+    };
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'sessions.query', requestId: 'q1', search: '', more: false });
+    expect(posted.some((m) => m.type === 'sessions.page')).toBe(false);
+    expect(posted.at(-1)).toMatchObject({
+      type: 'request.result',
+      requestId: 'q1',
+      error: { code: 'ServerUnavailable' },
+    });
+  });
+
+  it('answers ServerUnavailable without a server', async () => {
+    const { controller, posted } = setup(fakeApi().api);
+    await controller.handle({ type: 'sessions.query', requestId: 'q1', search: '', more: false });
+    expect(posted).toMatchObject([
+      { type: 'request.result', requestId: 'q1', error: { code: 'ServerUnavailable' } },
+    ]);
+  });
+});
+
+describe('session.rename (issue #20)', () => {
+  it('sends the trimmed title and logs the id but not the title', async () => {
+    const { api, updates } = fakeApi();
+    const { controller, posted, logs } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({
+      type: 'session.rename',
+      requestId: 'r1',
+      sessionID: 'ses_a',
+      title: '  Secret plan  ',
+    });
+    expect(updates).toEqual([{ sessionID: 'ses_a', title: 'Secret plan' }]);
+    expect(posted.at(-1)).toEqual({ type: 'request.result', requestId: 'r1' });
+    expect(logs).toContain('info: session renamed ses_a');
+    expect(logs.join('\n')).not.toContain('Secret plan');
+  });
+
+  it('refuses a blank or overlong title WITHOUT calling the server (a blank one runs the LLM)', async () => {
+    const { api, updates } = fakeApi();
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    for (const title of ['   ', 'x'.repeat(201)]) {
+      await controller.handle({
+        type: 'session.rename',
+        requestId: 'r1',
+        sessionID: 'ses_a',
+        title,
+      });
+      expect(posted.at(-1)).toMatchObject({
+        type: 'request.result',
+        error: { code: 'InvalidTitle' },
+      });
+    }
+    expect(updates).toEqual([]);
+  });
+
+  it('reports a session that no longer exists as removed, besides the error', async () => {
+    const { api } = fakeApi({
+      updateError: { _tag: 'SessionNotFoundError', message: 'Session not found' },
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({
+      type: 'session.rename',
+      requestId: 'r1',
+      sessionID: 'ses_gone',
+      title: 'New',
+    });
+    expect(withoutConnection(posted)).toMatchObject([
+      { type: 'session.removed', sessionID: 'ses_gone' },
+      { type: 'request.result', requestId: 'r1', error: { code: 'SessionNotFoundError' } },
+    ]);
+  });
+});
+
+describe('session.delete (issue #20)', () => {
+  it('asks the user first, with the title from the server and the running flag from active()', async () => {
+    const { api, sessionRemoves, calls } = fakeApi({
+      titles: { ses_a: 'Fix the build' },
+      active: { ses_a: { type: 'running' } },
+    });
+    const { controller, confirmations, logs, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'session.delete', requestId: 'r1', sessionID: 'ses_a' });
+    expect(confirmations).toEqual([{ title: 'Fix the build', running: true }]);
+    expect(calls.indexOf('session.get')).toBeLessThan(calls.indexOf('session.remove'));
+    expect(sessionRemoves).toEqual([{ sessionID: 'ses_a' }]);
+    expect(logs).toContain('info: session deleted ses_a');
+    expect(posted.at(-1)).toEqual({ type: 'request.result', requestId: 'r1' });
+  });
+
+  it('does NOT delete when the user declines, and answers success', async () => {
+    const { api, sessionRemoves } = fakeApi();
+    const { controller, posted, logs } = setup(api, undefined, undefined, undefined, () =>
+      Promise.resolve(false),
+    );
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'session.delete', requestId: 'r1', sessionID: 'ses_a' });
+    expect(sessionRemoves).toEqual([]);
+    expect(posted.at(-1)).toEqual({ type: 'request.result', requestId: 'r1' });
+    expect(logs).toContain('info: session delete cancelled ses_a');
+  });
+
+  it('reports a session that is already gone as removed, without asking anyone', async () => {
+    const { api } = fakeApi({
+      getError: { _tag: 'SessionNotFoundError', message: 'Session not found' },
+    });
+    const { controller, posted, confirmations } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'session.delete', requestId: 'r1', sessionID: 'ses_gone' });
+    expect(confirmations).toEqual([]);
+    expect(withoutConnection(posted)).toMatchObject([
+      { type: 'session.removed', sessionID: 'ses_gone' },
+      { type: 'request.result', requestId: 'r1', error: { code: 'SessionNotFoundError' } },
+    ]);
+  });
+
+  it('a failed delete is an error result and leaves the open session alone', async () => {
+    const { api } = fakeApi({
+      sessionRemoveError: { _tag: 'UnexpectedStatus', message: 'boom' },
+      sessions: ['ses_open'],
+    });
+    const { controller, posted, memoryWrites } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'session.delete', requestId: 'r1', sessionID: 'ses_open' });
+    expect(posted.at(-1)).toMatchObject({
+      type: 'request.result',
+      error: { code: 'UnexpectedStatus' },
+    });
+    expect(memoryWrites).toEqual([]);
+  });
+});
+
+describe('the open session being deleted (issue #20)', () => {
+  const settle = async () => {
+    await flush();
+  };
+
+  it('forgets it, memory included, and the next prompt creates a session instead of using the dead one', async () => {
+    const { api, calls, prompts } = fakeApi({ sessions: ['ses_open'] });
+    const { controller, posted, streams, memoryWrites, logs } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    emit(streams, 'session.deleted', { sessionID: 'ses_open' });
+    await settle();
+    expect(posted.at(-2)).toEqual({ type: 'session.removed', sessionID: 'ses_open' });
+    expect(memoryWrites).toEqual([{ folder: SERVER.folder, id: undefined }]);
+    expect(logs).toContain('info: open session deleted ses_open');
+
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'p1',
+      text: 'hi',
+      delivery: 'queue',
+      files: [],
+    });
+    expect(calls).toContain('session.create');
+    expect(prompts.map((p) => p.sessionID)).toEqual(['ses_new']);
+  });
+
+  it('tells the user when ANOTHER client deleted it, and stays quiet about our own delete', async () => {
+    // Elsewhere: only the event.
+    const elsewhere = setup(fakeApi({ sessions: ['ses_open'] }).api, 'ses_open');
+    elsewhere.controller.onServerState(RUNNING);
+    await elsewhere.controller.resync();
+    emit(elsewhere.streams, 'session.deleted', { sessionID: 'ses_open' });
+    expect(elsewhere.posted).toContainEqual({
+      type: 'notice',
+      level: 'info',
+      error: { code: 'SessionDeleted', message: 'The open session was deleted outside this view' },
+    });
+
+    // Ours: the server publishes the event BEFORE the HTTP answer (planner spike, same millisecond).
+    const own = setup(
+      fakeApi({
+        sessions: ['ses_open'],
+        removeImpl: ({ sessionID }) => {
+          emit(own.streams, 'session.deleted', { sessionID });
+          return Promise.resolve();
+        },
+      }).api,
+      'ses_open',
+    );
+    own.controller.onServerState(RUNNING);
+    await own.controller.resync();
+    await own.controller.handle({ type: 'session.delete', requestId: 'r1', sessionID: 'ses_open' });
+    expect(own.posted.some((m) => m.type === 'notice')).toBe(false);
+    expect(own.posted.filter((m) => m.type === 'session.removed')).not.toHaveLength(0);
+    expect(own.memoryWrites).toEqual([{ folder: SERVER.folder, id: undefined }]);
+  });
+
+  /**
+   * Protects `resync` (review W1 of E4-session-management): the open session is deleted WHILE
+   * `message.list` is in flight and the server answered before deleting. The snapshot must not
+   * bring the dead session back: no `open`, no row for it, and the next prompt creates a session.
+   * ALL DATA FABRICATED: the deletion is emitted from inside the fake `message.list`; whether a
+   * real server interleaves like this is UNVERIFIED (the window is narrow and was not reproduced).
+   */
+  it('publishes no open session, nor its row, when it is deleted while its messages are being read', async () => {
+    let remove: () => void = () => undefined;
+    const { api, prompts } = fakeApi({
+      sessions: ['ses_open', 'ses_other'],
+      messageListImpl: () => {
+        remove();
+        return Promise.resolve({ data: [], cursor: {} });
+      },
+    });
+    const { controller, streams, snapshots } = setup(api, 'ses_open');
+    remove = () => {
+      emit(streams, 'session.deleted', { sessionID: 'ses_open' });
+    };
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    const snapshot = snapshots().at(-1);
+    expect(snapshot?.open).toBeUndefined();
+    expect(snapshot?.sessions.map((row) => row.id)).toEqual(['ses_other']);
+
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'p1',
+      text: 'hi',
+      delivery: 'queue',
+      files: [],
+    });
+    expect(prompts.map((p) => p.sessionID)).toEqual(['ses_new']);
+  });
+
+  it('does not touch the open session when ANOTHER session is deleted', async () => {
+    const { api } = fakeApi({ sessions: ['ses_open', 'ses_other'] });
+    const { controller, posted, streams, memoryWrites } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    emit(streams, 'session.deleted', { sessionID: 'ses_other' });
+    expect(memoryWrites).toEqual([]);
+    expect(posted.some((m) => m.type === 'notice')).toBe(false);
+  });
+
+  it('drops the pending requests of the deleted session (nothing replies to them)', async () => {
+    const { api } = fakeApi({ sessions: ['ses_open'] });
+    const { controller, streams, attentionCalls, seedPermission, seedForm } = setup(
+      api,
+      'ses_open',
+    );
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    seedPermission('per_1', 'ses_open');
+    seedPermission('per_2', 'ses_other');
+    seedForm('frm_1', 'ses_open');
+    expect(lastAttention(attentionCalls)).toEqual(['per_1', 'per_2', 'frm_1']);
+    emit(streams, 'session.deleted', { sessionID: 'ses_open' });
+    expect(lastAttention(attentionCalls)).toEqual(['per_2']);
+  });
+});
+
+describe('session.new is lazy (issue #20)', () => {
+  it('creates nothing on the server: forgets the open session and publishes a snapshot without one', async () => {
+    const { api, calls } = fakeApi({ sessions: ['ses_open'] });
+    const { controller, snapshots, memoryWrites, posted } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(snapshots().at(-1)?.open?.sessionID).toBe('ses_open');
+    await controller.handle({ type: 'session.new', requestId: 'n1' });
+    expect(calls).not.toContain('session.create');
+    expect(memoryWrites).toEqual([{ folder: SERVER.folder, id: undefined }]);
+    expect(snapshots().at(-1)?.open).toBeUndefined();
+    expect(posted.at(-1)).toEqual({ type: 'request.result', requestId: 'n1' });
+  });
+
+  it('the first prompt then creates the session through the usual path', async () => {
+    const { api, calls, prompts } = fakeApi({ sessions: ['ses_open'] });
+    const { controller, snapshots } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'session.new', requestId: 'n1' });
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'p1',
+      text: 'hello',
+      delivery: 'queue',
+      files: [],
+    });
+    expect(calls.filter((call) => call === 'session.create')).toHaveLength(1);
+    expect(prompts).toEqual([{ sessionID: 'ses_new', text: 'hello', delivery: 'queue' }]);
+    expect(snapshots().at(-1)?.open?.sessionID).toBe('ses_new');
+  });
+
+  it('answers ServerUnavailable without a server', async () => {
+    const { controller, posted } = setup(fakeApi().api);
+    await controller.handle({ type: 'session.new', requestId: 'n1' });
+    expect(posted).toMatchObject([
+      { type: 'request.result', requestId: 'n1', error: { code: 'ServerUnavailable' } },
+    ]);
+  });
+});
+
+describe('the open session row (issue #20)', () => {
+  it('adds the row of an open session older than the 50 newest, so the header can name it', async () => {
+    const { api } = fakeApi({ sessions: ['ses_new1'], titles: { ses_ancient: 'Old but gold' } });
+    const { controller, snapshots } = setup(api, 'ses_ancient');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(
+      snapshots()
+        .at(-1)
+        ?.sessions.map((s) => [s.id, s.title]),
+    ).toEqual([
+      ['ses_new1', undefined],
+      ['ses_ancient', 'Old but gold'],
+    ]);
+  });
+
+  it('a session.open of a row that no longer exists is also reported as removed', async () => {
+    const { api } = fakeApi({
+      getError: { _tag: 'SessionNotFoundError', message: 'Session not found' },
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'session.open', requestId: 'o1', sessionID: 'ses_gone' });
+    expect(withoutConnection(posted)).toMatchObject([
+      { type: 'session.removed', sessionID: 'ses_gone' },
+      { type: 'request.result', requestId: 'o1', error: { code: 'SessionNotFoundError' } },
+    ]);
   });
 });

@@ -14,6 +14,9 @@
 // states of the asking tool in the fixture copy rows of a real opencode 2.0.32 database (a rejected
 // `read`, an answered `question`); the rejection WITH feedback and the dismissals are read in the
 // sources only. The webview-side derivation of those states is `toolOutcome.test.ts`.
+// E4-session-management (#20): paging and search over HTTP (the `parentID: null` and the cursor
+// round trip through the real client), rename, deleting a running session with a child, a decline,
+// a delete by another client, and the lazy "New session".
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -57,7 +60,11 @@ async function waitUntil(check: () => boolean, label: string, timeoutMs = 8_000)
 }
 
 /** Starts the fixture and a controller wired to it with the real client. */
-async function boot(mode: string) {
+async function boot(
+  mode: string,
+  confirmDelete: (info: { title: string; running: boolean }) => Promise<boolean> = () =>
+    Promise.resolve(true),
+) {
   const folder = await mkdtemp(path.join(os.tmpdir(), 'ovsc-chat-'));
   folders.push(folder);
   const server = await startServer({
@@ -96,6 +103,7 @@ async function boot(mode: string) {
       },
     },
     savedPermissions: { pickToRevoke: () => Promise.resolve([]) },
+    sessions: { confirmDelete },
     server: { restart: () => undefined, showLogs: () => undefined },
   });
   controllers.push(controller);
@@ -217,7 +225,18 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     const { controller, posted, state } = await boot('ok');
     controller.onServerState(state);
     await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
-    await controller.handle({ type: 'session.new', requestId: 'n1' });
+    // A session with a finished turn (idle): since issue #20 `session.new` creates nothing.
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'p1',
+      text: 'hello',
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn to finish',
+    );
     const before = posted.filter((m) => m.type === 'snapshot').length;
     const snapshot = posted.filter((m) => m.type === 'snapshot').at(-1);
     const sessionID = snapshot?.type === 'snapshot' ? snapshot.snapshot.open?.sessionID : undefined;
@@ -597,6 +616,181 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     }, 'a snapshot without the request');
     expect(posted.some((m) => m.type === 'permission.resolved')).toBe(false);
     expect(attention.at(-1)).toEqual([]);
+  }, 20_000);
+
+  // E4 / issue #20. The fixture copies what the planner spike saw in a real opencode 2.0.32 (cursor
+  // returned on every non-empty page, `parentID=null` for roots, children first on delete, the
+  // events before the HTTP answer); a pass proves our wiring with the real client, not the server.
+
+  /** A booted controller whose first snapshot has arrived, plus a second, independent client. */
+  async function bootSessions(confirm?: Parameters<typeof boot>[1]) {
+    const booted = await boot('ok', confirm);
+    booted.controller.onServerState(booted.state);
+    await waitUntil(() => booted.posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    if (booted.state.kind !== 'running') throw new Error('the server is not running');
+    return { ...booted, other: createOpencodeClient(booted.state.server) };
+  }
+
+  const pages = (posted: HostToWebview[]) =>
+    posted.flatMap((m) => (m.type === 'sessions.page' ? [m] : []));
+
+  it('pages and searches the session list over HTTP: null parentID, cursor round trip, server-side search', async () => {
+    const { controller, posted, other } = await bootSessions();
+    for (let index = 0; index < 52; index++) {
+      await other.session.create({
+        title: `${index % 2 === 0 ? 'alpha' : 'BETA'} ${String(index)}`,
+      });
+    }
+    const root = await other.session.create({ title: 'parent' });
+    await other.session.create({ title: 'alpha child', parentID: root.id });
+
+    await controller.handle({ type: 'sessions.query', requestId: 'q1', search: '', more: false });
+    await controller.handle({ type: 'sessions.query', requestId: 'q2', search: '', more: true });
+    const [first, second] = pages(posted);
+    expect(first).toMatchObject({ append: false, hasMore: true });
+    expect(first?.sessions).toHaveLength(50);
+    expect(second).toMatchObject({ append: true, hasMore: false });
+    // 52 + the parent = 53 roots, and the child is not one of them.
+    const ids = [...(first?.sessions ?? []), ...(second?.sessions ?? [])].map((s) => s.id);
+    expect(ids).toHaveLength(53);
+    expect(new Set(ids).size).toBe(53);
+    expect(
+      [...(first?.sessions ?? []), ...(second?.sessions ?? [])].some(
+        (s) => s.title === 'alpha child',
+      ),
+    ).toBe(false);
+
+    // The search is the server's (case-insensitive substring of the title).
+    await controller.handle({
+      type: 'sessions.query',
+      requestId: 'q3',
+      search: 'beta',
+      more: false,
+    });
+    const found = pages(posted).at(-1);
+    expect(found?.sessions).toHaveLength(26);
+    expect(found?.sessions.every((s) => s.title?.startsWith('BETA'))).toBe(true);
+    expect(found?.hasMore).toBe(false);
+  }, 30_000);
+
+  it('rename: the server publishes session.renamed and the row comes back as an upsert, moved to the top', async () => {
+    const { controller, posted, other } = await bootSessions();
+    const first = await other.session.create({ title: 'first' });
+    await other.session.create({ title: 'second' });
+    // The fixture stamps `time.updated` in milliseconds and breaks ties by id: without a pause the
+    // rename can land in the same millisecond as the creation of `second` and not move above it.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await controller.handle({
+      type: 'session.rename',
+      requestId: 'r1',
+      sessionID: first.id,
+      title: '  Renamed by the panel  ',
+    });
+    expect(posted).toContainEqual({ type: 'request.result', requestId: 'r1' });
+    await waitUntil(
+      () =>
+        posted.some(
+          (m) =>
+            m.type === 'session.upserted' &&
+            m.session.id === first.id &&
+            m.session.title === 'Renamed by the panel',
+        ),
+      'the rename to reach the webview',
+    );
+    await controller.handle({ type: 'sessions.query', requestId: 'q1', search: '', more: false });
+    expect(pages(posted).at(-1)?.sessions[0]).toMatchObject({
+      id: first.id,
+      title: 'Renamed by the panel',
+    });
+  }, 20_000);
+
+  it('deleting the open RUNNING session with a child: asks first (running), interrupts, removes both, forgets it', async () => {
+    const asked: Array<{ title: string; running: boolean }> = [];
+    const { controller, posted, other, remembered } = await bootSessions((info) => {
+      asked.push(info);
+      return Promise.resolve(true);
+    });
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'p1',
+      text: 'SLOW count to 400',
+      delivery: 'queue',
+      files: [],
+    });
+    const snapshot = posted.filter((m) => m.type === 'snapshot').at(-1);
+    const sessionID = snapshot?.type === 'snapshot' ? snapshot.snapshot.open?.sessionID : undefined;
+    expect(sessionID).toMatch(/^ses_/);
+    const child = await other.session.create({ parentID: sessionID ?? '' });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'busy'),
+      'busy',
+    );
+
+    await controller.handle({
+      type: 'session.delete',
+      requestId: 'd1',
+      sessionID: sessionID ?? '',
+    });
+
+    expect(asked).toEqual([{ title: '', running: true }]);
+    expect(posted).toContainEqual({ type: 'request.result', requestId: 'd1' });
+    await waitUntil(
+      () =>
+        posted.some((m) => m.type === 'session.removed' && m.sessionID === child.id) &&
+        posted.some((m) => m.type === 'session.removed' && m.sessionID === sessionID),
+      'both sessions to be reported removed',
+    );
+    expect(posted.some((m) => m.type === 'session.status' && m.status.type === 'idle')).toBe(true); // the interruption the server does before deleting
+    expect(remembered.at(-1)).toBeUndefined();
+    expect(posted.some((m) => m.type === 'notice')).toBe(false); // our own delete: no "outside" notice
+    await expect(other.session.get({ sessionID: sessionID ?? '' })).rejects.toMatchObject({
+      _tag: 'SessionNotFoundError',
+    });
+  }, 20_000);
+
+  it('a delete the user declines leaves the session alone', async () => {
+    const { controller, posted, other } = await bootSessions(() => Promise.resolve(false));
+    const session = await other.session.create({ title: 'keep me' });
+    await controller.handle({ type: 'session.delete', requestId: 'd1', sessionID: session.id });
+    expect(posted).toContainEqual({ type: 'request.result', requestId: 'd1' });
+    await expect(other.session.get({ sessionID: session.id })).resolves.toMatchObject({
+      id: session.id,
+    });
+  }, 20_000);
+
+  it('another client deleting the open session: the host forgets it and says so', async () => {
+    const { controller, posted, other, remembered } = await bootSessions();
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'p1',
+      text: 'hello',
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn to finish',
+    );
+    const snapshot = posted.filter((m) => m.type === 'snapshot').at(-1);
+    const sessionID = snapshot?.type === 'snapshot' ? snapshot.snapshot.open?.sessionID : undefined;
+    await other.session.remove({ sessionID: sessionID ?? '' });
+    await waitUntil(() => posted.some((m) => m.type === 'notice'), 'the notice');
+    expect(posted).toContainEqual({ type: 'session.removed', sessionID });
+    expect(posted.find((m) => m.type === 'notice')).toMatchObject({
+      level: 'info',
+      error: { code: 'SessionDeleted' },
+    });
+    expect(remembered.at(-1)).toBeUndefined();
+  }, 20_000);
+
+  it('session.new creates nothing on the server (lazy): the list of sessions does not grow', async () => {
+    const { controller, posted, other } = await bootSessions();
+    const before = (await other.session.list({})).data.length;
+    await controller.handle({ type: 'session.new', requestId: 'n1' });
+    expect(posted).toContainEqual({ type: 'request.result', requestId: 'n1' });
+    expect((await other.session.list({})).data).toHaveLength(before);
+    const last = posted.filter((m) => m.type === 'snapshot').at(-1);
+    expect(last?.type === 'snapshot' ? last.snapshot.open : 'missing').toBeUndefined();
   }, 20_000);
 
   it('reconnects and sends a second snapshot when the stream is cut', async () => {

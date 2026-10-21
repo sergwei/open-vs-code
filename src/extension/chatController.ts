@@ -26,11 +26,20 @@
 // each `*.resolved` into a `RequestResolution` that travels with the message and, for the open
 // session, inside every snapshot. Unlike the pending registry it is NOT emptied when the stream
 // stops: it must survive a reconnection, a hidden view and Restart Server.
+//
+// E4-session-management (issue #20): the session list the webview browses (`sessions.query` ->
+// `sessions.page`, with search and paging on the server and the cursor kept here), rename and
+// delete (the delete is confirmed by the HOST with a native modal), and the open session being
+// deleted (by us or by another client): the host forgets it, memory included. New log lines, also
+// stable: `sessions page (<n>, more: <bool>)`, `session renamed <id>` (never the title),
+// `session deleted <id>`, `session delete cancelled <id>`, `open session deleted <id>`. Neither
+// titles nor search texts are logged: they are the user's words.
 
 import type { V2Event } from '@opencode/client';
 import type { ErrorInfo, SessionStatus, SessionSummary } from '../shared/model';
 import {
   dispatch,
+  MAX_SESSION_TITLE_LENGTH,
   type AttachmentRef,
   type ConnectionState,
   type HostToWebview,
@@ -47,6 +56,7 @@ import { safeLog, type ServerLog } from './opencodeServer';
 import { createPendingRequests, type PendingSummary } from './pendingRequests';
 import { createRequestResolutions } from './requestResolutions';
 import type { RunningServerInfo, ServerState } from './serverManager';
+import { createSessionBrowser } from './sessionBrowser';
 import {
   toErrorInfo,
   toFormAsk,
@@ -141,6 +151,11 @@ export interface ChatControllerDeps {
   attention: AttentionSink;
   /** The QuickPick that picks which saved permissions to revoke; resolves with their ids. */
   savedPermissions: { pickToRevoke(items: SavedPermission[]): Promise<string[]> };
+  /**
+   * The native modal that confirms deleting a session (issue #20); resolves `true` only on
+   * "Delete". `title` comes from the server (`session.get`), `running` from `session.active()`.
+   */
+  sessions: { confirmDelete(info: { title: string; running: boolean }): Promise<boolean> };
   server: ServerCommands;
   /** The SSE loop; replaced in tests. */
   runStream?: typeof runEventStream;
@@ -198,6 +213,12 @@ const EMPTY_SNAPSHOT: Snapshot = {
  * pending permission WITHOUT `permission.replied`, read in `permission.ts@v2.0.32` L247-258, so an
  * `interrupted`/`failed` of a session that had requests triggers a resync); the saved-permissions
  * manager; `focusRequest`; restart/log commands; and the remembered session PER FOLDER.
+ * Issue #20 (`E4-session-management`, plan Engram #977, decisions #978) adds the session list,
+ * rename and delete, and makes "New session" LAZY: it creates nothing on the server, it only makes
+ * the controller forget the open session, and the first prompt creates one through `sendPrompt`.
+ * Deleting the open session leaves NO session open (alternative discarded: open the newest one,
+ * which could drop the next prompt into a session of the TUI; same reasoning as the remembered
+ * session above).
  * VERIFIED with a fake client (unit tests) and against a synthetic HTTP/SSE server
  * (`chatController.e2e.test.ts`, real client and stream loop). The permission and question flows
  * against a real opencode are exercised only by the opt-in `realOpencode.test.ts` (see its
@@ -232,8 +253,21 @@ export class ChatController {
     permissions: new Map<string, PendingAsks['permissions'][number]>(),
     forms: new Map<string, PendingAsks['forms'][number]>(),
     gone: new Set<string>(),
+    /** Sessions deleted during the reads: their requests in the REST lists are already dead. */
+    removed: new Set<string>(),
   };
   private resyncing = 0;
+  /** Paging state of the session list; owns the cursor, which never leaves the host. */
+  private readonly browser = createSessionBrowser();
+  /**
+   * Sessions this controller is deleting, so the `session.removed` that comes back is not
+   * announced as "deleted elsewhere". The id only lives for the duration of `deleteSession`: it
+   * leaves the set when the FIRST `session.removed` for it is consumed by `onSessionRemoved` (the
+   * server's, which arrives before the HTTP answer, or the one the controller publishes itself
+   * after the 204 when the stream is down), or when the call fails. So the set never grows and
+   * needs no bound.
+   */
+  private readonly deleting = new Set<string>();
   /** A focus request the webview may have missed, repeated after its next snapshot. */
   private focusRequested: { target: FocusTarget; at: number } | undefined;
   private generation = 0;
@@ -342,6 +376,7 @@ export class ChatController {
     this.client = undefined;
     this.server = undefined;
     this.generation++; // a snapshot in flight for the old server must not be published
+    this.browser.reset(); // its cursor embeds the old server's query
     this.clearPending();
     this.resolutions.forgetAsks();
   }
@@ -430,12 +465,7 @@ export class ChatController {
         }
         this.log.info(`turn finished: ${outcome} for ${event.data.sessionID}${reason}`);
       }
-      let changed = false;
-      for (const message of this.translator.translate(event)) {
-        if (this.trackRequest(message)) changed = true;
-        this.post(this.withResolution(message));
-      }
-      if (changed) this.deps.attention.update(this.pending.list());
+      this.publish(this.translator.translate(event));
       if (
         (event.type === 'session.execution.interrupted' ||
           event.type === 'session.execution.failed') &&
@@ -445,6 +475,66 @@ export class ChatController {
       }
     } catch (error) {
       this.log.error(`handling event ${event.type} failed: ${String(error)}`);
+    }
+  }
+
+  /**
+   * Sends translated messages to the webview through the host-side bookkeeping: the registry of
+   * pending requests (and `live`), the open-session check of {@link onSessionRemoved} and the memory
+   * of answered requests; the attention feature is told once if the pending set changed. Used for
+   * the events of the stream and for the `session.removed` the controller itself synthesises when
+   * a call finds the session gone (self-healing of a stale row).
+   */
+  private publish(messages: readonly HostToWebview[]): void {
+    let changed = false;
+    for (const message of messages) {
+      if (this.trackRequest(message)) changed = true;
+      this.post(this.withResolution(message));
+      // After the post: the webview empties its view on `session.removed`, and the notice that may
+      // follow explains why.
+      if (message.type === 'session.removed') this.onSessionRemoved(message.sessionID);
+    }
+    if (changed) this.deps.attention.update(this.pending.list());
+  }
+
+  /**
+   * A session is gone. If it was the open one the controller forgets it, memory included, so the
+   * next prompt without `sessionID` creates a session instead of going to a dead one (before this,
+   * `this.open` and `workspaceState` pointed at it until a resync got a 404). The webview empties
+   * its own view when it receives the same `session.removed`. An info notice says so unless the
+   * delete was ours (`deleting`). Idempotent: the second report finds `open` already cleared.
+   */
+  private onSessionRemoved(sessionID: string): void {
+    const ours = this.deleting.delete(sessionID);
+    if (sessionID !== this.open) return;
+    this.log.info(`open session deleted ${sessionID}`);
+    void this.forgetOpen();
+    if (!ours) {
+      this.post({
+        type: 'notice',
+        level: 'info',
+        error: {
+          code: 'SessionDeleted',
+          message: 'The open session was deleted outside this view',
+        },
+      });
+    }
+  }
+
+  /**
+   * Makes the controller forget the open session: field, translator and the per-folder memory.
+   * The returned promise never rejects (a failed write is logged); callers that need the memory
+   * written before going on await it, the event path does not.
+   */
+  private async forgetOpen(): Promise<void> {
+    this.open = undefined;
+    this.translator.setOpen(undefined);
+    const folder = this.server?.folder;
+    if (folder === undefined) return;
+    try {
+      await this.deps.memory.set(folder, undefined);
+    } catch (error) {
+      this.log.warn(`forgetting the remembered session failed: ${String(error)}`);
     }
   }
 
@@ -508,6 +598,19 @@ export class ChatController {
         }
         this.log.info(`form ${message.formID} resolved: ${message.outcome}`);
         return changed;
+      case 'session.removed':
+        // Lesson #969: a record of the host must not inherit requests of a session that is gone.
+        // The ones `live` holds would otherwise be re-added to a snapshot that is being built.
+        if (recording) {
+          this.live.removed.add(message.sessionID);
+          for (const [id, ask] of this.live.permissions) {
+            if (ask.sessionID === message.sessionID) this.live.permissions.delete(id);
+          }
+          for (const [id, ask] of this.live.forms) {
+            if (ask.sessionID === message.sessionID) this.live.forms.delete(id);
+          }
+        }
+        return changed;
       default:
         return false;
     }
@@ -550,7 +653,8 @@ export class ChatController {
   /**
    * Reads the state of the server by REST and publishes it as one `snapshot`.
    *
-   * Asks for the session list, the active sessions, the pending permissions and forms of the
+   * Asks for the session list (the 50 newest; the open session's row is added by `session.get`
+   * when it is older than those), the active sessions, the pending permissions and forms of the
    * whole LOCATION (`permission.request.list()` and `form.list()`, whose `{location, data}` answer
    * is NOT unwrapped by the client, unlike `permission.saved.list`) and, when a session is open,
    * its messages. The newest call wins: if another resync (or a server change) started
@@ -569,6 +673,9 @@ export class ChatController {
    * stream derived since the resync began wins over the REST one. Without these the webview,
    * which replaces its state with the snapshot, would lose a message in flight or stay on
    * "Working…" with Send disabled.
+   * If the open session is deleted while its messages are being read (`this.open` no longer is the
+   * id the reads started with), the snapshot goes out with NO open session, and the rows and
+   * statuses of sessions deleted meanwhile (`live.removed`) are left out (review W1 of #20).
    * REST status of the open session: `busy` if listed as active; else `error` when its newest
    * message is an `idle` with outcome `failed` (scrubbed); else `idle`.
    * VERIFIED shapes against a real opencode 2.0.32 (planner spike, Windows 11, 2026-10-20).
@@ -590,6 +697,7 @@ export class ChatController {
       this.live.permissions.clear();
       this.live.forms.clear();
       this.live.gone.clear();
+      this.live.removed.clear();
     }
     this.resyncing += 1;
     try {
@@ -625,6 +733,16 @@ export class ChatController {
             open.messages.push(mapped.message);
             if (mapped.parts.length > 0) open.parts[mapped.message.id] = mapped.parts;
           }
+          if (!sessions.some((row) => row.id === openID)) {
+            // Issue #20: a session opened from the list can be older than the 50 newest, and the
+            // header takes its title from `sessions`; without the row it read "Untitled session".
+            // Cosmetic, so a failure here must not fail the snapshot.
+            try {
+              sessions.push(toSessionSummary(await client.session.get({ sessionID: openID })));
+            } catch (error) {
+              this.log.debug(`could not read the open session row: ${String(error)}`);
+            }
+          }
           if (statuses[openID] === undefined) {
             const newest = messages.data[0];
             statuses[openID] =
@@ -640,8 +758,18 @@ export class ChatController {
         }
       }
       if (generation !== this.generation || this.disposed) return;
+      // Issue #20, review W1: the open session can be deleted (by another client, or by us) WHILE
+      // `message.list` was in flight and the server answered before deleting. `onSessionRemoved`
+      // already cleared `this.open`; publishing the local `open` would show the dead session again
+      // while the host believes there is none. The same goes for the rows the stream reported gone.
+      if (openID !== undefined && this.open !== openID) {
+        open = undefined;
+        rawMessages = [];
+      }
+      for (const id of this.live.removed) delete statuses[id];
+      const rows = sessions.filter((row) => !this.live.removed.has(row.id));
       this.translator.setOpen(this.open);
-      this.translator.seed({ sessions, messages: rawMessages });
+      this.translator.seed({ sessions: rows, messages: rawMessages });
       const requests = this.completeWithLive(restRequests);
       if (this.pending.replaceAll(requests.permissions, requests.forms)) {
         this.deps.attention.update(this.pending.list());
@@ -660,16 +788,14 @@ export class ChatController {
       this.post({
         type: 'snapshot',
         snapshot: {
-          sessions,
+          sessions: rows,
           statuses: this.translator.mergeStatuses(statuses),
           ...(complete ? { open: complete } : {}),
           requests,
           resolutions: this.open === undefined ? [] : this.resolutions.forSession(this.open),
         },
       });
-      this.log.info(
-        `snapshot sent (${String(sessions.length)} sessions, open ${this.open ?? 'none'})`,
-      );
+      this.log.info(`snapshot sent (${String(rows.length)} sessions, open ${this.open ?? 'none'})`);
     } catch (error) {
       if (generation !== this.generation || this.disposed) return;
       const info = toErrorInfo(error, this.secrets);
@@ -693,13 +819,16 @@ export class ChatController {
    * stream resolved is removed (REST was read before it was answered). Order: REST first, then
    * the late arrivals. Same reasoning as `translator.mergeLive` for messages; the snapshot
    * REPLACES the webview's requests, so without this a card would vanish for a moment (or an
-   * answered one come back) whenever a resync overlaps a request.
+   * answered one come back) whenever a resync overlaps a request. Requests of a session the stream
+   * reported deleted meanwhile (`live.removed`) are dropped too (issue #20).
    */
   private completeWithLive(rest: PendingAsks): PendingAsks {
     const permissions = rest.permissions.filter(
-      (ask) => !this.live.gone.has(`permission:${ask.id}`),
+      (ask) => !this.live.gone.has(`permission:${ask.id}`) && !this.live.removed.has(ask.sessionID),
     );
-    const forms = rest.forms.filter((ask) => !this.live.gone.has(`form:${ask.id}`));
+    const forms = rest.forms.filter(
+      (ask) => !this.live.gone.has(`form:${ask.id}`) && !this.live.removed.has(ask.sessionID),
+    );
     for (const ask of this.live.permissions.values()) {
       if (!permissions.some((known) => known.id === ask.id)) permissions.push(ask);
     }
@@ -1046,8 +1175,9 @@ export class ChatController {
    * Handles one VALIDATED webview message (the caller ran `isWebviewToHost`).
    *
    * `prompt.send` creates a session when none is open, then calls `session.prompt` with the
-   * delivery the webview chose and the attachments the file picker emitted. `session.new` and
-   * `session.open` change the open session. `session.abort` interrupts the turn (issue #16).
+   * delivery the webview chose and the attachments the file picker emitted. `session.new` (lazy)
+   * and `session.open` change the open session. `session.abort` interrupts the turn (issue #16).
+   * Issue #20: `sessions.query`, `session.rename` and `session.delete` serve the session list.
    * `editor.*`, `clipboard.write` and `attachments.pick` go to `deps.editor` and never need the
    * server; a failure becomes a `warning` notice (those messages carry no `requestId`).
    * Phase 3: `permission.reply`, `form.reply` and `form.cancel` call the server (a reply that fails
@@ -1071,6 +1201,15 @@ export class ChatController {
       },
       'session.open': (m) => {
         pending.push(this.openRequested(m.requestId, m.sessionID));
+      },
+      'sessions.query': (m) => {
+        pending.push(this.querySessions(m));
+      },
+      'session.rename': (m) => {
+        pending.push(this.renameSession(m));
+      },
+      'session.delete': (m) => {
+        pending.push(this.deleteSession(m));
       },
       'prompt.send': (m) => {
         pending.push(this.sendPrompt(m));
@@ -1122,20 +1261,32 @@ export class ChatController {
     await Promise.all(pending);
   }
 
-  /** `session.new`: creates a session in the workspace folder and opens it. */
+  /**
+   * `session.new`, LAZY (issue #20, decision of Sergio 21/10/2026): creates nothing. It forgets the
+   * open session (field, translator and per-folder memory) and resyncs, so the webview receives a
+   * snapshot with no open session and shows the empty view; the first `prompt.send` without a
+   * `sessionID` then creates the session through the path `sendPrompt` already has. Before this it
+   * did `POST /api/session` on every click, leaving an empty "Untitled session" in the list (and
+   * in the database the TUI shares). The session has no id until that first prompt. Still needs a
+   * running server: the snapshot is how the webview learns it, and the button is disabled without
+   * one.
+   */
   private async newSession(requestId: string): Promise<void> {
-    const client = this.client;
-    if (client === undefined) return this.result(requestId, unavailable());
+    if (this.client === undefined) return this.result(requestId, unavailable());
     try {
-      const session = await client.session.create({});
-      await this.openSession(session.id);
+      await this.forgetOpen();
+      await this.resync();
       this.result(requestId);
     } catch (error) {
       this.result(requestId, error);
     }
   }
 
-  /** `session.open`: checks the session exists, then opens it. */
+  /**
+   * `session.open`: checks the session exists, then opens it. A `SessionNotFoundError` means the
+   * row the user clicked is stale (deleted by another client, or an event was lost), so it is also
+   * reported as `session.removed` to heal the list.
+   */
   private async openRequested(requestId: string, sessionID: string): Promise<void> {
     const client = this.client;
     if (client === undefined) return this.result(requestId, unavailable());
@@ -1144,6 +1295,138 @@ export class ChatController {
       await this.openSession(sessionID);
       this.result(requestId);
     } catch (error) {
+      this.healMissing(error, sessionID);
+      this.result(requestId, error);
+    }
+  }
+
+  /** Tells the webview (and the bookkeeping) that `sessionID` is gone when `error` says it is. */
+  private healMissing(error: unknown, sessionID: string): void {
+    if (isSessionNotFound(error)) this.publish([{ type: 'session.removed', sessionID }]);
+  }
+
+  /**
+   * `sessions.query`: one page of the root sessions of the served folder, newest activity first,
+   * optionally filtered by title ON THE SERVER (so it finds sessions older than any loaded page).
+   * The cursor lives in {@link createSessionBrowser}; the page is mirrored in the translator so a
+   * later `session.renamed` of one of its rows reaches the webview. The answer is `sessions.page`
+   * followed by the `request.result` (the webview does NOT mark these as a pending send). An
+   * `InvalidCursorError` resets the browser, so the next "more" starts again. If the server
+   * changed while the page was in flight the page is dropped and the request answers
+   * `ServerUnavailable`, so the webview never stays waiting. Logs the row count,
+   * never the search text. VERIFIED against the synthetic server (`chatController.e2e.test.ts`,
+   * real client); the real server's `search`, `parentID: null` and cursor were checked by the
+   * planner spike only (Windows 11, opencode 2.0.32, 21/10/2026).
+   */
+  private async querySessions(
+    message: Extract<WebviewToHost, { type: 'sessions.query' }>,
+  ): Promise<void> {
+    const { requestId } = message;
+    const client = this.client;
+    const server = this.server;
+    if (client === undefined || server === undefined) {
+      return this.result(requestId, unavailable());
+    }
+    try {
+      const query = this.browser.query(message.search, message.more, server.folder);
+      const answer = await client.session.list(query.input);
+      // The server changed while we waited: the page belongs to another server, but the webview
+      // must still hear back or its list stays "loading" (review S3).
+      if (client !== this.client) return this.result(requestId, unavailable());
+      const page = query.accept(answer);
+      this.translator.mirror(page.rows);
+      this.post({
+        type: 'sessions.page',
+        requestId,
+        search: message.search,
+        sessions: page.rows,
+        append: page.append,
+        hasMore: page.hasMore,
+      });
+      this.log.info(`sessions page (${String(page.rows.length)}, more: ${String(message.more)})`);
+      this.result(requestId);
+    } catch (error) {
+      if (tagOf(error) === 'InvalidCursorError') this.browser.reset();
+      this.result(requestId, error);
+    }
+  }
+
+  /**
+   * `session.rename`: trims the title and re-checks it (the webview already did, but it is
+   * untrusted, and a BLANK title would make the server run the LLM title generator instead of
+   * clearing it: VERIFIED by the planner spike). The visible result is the `session.renamed` event
+   * the server publishes (translated to `session.upserted`, also when another client renames);
+   * this only answers with a `request.result`. A session that no longer exists is reported as
+   * `session.removed`. Logs the id, never the title.
+   */
+  private async renameSession(
+    message: Extract<WebviewToHost, { type: 'session.rename' }>,
+  ): Promise<void> {
+    const { requestId, sessionID } = message;
+    const client = this.client;
+    if (client === undefined) return this.result(requestId, unavailable());
+    const title = message.title.trim();
+    if (title === '' || title.length > MAX_SESSION_TITLE_LENGTH) {
+      return this.result(requestId, {
+        _tag: 'InvalidTitle',
+        message: `A session title needs 1 to ${String(MAX_SESSION_TITLE_LENGTH)} characters`,
+      });
+    }
+    try {
+      await client.session.update({ sessionID, title });
+      this.log.info(`session renamed ${sessionID}`);
+      this.result(requestId);
+    } catch (error) {
+      this.healMissing(error, sessionID);
+      this.result(requestId, error);
+    }
+  }
+
+  /**
+   * `session.delete`: asks the user through `deps.sessions.confirmDelete` (a native modal) and only
+   * on "Delete" calls `DELETE /api/session/:id`. The host asks, not the webview: see
+   * `sessionUi.ts`. The title shown comes from `session.get` and "running" from
+   * `session.active()` at this moment, never from the webview's message, so the dialog cannot be
+   * made to say something else. The id is put in `deleting` BEFORE the call, because the
+   * `session.removed` events arrive before the HTTP answer (VERIFIED by the planner spike, all
+   * within the same millisecond) and must not be announced as a delete by someone else. A
+   * declined dialog is a success without error. The server deletes the child sessions too and
+   * interrupts a busy one first; the events do the rest (`onSessionRemoved`, pending requests,
+   * resolutions). If the stream is down no event comes, so after a successful call the controller
+   * reports the removal itself (idempotent: the real event, if it arrives, finds nothing left to
+   * do). Logs ids only.
+   */
+  private async deleteSession(
+    message: Extract<WebviewToHost, { type: 'session.delete' }>,
+  ): Promise<void> {
+    const { requestId, sessionID } = message;
+    const client = this.client;
+    if (client === undefined) return this.result(requestId, unavailable());
+    try {
+      const [info, active] = await Promise.all([
+        client.session.get({ sessionID }),
+        client.session.active(),
+      ]);
+      const confirmed = await this.deps.sessions.confirmDelete({
+        title: info.title ?? '',
+        running: Object.hasOwn(active, sessionID),
+      });
+      if (!confirmed) {
+        this.log.info(`session delete cancelled ${sessionID}`);
+        return this.result(requestId);
+      }
+      this.deleting.add(sessionID);
+      try {
+        await client.session.remove({ sessionID });
+      } catch (error) {
+        this.deleting.delete(sessionID);
+        throw error;
+      }
+      this.log.info(`session deleted ${sessionID}`);
+      this.publish([{ type: 'session.removed', sessionID }]);
+      this.result(requestId);
+    } catch (error) {
+      this.healMissing(error, sessionID);
       this.result(requestId, error);
     }
   }

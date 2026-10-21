@@ -130,6 +130,21 @@ describe('summaries', () => {
     expect(item?.detail).not.toContain('secrets');
   });
 
+  // Issue #20 / lesson #969: opencode deletes the pending requests of a deleted session WITHOUT a
+  // `*.replied`, so `session.removed` is the only signal. Fabricated messages.
+  it('drops every request of a removed session and keeps the others', () => {
+    const pending = createPendingRequests();
+    pending.replaceAll(
+      [permission('per_1', 'ses_gone'), permission('per_2', 'ses_kept')],
+      [form('frm_1', 'ses_gone'), form('frm_2', 'ses_kept')],
+    );
+    expect(pending.apply({ type: 'session.removed', sessionID: 'ses_gone' })).toBe(true);
+    expect(pending.list().map((item) => item.id)).toEqual(['per_2', 'frm_2']);
+    expect(pending.hasSession('ses_gone')).toBe(false);
+    // Nothing left of that session: no change to report.
+    expect(pending.apply({ type: 'session.removed', sessionID: 'ses_gone' })).toBe(false);
+  });
+
   it('truncates a long resource (a shell command) to the bound', () => {
     const pending = createPendingRequests();
     const command = `curl -H "Authorization: ${'x'.repeat(300)}" https://example.test`;

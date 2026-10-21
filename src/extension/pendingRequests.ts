@@ -36,8 +36,9 @@ export interface PendingRequests {
   /**
    * Updates the registry from one protocol message. Returns `true` when the set of pending ids
    * changed: an unknown `*.asked` adds, a known one is ignored (idempotent: the stream and the
-   * snapshot can both announce the same request), a `*.resolved` removes if it was there, and any
-   * other message type returns `false`.
+   * snapshot can both announce the same request), a `*.resolved` removes if it was there, a
+   * `session.removed` removes every request of that session (issue #20), and any other message
+   * type returns `false`.
    */
   apply(message: HostToWebview): boolean;
   /** Replaces everything with the REST snapshot; returns `true` when the set of ids changed. */
@@ -111,6 +112,17 @@ export function createPendingRequests(): PendingRequests {
           return items.delete(keyOf('permission', message.permissionID));
         case 'form.resolved':
           return items.delete(keyOf('form', message.formID));
+        case 'session.removed': {
+          // Issue #20 / lesson #969: deleting a session interrupts it, and the server removes its
+          // pending requests WITHOUT a `*.replied`, so nothing else would ever clear these.
+          let removed = false;
+          for (const [key, item] of items) {
+            if (item.sessionID !== message.sessionID) continue;
+            items.delete(key);
+            removed = true;
+          }
+          return removed;
+        }
         default:
           return false;
       }

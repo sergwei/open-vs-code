@@ -363,4 +363,52 @@ describe('bounds and lifetime', () => {
     const { memory } = setup();
     expect(memory.observe({ type: 'session.removed', sessionID: 'ses_1' })).toBeUndefined();
   });
+
+  // Issue #20 / lesson #969: a deleted session never resolves its asks and its history can no longer
+  // be shown, so a registry of the host must not keep either.
+  it('forgets the asks and the resolutions of a removed session, not those of another', () => {
+    const { memory } = setup();
+    memory.observe({ type: 'permission.asked', permission: permission('per_gone') });
+    memory.observe({
+      type: 'permission.asked',
+      permission: permission('per_kept', { sessionID: 'ses_2' }),
+    });
+    memory.observe({ type: 'form.asked', form: question('frm_gone') });
+    memory.observe({
+      type: 'permission.resolved',
+      sessionID: 'ses_2',
+      permissionID: 'per_kept',
+      decision: 'once',
+    });
+    memory.observe({ type: 'permission.asked', permission: permission('per_again') });
+    memory.observe({
+      type: 'permission.resolved',
+      sessionID: 'ses_1',
+      permissionID: 'per_again',
+      decision: 'once',
+    });
+    expect(memory.forSession('ses_1')).toHaveLength(1);
+
+    memory.observe({ type: 'session.removed', sessionID: 'ses_1' });
+
+    expect(memory.forSession('ses_1')).toEqual([]);
+    expect(memory.forSession('ses_2')).toHaveLength(1);
+    // The ask of the removed session is gone: its late resolved yields no record.
+    expect(
+      memory.observe({
+        type: 'permission.resolved',
+        sessionID: 'ses_1',
+        permissionID: 'per_gone',
+        decision: 'once',
+      }),
+    ).toBeUndefined();
+    expect(
+      memory.observe({
+        type: 'form.resolved',
+        sessionID: 'ses_1',
+        formID: 'frm_gone',
+        outcome: 'answered',
+      }),
+    ).toBeUndefined();
+  });
 });

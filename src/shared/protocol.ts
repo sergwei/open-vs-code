@@ -27,6 +27,16 @@ import type {
   SessionSummary,
 } from './model';
 
+/**
+ * Longest session title the host accepts in `session.rename`. Our choice (issue #20): the server
+ * schema is a plain `String` with no limit (HYPOTHESIS that no other cap exists; read in
+ * `protocol/src/groups/session.ts` of the v2.0.32 tag, not probed with a huge title).
+ */
+export const MAX_SESSION_TITLE_LENGTH = 200;
+
+/** Longest search text `sessions.query` accepts. Our choice (issue #20), same reasoning as the title cap. */
+export const MAX_SESSION_SEARCH_LENGTH = 200;
+
 /** File picked by the user. Produced by the host (`attachments.picked`) and echoed back in `prompt.send`. */
 export type AttachmentRef = { uri: string; name: string };
 
@@ -88,6 +98,10 @@ export type Snapshot = {
  * `permission.resolved` and `form.resolved` carry the host's `resolution` record when the host
  * knew the request (it is absent for one it never saw asked, e.g. answered by another client
  * before the first snapshot); the webview files it in the history when the session is the open one.
+ * `sessions.page` (issue #20) answers a `sessions.query`: one page of ROOT sessions of the served
+ * folder, newest activity first. `append` says whether the rows continue the list (a "Show more")
+ * or replace it, and `hasMore` whether another page may exist. The paging cursor never travels:
+ * it embeds the folder, and the webview is untrusted input, so the host keeps it.
  */
 export type HostToWebview =
   | { type: 'connection.state'; connection: ConnectionState }
@@ -123,6 +137,14 @@ export type HostToWebview =
       resolution?: RequestResolution;
     }
   | { type: 'request.result'; requestId: string; error?: ErrorInfo }
+  | {
+      type: 'sessions.page';
+      requestId: string;
+      search: string;
+      sessions: SessionSummary[];
+      append: boolean;
+      hasMore: boolean;
+    }
   | { type: 'attachments.picked'; requestId: string; files: AttachmentRef[] }
   | { type: 'ui.focus'; target: { kind: 'permission' | 'form'; sessionID: string; id: string } }
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; error: ErrorInfo };
@@ -133,11 +155,21 @@ export type HostToWebview =
  * `prompt.send` because opencode's default (`steer`) injects the prompt into the running turn.
  * `server.restart` and `logs.show` (phase 3, issue #10) have no `requestId`: the outcome of a
  * restart is the connection state, and the log channel has nothing to answer.
+ * `session.new` is LAZY (issue #20, decision of 21/10/2026): it creates nothing on the server, it
+ * only makes the host forget the open session so the view is empty; the first `prompt.send`
+ * without `sessionID` creates the session. `sessions.query` asks for a page of the session list
+ * (`more` continues the previous query of the same `search`; the host owns the cursor), and the
+ * answer is `sessions.page`. `session.rename` and `session.delete` act on one session; the host
+ * validates the title again and asks the user for confirmation on a delete with a native modal,
+ * because an irreversible operation is authorised by the policy boundary, not by the webview.
  */
 export type WebviewToHost =
   | { type: 'ready' }
   | { type: 'session.new'; requestId: string }
   | { type: 'session.open'; requestId: string; sessionID: string }
+  | { type: 'sessions.query'; requestId: string; search: string; more: boolean }
+  | { type: 'session.rename'; requestId: string; sessionID: string; title: string }
+  | { type: 'session.delete'; requestId: string; sessionID: string }
   | {
       type: 'prompt.send';
       requestId: string;
@@ -310,6 +342,27 @@ function isFormAnswer(value: unknown): boolean {
   );
 }
 
+/** True for a boolean. */
+function isBoolean(value: unknown): value is boolean {
+  return typeof value === 'boolean';
+}
+
+/** True for a string of at most `max` characters; the empty string passes (an empty search means "all"). */
+function isStringUpTo(value: unknown, max: number): boolean {
+  return isString(value) && value.length <= max;
+}
+
+/**
+ * True for a title the host would accept: not blank after trimming, at most
+ * `MAX_SESSION_TITLE_LENGTH` once trimmed. Blank is refused because the server answers an empty
+ * title by running the LLM title generator instead of clearing it (VERIFIED, issue #20 spike).
+ */
+function isSessionTitle(value: unknown): boolean {
+  if (!isString(value)) return false;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= MAX_SESSION_TITLE_LENGTH;
+}
+
 /** Message with no payload beyond `type`. */
 const noFields: Validator = () => true;
 
@@ -331,6 +384,16 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
   ready: noFields,
   'session.new': requestOnly,
   'session.open': (m) =>
+    isNonEmptyString(field(m, 'requestId')) && isNonEmptyString(field(m, 'sessionID')),
+  'sessions.query': (m) =>
+    isNonEmptyString(field(m, 'requestId')) &&
+    isStringUpTo(field(m, 'search'), MAX_SESSION_SEARCH_LENGTH) &&
+    isBoolean(field(m, 'more')),
+  'session.rename': (m) =>
+    isNonEmptyString(field(m, 'requestId')) &&
+    isNonEmptyString(field(m, 'sessionID')) &&
+    isSessionTitle(field(m, 'title')),
+  'session.delete': (m) =>
     isNonEmptyString(field(m, 'requestId')) && isNonEmptyString(field(m, 'sessionID')),
   'prompt.send': (m) =>
     isNonEmptyString(field(m, 'requestId')) &&
@@ -391,6 +454,7 @@ const HOST_TYPE_SET: Record<HostToWebview['type'], true> = {
   'form.asked': true,
   'form.resolved': true,
   'request.result': true,
+  'sessions.page': true,
   'attachments.picked': true,
   'ui.focus': true,
   notice: true,
