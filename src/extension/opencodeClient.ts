@@ -21,6 +21,7 @@ import type {
   SessionActive,
   SessionCreateInput,
   SessionFormCancelInput,
+  SessionForkInput,
   SessionFormReplyInput,
   SessionGetInput,
   SessionInboxUser,
@@ -71,6 +72,16 @@ export interface ChatApi {
      * Windows 11, opencode 2.0.32, 21/10/2026.
      */
     remove(input: SessionRemoveInput): Promise<void>;
+    /**
+     * `POST /api/session/:id/fork` (issue #21): copies the settled history into a NEW session and
+     * returns it. `before` is a message id: the copy stops right before it (a user message gives
+     * "ask again from here"); without it the whole history is copied. The fork is a ROOT session
+     * (no `parentID`, `fork.sessionID` = the original) and the only event is the durable
+     * `session.forked`: there is NO `session.created`. A session with no messages and no `before`
+     * throws `InvalidRequestError`; an unknown `before` throws `MessageNotFoundError`. VERIFIED by
+     * the planner spike against opencode 2.0.32 (Windows 11, 21/10/2026).
+     */
+    fork(input: SessionForkInput): Promise<SessionInfo>;
     prompt(input: SessionPromptInput): Promise<SessionInboxUser>;
     /**
      * `POST /api/session/:id/interrupt` (issue #16). Unlike `list`/`message.list`, the answer is

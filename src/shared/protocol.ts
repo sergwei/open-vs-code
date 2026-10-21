@@ -162,6 +162,9 @@ export type HostToWebview =
  * answer is `sessions.page`. `session.rename` and `session.delete` act on one session; the host
  * validates the title again and asks the user for confirmation on a delete with a native modal,
  * because an irreversible operation is authorised by the policy boundary, not by the webview.
+ * `session.fork` (issue #21) asks for a new root session holding the history BEFORE `messageID`
+ * (a user message): there is no dedicated answer, the result arrives as a `session.upserted` for
+ * the new row, a `snapshot` of it and the usual `request.result`.
  */
 export type WebviewToHost =
   | { type: 'ready' }
@@ -170,6 +173,7 @@ export type WebviewToHost =
   | { type: 'sessions.query'; requestId: string; search: string; more: boolean }
   | { type: 'session.rename'; requestId: string; sessionID: string; title: string }
   | { type: 'session.delete'; requestId: string; sessionID: string }
+  | { type: 'session.fork'; requestId: string; sessionID: string; messageID: string }
   | {
       type: 'prompt.send';
       requestId: string;
@@ -395,6 +399,10 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
     isSessionTitle(field(m, 'title')),
   'session.delete': (m) =>
     isNonEmptyString(field(m, 'requestId')) && isNonEmptyString(field(m, 'sessionID')),
+  'session.fork': (m) =>
+    isNonEmptyString(field(m, 'requestId')) &&
+    isNonEmptyString(field(m, 'sessionID')) &&
+    isNonEmptyString(field(m, 'messageID')),
   'prompt.send': (m) =>
     isNonEmptyString(field(m, 'requestId')) &&
     isOptional(field(m, 'sessionID'), isNonEmptyString) &&

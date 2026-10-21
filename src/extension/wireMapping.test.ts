@@ -51,6 +51,31 @@ describe('toSessionSummary', () => {
       updatedAt: 2000,
     });
   });
+
+  // Issue #21. The `fork` JSON is copied from the shape the planner spike saw (opencode 2.0.32,
+  // 21/10/2026: root session, `parentID` absent, `fork.sessionID` = original); the test pins the
+  // mapping only. A fork is NOT a child: `parentID` must stay absent.
+  it('maps fork.sessionID to forkOf and leaves parentID alone', () => {
+    const fork = wire<SessionInfo>(`{
+      "id": "ses_2", "projectID": "prj", "cost": 0,
+      "tokens": {"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},
+      "fork": {"sessionID": "ses_1", "boundary": {"type": "before", "messageID": "msg_9"}},
+      "time": {"created": 1, "updated": 2}
+    }`);
+    expect(toSessionSummary(fork)).toEqual({
+      id: 'ses_2',
+      forkOf: 'ses_1',
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const child = wire<SessionInfo>(`{
+      "id": "ses_3", "parentID": "ses_1", "projectID": "prj", "cost": 0,
+      "tokens": {"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},
+      "time": {"created": 1, "updated": 2}
+    }`);
+    expect(toSessionSummary(child).forkOf).toBeUndefined();
+    expect(toSessionSummary(child).parentID).toBe('ses_1');
+  });
 });
 
 describe('toMessage', () => {

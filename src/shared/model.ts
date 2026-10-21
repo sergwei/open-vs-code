@@ -41,11 +41,19 @@ export type TokenUsage = {
   cacheWrite: number;
 };
 
-/** Row of the session list. Timestamps are epoch milliseconds. */
+/**
+ * Row of the session list. Timestamps are epoch milliseconds.
+ *
+ * `parentID` is the session that SPAWNED this one (a subagent child); `forkOf` is the session this
+ * one was FORKED from (issue #21). They are different relations: a fork is a ROOT session (no
+ * `parentID`) that only remembers its origin, so it shows up in the list of roots while a subagent
+ * child does not. VERIFIED against opencode 2.0.32 (fork spike, Windows 11, 21/10/2026).
+ */
 export type SessionSummary = {
   id: string;
   title?: string;
   parentID?: string;
+  forkOf?: string;
   agent?: string;
   model?: ModelRef;
   createdAt: number;

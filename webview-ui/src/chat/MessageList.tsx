@@ -23,6 +23,27 @@ import { isStopError } from '../store/activity';
 import { PartView } from './PartView';
 
 type AssistantMessage = Extract<MessageInfo, { kind: 'assistant' }>;
+export type UserMessage = Extract<MessageInfo, { kind: 'user' }>;
+
+/**
+ * How many characters of a message go into the name of its "Fork from here" button. 60 is long
+ * enough to tell two prompts of the same conversation apart (they usually differ in the first
+ * words) and short enough that a screen reader does not read a whole paragraph per button. A
+ * judgement call, not measured: UNVERIFIED with a real screen reader.
+ */
+const FORK_LABEL_CHARS = 60;
+
+/**
+ * Accessible name of the fork button of `message`: "Fork from here: " plus its first
+ * {@link FORK_LABEL_CHARS} characters with whitespace collapsed (an ellipsis when cut), or just
+ * "Fork from here" for a message that is only attachments.
+ */
+function forkLabel(message: UserMessage): string {
+  const flat = message.text.replace(/\s+/g, ' ').trim();
+  if (flat === '') return 'Fork from here';
+  const cut = flat.length > FORK_LABEL_CHARS ? `${flat.slice(0, FORK_LABEL_CHARS)}…` : flat;
+  return `Fork from here: ${cut}`;
+}
 
 /** How close to the bottom (px) still counts as "at the bottom". Our own figure: about a line. */
 const STICK_THRESHOLD_PX = 24;
@@ -77,13 +98,25 @@ function prefersReducedMotion(): boolean {
  * history goes at the end of the latest user/assistant message before it was answered, NESTED in
  * that message's `article` so `[role="log"] > *` (counted by `test:visual`) does not change. The
  * lines never move the focus nor carry a role: the log region announces their insertion.
+ *
+ * Issue #21: every USER message ends with an action bar holding "Fork from here" (decision of
+ * Sergio, 21/10/2026: user messages only, a text button, shown on hover and on focus within). The
+ * bar is hidden with opacity, not `display: none`, so Tab still reaches the button and focusing it
+ * shows the bar. The accessible name carries the start of the message (a column of identical
+ * "Fork from here" says nothing) and `aria-live="off"` on the bar keeps the log region from reading
+ * it out with every new message (HYPOTHESIS: not tried with a screen reader). While `forkDisabled`
+ * the button is `aria-disabled` and the click is ignored, never `disabled`, so the focus stays on
+ * it. `onOpenSession` is for the subagent links of the tool blocks.
  */
 export function MessageList(props: {
   open: OpenView;
   resolutions: { readonly [requestId: string]: RequestResolution };
   busy: boolean;
   canRetry: boolean;
+  forkDisabled: boolean;
   onRetry(): void;
+  onFork(message: UserMessage): void;
+  onOpenSession(sessionID: string): void;
 }) {
   let list: HTMLDivElement | undefined;
   const [stick, setStick] = createSignal(true);
@@ -199,6 +232,19 @@ export function MessageList(props: {
                       <For each={looseOutcomes(user().id)}>
                         {(view) => <RequestOutcome view={view} />}
                       </For>
+                      <div class="message-actions" aria-live="off">
+                        <button
+                          type="button"
+                          class="secondary message-action"
+                          aria-label={forkLabel(user())}
+                          aria-disabled={props.forkDisabled ? 'true' : undefined}
+                          onClick={() => {
+                            if (!props.forkDisabled) props.onFork(user());
+                          }}
+                        >
+                          Fork from here
+                        </button>
+                      </div>
                     </article>
                   )}
                 </Match>
@@ -214,6 +260,9 @@ export function MessageList(props: {
                             part={part}
                             live={isLive(assistant())}
                             outcomes={outcomesOf(part)}
+                            onOpenSession={(sessionID) => {
+                              props.onOpenSession(sessionID);
+                            }}
                           />
                         )}
                       </For>

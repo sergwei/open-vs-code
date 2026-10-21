@@ -18,7 +18,7 @@ import type { MessageInfo, Part, RequestResolution, SessionStatus } from '../../
 import type { HostToWebview, WebviewToHost } from '../../src/shared/protocol';
 import { App } from './App';
 import { createChatStore, type ChatStore } from './store/chatStore';
-import { must } from './testing';
+import { must, splitRequestId } from './testing';
 import { createUiState } from './uiState';
 
 const SES = 'ses_1';
@@ -780,5 +780,331 @@ describe('review round: activity and pending attachments', () => {
 
     const second = start(first.saved.at(-1));
     expect(second.container.querySelector('.chip')?.textContent).toContain('a.ts');
+  });
+});
+
+// Issue #21 (E4-fork-subsessions): "Fork from here", the subagent link and the related-sessions
+// header. FABRICATED host messages in jsdom: they prove the wiring and the accessibility of the
+// controls (names, aria-disabled, focus), not the host contract (`chatController*.test.ts`), the
+// look or a screen reader (`test:visual` step 10 covers the look in a real VS Code).
+
+/** A snapshot with `sessions`, `SES` open and the given messages and parts, connected. */
+function openWith(
+  sessions: Array<{
+    id: string;
+    title?: string;
+    parentID?: string;
+    forkOf?: string;
+    agent?: string;
+    createdAt?: number;
+  }>,
+  messages: MessageInfo[],
+  parts: Record<string, Part[]> = {},
+  extra: Partial<Extract<HostToWebview, { type: 'snapshot' }>['snapshot']> = {},
+): HostToWebview[] {
+  return [
+    connected,
+    {
+      type: 'snapshot',
+      snapshot: {
+        sessions: sessions.map((row) => ({ createdAt: 1, updatedAt: 2, ...row })),
+        statuses: {},
+        open: { sessionID: SES, messages, parts },
+        requests: { permissions: [], forms: [] },
+        resolutions: [],
+        ...extra,
+      },
+    },
+  ];
+}
+
+const userWithFiles = (
+  id: string,
+  text: string,
+  files: Extract<MessageInfo, { kind: 'user' }>['files'],
+): MessageInfo => ({ kind: 'user', id, createdAt: 1, text, files });
+
+const subagentTool = (metadata?: Record<string, string>): Part => ({
+  type: 'tool',
+  id: 'call_1',
+  name: 'subagent',
+  state: {
+    status: 'completed',
+    input: { agent: 'general', description: 'Say hello' },
+    output: [],
+    ...(metadata ? { metadata } : {}),
+  },
+});
+
+describe('fork from a message (issue #21)', () => {
+  const twoExchanges = [
+    user('m1', 'first question'),
+    assistant('m2'),
+    user('m3', 'second   question\nwith a break'),
+    assistant('m4'),
+  ];
+
+  it('offers "Fork from here" on user messages only, named after the message', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES, title: 'Fix the build' }], twoExchanges));
+    const buttons = [...h.container.querySelectorAll('.message-action')];
+    expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Fork from here: first question',
+      'Fork from here: second question with a break',
+    ]);
+    expect(buttons.map((b) => b.textContent)).toEqual(['Fork from here', 'Fork from here']);
+    expect(h.container.querySelectorAll('.message-assistant .message-action')).toHaveLength(0);
+  });
+
+  it('cuts a long message in the name and names an attachment-only message plainly', () => {
+    const h = start();
+    h.apply(
+      ...openWith(
+        [{ id: SES }],
+        [user('m1', 'x'.repeat(100)), userWithFiles('m3', '', [{ mime: 'text/plain' }])],
+      ),
+    );
+    const names = [...h.container.querySelectorAll('.message-action')].map((b) =>
+      b.getAttribute('aria-label'),
+    );
+    expect(names).toEqual([`Fork from here: ${'x'.repeat(60)}…`, 'Fork from here']);
+  });
+
+  it('sends session.fork with the id of the message that was clicked', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], twoExchanges));
+    h.button('Fork from here: second question with a break').click();
+    expect(h.sent).toHaveLength(1);
+    const { requestId, rest } = splitRequestId(h.sent[0]);
+    expect(requestId).toMatch(/\S/);
+    expect(rest).toEqual({ type: 'session.fork', sessionID: SES, messageID: 'm3' });
+  });
+
+  it('locks the buttons with aria-disabled (focus stays) and blocks Send while the fork is in flight', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], twoExchanges));
+    const button = h.button('Fork from here: first question');
+    button.focus();
+    button.click();
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect(button.hasAttribute('disabled')).toBe(false);
+    expect(document.activeElement).toBe(button);
+    button.click();
+    h.button('Fork from here: second question with a break').click();
+    expect(h.sent).toHaveLength(1);
+    h.type('typed meanwhile');
+    expect(h.button('Send').getAttribute('disabled')).not.toBeNull();
+
+    const { requestId } = splitRequestId(h.sent[0]);
+    h.apply({ type: 'request.result', requestId });
+    expect(button.hasAttribute('aria-disabled')).toBe(false);
+  });
+
+  it('refills the prompt with the message text, and focuses it, when the draft is empty', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], twoExchanges));
+    h.button('Fork from here: second question with a break').click();
+    const { requestId } = splitRequestId(h.sent[0]);
+    expect(h.textarea().value).toBe('');
+    h.apply({ type: 'request.result', requestId });
+    expect(h.textarea().value).toBe('second   question\nwith a break');
+    expect(document.activeElement).toBe(h.textarea());
+    expect(h.saved.at(-1)).toMatchObject({ draft: 'second   question\nwith a break' });
+  });
+
+  it('does not overwrite what the user was typing', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], twoExchanges));
+    h.type('my own draft');
+    h.button('Fork from here: first question').click();
+    const { requestId } = splitRequestId(h.sent[0]);
+    h.apply({ type: 'request.result', requestId });
+    expect(h.textarea().value).toBe('my own draft');
+    expect(document.activeElement).toBe(h.textarea());
+  });
+
+  it('re-attaches only the files of the message this document picked itself', () => {
+    const h = start();
+    h.apply({
+      type: 'attachments.picked',
+      requestId: 'pick',
+      files: [{ uri: 'file:///a.ts', name: 'a.ts' }],
+    });
+    h.apply(
+      ...openWith(
+        [{ id: SES }],
+        [
+          userWithFiles('m1', 'look at these', [
+            { mime: 'text/plain', uri: 'file:///a.ts', name: 'a.ts' },
+            { mime: 'text/plain', uri: 'file:///elsewhere.ts', name: 'elsewhere.ts' },
+          ]),
+          assistant('m2'),
+        ],
+      ),
+    );
+    // The picked file is a pending chip already; clear it as a sent prompt would, then fork.
+    h.store.takeDraftFiles();
+    h.button('Fork from here: look at these').click();
+    h.apply({ type: 'request.result', requestId: splitRequestId(h.sent[0]).requestId });
+    // Only the pending chips of the prompt box: the message's own chips are in the conversation.
+    const chips = [...h.container.querySelectorAll('.chips .chip-name')].map((c) => c.textContent);
+    expect(chips).toEqual(['a.ts']);
+  });
+
+  it('leaves the prompt alone and shows the error when the fork fails', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], twoExchanges));
+    h.button('Fork from here: first question').click();
+    const { requestId } = splitRequestId(h.sent[0]);
+    h.apply({
+      type: 'request.result',
+      requestId,
+      error: { code: 'MessageNotFoundError', message: 'Message not found' },
+    });
+    expect(h.textarea().value).toBe('');
+    expect(must(h.container, '[role="alert"]').textContent).toContain('Message not found');
+    // And the button works again.
+    expect(h.button('Fork from here: first question').hasAttribute('aria-disabled')).toBe(false);
+  });
+
+  it('locks the buttons without a connection', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], twoExchanges));
+    h.apply({
+      type: 'connection.state',
+      connection: { state: 'reconnecting', attempt: 1, error: { code: 'x', message: 'lost' } },
+    });
+    const button = h.button('Fork from here: first question');
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    button.click();
+    expect(h.sent).toEqual([]);
+  });
+});
+
+describe('subagent link in the conversation (issue #21)', () => {
+  const withTool = (part: Part) =>
+    openWith([{ id: SES }], [user('m1', 'delegate'), assistant('m2')], { m2: [part] });
+
+  it('shows the line as one sentence and opens the child session', () => {
+    const h = start();
+    h.apply(...withTool(subagentTool({ sessionID: 'ses_kid', status: 'completed' })));
+    expect(must(h.container, '.part-subagent span').textContent).toBe(
+      'Subagent · general · Say hello · done',
+    );
+    h.button('Open subagent session Say hello').click();
+    const { rest } = splitRequestId(h.sent[0]);
+    expect(rest).toEqual({ type: 'session.open', sessionID: 'ses_kid' });
+  });
+
+  it('says "running" while the child runs', () => {
+    const h = start();
+    h.apply(...withTool(subagentTool({ sessionID: 'ses_kid', status: 'running' })));
+    expect(must(h.container, '.part-subagent span').textContent).toBe(
+      'Subagent · general · Say hello · running',
+    );
+  });
+
+  it('keeps the plain line, with no button, when the block has no child id', () => {
+    const h = start();
+    h.apply(...withTool(subagentTool()));
+    expect(must(h.container, '.part-tool').textContent).toBe('subagent · completed');
+    expect(h.container.querySelector('.subagent-link')).toBeNull();
+  });
+});
+
+describe('related sessions in the header (issue #21)', () => {
+  it('shows the crumb "‹ parent" on a subagent child and goes back to the parent', () => {
+    const h = start();
+    h.apply(
+      ...openWith(
+        [
+          { id: SES, title: 'Say hello', parentID: 'ses_parent', agent: 'general' },
+          { id: 'ses_parent', title: 'Fix the build' },
+        ],
+        [user('m1', 'hi')],
+      ),
+    );
+    const nav = must(h.container, 'nav[aria-label="Session path"]');
+    expect(nav.textContent).toBe('‹ Fix the build');
+    h.button('Back to parent session Fix the build').click();
+    expect(splitRequestId(h.sent[0]).rest).toEqual({
+      type: 'session.open',
+      sessionID: 'ses_parent',
+    });
+  });
+
+  it('names the original of a fork and opens it', () => {
+    const h = start();
+    h.apply(
+      ...openWith(
+        [
+          { id: SES, title: 'Fix the build (fork #1)', forkOf: 'ses_orig' },
+          { id: 'ses_orig', title: 'Fix the build' },
+        ],
+        [user('m1', 'hi')],
+      ),
+    );
+    expect(must(h.container, 'nav[aria-label="Session path"]').textContent).toBe(
+      'Forked from Fix the build',
+    );
+    // WCAG 2.5.3: the accessible name contains the visible text "Forked from Fix the build".
+    h.button('Forked from Fix the build: open the original session').click();
+    expect(splitRequestId(h.sent[0]).rest).toEqual({
+      type: 'session.open',
+      sessionID: 'ses_orig',
+    });
+  });
+
+  it('shows plain text, with nothing to open, when the original is not known', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES, forkOf: 'ses_gone' }], [user('m1', 'hi')]));
+    const nav = must(h.container, 'nav[aria-label="Session path"]');
+    expect(nav.textContent).toBe('Forked session');
+    expect(nav.querySelector('button')).toBeNull();
+  });
+
+  it('has no path on a plain session', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
+    expect(h.container.querySelector('nav[aria-label="Session path"]')).toBeNull();
+  });
+
+  it('lists the children of the open session, oldest first, closed, with their state as text', () => {
+    const h = start();
+    h.apply(
+      ...openWith(
+        [
+          { id: SES, title: 'Fix the build' },
+          { id: 'ses_k2', title: 'Second', parentID: SES, agent: 'explore', createdAt: 20 },
+          { id: 'ses_k1', parentID: SES, agent: 'general', createdAt: 10 },
+          { id: 'ses_other', title: 'Not mine', parentID: 'ses_zzz', createdAt: 5 },
+        ],
+        [user('m1', 'hi')],
+        {},
+        {
+          statuses: { ses_k2: { type: 'busy' } },
+          requests: {
+            permissions: [],
+            forms: [{ id: 'frm_1', sessionID: 'ses_k1', title: 'Q', kind: 'question', fields: [] }],
+          },
+        },
+      ),
+    );
+    const details = must<HTMLDetailsElement>(h.container, 'details.subagent-sessions');
+    expect(details.open).toBe(false);
+    expect(must(details, 'summary').textContent).toBe('Subagent sessions (2)');
+    const items = [...details.querySelectorAll('li')].map((li) => li.textContent);
+    expect(items).toEqual(['Untitled sessiongeneral · Needs input', 'Secondexplore · Running']);
+    // Regression (review W1): the aria-label replaces the content, so it must carry the state
+    // words ("Running", "Needs input") and the agent, or a screen reader never hears them.
+    h.button('Open subagent session Untitled session, general · Needs input');
+    h.button('Open subagent session Second, explore · Running').click();
+    expect(splitRequestId(h.sent[0]).rest).toEqual({ type: 'session.open', sessionID: 'ses_k2' });
+  });
+
+  it('shows no "Subagent sessions" when the open session has no children', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
+    expect(h.container.querySelector('.subagent-sessions')).toBeNull();
   });
 });

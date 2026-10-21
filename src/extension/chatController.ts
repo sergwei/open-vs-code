@@ -34,6 +34,11 @@
 // stable: `sessions page (<n>, more: <bool>)`, `session renamed <id>` (never the title),
 // `session deleted <id>`, `session delete cancelled <id>`, `open session deleted <id>`. Neither
 // titles nor search texts are logged: they are the user's words.
+//
+// E4-fork-subsessions (issue #21): `session.fork` (new root session with the history BEFORE a user
+// message, opened right away) and the lineage of the open session (its subagent children and the
+// rows of its parent / original, added to the snapshot). New stable log line: `session forked
+// <origin> -> <new>` (ids only).
 
 import type { V2Event } from '@opencode/client';
 import type { ErrorInfo, SessionStatus, SessionSummary } from '../shared/model';
@@ -219,6 +224,11 @@ const EMPTY_SNAPSHOT: Snapshot = {
  * Deleting the open session leaves NO session open (alternative discarded: open the newest one,
  * which could drop the next prompt into a session of the TUI; same reasoning as the remembered
  * session above).
+ * Issue #21 (`E4-fork-subsessions`, plan Engram #1000, decisions #1001) adds `session.fork`: the
+ * HOST calls the server, mirrors the new row, publishes it as `session.upserted` and opens the
+ * session (the webview gets no new host message, only `session.upserted` + `snapshot`); a fork made
+ * by another client arrives as a bare `session.forked` event, which carries no title, so
+ * {@link refreshSession} reads the row. `resync` also brings the lineage of the open session.
  * VERIFIED with a fake client (unit tests) and against a synthetic HTTP/SSE server
  * (`chatController.e2e.test.ts`, real client and stream loop). The permission and question flows
  * against a real opencode are exercised only by the opt-in `realOpencode.test.ts` (see its
@@ -257,6 +267,12 @@ export class ChatController {
     removed: new Set<string>(),
   };
   private resyncing = 0;
+  /**
+   * Ids with a {@link refreshSession} read in flight. A `session.removed` for the id takes it out
+   * (`live.removed` only records during a resync, so it cannot guard that call); the read then
+   * drops its row. Entries leave when their read ends, so the set stays bounded.
+   */
+  private readonly refreshing = new Set<string>();
   /** Paging state of the session list; owns the cursor, which never leaves the host. */
   private readonly browser = createSessionBrowser();
   /**
@@ -439,12 +455,19 @@ export class ChatController {
    * the REST read after the event no longer lists it (the deletion could in theory happen after
    * the event); the opt-in suite does not interrupt a pending permission. A resync after
    * `succeeded` is not needed: a turn cannot succeed while a request is pending.
+   * `session.forked` (issue #21) is the ONLY event a fork publishes (no `session.created`) and has
+   * no title, so the translator cannot build the row: {@link refreshSession} reads it. VERIFIED by
+   * the planner spike (opencode 2.0.32, Windows 11, 21/10/2026).
    */
   private onEvent(event: V2Event): void {
     try {
       if (event.type === 'server.connected') {
         this.log.info('event stream connected');
         void this.resync();
+        return;
+      }
+      if (event.type === 'session.forked') {
+        void this.refreshSession(event.data.sessionID);
         return;
       }
       if (event.type === 'location.shutdown') {
@@ -562,7 +585,9 @@ export class ChatController {
    * Feeds one translated message to the registry of pending requests, writes the stable log line
    * for it and, while a resync is reading REST, remembers it in `live`. Returns `true` when the
    * set of pending requests changed (so the attention feature must be told). Logs the ids and the
-   * action only, never the resources.
+   * action only, never the resources. A `session.removed` also drops that id from `refreshing`, so
+   * a `refreshSession` read still in flight discards its row instead of republishing a deleted
+   * session (every `session.removed` goes through `publish`, hence through here).
    */
   private trackRequest(message: HostToWebview): boolean {
     const changed = this.pending.apply(message);
@@ -599,6 +624,8 @@ export class ChatController {
         this.log.info(`form ${message.formID} resolved: ${message.outcome}`);
         return changed;
       case 'session.removed':
+        // A `refreshSession` in flight for this id must not republish its row afterwards.
+        this.refreshing.delete(message.sessionID);
         // Lesson #969: a record of the host must not inherit requests of a session that is gone.
         // The ones `live` holds would otherwise be re-added to a snapshot that is being built.
         if (recording) {
@@ -685,6 +712,11 @@ export class ChatController {
    * of a NON-EMPTY list from a real server, because no snapshot was taken while a request was
    * pending (the synthetic fixture covers that shape, which is only as good as its reading of
    * the types).
+   * Issue #21: with a session open the rows also carry its LINEAGE, because the header shows
+   * "‹ parent", "Forked from" and "Subagent sessions (N)" and none of those rows has to be among
+   * the 50 newest: the open session's children (`session.list({ parentID })`, in parallel with the
+   * messages), its parent and its fork origin (`session.get` each). All cosmetic: a failure is a
+   * `debug` line and the snapshot still goes out (same rule as the open session's own row).
    */
   async resync(): Promise<void> {
     const client = this.client;
@@ -720,11 +752,10 @@ export class ChatController {
       const openID = this.open;
       if (openID !== undefined) {
         try {
-          const messages = await client.message.list({
-            sessionID: openID,
-            order: 'desc',
-            limit: MESSAGE_LIMIT,
-          });
+          const [messages, children] = await Promise.all([
+            client.message.list({ sessionID: openID, order: 'desc', limit: MESSAGE_LIMIT }),
+            this.readChildren(client, server.folder, openID),
+          ]);
           rawMessages = [...messages.data].reverse(); // REST returned newest first
           open = { sessionID: openID, messages: [], parts: {} };
           for (const raw of rawMessages) {
@@ -743,6 +774,7 @@ export class ChatController {
               this.log.debug(`could not read the open session row: ${String(error)}`);
             }
           }
+          await this.addLineage(client, sessions, openID, children);
           if (statuses[openID] === undefined) {
             const newest = messages.data[0];
             statuses[openID] =
@@ -810,6 +842,70 @@ export class ChatController {
       this.post({ type: 'notice', level: 'error', error: info });
     } finally {
       this.resyncing -= 1;
+    }
+  }
+
+  /**
+   * The subagent children of `parentID` (issue #21), newest first, at most {@link SESSION_LIMIT}.
+   * Never rejects: a failure is a `debug` line and an empty list, so it cannot fail the snapshot.
+   * Only rows whose `parentID` really is `parentID` are kept, in case the server ignored the
+   * filter. VERIFIED by the planner spike that `list({ parentID })` returns the child and the
+   * parent's own list does not (opencode 2.0.32, Windows 11, 21/10/2026).
+   */
+  private async readChildren(
+    client: ChatApi,
+    folder: string,
+    parentID: string,
+  ): Promise<SessionSummary[]> {
+    try {
+      const answer = await client.session.list({
+        directory: folder,
+        parentID,
+        order: 'desc',
+        limit: SESSION_LIMIT,
+      });
+      return answer.data.map(toSessionSummary).filter((row) => row.parentID === parentID);
+    } catch (error) {
+      this.log.debug(`could not read the children of the open session: ${String(error)}`);
+      return [];
+    }
+  }
+
+  /**
+   * Adds to `sessions`, in place and without duplicating ids, the rows the header of the open
+   * session needs (issue #21): its `children`, and its parent and fork origin read with
+   * `session.get` when they are not among the rows already. A 404 or any other failure of those
+   * reads is a `debug` line: the header then falls back to "Forked session" / no crumb. The two
+   * reads go out in parallel (one round trip instead of up to two in the snapshot path); each one
+   * catches its own failure, so one failing never loses the other.
+   */
+  private async addLineage(
+    client: ChatApi,
+    sessions: SessionSummary[],
+    openID: string,
+    children: readonly SessionSummary[],
+  ): Promise<void> {
+    for (const child of children) {
+      if (!sessions.some((row) => row.id === child.id)) sessions.push(child);
+    }
+    const self = sessions.find((row) => row.id === openID);
+    if (self === undefined) return;
+    const missing = [self.parentID, self.forkOf].filter(
+      (relative): relative is string =>
+        relative !== undefined && !sessions.some((row) => row.id === relative),
+    );
+    const reads = await Promise.all(
+      missing.map(async (relative) => {
+        try {
+          return toSessionSummary(await client.session.get({ sessionID: relative }));
+        } catch (error) {
+          this.log.debug(`could not read a related session row: ${String(error)}`);
+          return undefined;
+        }
+      }),
+    );
+    for (const row of reads) {
+      if (row !== undefined && !sessions.some((have) => have.id === row.id)) sessions.push(row);
     }
   }
 
@@ -1178,6 +1274,7 @@ export class ChatController {
    * delivery the webview chose and the attachments the file picker emitted. `session.new` (lazy)
    * and `session.open` change the open session. `session.abort` interrupts the turn (issue #16).
    * Issue #20: `sessions.query`, `session.rename` and `session.delete` serve the session list.
+   * Issue #21: `session.fork` forks the open session before a message and opens the fork.
    * `editor.*`, `clipboard.write` and `attachments.pick` go to `deps.editor` and never need the
    * server; a failure becomes a `warning` notice (those messages carry no `requestId`).
    * Phase 3: `permission.reply`, `form.reply` and `form.cancel` call the server (a reply that fails
@@ -1210,6 +1307,9 @@ export class ChatController {
       },
       'session.delete': (m) => {
         pending.push(this.deleteSession(m));
+      },
+      'session.fork': (m) => {
+        pending.push(this.forkSession(m));
       },
       'prompt.send': (m) => {
         pending.push(this.sendPrompt(m));
@@ -1428,6 +1528,71 @@ export class ChatController {
     } catch (error) {
       this.healMissing(error, sessionID);
       this.result(requestId, error);
+    }
+  }
+
+  /**
+   * `session.fork` (issue #21): forks `sessionID` before `messageID` and opens the new session.
+   *
+   * The fork is a ROOT session, so the row goes to the translator's mirror and out as
+   * `session.upserted` BEFORE the snapshot of the new session (the list then shows it, and a later
+   * rename reaches the webview); `openSession` then publishes its history and remembers it for the
+   * folder. The webview gets no message of its own: the answer is the `request.result`. A busy
+   * source session is allowed (the server copies only what is settled, VERIFIED by the planner
+   * spike, opencode 2.0.32, Windows 11, 21/10/2026). The host does not check that `messageID` is a
+   * user message: a fork is not destructive, and an unknown id is the server's `MessageNotFoundError`
+   * (returned as the error of the result; the open session does not change). A vanished source is
+   * also reported as `session.removed`. If the server changed while the call was in flight the
+   * result is `ServerUnavailable`. Logs ids only (the stable line `session forked <a> -> <b>`).
+   */
+  private async forkSession(
+    message: Extract<WebviewToHost, { type: 'session.fork' }>,
+  ): Promise<void> {
+    const { requestId, sessionID, messageID } = message;
+    const client = this.client;
+    if (client === undefined) return this.result(requestId, unavailable());
+    try {
+      const info = await client.session.fork({ sessionID, before: messageID });
+      if (client !== this.client) return this.result(requestId, unavailable());
+      const row = toSessionSummary(info);
+      this.translator.mirror([row]);
+      this.publish([{ type: 'session.upserted', session: row }]);
+      this.log.info(`session forked ${sessionID} -> ${info.id}`);
+      await this.openSession(info.id);
+      this.result(requestId);
+    } catch (error) {
+      this.healMissing(error, sessionID);
+      this.result(requestId, error);
+    }
+  }
+
+  /**
+   * Reads one session and publishes its row as `session.upserted`. Used for the `session.forked`
+   * event of a fork made by another client (the TUI): the event has no title and there is no
+   * `session.created`, so the row has to be read. A 404 is ignored (deleted meanwhile); any other
+   * failure is a `warn` line and nothing else, because the next snapshot brings the row anyway.
+   * Drops the result if the server changed while waiting, or if the stream reported the session
+   * deleted meanwhile (tracked in `refreshing`; two concurrent refreshes of the same id share the
+   * entry, so at worst the later one is dropped and the next snapshot brings the row).
+   */
+  private async refreshSession(sessionID: string): Promise<void> {
+    const client = this.client;
+    if (client === undefined) return;
+    this.refreshing.add(sessionID);
+    try {
+      const row = toSessionSummary(await client.session.get({ sessionID }));
+      // A `session.removed` that arrived while the get was in flight wins (it left `refreshing`),
+      // or the row of a deleted session would be republished.
+      if (client !== this.client || this.disposed || !this.refreshing.has(sessionID)) return;
+      this.translator.mirror([row]);
+      this.publish([{ type: 'session.upserted', session: row }]);
+    } catch (error) {
+      if (isSessionNotFound(error)) return;
+      this.log.warn(
+        `could not read forked session ${sessionID}: ${toErrorInfo(error, this.secrets).message}`,
+      );
+    } finally {
+      this.refreshing.delete(sessionID);
     }
   }
 

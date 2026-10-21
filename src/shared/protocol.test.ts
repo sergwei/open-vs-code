@@ -169,6 +169,7 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
     title: 'A new title',
   },
   'session.delete': { type: 'session.delete', requestId: 'r1', sessionID: 's1' },
+  'session.fork': { type: 'session.fork', requestId: 'r1', sessionID: 's1', messageID: 'm1' },
   'prompt.send': {
     type: 'prompt.send',
     requestId: 'r1',
@@ -277,6 +278,7 @@ describe('isWebviewToHost', () => {
       'session.open',
       'session.rename',
       'session.delete',
+      'session.fork',
       'session.abort',
       'permission.reply',
       'form.reply',
@@ -326,6 +328,17 @@ describe('isWebviewToHost', () => {
       isWebviewToHost({ ...rename, title: `  ${'x'.repeat(MAX_SESSION_TITLE_LENGTH)}  ` }),
     ).toBe(true);
     expect(isWebviewToHost({ ...WEBVIEW_SAMPLES['session.delete'], sessionID: '' })).toBe(false);
+  });
+
+  // Issue #21. Fabricated messages: they pin the guard; what the server does with a bad
+  // `messageID` (MessageNotFoundError) was seen in the planner spike, not here.
+  it('requires non-empty string ids on session.fork (issue #21)', () => {
+    const fork = WEBVIEW_SAMPLES['session.fork'];
+    expect(isWebviewToHost(fork)).toBe(true);
+    expect(isWebviewToHost({ ...fork, messageID: '' })).toBe(false);
+    expect(isWebviewToHost({ ...fork, sessionID: '' })).toBe(false);
+    expect(isWebviewToHost({ ...fork, requestId: '' })).toBe(false);
+    expect(isWebviewToHost({ ...fork, messageID: 7 })).toBe(false);
   });
 
   it('bounds editor.open line and column to safe integers >= 1', () => {

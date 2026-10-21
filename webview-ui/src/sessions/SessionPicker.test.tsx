@@ -242,6 +242,26 @@ describe('rows', () => {
     expect(h.view.container.querySelectorAll('.session-badge')).toHaveLength(1);
   });
 
+  // Issue #21. A fork is titled like its original, so the row must say it is one (fabricated rows).
+  it('marks a fork with the word "Fork", before the state words', () => {
+    const forked: SessionSummary = { ...row('fork', 'Fix the build (fork #1)'), forkOf: 'orig' };
+    const h = open([forked, row('orig', 'Fix the build', 5_000)], (store) => {
+      store.apply({
+        type: 'snapshot',
+        snapshot: {
+          sessions: [],
+          statuses: { fork: { type: 'busy' } },
+          requests: { permissions: [], forms: [] },
+          resolutions: [],
+        },
+      });
+    });
+    const badges = [...h.view.container.querySelectorAll('.session-badge')].map(
+      (e) => e.textContent,
+    );
+    expect(badges).toEqual(['Fork · Running']);
+  });
+
   it('shows "Untitled session" for a session without title and names the buttons after the title', () => {
     const h = open([row('a', undefined), row('b', 'Fix the build')]);
     expect(h.mains()[0]?.querySelector('.session-title')?.textContent).toBe('Untitled session');

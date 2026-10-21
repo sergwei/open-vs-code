@@ -119,6 +119,56 @@ button.secondary:hover:not(:disabled),
   white-space: nowrap;
 }
 
+/* ---------- related sessions (issue #21) ---------- */
+
+/* "‹ parent" or "Forked from ..." above the title. */
+.session-path {
+  display: flex;
+  margin: 0 0 4px;
+  min-width: 0;
+}
+
+.session-path-link {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-path-text {
+  color: var(--vscode-descriptionForeground);
+}
+
+/* The children of the open session, closed until asked for. */
+.subagent-sessions {
+  margin-top: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--vscode-panel-border, transparent);
+}
+
+.subagent-sessions > summary {
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+}
+
+.subagent-list {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.subagent-child {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  text-align: left;
+}
+
 /* ---------- session list (issue #20) ---------- */
 
 /* Holds the header and the dropdown that hangs under it, over the conversation. */
@@ -306,7 +356,15 @@ button.secondary:hover:not(:disabled),
   flex-direction: column;
 }
 
+/*
+ * `position: relative` makes the scroll container the containing block of the `.visually-hidden`
+ * spans inside it (the outcome lines carry one). Without it their containing block is outside the
+ * container, so they are neither clipped nor scrolled with it and can land below the page: the
+ * body then gets a vertical scrollbar that narrows the whole layout (seen by `test:visual` step 9
+ * once the action bars of issue #21 shifted the conversation: a 9 px overflow, 807 against 798).
+ */
 .message-list {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -365,6 +423,37 @@ button.secondary:hover:not(:disabled),
   font-family: var(--vscode-editor-font-family);
   font-size: 0.9em;
   margin: 4px 0;
+}
+
+/* A subagent tool block (issue #21): the line, and the button that opens its child session. */
+.part-subagent {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/*
+ * The action bar of a user message (issue #21). Hidden with opacity, never display: none, so Tab
+ * still reaches the button and focusing it shows the bar; no transition, so there is nothing to
+ * switch off for reduced motion.
+ */
+.message-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+  opacity: 0;
+}
+
+.message-user:hover .message-actions,
+.message-user:focus-within .message-actions {
+  opacity: 1;
+}
+
+/* Locked while a fork is in flight, but still focusable (aria-disabled, not disabled). */
+.message-action[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* What the user answered to a permission or a question, under the tool that asked. A Reject is a
@@ -1065,6 +1154,7 @@ button.secondary:hover:not(:disabled),
 [class*='vscode-high-contrast'] button.secondary,
 [class*='vscode-high-contrast'] .session-picker,
 [class*='vscode-high-contrast'] .session-search,
+[class*='vscode-high-contrast'] .subagent-sessions,
 [class*='vscode-high-contrast'] .code-action {
   border-color: var(--vscode-contrastBorder);
 }

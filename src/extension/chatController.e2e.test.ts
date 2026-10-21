@@ -17,6 +17,9 @@
 // E4-session-management (#20): paging and search over HTTP (the `parentID: null` and the cursor
 // round trip through the real client), rename, deleting a running session with a child, a decline,
 // a delete by another client, and the lazy "New session".
+// E4-fork-subsessions (#21): a fork over HTTP (only the history before the message, a ROOT row with
+// `forkOf`, the original intact), a fork made by another client, an unknown message, and a turn
+// whose `subagent` tool creates a child session that the host can open and list.
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -791,6 +794,141 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     expect((await other.session.list({})).data).toHaveLength(before);
     const last = posted.filter((m) => m.type === 'snapshot').at(-1);
     expect(last?.type === 'snapshot' ? last.snapshot.open : 'missing').toBeUndefined();
+  }, 20_000);
+
+  // E4 / issue #21. The fixture copies what the planner spike saw in a real opencode 2.0.32 (the
+  // fork is a ROOT session with `fork.sessionID`, only `session.forked` is published, a subagent
+  // child has `parentID` and the tool carries its id in `metadata`); a pass proves our wiring with
+  // the real client, not that the real server does it.
+
+  /** Sends `text` in the open session and waits for the turn to end (`idleCount` idles so far). */
+  async function turn(
+    controller: ChatController,
+    posted: HostToWebview[],
+    text: string,
+    idleCount: number,
+  ) {
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: `p${String(idleCount)}`,
+      text,
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(
+      () =>
+        posted.filter((m) => m.type === 'session.status' && m.status.type === 'idle').length >=
+        idleCount,
+      `turn ${String(idleCount)} to finish`,
+    );
+  }
+
+  it('forks before the second prompt over HTTP: the fork holds only the first exchange and opens', async () => {
+    const { controller, posted, other } = await bootSessions();
+    await turn(controller, posted, 'first question', 1);
+    await turn(controller, posted, 'second question', 2);
+    const originalID = lastSnapshot(posted).open?.sessionID ?? '';
+    const history = await other.message.list({ sessionID: originalID, order: 'desc', limit: 200 });
+    const secondUser = history.data.find((m) => m.type === 'user');
+    expect(secondUser).toBeDefined();
+
+    await controller.handle({
+      type: 'session.fork',
+      requestId: 'f1',
+      sessionID: originalID,
+      messageID: secondUser?.id ?? '',
+    });
+
+    expect(posted).toContainEqual({ type: 'request.result', requestId: 'f1' });
+    const snapshot = lastSnapshot(posted);
+    const forkID = snapshot.open?.sessionID ?? '';
+    expect(forkID).not.toBe(originalID);
+    expect(snapshot.open?.messages.map((m) => m.kind)).toEqual(['user', 'assistant']);
+    expect(snapshot.open?.messages[0]).toMatchObject({ kind: 'user', text: 'first question' });
+    expect(snapshot.sessions.find((row) => row.id === forkID)).toMatchObject({
+      forkOf: originalID,
+    });
+    expect(snapshot.sessions.find((row) => row.id === forkID)?.parentID).toBeUndefined();
+    // The row reached the webview as an upsert before the snapshot, and the original is intact.
+    expect(
+      posted.some((m) => m.type === 'session.upserted' && m.session.forkOf === originalID),
+    ).toBe(true);
+    const after = await other.message.list({ sessionID: originalID, order: 'desc', limit: 200 });
+    expect(after.data).toHaveLength(history.data.length);
+  }, 20_000);
+
+  it('a fork made by ANOTHER client reaches the webview as a session.upserted (session.forked has no title)', async () => {
+    const { controller, posted, other } = await bootSessions();
+    await turn(controller, posted, 'hello', 1);
+    const originalID = lastSnapshot(posted).open?.sessionID ?? '';
+    const forked = await other.session.fork({ sessionID: originalID });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.upserted' && m.session.id === forked.id),
+      'the upsert of the fork',
+    );
+    expect(
+      posted.find((m) => m.type === 'session.upserted' && m.session.id === forked.id),
+    ).toMatchObject({ session: { forkOf: originalID } });
+  }, 20_000);
+
+  it('a fork before an unknown message answers the server error and keeps the session open', async () => {
+    const { controller, posted } = await bootSessions();
+    await turn(controller, posted, 'hello', 1);
+    const originalID = lastSnapshot(posted).open?.sessionID ?? '';
+    await controller.handle({
+      type: 'session.fork',
+      requestId: 'f1',
+      sessionID: originalID,
+      messageID: 'msg_nope',
+    });
+    expect(posted.at(-1)).toMatchObject({
+      type: 'request.result',
+      requestId: 'f1',
+      error: { code: 'MessageNotFoundError' },
+    });
+    expect(lastSnapshot(posted).open?.sessionID).toBe(originalID);
+  }, 20_000);
+
+  it('a subagent turn: the tool carries the child id, the child is a session with parentID, opening it brings the parent row', async () => {
+    const { controller, posted } = await bootSessions();
+    await turn(controller, posted, 'SUBAGENT say hello', 1);
+    const parentID = lastSnapshot(posted).open?.sessionID ?? '';
+    const child = posted.find(
+      (m) => m.type === 'session.upserted' && m.session.parentID === parentID,
+    );
+    expect(child).toMatchObject({ session: { title: 'Say hello', agent: 'general' } });
+    const childID = child?.type === 'session.upserted' ? child.session.id : '';
+
+    const tools = posted.flatMap((m) =>
+      m.type === 'part.upserted' && m.part.type === 'tool' && m.part.name === 'subagent'
+        ? [m.part.state]
+        : [],
+    );
+    expect(tools.map((state) => state.status)).toContain('running');
+    expect(tools.at(-1)).toMatchObject({
+      status: 'completed',
+      metadata: { sessionID: childID, status: 'completed' },
+    });
+    expect(
+      tools.some(
+        (state) =>
+          state.status === 'running' &&
+          state.metadata?.sessionID === childID &&
+          state.metadata.status === 'running',
+      ),
+    ).toBe(true);
+
+    await controller.handle({ type: 'session.open', requestId: 'o1', sessionID: childID });
+    const snapshot = lastSnapshot(posted);
+    expect(snapshot.open?.sessionID).toBe(childID);
+    expect(snapshot.open?.messages.map((m) => m.kind)).toEqual(['user', 'assistant']);
+    expect(snapshot.sessions.find((row) => row.id === parentID)).toBeDefined();
+
+    // Back to the parent: its snapshot lists the child (the "Subagent sessions" of the header).
+    await controller.handle({ type: 'session.open', requestId: 'o2', sessionID: parentID });
+    expect(lastSnapshot(posted).sessions.find((row) => row.id === childID)).toMatchObject({
+      parentID,
+    });
   }, 20_000);
 
   it('reconnects and sends a second snapshot when the stream is cut', async () => {
