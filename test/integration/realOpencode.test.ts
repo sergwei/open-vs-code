@@ -185,6 +185,64 @@ describe('real opencode', function () {
   });
 
   /**
+   * Model and agent selectors (issues #23/#24) against a REAL opencode: a prompt that carries
+   * `opencode/glm-5.3-flash-free` and `plan` is validated against the catalog the host loaded from
+   * `model.list` / `agent.list`, the session is switched with the real `switchAgent` and
+   * `switchModel` routes, and the turn ends `succeeded`.
+   *
+   * Protects: the four catalog GETs and the two switch routes existing in the real server with the
+   * bodies the host sends (a 4xx would fail the send and log `request ... failed`), and that the
+   * order is switch, then prompt. The model is one of the ten free ones the planner's spike listed
+   * (opencode 2.0.32, Windows 11, 21/10/2026); free models change over time, so when the host
+   * REFUSES it (`ModelUnavailable`: the real catalog no longer lists it) the case is skipped with
+   * the reason, not failed. It runs in the session the previous cases left open, so the agent
+   * really changes (`build` -> `plan`). The reply text is not asserted; the visible proof
+   * ("Plan · <model>" under the reply) is `test:visual` step 11. Needs network and the free model.
+   */
+  it('applies a chosen model and agent before the prompt', async function () {
+    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'integration-model-1',
+      text: 'Reply with exactly: hello there',
+      delivery: 'queue',
+      files: [],
+      model: { providerID: 'opencode', id: 'glm-5.3-flash-free' },
+      agent: 'plan',
+    });
+    // Either the prompt is accepted, or the host refused the choice before touching the server.
+    const deadline = Date.now() + 15_000;
+    while (
+      !log.added().includes('prompt accepted for ses_') &&
+      !log.added().includes('prompt integration-model-1 rejected: ') &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (log.added().includes('prompt integration-model-1 rejected: ModelUnavailable')) {
+      console.log('SKIP: opencode/glm-5.3-flash-free is not in the real catalog any more');
+      this.skip();
+    }
+    await log.waitFor('prompt accepted for ses_', 1_000);
+    await log.waitFor('turn finished: ', TURN_WAIT_MS);
+    const text = log.added();
+    assert.ok(
+      text.includes('agent selected plan for ses_'),
+      `the agent was not switched to plan; log:\n${text}`,
+    );
+    assert.ok(
+      text.includes('model selected opencode/glm-5.3-flash-free for ses_'),
+      `the model was not switched; log:\n${text}`,
+    );
+    assert.ok(
+      text.indexOf('model selected') < text.indexOf('prompt accepted'),
+      `the choice must be applied BEFORE the prompt; log:\n${text}`,
+    );
+    assert.ok(text.includes('turn finished: succeeded'), `the turn did not succeed; log:\n${text}`);
+  });
+
+  /**
    * Stop (issue #16) against a REAL opencode: a long prompt is interrupted mid-turn through the
    * same `session.abort` message the Stop button sends, and the server confirms it.
    *

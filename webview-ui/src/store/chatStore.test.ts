@@ -887,3 +887,119 @@ describe('the session list (issue #20)', () => {
     });
   });
 });
+
+// E5 / issues #23 and #24. FABRICATED catalog and snapshots. Protects: a catalog that merges with the
+// old one instead of replacing it (a model that left would stay pickable); a draft that leaks into
+// another session (the next prompt would switch THAT session to the model chosen for this one) or
+// that a harmless snapshot of the same session wipes (the user's pick vanishing while typing).
+describe('catalog and selection draft (issues #23/#24)', () => {
+  const catalog = (ids: string[]) => ({
+    models: ids.map((id) => ({
+      providerID: 'opencode',
+      id,
+      name: id,
+      status: 'active' as const,
+      contextLimit: 1,
+      free: true,
+      variants: [],
+    })),
+    providers: [{ id: 'opencode', name: 'OpenCode' }],
+    agents: [{ id: 'build', name: 'Build' }],
+  });
+  const GLM = { providerID: 'opencode', id: 'glm' };
+
+  it('starts with no catalog and REPLACES it whole on every catalog message', () => {
+    withStore((store) => {
+      expect(store.state.catalog).toBeUndefined();
+      store.apply({ type: 'catalog', catalog: catalog(['a', 'b']) });
+      expect(store.state.catalog?.models.map((m) => m.id)).toEqual(['a', 'b']);
+      store.apply({ type: 'catalog', catalog: catalog(['c']) });
+      expect(store.state.catalog?.models.map((m) => m.id)).toEqual(['c']);
+    });
+  });
+
+  it('picking records the draft against the open session and sends nothing', () => {
+    withStore((store) => {
+      store.selectModel(GLM);
+      store.selectAgent('plan');
+      expect(store.state.selection).toEqual({ sessionID: SES, model: GLM, agent: 'plan' });
+    });
+  });
+
+  it('a snapshot of the SAME session keeps the draft; another session, or none, empties it', () => {
+    withStore((store) => {
+      store.selectModel(GLM);
+      store.apply({ type: 'snapshot', snapshot: openSnapshot() });
+      expect(store.state.selection.model).toEqual(GLM);
+
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...openSnapshot(), open: { sessionID: 'ses_2', messages: [], parts: {} } },
+      });
+      expect(store.state.selection).toEqual({
+        sessionID: 'ses_2',
+        model: undefined,
+        agent: undefined,
+      });
+
+      store.selectAgent('plan');
+      store.apply({
+        type: 'snapshot',
+        snapshot: {
+          sessions: [],
+          statuses: {},
+          requests: { permissions: [], forms: [] },
+          resolutions: [],
+        },
+      });
+      expect(store.state.selection.agent).toBeUndefined();
+      expect(store.state.selection.sessionID).toBeUndefined();
+    });
+  });
+
+  it('a draft made before the session exists is emptied when the first prompt opens it', () => {
+    createRoot((dispose) => {
+      const store = createChatStore();
+      store.selectAgent('plan');
+      expect(store.state.selection).toEqual({ sessionID: undefined, agent: 'plan' });
+      store.apply({ type: 'snapshot', snapshot: openSnapshot() });
+      expect(store.state.selection.agent).toBeUndefined();
+      expect(store.state.selection.sessionID).toBe(SES);
+      dispose();
+    });
+  });
+
+  it('removing the open session empties the draft', () => {
+    withStore((store) => {
+      store.selectModel(GLM);
+      store.apply({ type: 'session.removed', sessionID: SES });
+      expect(store.state.selection.model).toBeUndefined();
+    });
+  });
+
+  it('a restored draft survives only if the first snapshot opens the session it belonged to', () => {
+    createRoot((dispose) => {
+      const kept = createChatStore();
+      kept.restoreSelection({ sessionID: SES, model: GLM, agent: 'plan' });
+      kept.apply({ type: 'snapshot', snapshot: openSnapshot() });
+      expect(kept.state.selection).toEqual({ sessionID: SES, model: GLM, agent: 'plan' });
+
+      const dropped = createChatStore();
+      dropped.restoreSelection({ sessionID: 'ses_old', model: GLM, agent: 'plan' });
+      dropped.apply({ type: 'snapshot', snapshot: openSnapshot() });
+      expect(dropped.state.selection.model).toBeUndefined();
+      expect(dropped.state.selection.agent).toBeUndefined();
+      dispose();
+    });
+  });
+
+  it('a session.upserted with a new model updates the row the selectors read', () => {
+    withStore((store) => {
+      store.apply({
+        type: 'session.upserted',
+        session: { id: SES, createdAt: 1, updatedAt: 9, model: GLM, agent: 'plan' },
+      });
+      expect(store.state.sessions[SES]).toMatchObject({ model: GLM, agent: 'plan' });
+    });
+  });
+});

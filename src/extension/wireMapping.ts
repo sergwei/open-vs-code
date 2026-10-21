@@ -9,8 +9,11 @@
 // those recorded JSON shapes confirm OUR logic, not the contract (see the test headers).
 
 import type {
+  AgentInfo,
   FormInfo,
+  ModelInfo,
   PermissionRequest,
+  ProviderInfo,
   SessionInfo,
   SessionMessageAssistant,
   SessionMessageAssistantReasoning,
@@ -21,15 +24,18 @@ import type {
   ToolContent,
 } from '@opencode/client';
 import type {
+  AgentOption,
   AttachmentInfo,
   ErrorInfo,
   FormAsk,
   FormField,
   JsonObject,
   MessageInfo,
+  ModelOption,
   ModelRef,
   Part,
   PermissionAsk,
+  ProviderOption,
   SessionSummary,
   ToolOutput,
   ToolRef,
@@ -132,11 +138,60 @@ export function toStructuredErrorInfo(
   return { code: error.type, message: sanitizeText(error.message, secrets) };
 }
 
-/** Provider/model pair of the wire to the shared shape (same fields, optional `variant` kept). */
+/**
+ * Provider/model pair of the wire to the shared shape. A `variant` of `"default"` becomes ABSENT:
+ * the server echoes `variant: "default"` in `session.get` and `session.step.started` when the
+ * model was chosen without a variant, and the UI compares references, so both spellings of "no
+ * variant" must be one. Any other variant is kept. VERIFIED in the issue #23 spike against
+ * opencode 2.0.32 (Windows 11, 21/10/2026).
+ */
 export function toModelRef(model: { id: string; providerID: string; variant?: string }): ModelRef {
   const ref: ModelRef = { providerID: model.providerID, id: model.id };
-  if (model.variant !== undefined) ref.variant = model.variant;
+  if (model.variant !== undefined && model.variant !== 'default') ref.variant = model.variant;
   return ref;
+}
+
+/**
+ * Catalog entry of the wire to the shared option (issue #23). `free` needs EVERY cost entry (the
+ * price can be tiered by context size) to have zero input and output, and a model with NO cost
+ * entries is not called free (we would be guessing). `variants` keeps only the ids.
+ * VERIFIED shape against a real opencode 2.0.32 (spike, Windows 11, 21/10/2026: ten free models);
+ * the tiered-cost reading is HYPOTHESIS (no tiered model was seen).
+ */
+export function toModelOption(info: ModelInfo): ModelOption {
+  return {
+    providerID: info.providerID,
+    id: info.id,
+    name: info.name,
+    status: info.status,
+    contextLimit: info.limit.context,
+    free: info.cost.length > 0 && info.cost.every((c) => c.input === 0 && c.output === 0),
+    variants: info.variants.map((variant) => variant.id),
+  };
+}
+
+/** Provider of the wire to the shared option. VERIFIED shape (same spike as {@link toModelOption}). */
+export function toProviderOption(info: ProviderInfo): ProviderOption {
+  return { id: info.id, name: info.name };
+}
+
+/**
+ * The agents the user may choose, in the server's order (the default agent comes first).
+ *
+ * Selectable = `mode !== "subagent"` and not `hidden`, the filter opencode's own `agent.ts` applies
+ * (`core/src/agent.ts` L74-75 at tag v2.0.32, read). VERIFIED against a real opencode 2.0.32 (spike,
+ * Windows 11, 21/10/2026): of seven agents only `build` and `plan` passed; `general`/`explore` are
+ * subagents and `compaction`/`title`/`summary` are hidden. `mode: "all"` passes (HYPOTHESIS: none
+ * was seen; it is what the filter says).
+ */
+export function toAgentOptions(list: readonly AgentInfo[]): AgentOption[] {
+  return list
+    .filter((agent) => agent.mode !== 'subagent' && !agent.hidden)
+    .map((agent) => {
+      const option: AgentOption = { id: agent.id, name: agent.name };
+      if (agent.description !== undefined) option.description = agent.description;
+      return option;
+    });
 }
 
 /**

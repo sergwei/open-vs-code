@@ -72,6 +72,23 @@
 // with `metadata {sessionID, status: "running"}`, runs a short turn in the child and ends with
 // `session.tool.success` carrying `metadata {sessionID, status: "completed", truncated: false}`
 // (the event ORDER is the spike's; the ids, texts and timing are INVENTED).
+// E5-model-agent-selectors (issues #23/#24) adds, SYNTHETIC but copying what the planner saw in a
+// spike against a real opencode 2.0.32 (Windows 11, 21/10/2026): `GET /api/model`,
+// `GET /api/model/default`, `GET /api/provider` and `GET /api/agent`, all `{location, data}` (the
+// client does not unwrap them; `model/default` too is `{location, data: ModelInfo | null}`); the
+// agent list holds `build` (the default, first), `general` (subagent), `title` (hidden) and `plan`.
+// `POST /api/session` accepts `agent` and `model`; `POST /api/session/:id/model` and `.../agent` answer
+// 204 and validate NOTHING (an unknown model or agent is stored, like the real server); the model
+// route deduplicates against the model STORED on the session (the same model again publishes
+// nothing; a session with no stored model always publishes, which is INVENTED) and the agent route
+// does NOT; each
+// publishes the durable `session.model.selected` / `session.agent.selected`, appends a
+// `model-switched` / `agent-switched` message to the history and bumps `time.updated`. A model chosen
+// without a variant is stored (and echoed by `session.get` and `session.step.started`) with
+// `variant: "default"`, as the spike saw. What is INVENTED: the two-model catalog (the real one had
+// ten, all free), the shape of the `*.selected` payloads beyond `{sessionID, model|agent,
+// previous?}`, and that `step.started` and the REST assistant message use the agent and model
+// stored in the session (the real server does it; the fixture copies the rule, not the code).
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running.
 
@@ -339,9 +356,112 @@ function subagentTool(a) {
   return { steps, block };
 }
 
+/** The model a session answers with when none was ever selected: the catalog default. */
+const DEFAULT_MODEL = { id: 'big-pickle', providerID: 'opencode' };
+
+/** The agent and model the next turn of a session uses: its stored choice, else the defaults. */
+function selectionOf(sessionID) {
+  const session = sessions.get(sessionID);
+  return { agent: session?.agent ?? 'build', model: session?.model ?? DEFAULT_MODEL };
+}
+
+/**
+ * The catalog the model and agent routes answer (see the header). `ModelInfo` fields are trimmed to
+ * what the host's mapping reads (`id`, `providerID`, `name`, `status`, `limit`, `cost`, `variants`).
+ */
+const CATALOG_MODELS = [
+  ['big-pickle', 'Big Pickle'],
+  ['glm-5.3-flash-free', 'GLM-5.3-Flash Free'],
+].map(([id, name]) => ({
+  id,
+  modelID: id,
+  providerID: 'opencode',
+  name,
+  capabilities: { tools: true, input: ['text'], output: ['text'] },
+  variants: [{ id: 'low' }, { id: 'high' }],
+  time: { released: 1 },
+  cost: [{ input: 0, output: 0, cache: { read: 0, write: 0 } }],
+  status: 'active',
+  enabled: true,
+  limit: { context: 200000, output: 32000 },
+}));
+
+const CATALOG_AGENTS = [
+  ['build', 'Build', 'primary', false],
+  ['general', 'General', 'subagent', false],
+  ['title', 'Title', 'primary', true],
+  ['plan', 'Plan', 'primary', false],
+].map(([id, name, mode, hidden]) => ({
+  id,
+  name,
+  mode,
+  hidden,
+  request: { settings: {}, headers: {} },
+  permissions: [],
+}));
+
+/**
+ * `POST /api/session/:id/model` and `/agent` (issues #23/#24): see the header. Stores the choice
+ * with NO validation and publishes the durable event. The model route returns without doing
+ * anything when the model equals the one STORED on the session (it deduplicates against the stored
+ * model only: a session that stores none always gets the `model-switched`, which is what
+ * `chatController.applySelection` assumes since the review #1015 W1 decision); the agent route
+ * never deduplicates. Deduplication against a stored model was seen on a real opencode 2.0.32 in the
+ * planner spike; the no-stored-model case is INVENTED here, not recorded from a real server.
+ */
+function selectOnSession(session, sub, body) {
+  const now = Date.now();
+  session.time.updated = now;
+  if (sub === 'model') {
+    const next = {
+      id: body.model.id,
+      providerID: body.model.providerID,
+      variant: body.model.variant ?? 'default',
+    };
+    const previous = session.model;
+    if (
+      previous !== undefined &&
+      previous.id === next.id &&
+      previous.providerID === next.providerID &&
+      (previous.variant ?? 'default') === next.variant
+    ) {
+      return;
+    }
+    session.model = next;
+    history.get(session.id).push({
+      id: nextId('msg'),
+      type: 'model-switched',
+      time: { created: now },
+      model: next,
+      ...(previous ? { previous } : {}),
+    });
+    broadcast('session.model.selected', {
+      sessionID: session.id,
+      model: next,
+      ...(previous ? { previous } : {}),
+    });
+    return;
+  }
+  const previous = session.agent;
+  session.agent = body.agent;
+  history.get(session.id).push({
+    id: nextId('msg'),
+    type: 'agent-switched',
+    time: { created: now },
+    agent: body.agent,
+    ...(previous ? { previous } : {}),
+  });
+  broadcast('session.agent.selected', {
+    sessionID: session.id,
+    agent: body.agent,
+    ...(previous ? { previous } : {}),
+  });
+}
+
 /** Plays the recorded turn for a prompt, one event every few milliseconds. */
 function playTurn(sessionID, inboxID, text) {
   const assistantMessageID = nextId('msg');
+  const chosen = selectionOf(sessionID);
   const a = { sessionID, assistantMessageID };
   const fail = text.includes('FAIL');
   const asking = text.includes('ASK_PERMISSION')
@@ -385,8 +505,8 @@ function playTurn(sessionID, inboxID, text) {
     const stepStarted = () =>
       broadcast('session.step.started', {
         ...a,
-        agent: 'build',
-        model: { id: 'big-pickle', providerID: 'opencode' },
+        agent: chosen.agent,
+        model: chosen.model,
         started: Date.now(),
       });
     const body = [
@@ -402,8 +522,8 @@ function playTurn(sessionID, inboxID, text) {
         history.get(sessionID).push({
           id: assistantMessageID,
           type: 'assistant',
-          agent: 'build',
-          model: { id: 'big-pickle', providerID: 'opencode' },
+          agent: chosen.agent,
+          model: chosen.model,
           time: { created: Date.now(), completed: Date.now() },
           finish: 'stop',
           content: [
@@ -760,6 +880,10 @@ function handleChat(request, response) {
         },
         ...(typeof body.title === 'string' ? { title: body.title } : {}),
         ...(typeof body.parentID === 'string' ? { parentID: body.parentID } : {}),
+        ...(typeof body.agent === 'string' ? { agent: body.agent } : {}),
+        ...(typeof body.model === 'object' && body.model !== null
+          ? { model: { ...body.model, variant: body.model.variant ?? 'default' } }
+          : {}),
       };
       sessions.set(id, info);
       history.set(id, []);
@@ -772,6 +896,8 @@ function handleChat(request, response) {
         location: info.location,
         ...(info.title === undefined ? {} : { title: info.title }),
         ...(info.parentID === undefined ? {} : { parentID: info.parentID }),
+        ...(info.agent === undefined ? {} : { agent: info.agent }),
+        ...(info.model === undefined ? {} : { model: info.model }),
       });
     });
     return true;
@@ -779,6 +905,25 @@ function handleChat(request, response) {
   const location = {
     directory: decodeURIComponent(String(request.headers['x-opencode-directory'] ?? '')),
   };
+  if (method === 'GET' && path === '/api/model') {
+    json(response, 200, { location, data: CATALOG_MODELS });
+    return true;
+  }
+  if (method === 'GET' && path === '/api/model/default') {
+    json(response, 200, { location, data: CATALOG_MODELS[0] });
+    return true;
+  }
+  if (method === 'GET' && path === '/api/provider') {
+    json(response, 200, {
+      location,
+      data: [{ id: 'opencode', name: 'OpenCode', activation: 'auto', package: 'fake' }],
+    });
+    return true;
+  }
+  if (method === 'GET' && path === '/api/agent') {
+    json(response, 200, { location, data: CATALOG_AGENTS });
+    return true;
+  }
   if (method === 'GET' && path === '/api/permission/request') {
     json(response, 200, { location, data: [...pendingPermissions.values()] });
     return true;
@@ -794,7 +939,9 @@ function handleChat(request, response) {
   const act = /^\/api\/session\/([^/]+)\/(permission|form)\/([^/]+)(?:\/(reply))?$/.exec(path);
   if (act !== null) return handleAnswer(request, response, act);
   const match =
-    /^\/api\/session\/([^/]+)(?:\/(message|permission|form|prompt|interrupt|fork))?$/.exec(path);
+    /^\/api\/session\/([^/]+)(?:\/(message|permission|form|prompt|interrupt|fork|model|agent))?$/.exec(
+      path,
+    );
   if (match === null) return false;
   const [, id, sub] = match;
   const session = sessions.get(decodeURIComponent(id));
@@ -832,6 +979,13 @@ function handleChat(request, response) {
   if (method === 'DELETE' && sub === undefined) {
     removeSession(session.id);
     noContent(response);
+    return true;
+  }
+  if (method === 'POST' && (sub === 'model' || sub === 'agent')) {
+    readBody(request).then((body) => {
+      selectOnSession(session, sub, body);
+      noContent(response);
+    });
     return true;
   }
   if (method === 'POST' && sub === 'fork') {

@@ -39,9 +39,17 @@
 // message, opened right away) and the lineage of the open session (its subagent children and the
 // rows of its parent / original, added to the snapshot). New stable log line: `session forked
 // <origin> -> <new>` (ids only).
+//
+// E5-model-agent-selectors (issues #23/#24, plan Engram #1011, decisions #1012): the host loads the
+// CATALOG of the server (models, providers, selectable agents, default model; `loadCatalog`),
+// pushes it to the webview as `catalog` and reloads it on the reload events of the server. A
+// `prompt.send` may carry the model and agent the user chose; the choice is applied ON SEND, after
+// being validated against the catalog (the server validates neither). New stable log lines, ids
+// only: `catalog loaded (<n> models, <m> agents)`, `model selected <providerID>/<id> for <sid>`,
+// `agent selected <id> for <sid>`, `default model setting ignored: invalid|unavailable`.
 
 import type { V2Event } from '@opencode/client';
-import type { ErrorInfo, SessionStatus, SessionSummary } from '../shared/model';
+import type { Catalog, ErrorInfo, ModelRef, SessionStatus, SessionSummary } from '../shared/model';
 import {
   dispatch,
   MAX_SESSION_TITLE_LENGTH,
@@ -56,6 +64,7 @@ import {
 } from '../shared/protocol';
 import { createEventTranslator, type EventTranslator } from './eventTranslator';
 import { runEventStream, type StreamState } from './eventStream';
+import { resolvePreferredModel } from './modelPreference';
 import type { ChatApi } from './opencodeClient';
 import { safeLog, type ServerLog } from './opencodeServer';
 import { createPendingRequests, type PendingSummary } from './pendingRequests';
@@ -63,10 +72,14 @@ import { createRequestResolutions } from './requestResolutions';
 import type { RunningServerInfo, ServerState } from './serverManager';
 import { createSessionBrowser } from './sessionBrowser';
 import {
+  toAgentOptions,
   toErrorInfo,
   toFormAsk,
   toMessage,
+  toModelOption,
+  toModelRef,
   toPermissionAsk,
+  toProviderOption,
   toSessionSummary,
   toStructuredErrorInfo,
   type ErrorSecrets,
@@ -161,9 +174,29 @@ export interface ChatControllerDeps {
    * "Delete". `title` comes from the server (`session.get`), `running` from `session.active()`.
    */
   sessions: { confirmDelete(info: { title: string; running: boolean }): Promise<boolean> };
+  preferences: ModelPreferences;
   server: ServerCommands;
   /** The SSE loop; replaced in tests. */
   runStream?: typeof runEventStream;
+}
+
+/**
+ * What the controller needs to know about the user's model preferences (issue #23). Injected so the
+ * controller stays free of `vscode`: `chatLifecycle.ts` reads the `openVsCode.defaultModel` setting
+ * and keeps the last model in `globalState`.
+ */
+export interface ModelPreferences {
+  /** The raw text of `openVsCode.defaultModel` (`provider/model`), or `undefined` when unset. */
+  defaultModel(): string | undefined;
+  /** The model the last accepted prompt was sent with, or `undefined`. */
+  lastModel(): ModelRef | undefined;
+  /** Remembers `ref` as the last model used; may reject, the controller logs and goes on. */
+  setLastModel(ref: ModelRef): Promise<void>;
+}
+
+/** True when two references name the same model and variant; an absent variant is "default". */
+function sameModel(a: ModelRef, b: ModelRef): boolean {
+  return a.providerID === b.providerID && a.id === b.id && (a.variant ?? '') === (b.variant ?? '');
 }
 
 /** The `_tag` of a thrown server error body, or `undefined` when it is not one. */
@@ -193,6 +226,22 @@ function isStaleRequest(error: unknown): boolean {
     tag === 'RequestNotPending' // ours: the host's registry did not know the request
   );
 }
+
+/**
+ * Server events after which the catalog may have changed (all volatile, `data: {}`): the list of
+ * models, providers or agents, the credentials behind them, or the config that names the default.
+ * Names read in the client types of 2.0.32 and `references/eventos-v2.md`; VERIFIED in the issue
+ * #23 spike that a burst of them (nine in the same millisecond) follows the first use of a
+ * session. Not exercised against a real server by changing a credential (UNVERIFIED).
+ */
+const CATALOG_RELOAD_EVENTS: ReadonlySet<string> = new Set([
+  'model.updated',
+  'provider.updated',
+  'agent.updated',
+  'integration.updated',
+  'credential.updated',
+  'config.updated',
+]);
 
 /** Snapshot with no sessions, sent when there is no server to ask. */
 const EMPTY_SNAPSHOT: Snapshot = {
@@ -229,6 +278,14 @@ const EMPTY_SNAPSHOT: Snapshot = {
  * session (the webview gets no new host message, only `session.upserted` + `snapshot`); a fork made
  * by another client arrives as a bare `session.forked` event, which carries no title, so
  * {@link refreshSession} reads the row. `resync` also brings the lineage of the open session.
+ * Issues #23/#24 (`E5-model-agent-selectors`, plan Engram #1011, decisions #1012) add the CATALOG:
+ * `loadCatalog` reads models, providers, agents and the default model IN PARALLEL with `resync`
+ * (not inside it: `model.list` waits for the plugins and must not delay the snapshot), keeps the
+ * result in `catalog`, REPLACES it whole on every load (the host-registry rule) and pushes it to the
+ * webview; the reload events of the server trigger it again, coalesced into at most one more run.
+ * The choice of model and agent is a draft in the webview and travels in `prompt.send`; `sendPrompt`
+ * validates it against `catalog` and applies it just before the prompt (alternative discarded:
+ * apply on every click, which adds `*-switched` noise and reconfigures a running turn).
  * VERIFIED with a fake client (unit tests) and against a synthetic HTTP/SSE server
  * (`chatController.e2e.test.ts`, real client and stream loop). The permission and question flows
  * against a real opencode are exercised only by the opt-in `realOpencode.test.ts` (see its
@@ -288,6 +345,18 @@ export class ChatController {
   private focusRequested: { target: FocusTarget; at: number } | undefined;
   private generation = 0;
   private disposed = false;
+  /** Models, providers and agents of the CURRENT server; `undefined` until the first load succeeds. */
+  private catalog: Catalog | undefined;
+  /**
+   * The load in flight, or `undefined`. A request that arrives meanwhile sets `catalogDirty` and
+   * shares this promise, so a burst of reload events costs at most one more load.
+   */
+  private catalogRun: Promise<void> | undefined;
+  private catalogDirty = false;
+  /** Bumped when the server goes away: a load that started for the old one must not publish. */
+  private catalogEpoch = 0;
+  /** The `defaultModel` setting value the user was last told about, so it is told once. */
+  private ignoredSettingNoticed: string | undefined;
 
   constructor(private readonly deps: ChatControllerDeps) {
     this.log = safeLog(deps.log);
@@ -384,7 +453,8 @@ export class ChatController {
    * new ones. The requests die with the server (opencode rejects its pending ones on shutdown), so
    * the registry is emptied and the attention feature told, which closes its notifications.
    * The asks remembered for the resolutions die with them (`forgetAsks`), but the RESOLUTIONS
-   * already recorded stay: they are history, and Restart Server must not wipe them.
+   * already recorded stay: they are history, and Restart Server must not wipe them. The catalog
+   * goes too (it described that server) and a catalog load in flight is cut off from publishing.
    */
   private stopStream(): void {
     this.streamAbort?.abort();
@@ -392,6 +462,11 @@ export class ChatController {
     this.client = undefined;
     this.server = undefined;
     this.generation++; // a snapshot in flight for the old server must not be published
+    // The catalog belongs to the server that served it: another server may offer other models.
+    this.catalog = undefined;
+    this.catalogEpoch++;
+    this.catalogRun = undefined;
+    this.catalogDirty = false;
     this.browser.reset(); // its cursor embeds the old server's query
     this.clearPending();
     this.resolutions.forgetAsks();
@@ -442,7 +517,9 @@ export class ChatController {
   }
 
   /**
-   * Handles one stream event: resync on `server.connected`/`location.shutdown`, else translate.
+   * Handles one stream event: resync on `server.connected`/`location.shutdown` (both also reload the
+   * catalog, as do the events of {@link CATALOG_RELOAD_EVENTS}, which have nothing to translate),
+   * else translate.
    *
    * Every translated message goes through the registry of pending requests (and the in-flight
    * resync's `live` record); when the set changed, the attention feature is told once per event.
@@ -464,6 +541,11 @@ export class ChatController {
       if (event.type === 'server.connected') {
         this.log.info('event stream connected');
         void this.resync();
+        void this.loadCatalog();
+        return;
+      }
+      if (CATALOG_RELOAD_EVENTS.has(event.type)) {
+        void this.loadCatalog();
         return;
       }
       if (event.type === 'session.forked') {
@@ -473,6 +555,7 @@ export class ChatController {
       if (event.type === 'location.shutdown') {
         this.log.info('location shutdown; refreshing the snapshot');
         void this.resync();
+        void this.loadCatalog();
         return;
       }
       if (
@@ -649,7 +732,9 @@ export class ChatController {
    * dropped by the provider, so this is the only way a new document gets its state. If a
    * `focusRequest` is waiting (an "Open chat" click that had to load the document first, so its
    * first `ui.focus` went nowhere) it is sent again after the snapshot, as long as it is fresher
-   * than {@link FOCUS_REQUEST_TTL_MS}.
+   * than {@link FOCUS_REQUEST_TTL_MS}. The cached catalog, if any, is sent right after the snapshot
+   * (a new document starts without one; the load that produced it already went to the old
+   * document or was dropped).
    */
   async onWebviewReady(): Promise<void> {
     this.log.info('webview ready');
@@ -659,6 +744,7 @@ export class ChatController {
       return;
     }
     await this.resync();
+    if (this.catalog !== undefined) this.post({ type: 'catalog', catalog: this.catalog });
     const requested = this.focusRequested;
     this.focusRequested = undefined;
     if (requested !== undefined && Date.now() - requested.at <= FOCUS_REQUEST_TTL_MS) {
@@ -932,6 +1018,217 @@ export class ChatController {
       if (!forms.some((known) => known.id === ask.id)) forms.push(ask);
     }
     return { permissions, forms };
+  }
+
+  /**
+   * Reads the catalog of the server (`model.list`, `provider.list`, `agent.list`, `model.default`,
+   * four GETs in parallel) and publishes it as `catalog`. Resolves when the load, and the one more
+   * it may owe, are done; never rejects. A call while a load is in flight does not start a second
+   * one: it marks the catalog dirty, so the running load repeats once when it ends, and shares its
+   * promise. The result REPLACES the previous catalog whole (a model that left must disappear);
+   * a failed load keeps the previous one and writes a `warn` line, with no notice (the selectors
+   * simply keep what they had). A load for a server that went away meanwhile is dropped.
+   * All four answers are `{ location, data }` (VERIFIED, planner spike against opencode 2.0.32,
+   * Windows 11, 21/10/2026; `model.default().data` is `null` when no model can be chosen).
+   */
+  loadCatalog(): Promise<void> {
+    if (this.client === undefined || this.disposed) return Promise.resolve();
+    if (this.catalogRun !== undefined) {
+      this.catalogDirty = true;
+      return this.catalogRun;
+    }
+    const epoch = this.catalogEpoch;
+    const run: Promise<void> = this.repeatCatalogLoads(epoch).finally(() => {
+      if (this.catalogRun === run) this.catalogRun = undefined;
+    });
+    this.catalogRun = run;
+    return run;
+  }
+
+  /** Loads the catalog, and once more per `catalogDirty` raised meanwhile, while `epoch` holds. */
+  private async repeatCatalogLoads(epoch: number): Promise<void> {
+    do {
+      this.catalogDirty = false;
+      await this.readCatalog(epoch);
+    } while (this.catalogDirty && epoch === this.catalogEpoch && !this.disposed);
+  }
+
+  /** One catalog read for the server of `epoch`; see {@link loadCatalog}. Never throws. */
+  private async readCatalog(epoch: number): Promise<void> {
+    const client = this.client;
+    if (client === undefined) return;
+    try {
+      const [models, providers, agents, fallback] = await Promise.all([
+        client.model.list(),
+        client.provider.list(),
+        client.agent.list(),
+        client.model.default(),
+      ]);
+      if (epoch !== this.catalogEpoch || this.disposed) return;
+      const agentOptions = toAgentOptions(agents.data);
+      const catalog: Catalog = {
+        models: models.data.map(toModelOption),
+        providers: providers.data.map(toProviderOption),
+        agents: agentOptions,
+      };
+      if (fallback.data !== null) {
+        catalog.serverDefault = { providerID: fallback.data.providerID, id: fallback.data.id };
+      }
+      // The server lists its default agent first (core/agent.ts L106-111 at v2.0.32, read).
+      const first = agentOptions[0];
+      if (first !== undefined) catalog.defaultAgent = first.id;
+      this.catalog = this.withPreferredModel(catalog);
+      this.log.info(
+        `catalog loaded (${String(catalog.models.length)} models, ${String(catalog.agents.length)} agents)`,
+      );
+      this.post({ type: 'catalog', catalog: this.catalog });
+    } catch (error) {
+      if (epoch !== this.catalogEpoch) return;
+      const info = toErrorInfo(error, this.secrets);
+      this.log.warn(`catalog load failed: ${info.code}: ${info.message}`);
+    }
+  }
+
+  /**
+   * Returns `catalog` with `preferredModel` set from the user's preferences: the
+   * `openVsCode.defaultModel` setting, then the last model used, each only if the catalog offers it.
+   * A setting that is written but unusable is reported by {@link reportIgnoredSetting}.
+   */
+  private withPreferredModel(catalog: Catalog): Catalog {
+    const { model, ignored } = resolvePreferredModel({
+      setting: this.deps.preferences.defaultModel(),
+      last: this.deps.preferences.lastModel(),
+      available: catalog.models,
+    });
+    this.reportIgnoredSetting(ignored);
+    const next: Catalog = {
+      models: catalog.models,
+      providers: catalog.providers,
+      agents: catalog.agents,
+    };
+    if (catalog.serverDefault !== undefined) next.serverDefault = catalog.serverDefault;
+    if (catalog.defaultAgent !== undefined) next.defaultAgent = catalog.defaultAgent;
+    if (model !== undefined) next.preferredModel = model;
+    return next;
+  }
+
+  /**
+   * Tells the user ONCE per distinct value that `openVsCode.defaultModel` is not being applied:
+   * a `warn` line with the reason only, and an info `notice`. A value that applies (or no value)
+   * forgets the last report, so fixing the setting and breaking it again is told again.
+   */
+  private reportIgnoredSetting(
+    ignored: { value: string; reason: 'invalid' | 'unavailable' } | undefined,
+  ): void {
+    if (ignored === undefined) {
+      this.ignoredSettingNoticed = undefined;
+      return;
+    }
+    if (this.ignoredSettingNoticed === ignored.value) return;
+    this.ignoredSettingNoticed = ignored.value;
+    this.log.warn(`default model setting ignored: ${ignored.reason}`);
+    const shown = ignored.value.length > 80 ? `${ignored.value.slice(0, 80)}…` : ignored.value;
+    this.post({
+      type: 'notice',
+      level: 'info',
+      error: {
+        code: 'DefaultModelIgnored',
+        message:
+          ignored.reason === 'invalid'
+            ? `openVsCode.defaultModel “${shown}” is not written provider/model, so it is ignored`
+            : `The model “${shown}” of openVsCode.defaultModel is not offered by the server, so it is ignored`,
+      },
+    });
+  }
+
+  /**
+   * The user's preferences changed (the setting, from `chatLifecycle.ts`): recomputes the model a
+   * new session proposes with the catalog already held and publishes it again. No REST call. Does
+   * nothing without a catalog (the first load will read the preferences itself).
+   */
+  onPreferencesChanged(): void {
+    if (this.catalog === undefined || this.disposed) return;
+    this.catalog = this.withPreferredModel(this.catalog);
+    this.post({ type: 'catalog', catalog: this.catalog });
+  }
+
+  /** The held catalog, loading it first when there is none; `undefined` if the load failed. */
+  private async ensureCatalog(): Promise<Catalog | undefined> {
+    if (this.catalog !== undefined) return this.catalog;
+    await this.loadCatalog();
+    return this.catalog;
+  }
+
+  /**
+   * Checks the model and agent of a `prompt.send` against `catalog`. Returns the error body to
+   * answer with, or `undefined` when both are offered (or absent). A variant must be one the
+   * catalog lists for that model. The webview is untrusted input, and the server would accept
+   * anything here and fail the NEXT turn instead (VERIFIED, planner spike, opencode 2.0.32).
+   */
+  private checkSelection(
+    catalog: Catalog,
+    model: ModelRef | undefined,
+    agent: string | undefined,
+  ): { _tag: string; message: string } | undefined {
+    if (model !== undefined) {
+      const option = catalog.models.find(
+        (candidate) => candidate.providerID === model.providerID && candidate.id === model.id,
+      );
+      if (
+        option === undefined ||
+        (model.variant !== undefined && !option.variants.includes(model.variant))
+      ) {
+        return {
+          _tag: 'ModelUnavailable',
+          message: 'That model is not offered by the server any more. Choose another one.',
+        };
+      }
+    }
+    if (agent !== undefined && !catalog.agents.some((candidate) => candidate.id === agent)) {
+      return {
+        _tag: 'AgentUnavailable',
+        message: 'That agent is not available any more. Choose another one.',
+      };
+    }
+    return undefined;
+  }
+
+  /**
+   * Puts an EXISTING session on the agent and model the user chose, just before its prompt.
+   *
+   * Reads the session (`session.get`) and compares ONLY with what the session has stored: it calls
+   * `switchAgent` when `agent !== info.agent` and `switchModel` when the model differs from
+   * `info.model`, and a session that stores nothing always gets the switch. So a model or agent the
+   * user chose is PINNED on the session, even when it equals the server default of today (decision
+   * of Sergio, 21/10/2026, review #1015 W1): leaving it unpinned would let a later credential,
+   * provider or config change move the session to another model. The price is one `model-switched`
+   * (or `agent-switched`) message the first time a session without a stored value gets a choice.
+   * The server does NOT deduplicate `switchAgent` (it publishes an `agent-switched` message every
+   * time; going to or from `plan` also queues a reminder), and does deduplicate `switchModel`
+   * against the stored model. Agent first, then model. Throws what the client throws; the caller
+   * then sends NO prompt. VERIFIED against a real opencode 2.0.32 in the planner spike (Windows 11,
+   * 21/10/2026) for the server behaviours quoted; the pinning itself is covered by
+   * `chatController.test.ts` with a fake client only. UNVERIFIED against a real server inside VS
+   * Code: test:visual steps 11 and 13 send every prompt to a NEW session, which goes through
+   * `session.create`, never through this method (review E5-model-agent-selectors/review-2 W1).
+   */
+  private async applySelection(
+    client: ChatApi,
+    sessionID: string,
+    model: ModelRef | undefined,
+    agent: string | undefined,
+  ): Promise<void> {
+    if (model === undefined && agent === undefined) return;
+    const info = await client.session.get({ sessionID });
+    if (agent !== undefined && agent !== info.agent) {
+      await client.session.switchAgent({ sessionID, agent });
+      this.log.info(`agent selected ${agent} for ${sessionID}`);
+    }
+    const current = info.model === undefined ? undefined : toModelRef(info.model);
+    if (model !== undefined && (current === undefined || !sameModel(model, current))) {
+      await client.session.switchModel({ sessionID, model });
+      this.log.info(`model selected ${model.providerID}/${model.id} for ${sessionID}`);
+    }
   }
 
   /** Remembers `sessionID` as the open one (for the served folder) and publishes its history. */
@@ -1270,7 +1567,8 @@ export class ChatController {
   /**
    * Handles one VALIDATED webview message (the caller ran `isWebviewToHost`).
    *
-   * `prompt.send` creates a session when none is open, then calls `session.prompt` with the
+   * `prompt.send` creates a session when none is open (with the model and agent the webview chose,
+   * issues #23/#24), then calls `session.prompt` with the
    * delivery the webview chose and the attachments the file picker emitted. `session.new` (lazy)
    * and `session.open` change the open session. `session.abort` interrupts the turn (issue #16).
    * Issue #20: `sessions.query`, `session.rename` and `session.delete` serve the session list.
@@ -1601,6 +1899,17 @@ export class ChatController {
    * Every `files[].uri` must be in `pickedUris`, else the whole prompt is refused with
    * `AttachmentRejected` before touching the server (the attachment name is not trusted either,
    * but it is only a label).
+   *
+   * Issues #23/#24: when the message carries a `model` and/or an `agent`, they are checked against
+   * the catalog FIRST (loading it if the host has none; a catalog that cannot be read is
+   * `CatalogUnavailable`). One that is not offered answers `ModelUnavailable` / `AgentUnavailable`
+   * with no call to the server and reloads the catalog, because the webview is behind it. Then the
+   * choice is applied: a NEW session is created with it (`session.create({ agent, model })`), an
+   * existing one is switched by {@link applySelection}; a failure there answers the error and sends
+   * NO prompt (a prompt sent to a session on a bad model would be redelivered later, VERIFIED in
+   * the planner spike). After the prompt is accepted the model becomes the last one used
+   * (`preferences.setLastModel`; a failure is a `warn` line, the send stands) and the catalog is
+   * published again so a new session proposes it. The model's own variant, if any, is kept.
    */
   private async sendPrompt(
     message: Extract<WebviewToHost, { type: 'prompt.send' }>,
@@ -1616,12 +1925,43 @@ export class ChatController {
       });
     }
     try {
+      const { model, agent } = message;
+      let catalog: Catalog | undefined;
+      if (model !== undefined || agent !== undefined) {
+        catalog = await this.ensureCatalog();
+        if (client !== this.client) return this.result(requestId, unavailable());
+        if (catalog === undefined) {
+          return this.result(requestId, {
+            _tag: 'CatalogUnavailable',
+            message:
+              'The models and agents of the server could not be read. Try again in a moment.',
+          });
+        }
+        const problem = this.checkSelection(catalog, model, agent);
+        if (problem !== undefined) {
+          this.log.warn(`prompt ${requestId} rejected: ${problem._tag}`);
+          void this.loadCatalog();
+          return this.result(requestId, problem);
+        }
+      }
       let sessionID = message.sessionID ?? this.open;
       if (sessionID === undefined) {
-        sessionID = (await client.session.create({})).id;
+        sessionID = (
+          await client.session.create({
+            ...(agent === undefined ? {} : { agent }),
+            ...(model === undefined ? {} : { model }),
+          })
+        ).id;
+        if (agent !== undefined) this.log.info(`agent selected ${agent} for ${sessionID}`);
+        if (model !== undefined) {
+          this.log.info(`model selected ${model.providerID}/${model.id} for ${sessionID}`);
+        }
         await this.openSession(sessionID);
-      } else if (sessionID !== this.open) {
-        await this.openSession(sessionID);
+      } else {
+        if (sessionID !== this.open) await this.openSession(sessionID);
+        if (catalog !== undefined) {
+          await this.applySelection(client, sessionID, model, agent);
+        }
       }
       await client.session.prompt({
         sessionID,
@@ -1633,8 +1973,23 @@ export class ChatController {
       });
       this.log.info(`prompt accepted for ${sessionID}`);
       this.result(requestId);
+      if (model !== undefined) await this.rememberModel(model);
     } catch (error) {
       this.result(requestId, error);
+    }
+  }
+
+  /**
+   * Stores `model` as the last one used and republishes the catalog so a new session proposes it.
+   * Runs AFTER the `request.result` of the prompt, so a slow or failing write never delays or
+   * breaks the send; a failure is only a `warn` line.
+   */
+  private async rememberModel(model: ModelRef): Promise<void> {
+    try {
+      await this.deps.preferences.setLastModel(model);
+      this.onPreferencesChanged();
+    } catch (error) {
+      this.log.warn(`remembering the last model failed: ${String(error)}`);
     }
   }
 

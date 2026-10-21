@@ -149,14 +149,18 @@ describe('empty state and header', () => {
     expect(h.sent).toEqual([]);
   });
 
-  it('shows the session title and the agent/model marker of the last assistant message', () => {
+  // E5 (issues #23/#24, decision of 21/10/2026): the disabled "Agent · model" marker is gone from the
+  // header; each assistant reply says which agent and model answered instead.
+  it('shows the session title, no model marker in the header, and the agent and model of each reply', () => {
     const h = start();
     expect(must(h.container, '.chat-title').textContent).toBe('Untitled session');
     h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
     expect(must(h.container, '.chat-title').textContent).toBe('Fix the build');
-    const marker = must<HTMLButtonElement>(h.container, '.model-marker');
-    expect(marker.textContent).toBe('build · opencode/big-pickle');
-    expect(marker.disabled).toBe(true);
+    expect(h.container.querySelector('.model-marker')).toBeNull();
+    expect(must(h.container, 'header').textContent).not.toContain('·');
+    expect(must(h.container, '.message-assistant .message-meta').textContent).toBe(
+      'build · opencode/big-pickle',
+    );
     expect(h.container.querySelector('.suggestion')).toBeNull();
   });
 
@@ -1106,5 +1110,320 @@ describe('related sessions in the header (issue #21)', () => {
     const h = start();
     h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
     expect(h.container.querySelector('.subagent-sessions')).toBeNull();
+  });
+});
+
+// E5 / issues #23 and #24: the agent switch and the model picker in the prompt row, and what
+// `prompt.send` carries. FABRICATED catalog and snapshots (the shapes are the ones the planner spike
+// saw in a real opencode 2.0.32, but these tests prove the wiring and the precedence, not the
+// server). The choice is a DRAFT: nothing is sent to the host when the user picks.
+describe('model and agent selectors (issues #23/#24)', () => {
+  const PICKLE = { providerID: 'opencode', id: 'big-pickle' };
+  const GLM = { providerID: 'opencode', id: 'glm-5.3-flash-free' };
+  const option = (id: string, name: string) => ({
+    providerID: 'opencode',
+    id,
+    name,
+    status: 'active' as const,
+    contextLimit: 200000,
+    free: true,
+    variants: [],
+  });
+  const catalog: HostToWebview = {
+    type: 'catalog',
+    catalog: {
+      models: [
+        option('big-pickle', 'Big Pickle'),
+        option('glm-5.3-flash-free', 'GLM-5.3-Flash Free'),
+      ],
+      providers: [{ id: 'opencode', name: 'OpenCode' }],
+      agents: [
+        { id: 'build', name: 'Build' },
+        { id: 'plan', name: 'Plan' },
+      ],
+      serverDefault: PICKLE,
+      defaultAgent: 'build',
+    },
+  };
+  /** A snapshot opening `SES`, whose row may carry a model and an agent. */
+  const withRow = (
+    row: { model?: typeof GLM; agent?: string } = {},
+    sessionID = SES,
+  ): HostToWebview[] => [
+    connected,
+    {
+      type: 'snapshot',
+      snapshot: {
+        sessions: [{ id: sessionID, title: 'Work', createdAt: 1, updatedAt: 2, ...row }],
+        statuses: { [sessionID]: { type: 'idle' } },
+        open: { sessionID, messages: [user('m1', 'hi')], parts: {} },
+        requests: { permissions: [], forms: [] },
+        resolutions: [],
+      },
+    },
+  ];
+  const trigger = (h: Harness) => must<HTMLButtonElement>(h.container, 'button.model-trigger');
+  const radio = (h: Harness, id: string) => must<HTMLInputElement>(h.container, `#agent-${id}`);
+  const lastSent = (h: Harness) => {
+    const message = h.sent.at(-1);
+    if (message?.type !== 'prompt.send') throw new Error('the last message is not a prompt.send');
+    return message;
+  };
+
+  it('sends no model or agent, and the selectors are inert, until the host sends a catalog', () => {
+    const h = start();
+    h.apply(...withRow());
+    expect(trigger(h).getAttribute('aria-disabled')).toBe('true');
+    trigger(h).click();
+    expect(h.container.querySelector('.model-panel')).toBeNull();
+    h.type('hi');
+    h.button('Send').click();
+    const sent = lastSent(h);
+    expect(sent.model).toBeUndefined();
+    expect(sent.agent).toBeUndefined();
+  });
+
+  it('with no session shows Build and the default model, and a send carries the agent but not the default model', () => {
+    const h = start();
+    h.apply(connected, catalog);
+    expect(trigger(h).getAttribute('aria-label')).toBe('Model: Big Pickle (default)');
+    expect(trigger(h).textContent).toBe('Big Pickle (default)');
+    expect(radio(h, 'build').checked).toBe(true);
+    expect(radio(h, 'plan').checked).toBe(false);
+    h.type('hi');
+    h.button('Send').click();
+    const sent = lastSent(h);
+    expect(sent.agent).toBe('build');
+    expect(sent.model).toBeUndefined();
+    expect(sent.sessionID).toBeUndefined();
+  });
+
+  it("proposes the host's preferred model for a NEW session and sends it", () => {
+    const h = start();
+    h.apply(connected, {
+      ...catalog,
+      catalog: { ...catalog.catalog, preferredModel: GLM },
+    });
+    expect(trigger(h).textContent).toBe('GLM-5.3-Flash Free');
+    h.type('hi');
+    h.button('Send').click();
+    expect(lastSent(h).model).toEqual(GLM);
+  });
+
+  // Regression found by `test:visual` step 11 in a real VS Code (21/10/2026): the model came out of
+  // the Solid store as a Proxy, `postMessage` could not clone it (DataCloneError) and the prompt never
+  // left. jsdom's `postMessage` does not clone, so the test clones the sent message itself.
+  it('sends a model and an agent that survive structuredClone (no store proxies inside)', () => {
+    const h = start();
+    h.apply(...withRow({ model: GLM, agent: 'plan' }), catalog);
+    radio(h, 'build').click();
+    trigger(h).click();
+    [...h.container.querySelectorAll<HTMLButtonElement>('button.model-option')][0]?.click();
+    h.type('go');
+    h.button('Send').click();
+    expect(() => structuredClone(lastSent(h))).not.toThrow();
+    expect(lastSent(h)).toMatchObject({ model: PICKLE, agent: 'build' });
+  });
+
+  // Same DataCloneError, other source (review #1015 S1, found by reading the store): the picked
+  // files are store elements, so `takeDraftFiles` and the `knownFiles` that Retry reads must hand out
+  // plain copies. Checked by mutation: with the old `[...state.draftFiles]` both cases throw.
+  // FABRICATED host messages; the real-VS-Code evidence is the attach step of `test:visual`.
+  it('sends an attachment that survives structuredClone', () => {
+    const h = start();
+    h.apply(...withRow({ model: PICKLE, agent: 'build' }), catalog);
+    h.apply({
+      type: 'attachments.picked',
+      requestId: 'pick',
+      files: [{ uri: 'file:///a.ts', name: 'a.ts' }],
+    });
+    h.type('look at it');
+    h.button('Send').click();
+    expect(() => structuredClone(lastSent(h))).not.toThrow();
+    expect(lastSent(h).files).toEqual([{ uri: 'file:///a.ts', name: 'a.ts' }]);
+  });
+
+  it('a Retry that re-attaches a file survives structuredClone', () => {
+    const h = start();
+    h.apply(...withRow({ model: PICKLE, agent: 'build' }), catalog);
+    h.apply({
+      type: 'attachments.picked',
+      requestId: 'pick',
+      files: [{ uri: 'file:///a.ts', name: 'a.ts' }],
+    });
+    h.type('look at it');
+    h.button('Send').click();
+    const first = h.sent.at(-1);
+    h.apply({
+      type: 'request.result',
+      requestId: first && 'requestId' in first ? first.requestId : '',
+    });
+    h.apply({
+      type: 'snapshot',
+      snapshot: {
+        sessions: [{ id: SES, createdAt: 1, updatedAt: 2, model: PICKLE, agent: 'build' }],
+        statuses: { [SES]: { type: 'error', error: { code: 'provider.no-route', message: 'x' } } },
+        open: {
+          sessionID: SES,
+          messages: [
+            userWithFiles('m1', 'look at it', [
+              { mime: 'text/plain', uri: 'file:///a.ts', name: 'a.ts' },
+            ]),
+          ],
+          parts: {},
+        },
+        requests: { permissions: [], forms: [] },
+        resolutions: [],
+      },
+    });
+    h.button('Retry').click();
+    expect(() => structuredClone(lastSent(h))).not.toThrow();
+    expect(lastSent(h).files).toEqual([{ uri: 'file:///a.ts', name: 'a.ts' }]);
+  });
+
+  // Review #1015 W1 (decision of Sergio, 21/10/2026): the host pins whatever it receives, so an
+  // EXPLICIT pick of the server's default must reach it; only an untouched default stays unsent.
+  it('an explicit pick of the server default model IS sent (the host pins it)', () => {
+    const h = start();
+    h.apply(...withRow(), catalog);
+    trigger(h).click();
+    const pickle = [...h.container.querySelectorAll<HTMLButtonElement>('button.model-option')].find(
+      (b) => b.textContent.startsWith('Big Pickle'),
+    );
+    pickle?.click();
+    h.type('go');
+    h.button('Send').click();
+    expect(lastSent(h).model).toEqual(PICKLE);
+  });
+
+  it('picking an agent and a model sends nothing yet; the next prompt carries both', () => {
+    const h = start();
+    h.apply(...withRow({ model: PICKLE, agent: 'build' }), catalog);
+    radio(h, 'plan').click();
+    trigger(h).click();
+    const glm = [...h.container.querySelectorAll<HTMLButtonElement>('button.model-option')].find(
+      (b) => b.textContent.startsWith('GLM-5.3-Flash Free'),
+    );
+    glm?.click();
+    expect(h.sent).toEqual([]);
+    expect(radio(h, 'plan').checked).toBe(true);
+    expect(trigger(h).textContent).toBe('GLM-5.3-Flash Free');
+    h.type('go');
+    h.button('Send').click();
+    expect(lastSent(h)).toMatchObject({ sessionID: SES, model: GLM, agent: 'plan' });
+  });
+
+  it('an open session shows and sends its own model and agent', () => {
+    const h = start();
+    h.apply(...withRow({ model: GLM, agent: 'plan' }), catalog);
+    expect(trigger(h).textContent).toBe('GLM-5.3-Flash Free');
+    expect(radio(h, 'plan').checked).toBe(true);
+    h.type('go');
+    h.button('Send').click();
+    expect(lastSent(h)).toMatchObject({ model: GLM, agent: 'plan' });
+  });
+
+  it('Retry carries the choice too', () => {
+    const h = start();
+    h.apply(
+      connected,
+      {
+        type: 'snapshot',
+        snapshot: {
+          sessions: [{ id: SES, createdAt: 1, updatedAt: 2, model: PICKLE, agent: 'build' }],
+          statuses: {
+            [SES]: { type: 'error', error: { code: 'provider.no-route', message: 'x' } },
+          },
+          open: { sessionID: SES, messages: [user('m1', 'hi')], parts: {} },
+          requests: { permissions: [], forms: [] },
+          resolutions: [],
+        },
+      },
+      catalog,
+    );
+    radio(h, 'plan').click();
+    h.button('Retry').click();
+    expect(lastSent(h)).toMatchObject({ text: 'hi', agent: 'plan', model: PICKLE });
+  });
+
+  it('forgets the draft when another session opens, but keeps it across a snapshot of the same one', () => {
+    const h = start();
+    h.apply(...withRow({ agent: 'build' }), catalog);
+    radio(h, 'plan').click();
+    h.apply(...withRow({ agent: 'build' }));
+    expect(radio(h, 'plan').checked).toBe(true);
+    h.apply(...withRow({ agent: 'build' }, 'ses_2'));
+    expect(radio(h, 'build').checked).toBe(true);
+    expect(radio(h, 'plan').checked).toBe(false);
+  });
+
+  it('keeps the draft of a session that does not exist yet until the first prompt creates it', () => {
+    const h = start();
+    h.apply(connected, catalog);
+    radio(h, 'plan').click();
+    expect(radio(h, 'plan').checked).toBe(true);
+    h.type('hi');
+    h.button('Send').click();
+    expect(lastSent(h).agent).toBe('plan');
+    // The host created the session: the snapshot opens it, and from then on its row speaks.
+    h.apply(...withRow({ agent: 'plan' }, 'ses_new'));
+    expect(radio(h, 'plan').checked).toBe(true);
+  });
+
+  it('persists the pick with the session it belongs to, and restores it only for that session', () => {
+    const first = start();
+    first.apply(...withRow({ agent: 'build' }), catalog);
+    radio(first, 'plan').click();
+    expect(first.saved.at(-1)).toMatchObject({ selection: { sessionID: SES, agent: 'plan' } });
+
+    const same = start({
+      draft: '',
+      history: [],
+      files: [],
+      selection: { sessionID: SES, agent: 'plan' },
+    });
+    same.apply(...withRow({ agent: 'build' }), catalog);
+    expect(radio(same, 'plan').checked).toBe(true);
+
+    const other = start({
+      draft: '',
+      history: [],
+      files: [],
+      selection: { sessionID: SES, agent: 'plan' },
+    });
+    other.apply(...withRow({ agent: 'build' }, 'ses_2'), catalog);
+    expect(radio(other, 'build').checked).toBe(true);
+  });
+
+  it('names the agent and model of each reply from the catalog', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]), catalog);
+    expect(must(h.container, '.message-assistant .message-meta').textContent).toBe(
+      'Build · Big Pickle',
+    );
+  });
+
+  it('shows a session model the server no longer offers as unavailable', () => {
+    const h = start();
+    h.apply(...withRow({ model: { providerID: 'opencode', id: 'retired' } }), catalog);
+    expect(trigger(h).textContent).toBe('opencode/retired (unavailable)');
+  });
+
+  it('Enter on the agent switch does not send the prompt', () => {
+    const h = start();
+    h.apply(...withRow({ agent: 'build' }), catalog);
+    h.type('keep me');
+    const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    radio(h, 'build').dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(h.sent).toEqual([]);
+  });
+
+  it('keeps the selectors in the prompt row, not in the header', () => {
+    const h = start();
+    h.apply(...withRow(), catalog);
+    expect(h.container.querySelector('header .model-trigger, header .agent-toggle')).toBeNull();
+    expect(h.container.querySelector('.prompt-actions .model-trigger')).not.toBeNull();
+    expect(h.container.querySelector('.prompt-actions .agent-toggle')).not.toBeNull();
   });
 });

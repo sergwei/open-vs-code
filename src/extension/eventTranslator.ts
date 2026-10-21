@@ -13,6 +13,11 @@
 //     the core projector does: text -> last text block, reasoning -> last reasoning block not
 //     completed, tool -> by id. `ordinal` is NOT used as an index (VERIFIED, same spike: both
 //     `ordinal`s were 0 and `text.started` arrived before `reasoning.ended`).
+//   - `session.model.selected` / `session.agent.selected` (issues #23/#24) update the model / agent
+//     of a MIRRORED row and bump its `updatedAt` (the server bumps `time.updated` too, VERIFIED in
+//     the issue #23 spike, opencode 2.0.32, Windows 11, 21/10/2026); a row it does not know gives
+//     `[]` and the next snapshot brings it. The reload events of the catalog (`model.updated`,
+//     `agent.updated`...) are NOT handled here: the controller reloads the catalog itself.
 // Self-healing instead of buffering: every closing event (`*.ended`, `step.*`, `tool.*`) emits the
 // WHOLE object, so what a snapshot/stream gap lost is repaired when the block closes. A delta for
 // an unknown message or block is dropped (deltas are not idempotent, so they cannot be replayed).
@@ -401,6 +406,28 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
           const next: SessionSummary = {
             ...row,
             title: event.data.title,
+            updatedAt: event.created,
+          };
+          sessions.set(next.id, next);
+          return [{ type: 'session.upserted', session: next }];
+        }
+        case 'session.model.selected': {
+          const row = sessions.get(event.data.sessionID);
+          if (row === undefined) return []; // not mirrored: a snapshot will bring the full row
+          const next: SessionSummary = {
+            ...row,
+            model: toModelRef(event.data.model),
+            updatedAt: event.created,
+          };
+          sessions.set(next.id, next);
+          return [{ type: 'session.upserted', session: next }];
+        }
+        case 'session.agent.selected': {
+          const row = sessions.get(event.data.sessionID);
+          if (row === undefined) return [];
+          const next: SessionSummary = {
+            ...row,
+            agent: event.data.agent,
             updatedAt: event.created,
           };
           sessions.set(next.id, next);

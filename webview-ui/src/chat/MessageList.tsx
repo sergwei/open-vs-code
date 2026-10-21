@@ -9,7 +9,7 @@ import {
   Show,
   Switch,
 } from 'solid-js';
-import type { MessageInfo, Part, RequestResolution } from '../../../src/shared/model';
+import type { Catalog, MessageInfo, Part, RequestResolution } from '../../../src/shared/model';
 import { RequestOutcome } from '../requests/RequestOutcome';
 import {
   byToolPart,
@@ -18,6 +18,7 @@ import {
   unanchoredByMessage,
   type OutcomeView,
 } from '../requests/resolutionPlacement';
+import { replyMeta } from '../selectors/selection';
 import type { OpenView } from '../store/chatStore';
 import { isStopError } from '../store/activity';
 import { PartView } from './PartView';
@@ -107,9 +108,16 @@ function prefersReducedMotion(): boolean {
  * it out with every new message (HYPOTHESIS: not tried with a screen reader). While `forkDisabled`
  * the button is `aria-disabled` and the click is ignored, never `disabled`, so the focus stays on
  * it. `onOpenSession` is for the subagent links of the tool blocks.
+ *
+ * Issues #23/#24: every ASSISTANT message starts with a muted line "Agent · model" ("Plan · GLM-5.3
+ * Flash Free", from `session.step.started`, named through `catalog`). It took over what the header
+ * marker used to show and is the visible proof of what actually answered (decision of 21/10/2026,
+ * Engram #1012). It is plain text inside the message's `article`, so it adds no child to the log.
  */
 export function MessageList(props: {
   open: OpenView;
+  /** Names the agent and model of each reply; ids are shown for the ones it does not know. */
+  catalog: Catalog | undefined;
   resolutions: { readonly [requestId: string]: RequestResolution };
   busy: boolean;
   canRetry: boolean;
@@ -254,6 +262,9 @@ export function MessageList(props: {
                       class="message message-assistant"
                       aria-busy={props.busy && isLast(assistant().id)}
                     >
+                      <div class="message-meta">
+                        {replyMeta(props.catalog, assistant().agent, assistant().model)}
+                      </div>
                       <For each={props.open.parts[assistant().id] ?? []}>
                         {(part) => (
                           <PartView

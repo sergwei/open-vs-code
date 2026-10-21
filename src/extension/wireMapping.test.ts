@@ -10,16 +10,21 @@
 // not the contract with the server.
 import { describe, expect, it } from 'vitest';
 import type {
+  AgentInfo,
   FormInfo,
+  ModelInfo,
   PermissionRequest,
   SessionInfo,
   SessionMessageInfo,
 } from '@opencode/client';
 import {
   sanitizeText,
+  toAgentOptions,
   toErrorInfo,
   toFormAsk,
   toMessage,
+  toModelOption,
+  toModelRef,
   toPermissionAsk,
   toSessionSummary,
 } from './wireMapping';
@@ -30,6 +35,75 @@ function wire<T>(json: string): T {
 }
 
 const SECRETS = { url: 'http://127.0.0.1:43211', password: 'S3cr3t-pass_word' };
+
+// Issues #23/#24. The model JSON follows the fields of a REAL `ModelInfo` as the planner spike saw
+// them (opencode 2.0.32, Windows 11, 21/10/2026: `glm-5.3-flash-free`, variants low/high/max,
+// context 200000, cost 0) trimmed to what the mapping reads; the paid, tiered and no-cost models
+// and the agent list are FABRICATED from the types (the agent ids and modes of the list are what
+// the spike printed). These pin OUR mapping, not the contract.
+describe('catalog mapping', () => {
+  const model = (cost: string): ModelInfo =>
+    wire<ModelInfo>(`{
+      "id": "glm-5.3-flash-free", "modelID": "glm-5.3-flash", "providerID": "opencode",
+      "name": "GLM-5.3-Flash Free", "capabilities": {"tools": true, "input": [], "output": []},
+      "variants": [{"id": "low"}, {"id": "high"}, {"id": "max"}],
+      "time": {"released": 1}, "cost": ${cost}, "status": "beta", "enabled": true,
+      "limit": {"context": 200000, "output": 32000}
+    }`);
+  const zero = '{"input": 0, "output": 0, "cache": {"read": 0, "write": 0}}';
+  const paid = '{"input": 3, "output": 15, "cache": {"read": 0, "write": 0}}';
+
+  it('maps a free model', () => {
+    expect(toModelOption(model(`[${zero}]`))).toEqual({
+      providerID: 'opencode',
+      id: 'glm-5.3-flash-free',
+      name: 'GLM-5.3-Flash Free',
+      status: 'beta',
+      contextLimit: 200000,
+      free: true,
+      variants: ['low', 'high', 'max'],
+    });
+  });
+
+  it('is free only when EVERY cost entry is zero, and never with no cost entry at all', () => {
+    expect(toModelOption(model(`[${paid}]`)).free).toBe(false);
+    expect(toModelOption(model(`[${zero}, ${paid}]`)).free).toBe(false);
+    expect(toModelOption(model('[]')).free).toBe(false);
+  });
+
+  it('keeps only the selectable agents, in the server order', () => {
+    const agent = (id: string, mode: string, hidden: boolean, extra = ''): AgentInfo =>
+      wire<AgentInfo>(
+        `{"id": "${id}", "name": "${id.toUpperCase()}", "mode": "${mode}", "hidden": ${String(hidden)},
+          "request": {}, "permissions": []${extra}}`,
+      );
+    const list = [
+      agent('build', 'primary', false, ', "description": "Builds"'),
+      agent('general', 'subagent', false),
+      agent('title', 'primary', true),
+      agent('plan', 'primary', false),
+      agent('both', 'all', false),
+    ];
+    expect(toAgentOptions(list)).toEqual([
+      { id: 'build', name: 'BUILD', description: 'Builds' },
+      { id: 'plan', name: 'PLAN' },
+      { id: 'both', name: 'BOTH' },
+    ]);
+  });
+
+  it('turns the variant "default" the server echoes into no variant, and keeps real ones', () => {
+    expect(toModelRef({ providerID: 'p', id: 'm', variant: 'default' })).toEqual({
+      providerID: 'p',
+      id: 'm',
+    });
+    expect(toModelRef({ providerID: 'p', id: 'm', variant: 'low' })).toEqual({
+      providerID: 'p',
+      id: 'm',
+      variant: 'low',
+    });
+    expect(toModelRef({ providerID: 'p', id: 'm' })).toEqual({ providerID: 'p', id: 'm' });
+  });
+});
 
 describe('toSessionSummary', () => {
   it('maps time.created/updated to createdAt/updatedAt and keeps optional fields', () => {

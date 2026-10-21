@@ -9,15 +9,23 @@
 
 import { OpenCode } from '@opencode/client';
 import type {
+  AgentListInput,
+  AgentListOutput,
   FormListInput,
   FormListOutput,
   MessageListInput,
+  ModelDefaultInput,
+  ModelDefaultOutput,
+  ModelListInput,
+  ModelListOutput,
   PermissionReplyInput,
   PermissionRequestListInput,
   PermissionRequestListOutput,
   PermissionSavedInfo,
   PermissionSavedListInput,
   PermissionSavedRemoveInput,
+  ProviderListInput,
+  ProviderListOutput,
   SessionActive,
   SessionCreateInput,
   SessionFormCancelInput,
@@ -33,6 +41,8 @@ import type {
   SessionPromptInput,
   SessionRemoveInput,
   SessionsResponse,
+  SessionSwitchAgentInput,
+  SessionSwitchModelInput,
   SessionUpdateInput,
   V2Event,
 } from '@opencode/client';
@@ -84,6 +94,25 @@ export interface ChatApi {
     fork(input: SessionForkInput): Promise<SessionInfo>;
     prompt(input: SessionPromptInput): Promise<SessionInboxUser>;
     /**
+     * `POST /api/session/:id/model` (issue #23): 204, empty body. The server DOES NOT validate: an
+     * unknown model answers 204 and is stored; the next turn then fails BEFORE delivering the prompt
+     * (`session.execution.failed`, `provider.no-route`), and that prompt stays in the inbox and is
+     * redelivered with the next good run. So the host checks its catalog first. It deduplicates
+     * (the same model again publishes nothing); otherwise it publishes the durable
+     * `session.model.selected`, adds a `model-switched` message and bumps `time.updated`. The
+     * model's `id` is the CATALOG id (`ModelInfo.id`). VERIFIED by the planner spike against
+     * opencode 2.0.32 (Windows 11, 21/10/2026, node + `@opencode/client`).
+     */
+    switchModel(input: SessionSwitchModelInput): Promise<void>;
+    /**
+     * `POST /api/session/:id/agent` (issue #24): 204. Same lack of validation as `switchModel`
+     * (an unknown agent fails the next turn with `Agent not found`), but it does NOT deduplicate:
+     * it publishes `session.agent.selected` every time, and switching to or from `plan` queues a
+     * synthetic reminder. So the host only calls it when the agent really changes. VERIFIED by the
+     * same spike.
+     */
+    switchAgent(input: SessionSwitchAgentInput): Promise<void>;
+    /**
      * `POST /api/session/:id/interrupt` (issue #16). Unlike `list`/`message.list`, the answer is
      * NOT wrapped in `{data}`: `{ interrupted }` comes bare (read in the client chunk and in
      * `packages/protocol/src/groups/session.ts@843a6c51`). VERIFIED against a real opencode 2.0.32
@@ -103,6 +132,18 @@ export interface ChatApi {
     };
   };
   message: { list(input: MessageListInput): Promise<SessionMessagesResponse> };
+  /**
+   * Catalog reads (issues #23/#24). All three answers are `{ location, data }` and the client does
+   * NOT unwrap them (like `form.list`); in particular `model.default()` is `{ data: ModelInfo | null }`,
+   * not a bare model. `model.list` only holds ENABLED models of AVAILABLE providers. VERIFIED by
+   * the planner spike against opencode 2.0.32 (Windows 11, 21/10/2026).
+   */
+  model: {
+    list(input?: ModelListInput): Promise<ModelListOutput>;
+    default(input?: ModelDefaultInput): Promise<ModelDefaultOutput>;
+  };
+  provider: { list(input?: ProviderListInput): Promise<ProviderListOutput> };
+  agent: { list(input?: AgentListInput): Promise<AgentListOutput> };
   /** Pending requests of the whole location: both lists return `{location, data}` UNWRAPPED. */
   form: { list(input?: FormListInput): Promise<FormListOutput> };
   permission: {
