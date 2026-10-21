@@ -52,9 +52,9 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
         sessionID: 's1',
         messages: [{ kind: 'user', id: 'm1', createdAt: 1, text: 'hi', files: [] }],
         parts: { m1: [{ type: 'text', id: contentPartId('m1', 0), text: 'hi' }] },
-        permissions: [permission],
-        forms: [form],
       },
+      // Phase 3: pending requests are per location, not per open session.
+      requests: { permissions: [permission], forms: [form] },
     },
   },
   'session.upserted': { type: 'session.upserted', session },
@@ -140,6 +140,8 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   'form.cancel': { type: 'form.cancel', requestId: 'r1', sessionID: 's1', formID: 'f1' },
   'attachments.pick': { type: 'attachments.pick', requestId: 'r1' },
   'permissions.manage': { type: 'permissions.manage' },
+  'server.restart': { type: 'server.restart' },
+  'logs.show': { type: 'logs.show' },
   'editor.open': { type: 'editor.open', path: 'src/a.ts', line: 3, column: 1 },
   'editor.insert': { type: 'editor.insert', text: 'x' },
   'editor.newFile': { type: 'editor.newFile', text: 'x', language: 'ts' },
@@ -360,6 +362,29 @@ describe('isHostToWebview', () => {
     expect(isHostToWebview(value)).toBe(false);
   });
 
+  // Issue #14 widened two shapes: a session status can carry an error, and the connection can be
+  // unavailable because the server exited. Fabricated messages; the guard is shallow, so this
+  // only pins that the new `type` payloads still pass it.
+  it('accepts a session.status with an error and an unavailable/exited connection', () => {
+    expect(
+      isHostToWebview({
+        type: 'session.status',
+        sessionID: 's',
+        status: { type: 'error', error: { code: 'provider.no-route', message: 'nope' } },
+      }),
+    ).toBe(true);
+    expect(
+      isHostToWebview({
+        type: 'connection.state',
+        connection: {
+          state: 'unavailable',
+          reason: 'exited',
+          error: { code: 'exited', message: 'gone' },
+        },
+      }),
+    ).toBe(true);
+  });
+
   it('is deliberately shallow: accepts a part.delta without delta', () => {
     // Documents the trade-off recorded in the guard header; change it only as a decision.
     expect(isHostToWebview({ type: 'part.delta' })).toBe(true);
@@ -399,7 +424,7 @@ describe('contentPartId', () => {
     expect(contentPartId('m1', 2)).toBe('m1#2');
   });
 
-  // The real invariant (REST snapshot index == stream counter) needs the host adapter, which
-  // does not exist yet; its test belongs to issue #14. A test over contentPartId alone would
-  // compare the function with itself and could not fail, so there is none here.
+  // The real invariant (REST snapshot index == stream counter) needs the host adapter; it is
+  // tested in `src/extension/eventTranslator.test.ts` (issue #14). A test over contentPartId
+  // alone would compare the function with itself and could not fail, so there is none here.
 });

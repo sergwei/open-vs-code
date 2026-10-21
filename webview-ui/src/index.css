@@ -1,4 +1,25 @@
-/* Theme colors come only from VS Code variables (--vscode-*): no literal colors here. */
+/*
+ * Styles of the chat webview (issues #12, #15, #17, and from phase 3 #18/#44 for the request dock).
+ * The request cards use the editorWidget variables for the surface, the warning border of
+ * inputValidation for the frame and the `.primary` / `.secondary` buttons; they have no
+ * transitions or animations, so reduced motion needs no extra rule for them.
+ *
+ * Theme colors come only from VS Code variables (--vscode-*): no literal colors anywhere, so
+ * light, dark and both high-contrast themes work. Token colors for highlighted code map
+ * highlight.js classes to `debugTokenExpression-*` / `symbolIcon-*` / `gitDecoration-*` ids
+ * (theme-color ids read in the VS Code reference on 2026-10-20); VS Code does not expose the
+ * editor's own token colors to a webview, so they are approximations, and some themes leave the
+ * `symbolIcon-*` ones equal to the foreground (HYPOTHESIS, check with the F5: theme point).
+ * Nothing here is applied through a `style` attribute: the CSP forbids it.
+ * `field-sizing: content` lets the textarea grow with its text (HYPOTHESIS that the Chromium of
+ * VS Code 1.105+ supports it; otherwise the box keeps its minimum height and still works).
+ */
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
   padding: 0 12px;
@@ -7,16 +28,917 @@ body {
   color: var(--vscode-foreground);
 }
 
-.app-title {
-  font-size: 1.2em;
-  font-weight: 600;
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 8px;
+  padding: 8px 0;
+  box-sizing: border-box;
 }
 
-.app-hint {
-  color: var(--vscode-descriptionForeground);
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- buttons ---------- */
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.primary {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: 1px solid var(--vscode-button-border, transparent);
+  padding: 4px 12px;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+
+button.secondary,
+.code-action {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  border: 1px solid var(--vscode-button-border, transparent);
+  padding: 2px 8px;
+}
+
+button.secondary:hover:not(:disabled),
+.code-action:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryHoverBackground);
 }
 
 :focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 1px;
+}
+
+/* ---------- header ---------- */
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 1em;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-marker {
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- conversation ---------- */
+
+.chat-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.message-list-wrapper {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.message-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.jump-latest {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+}
+
+.message {
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+
+.message-user {
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+}
+
+.message-assistant {
+  border-left: 2px solid var(--vscode-textBlockQuote-border);
+}
+
+.message-files {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.part-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.part-reasoning {
+  color: var(--vscode-descriptionForeground);
+  margin: 4px 0;
+}
+
+.part-reasoning-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 4px 0 0 12px;
+}
+
+.part-tool {
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+  margin: 4px 0;
+}
+
+.message-notice {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.message-error {
+  color: var(--vscode-errorForeground);
+}
+
+/* ---------- empty state ---------- */
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
+.empty-title {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.suggestions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.suggestion {
+  width: 100%;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+
+.suggestion:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+/* ---------- Markdown ---------- */
+
+.md {
+  overflow-wrap: anywhere;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md p,
+.md ul,
+.md ol,
+.md blockquote,
+.md table,
+.md pre {
+  margin: 0.5em 0;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: 0.8em 0 0.4em;
+  line-height: 1.25;
+}
+
+.md h1 {
+  font-size: 1.4em;
+}
+
+.md h2 {
+  font-size: 1.2em;
+}
+
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  font-size: 1.05em;
+}
+
+.md ul,
+.md ol {
+  padding-left: 1.6em;
+}
+
+.md a {
+  color: var(--vscode-textLink-foreground);
+}
+
+.md a:hover {
+  color: var(--vscode-textLink-activeForeground);
+}
+
+.md blockquote {
+  padding: 0 0.8em;
+  background: var(--vscode-textBlockQuote-background);
+  border-left: 3px solid var(--vscode-textBlockQuote-border);
+}
+
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--vscode-panel-border, var(--vscode-foreground));
+}
+
+.md code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size);
+  color: var(--vscode-textPreformat-foreground);
+  background: var(--vscode-textPreformat-background);
+  border-radius: 3px;
+  padding: 0 0.3em;
+}
+
+.md pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.md table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+
+.md th,
+.md td {
+  border: 1px solid var(--vscode-panel-border, var(--vscode-foreground));
+  padding: 3px 8px;
+}
+
+.md th {
+  background: var(--vscode-textCodeBlock-background);
+}
+
+/* A file reference is a <code>, not an anchor (see renderMarkdown.ts). */
+.file-ref {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  color: var(--vscode-textLink-foreground);
+}
+
+.file-ref:hover {
+  color: var(--vscode-textLink-activeForeground);
+  text-decoration-style: solid;
+}
+
+/* ---------- code blocks ---------- */
+
+.code-block {
+  margin: 0.5em 0;
+  background: var(--vscode-textCodeBlock-background);
+  border: 1px solid var(--vscode-panel-border, transparent);
+  border-radius: 4px;
+}
+
+.code-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 6px;
+  color: var(--vscode-descriptionForeground);
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+}
+
+.code-language {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+}
+
+.code-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+/* "New file" must not split in two lines in a narrow sidebar: the bar wraps instead. */
+.code-action {
+  white-space: nowrap;
+}
+
+.code-copied {
+  min-width: 3.5em;
+  font-size: 0.85em;
+}
+
+.code-body {
+  margin: 0;
+  padding: 6px 8px;
+  overflow-x: auto;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size);
+  font-weight: var(--vscode-editor-font-weight);
+  color: var(--vscode-editor-foreground, var(--vscode-foreground));
+}
+
+/*
+ * VS Code injects a default stylesheet into every webview that paints `code` with
+ * `textPreformat-foreground` on `textPreformat-background` (seen in the "Default High Contrast
+ * Light" theme: dark-blue boxes behind dark token colours, unreadable). The block already has its
+ * own background (`.code-block`), so its `code` must be transparent and inherit the colour.
+ */
+.code-body code {
+  font-family: inherit;
+  font-size: inherit;
+  white-space: pre;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-tag,
+.hljs-name,
+.hljs-doctag {
+  color: var(--vscode-debugTokenExpression-name, var(--vscode-foreground));
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-link,
+.hljs-template-variable {
+  color: var(--vscode-debugTokenExpression-string, var(--vscode-foreground));
+}
+
+.hljs-number {
+  color: var(--vscode-debugTokenExpression-number, var(--vscode-foreground));
+}
+
+.hljs-literal {
+  color: var(--vscode-debugTokenExpression-boolean, var(--vscode-foreground));
+}
+
+.hljs-type,
+.hljs-built_in,
+.hljs-title.class_ {
+  color: var(--vscode-symbolIcon-classForeground, var(--vscode-foreground));
+}
+
+.hljs-title,
+.hljs-title.function_ {
+  color: var(--vscode-symbolIcon-functionForeground, var(--vscode-foreground));
+}
+
+.hljs-attr,
+.hljs-attribute,
+.hljs-property,
+.hljs-selector-attr {
+  color: var(--vscode-symbolIcon-propertyForeground, var(--vscode-foreground));
+}
+
+.hljs-variable,
+.hljs-params,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: var(--vscode-symbolIcon-variableForeground, var(--vscode-foreground));
+}
+
+.hljs-meta,
+.hljs-symbol,
+.hljs-bullet {
+  color: var(--vscode-symbolIcon-constantForeground, var(--vscode-foreground));
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.hljs-addition {
+  color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-foreground));
+}
+
+.hljs-deletion {
+  color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-foreground));
+}
+
+.hljs-section,
+.hljs-strong {
+  font-weight: bold;
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+/* ---------- status strip ---------- */
+
+.status-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.connection {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+.connection-problem {
+  padding: 4px 6px;
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
+  background: var(--vscode-inputValidation-warningBackground);
+  border: 1px solid var(--vscode-inputValidation-warningBorder, transparent);
+}
+
+.connection[data-state='unavailable'] {
+  color: var(--vscode-inputValidation-errorForeground, var(--vscode-foreground));
+  background: var(--vscode-inputValidation-errorBackground);
+  border-color: var(--vscode-inputValidation-errorBorder, transparent);
+}
+
+.activity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.spinner {
+  width: 0.9em;
+  height: 0.9em;
+  box-sizing: border-box;
+  border: 2px solid var(--vscode-descriptionForeground);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border: 1px solid var(--vscode-inputValidation-infoBorder, transparent);
+  background: var(--vscode-inputValidation-infoBackground);
+  color: var(--vscode-foreground);
+}
+
+.alert-error {
+  background: var(--vscode-inputValidation-errorBackground);
+  border-color: var(--vscode-inputValidation-errorBorder, transparent);
+}
+
+.alert-warning {
+  background: var(--vscode-inputValidation-warningBackground);
+  border-color: var(--vscode-inputValidation-warningBorder, transparent);
+}
+
+/* A turn the user stopped: neutral, not an alert (no red, no inputValidation colours). */
+.stopped-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.alert-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.connection-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.connection-row .connection {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.connection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* ---------- request dock: permissions and questions (issues #18, #44) ---------- */
+
+.request-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.request-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  background: var(--vscode-editorWidget-background);
+  border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder));
+  border-radius: 4px;
+}
+
+.request-title {
+  margin: 0;
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.request-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.request-origin,
+.request-tool,
+.request-message,
+.request-hint,
+.field-description {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.request-origin {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.request-tool,
+.request-hint,
+.option-description,
+.field-description {
+  color: var(--vscode-descriptionForeground);
+}
+
+.request-resources {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.request-resources code,
+.request-always code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size);
+  color: var(--vscode-textPreformat-foreground);
+  background: var(--vscode-textPreformat-background);
+  border-radius: 3px;
+  padding: 0 0.3em;
+  overflow-wrap: anywhere;
+}
+
+.request-more {
+  color: var(--vscode-descriptionForeground);
+}
+
+.request-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.request-always,
+.request-feedback {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-focusBorder));
+}
+
+.request-always p,
+.request-always ul {
+  margin: 0;
+}
+
+.request-always ul {
+  padding-left: 1.4em;
+}
+
+.request-warning {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.request-error,
+.field-error {
+  margin: 0;
+  color: var(--vscode-errorForeground);
+}
+
+.request-feedback label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.request-feedback textarea,
+.form-textarea,
+.form-text {
+  box-sizing: border-box;
+  width: 100%;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  padding: 4px 6px;
+}
+
+.request-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--vscode-panel-border, transparent);
+}
+
+.form-field legend {
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+.form-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.form-option > label {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.form-other {
+  align-items: center;
+}
+
+.request-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* ---------- prompt ---------- */
+
+.prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.prompt-text {
+  width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  field-sizing: content;
+  min-height: 3.2em;
+  max-height: 12em;
+  overflow-y: auto;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  padding: 4px 6px;
+}
+
+.prompt-text::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+.prompt-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  color: var(--vscode-badge-foreground);
+  background: var(--vscode-badge-background);
+  border-radius: 10px;
+}
+
+.chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-remove {
+  padding: 0 2px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+}
+
+/* ---------- high contrast ---------- */
+
+[class*='vscode-high-contrast'] .message-user,
+[class*='vscode-high-contrast'] .code-block,
+[class*='vscode-high-contrast'] .suggestion,
+[class*='vscode-high-contrast'] .alert,
+[class*='vscode-high-contrast'] .connection-problem,
+[class*='vscode-high-contrast'] .prompt-text,
+[class*='vscode-high-contrast'] .chip,
+[class*='vscode-high-contrast'] .request-card,
+[class*='vscode-high-contrast'] .request-always,
+[class*='vscode-high-contrast'] .request-feedback,
+[class*='vscode-high-contrast'] .form-field,
+[class*='vscode-high-contrast'] .form-text,
+[class*='vscode-high-contrast'] .form-textarea,
+[class*='vscode-high-contrast'] .request-feedback textarea,
+[class*='vscode-high-contrast'] button.primary,
+[class*='vscode-high-contrast'] button.secondary,
+[class*='vscode-high-contrast'] .code-action {
+  border-color: var(--vscode-contrastBorder);
+}
+
+[class*='vscode-high-contrast'] .message-assistant {
+  border-left-color: var(--vscode-contrastBorder);
+}
+
+[class*='vscode-high-contrast'] :focus-visible {
+  outline: 2px solid var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+  outline-offset: 1px;
+}
+
+/*
+ * Code in high contrast (light and dark): no tinted background and no token colours. The
+ * textPreformat / symbolIcon / debugTokenExpression pairs are made for the tinted themes; in the
+ * high-contrast ones they land dark-on-dark (seen on "Default High Contrast Light"), so text is
+ * the editor foreground on the plain background, and a contrast border marks the box. Comments
+ * keep their italics and the diff markers stay readable through `+`/`-` in the text itself.
+ */
+[class*='vscode-high-contrast'] .code-block,
+[class*='vscode-high-contrast'] .md th {
+  background: transparent;
+}
+
+[class*='vscode-high-contrast'] .md code,
+[class*='vscode-high-contrast'] .request-resources code,
+[class*='vscode-high-contrast'] .request-always code,
+[class*='vscode-high-contrast'] .code-body {
+  color: var(--vscode-editor-foreground, var(--vscode-foreground));
+  background: transparent;
+}
+
+[class*='vscode-high-contrast'] .md :not(pre) > code:not(.file-ref),
+[class*='vscode-high-contrast'] .request-resources code {
+  border: 1px solid var(--vscode-contrastBorder);
+}
+
+[class*='vscode-high-contrast'] .code-body [class*='hljs-'] {
+  color: inherit;
+}
+
+[class*='vscode-high-contrast'] .md code.file-ref {
+  color: var(--vscode-textLink-foreground);
+}
+
+/* ---------- reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border: 0;
+    width: auto;
+    height: auto;
+  }
+
+  .spinner::before {
+    content: '…';
+  }
+}
+
+body.vscode-reduce-motion .spinner {
+  animation: none;
+  border: 0;
+  width: auto;
+  height: auto;
+}
+
+body.vscode-reduce-motion .spinner::before {
+  content: '…';
 }

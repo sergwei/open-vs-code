@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { DetectionResult } from './opencodeBinary';
 import { fetchServerInfo, safeLog, startServer, stopServer } from './opencodeServer';
+import { RESTART_SERVER_COMMAND_ID, SELECT_FOLDER_COMMAND_ID } from './ids';
 import {
   describeServerFailure,
   describeServerState,
@@ -10,16 +11,54 @@ import {
 } from './serverManager';
 
 const SHOW_LOGS = 'Show Logs';
+const RESTART_SERVER = 'Restart Server';
 
 /**
- * Wires the server lifecycle (issue #8) into VS Code and returns what `activate` needs.
+ * `workspaceState` key of the folder the user chose to serve (an `fsPath`). Not a secret. The
+ * choice is remembered per workspace and used only while that folder is still open on disk.
+ */
+const SERVED_FOLDER_KEY = 'openVsCode.servedFolder';
+
+/**
+ * Restarts the server (the command, the toolbar button and the webview's Restart button) and,
+ * when nothing could be restarted, tells the user why instead of failing silently.
  *
- * Thin adapter over the pure `serverManager.ts`: picks the workspace folder once (first
- * folder, `file` scheme only; folder changes and multi-root are issue #10), builds the manager
+ * Resolves after the restart attempt settled; the outcome of the new start is the manager's
+ * state, not this function's. `no-binary` (no detection accepted an opencode v2 yet) and
+ * `no-workspace` (no folder on disk) are the two cases the manager refuses; both show a warning
+ * that points at the log. UNVERIFIED in a real window (the warning text and its placement).
+ */
+export async function restartServerWithFeedback(manager: ServerManager): Promise<void> {
+  const result = await manager.restart('command');
+  if (result === 'no-binary') {
+    void vscode.window.showWarningMessage(
+      'OpenCode cannot restart the server: no opencode v2 executable has been found. Set "openVsCode.opencodePath" or install opencode v2.',
+    );
+  } else if (result === 'no-workspace') {
+    void vscode.window.showWarningMessage(
+      'OpenCode cannot restart the server: open a folder from disk first.',
+    );
+  }
+}
+
+/**
+ * Wires the server lifecycle (issues #8, #10) into VS Code and returns what `activate` needs.
+ *
+ * Thin adapter over the pure `serverManager.ts`: picks the workspace folder to serve (the one the
+ * user chose with "Select Workspace Folder", else the first on disk), builds the manager
  * with the real process functions and the OpenCode channel as log, mirrors every state change
- * into the log, and shows an error notification (with a Show Logs button) when a server we tried
- * to run fails. `onDetection` is meant for `registerBinaryDetection`, so the server starts as
- * soon as a usable binary is found (decision of Sergio, 2026-10-20).
+ * into the log, and shows an error notification (with Show Logs and Restart Server buttons) when
+ * a server we tried to run fails for good (a crash that the manager is still retrying is silent:
+ * `describeServerFailure`). `onDetection` is meant for `registerBinaryDetection`, so the server
+ * starts as soon as a usable binary is found (decision of Sergio, 2026-10-20).
+ *
+ * Phase 3 (issue #10) registers two commands (restart, select folder) and listens to
+ * `onDidChangeWorkspaceFolders`: a removed served folder moves to the first one left and restarts.
+ * VERIFIED in the VS Code docs (`vscode.d.ts` 1.105, read) that the event does NOT fire when the
+ * FIRST folder changes: the extension host restarts instead, which goes through
+ * `deactivate`/`activate` and this function again. Only the commands' registration is exercised by
+ * the integration suite (`lifecycle.test.ts`); folder changes in a real multi-root window are
+ * UNVERIFIED (F5 point 9).
  *
  * Neither the stop nor the channel is a disposable in `context.subscriptions`: VS Code disposes
  * those right after calling `deactivate` without awaiting them, which would pre-empt the polite
@@ -28,8 +67,8 @@ const SHOW_LOGS = 'Show Logs';
  * subscriptions, returns `manager.stop()` from `deactivate` and disposes the channel only when
  * that Promise settles. The state listener stays subscribed meanwhile, so the shutdown is visible
  * in the log. As defence in depth every log call made here goes through `safeLog`, so even a
- * channel closed early cannot interrupt a transition or the tree kill.
- * Takes no `ExtensionContext` because it registers no disposable (see above).
+ * channel closed early cannot interrupt a transition or the tree kill. The two commands and the
+ * folder listener are plain disposables in `context.subscriptions` (they hold no process).
  * Workspace Trust: the extension declares no `capabilities.untrustedWorkspaces`, so it does not
  * activate in Restricted Mode and nothing is launched against an untrusted folder (HYPOTHESIS:
  * VS Code's documented default, not exercised).
@@ -37,9 +76,12 @@ const SHOW_LOGS = 'Show Logs';
  * (bundled code under plain Node, spike on 2026-10-20). VERIFIED in VS Code 1.142.0 on Windows
  * 11 (opt-in `realOpencode.test.ts`, 2026-10-20): the start against a real opencode and its
  * `starting the server` and `server ready` log lines. UNVERIFIED in VS Code: the notification
- * and its button, and that the stop on `deactivate` leaves no process behind; POSIX UNVERIFIED.
+ * and its buttons, and that the stop on `deactivate` leaves no process behind; POSIX UNVERIFIED.
  */
-export function registerServerLifecycle(channel: vscode.LogOutputChannel): {
+export function registerServerLifecycle(
+  context: vscode.ExtensionContext,
+  channel: vscode.LogOutputChannel,
+): {
   manager: ServerManager;
   onDetection: (result: DetectionResult) => void;
 } {
@@ -51,7 +93,8 @@ export function registerServerLifecycle(channel: vscode.LogOutputChannel): {
       fetchServerInfo(url, password, undefined, undefined, signal),
     log,
   });
-  manager.setFolder(pickWorkspaceFolder(vscode.workspace.workspaceFolders));
+  const preferred = (): string | undefined => context.workspaceState.get<string>(SERVED_FOLDER_KEY);
+  manager.setFolder(pickWorkspaceFolder(vscode.workspace.workspaceFolders, preferred()));
 
   let previous: ServerState = manager.state;
   // `setFolder` may already have moved to `unavailable/no-workspace`, before anyone listened.
@@ -65,11 +108,46 @@ export function registerServerLifecycle(channel: vscode.LogOutputChannel): {
     const failure = describeServerFailure(previous, next);
     previous = next;
     if (failure !== undefined) {
-      void vscode.window.showErrorMessage(failure, SHOW_LOGS).then((choice) => {
+      void vscode.window.showErrorMessage(failure, RESTART_SERVER, SHOW_LOGS).then((choice) => {
         if (choice === SHOW_LOGS) channel.show();
+        else if (choice === RESTART_SERVER) void restartServerWithFeedback(manager);
       });
     }
   });
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(RESTART_SERVER_COMMAND_ID, async () => {
+      await restartServerWithFeedback(manager);
+    }),
+    vscode.commands.registerCommand(SELECT_FOLDER_COMMAND_ID, async () => {
+      const folders = (vscode.workspace.workspaceFolders ?? []).filter(
+        (folder) => folder.uri.scheme === 'file',
+      );
+      if (folders.length < 2) {
+        void vscode.window.showInformationMessage(
+          'OpenCode: only one folder is open, so there is nothing to choose.',
+        );
+        return;
+      }
+      const serving = pickWorkspaceFolder(vscode.workspace.workspaceFolders, preferred());
+      const servedPath = 'folder' in serving ? serving.folder : undefined;
+      const picked = await vscode.window.showQuickPick(
+        folders.map((folder) => ({
+          label: folder.name,
+          description: folder.uri.fsPath,
+          detail: folder.uri.fsPath === servedPath ? 'Currently served' : undefined,
+          fsPath: folder.uri.fsPath,
+        })),
+        { title: 'OpenCode: choose the folder to serve', placeHolder: 'Folder' },
+      );
+      if (picked === undefined) return;
+      await context.workspaceState.update(SERVED_FOLDER_KEY, picked.fsPath);
+      manager.setFolder(pickWorkspaceFolder(vscode.workspace.workspaceFolders, picked.fsPath));
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      manager.setFolder(pickWorkspaceFolder(vscode.workspace.workspaceFolders, preferred()));
+    }),
+  );
 
   return { manager, onDetection: (result) => manager.onDetection(result) };
 }

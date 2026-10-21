@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { registerBinaryDetection } from './binaryDetection';
-import { registerChatView } from './chatViewProvider';
+import { registerChat } from './chatLifecycle';
 import { LOG_CHANNEL_NAME, SHOW_LOGS_COMMAND_ID } from './ids';
 import { registerServerLifecycle } from './serverLifecycle';
 import type { ServerManager } from './serverManager';
@@ -17,9 +17,13 @@ let serverManager: ServerManager | undefined;
 let logChannel: vscode.LogOutputChannel | undefined;
 
 /**
- * Extension entry point: creates the log channel, registers the commands and the chat view,
- * and starts opencode binary detection, whose usable results start `opencode serve` in the
- * first workspace folder (issue #8; the manager is kept for `deactivate`).
+ * Extension entry point: creates the log channel, registers the commands, the server lifecycle
+ * (with its restart and select-folder commands, issue #10) and the chat (view, client and event
+ * stream, issues #9/#14, plus the permission, question and attention features of phase 3, wired
+ * to the manager's state), and starts opencode binary detection, whose usable results start
+ * `opencode serve` in the served workspace folder (issue #8; the manager is kept for
+ * `deactivate`). The lifecycle is registered before the chat because the chat subscribes to the
+ * manager and uses its restart helper.
  * The server start path is VERIFIED against the real opencode 2.0.32 outside VS Code (bundled
  * code under plain Node, Windows 11, spike on 2026-10-20). UNVERIFIED inside VS Code (F5 or
  * the opt-in `realOpencode.test.ts`) and on POSIX.
@@ -55,9 +59,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  context.subscriptions.push(registerChatView(context.extensionUri, channel));
-  const lifecycle = registerServerLifecycle(channel);
+  const lifecycle = registerServerLifecycle(context, channel);
   serverManager = lifecycle.manager;
+  context.subscriptions.push(registerChat(context, channel, lifecycle.manager));
   registerBinaryDetection(context, channel, lifecycle.onDetection);
 
   const { version } = context.extension.packageJSON as { version?: unknown };

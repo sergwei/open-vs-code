@@ -53,11 +53,18 @@ export type SessionSummary = {
   outcome?: 'succeeded' | 'failed' | 'interrupted';
 };
 
-/** Live state of a session. `nextAt` of `retry` is an epoch-milliseconds timestamp. */
+/**
+ * Live state of a session. `nextAt` of `retry` is an epoch-milliseconds timestamp.
+ *
+ * `error` means "not running; the last execution failed" (issue #14: opencode 2.0.32 publishes
+ * `session.execution.failed`, never a status event). It goes back to `busy` on the next
+ * `session.execution.started`, so the UI can show the error and still accept another prompt.
+ */
 export type SessionStatus =
   | { type: 'idle' }
   | { type: 'busy' }
-  | { type: 'retry'; attempt: number; message: string; nextAt: number };
+  | { type: 'retry'; attempt: number; message: string; nextAt: number }
+  | { type: 'error'; error: ErrorInfo };
 
 /** File attached to a user message. Never carries the file contents (no base64). */
 export type AttachmentInfo = { name?: string; mime: string; uri?: string };

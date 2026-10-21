@@ -14,21 +14,53 @@
 //   OPEN_VS_CODE_REAL_OPENCODE=<path to opencode.exe> npm run test:integration
 // To run only this suite: add `-- --label real-opencode`.
 //
+// Phase 3 (issues #18/#44/#19/#10) cases, observed on Windows 11 with VS Code 1.142.0 and the
+// free default model on 2026-10-20 (two runs; in the first, the older case "streams a real
+// prompt" saw no turn end within 60 s; the second run passed all 9 and the same prompt finished
+// in 4 s). HYPOTHESIS that the free model was slow or stuck: the log of that first run
+// (`.vscode-test/user-data/logs/20261020T205411/window1/exthost/sergwei.open-vs-code/OpenCode.log`,
+// kept) shows `prompt accepted` at 20:54:16 and NO `turn finished` line of any kind until the
+// next case's prompt at 20:55:16, which queued behind it and was cut by the interrupt; nothing in
+// that log points at the model or rules it out. To check: rerun until it repeats and read the
+// server's own session messages for that prompt.
+//   - `read` of `.env` raises a real `permission.asked` (action `read`) with the default config;
+//   - hidden view: `attention: badge 1` and ONE `attention: notified`, then `resolved: reject`,
+//     `attention: closed ... (resolved)` and `attention: badge 0`; a bare reject ends the turn
+//     `interrupted`;
+//   - visible view: no notification, `once` ends the turn `succeeded`;
+//   - the `question` tool raised a form, the session waited, `{ q0: "A" }` was accepted;
+//   - restart: new pid, stream reconnected, old pid gone; killing the server restarts it after 1 s.
+// NEVER pressed: "Always" (it stores a rule such as `read *` in the opencode database of whoever
+// runs this). Not observed: how the toast or its links look, the badge on the icon, a REST
+// snapshot taken while a request is pending, `form.cancel`, an interrupt with a request pending.
+//
 // Out of scope: the STOP. Nothing public in the extension stops the server before the window
 // closes (`deactivate` does it), and a test cannot observe its own host shutting down. The test
 // prints the pid so whoever runs it can check afterwards that the process is gone (Windows:
 // `tasklist /FI "PID eq <pid>"`; POSIX: `kill -0 <pid>`). The stop is VERIFIED separately under
 // plain Node (spike of 2026-10-20) but NOT through `deactivate` in VS Code.
 import * as assert from 'node:assert';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { CONFIG_SECTION, OPENCODE_PATH_KEY, OPENCODE_PATH_SETTING } from '../../src/extension/ids';
+import {
+  CONFIG_SECTION,
+  INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
+  OPENCODE_PATH_KEY,
+  OPENCODE_PATH_SETTING,
+  REPLY_PERMISSION_COMMAND_ID,
+  RESTART_SERVER_COMMAND_ID,
+  VIEW_CONTAINER_ID,
+} from '../../src/extension/ids';
 import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
-import { openLogFromStart } from './support/extensionLog';
+import { openLogCursor, openLogFromStart } from './support/extensionLog';
 
 const EXTENSION_ID = 'sergwei.open-vs-code';
 // Above STARTUP_TIMEOUT_MS (30 s) of the extension, so a start that really hangs fails with the
 // extension's own error in the log, not with ours. A healthy start takes well under a second.
 const READY_WAIT_MS = 35_000;
+// Time for a real turn with the free default model (network): our own choice, see the test.
+const TURN_WAIT_MS = 60_000;
 
 describe('real opencode', function () {
   let binary: string;
@@ -115,4 +147,382 @@ describe('real opencode', function () {
     // The pid is for whoever runs the suite: check it is gone once the window has closed.
     console.log(`real opencode ready on port ${String(port)}, pid ${String(pid)}`);
   });
+
+  /**
+   * End to end of issue #14 against a REAL opencode: the view loads, the event stream connects,
+   * a prompt injected as if the webview had sent it is accepted, and the turn ends `succeeded`.
+   *
+   * The prompt goes through the internal command `openVsCode.test.injectWebviewMessage` (only
+   * registered in `ExtensionMode.Test`), because the test API cannot reach the iframe. It uses
+   * the free default model of opencode (`opencode/big-pickle`, seen working in the planner's
+   * spike on 2026-10-20), so it needs network: a failure may come from the service, and the log
+   * excerpt in the assertion includes the `execution.failed` error. The reply TEXT is not
+   * asserted (a model may word it differently); the visual result is for the F5 of Sergio.
+   * 60 s for the turn is our own choice (the spike's turn took a few seconds).
+   * Depends on the previous `it` (same window, server already running).
+   */
+  it('streams a real prompt to the end', async function () {
+    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
+    const log = await openLogFromStart();
+    await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
+    await log.waitFor('webview ready', 8_000);
+    await log.waitFor('event stream connected', 10_000);
+
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'integration-1',
+      text: 'Reply with exactly: hello there',
+      delivery: 'queue',
+      files: [],
+    });
+    await log.waitFor('prompt accepted for ses_', 10_000);
+    await log.waitFor('turn finished: ', TURN_WAIT_MS);
+    const text = log.added();
+    assert.ok(
+      text.includes('turn finished: succeeded'),
+      `the turn did not end succeeded; log:\n${text}`,
+    );
+  });
+
+  /**
+   * Stop (issue #16) against a REAL opencode: a long prompt is interrupted mid-turn through the
+   * same `session.abort` message the Stop button sends, and the server confirms it.
+   *
+   * Protects: the v2 route (`POST /api/session/:id/interrupt`, not the v1 `/abort` the issue
+   * cites), the BARE `{interrupted}` body (a wrapped read would give `undefined` and log
+   * `interrupted: undefined`), and the `session.execution.interrupted` event reaching the turn log.
+   * The session id is read from the `prompt accepted for ses_...` line. The 1500 ms wait lets the
+   * turn start before the interrupt; if the model were fast enough to finish a 400-number list in
+   * that time the test would see `interrupted: false` and fail (our own choice, flaky only on an
+   * absurdly fast model; not observed). Needs network and the free model, like the test above.
+   */
+  it('interrupts a long turn with session.abort', async function () {
+    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'integration-abort-1',
+      text: 'Count from 1 to 400, one number per line. Do not stop early.',
+      delivery: 'queue',
+      files: [],
+    });
+    await log.waitFor('prompt accepted for ses_', 10_000);
+    const sessionID = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+    assert.ok(sessionID, `no session id in the log:\n${log.added()}`);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'session.abort',
+      requestId: 'integration-abort-2',
+      sessionID,
+    });
+    await log.waitFor(`abort requested for ${sessionID} (interrupted: true)`, 10_000);
+    await log.waitFor(`turn finished: interrupted for ${sessionID}`, 15_000);
+  });
+
+  /**
+   * A file link in a reply (issue #15) opens the file at the line, inside the served folder.
+   *
+   * Protects: `editor.open` resolving a RELATIVE path against the folder the server serves, and
+   * the 1-based line of the protocol becoming VS Code's 0-based selection (line 3 -> index 2).
+   * Writes `src/sample.ts` into the temporary workspace folder of this configuration (never the
+   * repository). Paths are compared case-insensitively on Windows. The refusal of a path OUTSIDE
+   * the folder is covered by `pathPolicy.test.ts` (pure); not repeated here.
+   * NOT covered: attachments, because `attachments.pick` opens a native dialog that cannot be
+   * injected; that case stays with the F5 (point 8 of the plan).
+   */
+  it('opens a relative file at the requested line for editor.open', async function () {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    assert.ok(folder, 'no workspace folder is open');
+    const file = path.join(folder, 'src', 'sample.ts');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'export const a = 1;\nexport const b = 2;\nexport const c = 3;\n');
+
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'editor.open',
+      path: 'src/sample.ts',
+      line: 3,
+    });
+
+    const same = (a: string, b: string): boolean =>
+      process.platform === 'win32'
+        ? a.toLowerCase() === b.toLowerCase()
+        : path.normalize(a) === path.normalize(b);
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      const editor = vscode.window.activeTextEditor;
+      if (editor && same(editor.document.uri.fsPath, file)) {
+        assert.strictEqual(editor.selection.active.line, 2);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.fail(
+      `${file} did not become the active editor; active: ${vscode.window.activeTextEditor?.document.uri.fsPath ?? '(none)'}`,
+    );
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // Phase 3 (issues #18, #44, #19, #10). These cases depend on the free model CHOOSING to use the
+  // `read` or `question` tool, which a prompt cannot force: a failure to see `permission asked` or
+  // `form asked` may be the model, not the extension (the assertion message carries the log so
+  // the two can be told apart). They NEVER send `always`: that writes a rule into the opencode
+  // database of whoever runs the suite (with `read` it is `read *`, which allows reading every
+  // file of the project, `.env` included, from then on).
+  // ---------------------------------------------------------------------------------------------
+
+  /** Writes the `.env` that the permission prompts ask to read (opencode asks before reading it). */
+  function writeEnvFile(): void {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    assert.ok(folder, 'no workspace folder is open');
+    fs.writeFileSync(path.join(folder, '.env'), 'OPEN_VS_CODE_TEST=1\n');
+  }
+
+  const READ_ENV_PROMPT =
+    'Use the read tool to read the file .env in the current folder and reply with its first line.';
+
+  /** Sends `text` as if the webview had, and waits for the server to accept it. */
+  async function sendPrompt(log: Awaited<ReturnType<typeof openLogCursor>>, text: string) {
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: `integration-${String(Date.now())}`,
+      text,
+      delivery: 'queue',
+      files: [],
+    });
+    await log.waitFor('prompt accepted for ses_', 10_000);
+  }
+
+  /** Waits for `pattern` in the lines added since the mark and returns its match. */
+  async function matchInLog(
+    log: Awaited<ReturnType<typeof openLogCursor>>,
+    pattern: RegExp,
+    timeoutMs: number,
+    what: string,
+  ): Promise<RegExpExecArray> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const found = pattern.exec(log.added());
+      if (found) return found;
+      if (Date.now() >= deadline) {
+        assert.fail(
+          `${what} did not appear within ${String(timeoutMs)} ms (the model may not have used the tool); log:\n${log.added()}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  /**
+   * Hidden view (issue #19): a permission asked while the chat is not on screen raises the badge
+   * and ONE notification, and answering it from a command closes both by themselves.
+   *
+   * The Explorer is shown to hide the chat container. The prompt asks to read `.env`, the one
+   * file that opencode v2 asks permission for with its default rules (`read *.env` is `ask`, read
+   * in `packages/schema/src/agent.ts@v2.0.32`). The answer is a REJECT through the internal
+   * command of the notification link (`Allow once` would work too; reject avoids the file being
+   * read). Waits for `resolved: reject` and the closing lines; the model then goes on without the
+   * file, so the turn ends (any outcome is accepted). NOT verified here: that the toast looks
+   * right or that its links render (F5 point 4).
+   */
+  it('a permission asked with the view hidden raises the badge and one notification, and closes them on reject', async function () {
+    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
+    writeEnvFile();
+    await vscode.commands.executeCommand('workbench.view.explorer');
+    // Give VS Code a moment to report the chat view as hidden before the request arrives.
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    const log = await openLogCursor();
+    await sendPrompt(log, READ_ENV_PROMPT);
+    const asked = await matchInLog(
+      log,
+      /permission asked (per_\S+) for (ses_\S+) \(read\)/,
+      TURN_WAIT_MS,
+      'permission asked',
+    );
+    const [, permissionID, sessionID] = asked;
+    assert.ok(permissionID && sessionID, 'ids missing from the log line');
+    await log.waitFor('attention: badge 1', 5_000);
+    await log.waitFor(`attention: notified ${permissionID}`, 5_000);
+    assert.strictEqual(
+      (log.added().match(/attention: notified /g) ?? []).length,
+      1,
+      `expected exactly one notification for the request; log:\n${log.added()}`,
+    );
+
+    await vscode.commands.executeCommand(REPLY_PERMISSION_COMMAND_ID, {
+      sessionID,
+      permissionID,
+      decision: 'reject',
+    });
+    await log.waitFor(`permission ${permissionID} resolved: reject`, 10_000);
+    await log.waitFor(`attention: closed ${permissionID} (resolved)`, 5_000);
+    await log.waitFor('attention: badge 0', 5_000);
+    await log.waitFor('turn finished:', TURN_WAIT_MS);
+  });
+
+  /**
+   * Visible view: the same request raises NO notification (the card is right there), and an
+   * "allow once" sent as the webview would lets the turn finish.
+   *
+   * The container is revealed first and `webview ready` awaited, so the plan's rule "notify only
+   * when the view is not visible" is exercised against a view that really is. The reply goes
+   * through the injected `permission.reply` message (the same path as the card's button).
+   */
+  it('a permission asked with the view visible raises no notification and allow once finishes the turn', async function () {
+    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
+    writeEnvFile();
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
+    await log.waitFor('webview ready', 8_000);
+    await sendPrompt(log, READ_ENV_PROMPT);
+    const asked = await matchInLog(
+      log,
+      /permission asked (per_\S+) for (ses_\S+) \(read\)/,
+      TURN_WAIT_MS,
+      'permission asked',
+    );
+    const [, permissionID, sessionID] = asked;
+    assert.ok(permissionID && sessionID, 'ids missing from the log line');
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    log.assertAbsent('attention: notified');
+    await log.waitFor('attention: badge 1', 5_000);
+
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'permission.reply',
+      requestId: 'integration-allow-once',
+      sessionID,
+      permissionID,
+      decision: 'once',
+    });
+    await log.waitFor(`permission reply sent for ${permissionID} (once)`, 10_000);
+    await log.waitFor(`permission ${permissionID} resolved: once`, 10_000);
+    await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+  });
+
+  /**
+   * A question (issue #44): the tool `question` creates a form and the session WAITS until it is
+   * answered; answering lets the turn finish.
+   *
+   * Confirms the HYPOTHESIS of the plan that, without an answer, no `turn finished` line appears
+   * (3 s of watching: an absence cannot be proven instantly, so the number is our own choice).
+   * The answer is `{ q0: "A" }`; if the server insists the field is a list (a multiselect), the
+   * test retries once with `["A"]`, and the log shows which one the server accepted.
+   * Depends on the free model using the `question` tool, like the cases above.
+   */
+  it('a question waits for its answer, and answering lets the turn finish', async function () {
+    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
+    const log = await openLogCursor();
+    await sendPrompt(
+      log,
+      'Use the question tool to ask me to choose between A and B, then reply with my choice.',
+    );
+    const asked = await matchInLog(
+      log,
+      /form asked (frm_\S+) for (ses_\S+)/,
+      TURN_WAIT_MS,
+      'form asked',
+    );
+    const [, formID, sessionID] = asked;
+    assert.ok(formID && sessionID, 'ids missing from the log line');
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    log.assertAbsent('turn finished');
+
+    const answer = (value: string | string[], requestId: string) =>
+      vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+        type: 'form.reply',
+        requestId,
+        sessionID,
+        formID,
+        answer: { q0: value },
+      });
+    await answer('A', 'integration-answer-1');
+    const outcome = await matchInLog(
+      log,
+      /form frm_\S+ resolved: answered|request integration-answer-1 failed: \S+/,
+      10_000,
+      'the answer to be accepted',
+    );
+    if (outcome[0].startsWith('request integration-answer-1 failed')) {
+      await answer(['A'], 'integration-answer-2');
+    }
+    await log.waitFor(`form ${formID} resolved: answered`, 10_000);
+    await log.waitFor('turn finished:', TURN_WAIT_MS);
+  });
+
+  /**
+   * "Restart Server" (issue #10) against a real server: the old process is stopped (and really
+   * gone), a new one comes up, and the event stream reconnects by itself.
+   *
+   * The pid is read from the last `server ready` line. `process.kill(pid, 0)` throws `ESRCH` only
+   * once the process no longer exists, which proves the stop did not leave the old server behind.
+   * Runs near the end because it restarts the server the cases above share.
+   */
+  it('restart replaces the server: new pid, stream reconnected, old process gone', async function () {
+    this.timeout(READY_WAIT_MS + 30_000);
+    const before = await openLogFromStart();
+    const oldPid = lastReadyPid(before.added());
+    assert.ok(oldPid, `no \`server ready\` line yet; log:\n${before.added()}`);
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(RESTART_SERVER_COMMAND_ID);
+    await log.waitFor('restarting the server (command)', 5_000);
+    const ready = await matchInLog(
+      log,
+      /server ready at \S+ \(opencode \S+, pid (\d+)\)/,
+      READY_WAIT_MS,
+      'the new server',
+    );
+    const newPid = Number(ready[1]);
+    assert.notStrictEqual(newPid, oldPid, 'the restart reused the same process');
+    await log.waitFor('event stream connected', 10_000);
+    await waitUntilGone(oldPid, 10_000);
+  });
+
+  /**
+   * Crash recovery (issue #10): killing the server from outside makes the extension restart it
+   * after the first backoff (1 s) without any user action, and the stream reconnects.
+   *
+   * `process.kill(pid)` terminates the server like a crash (Windows: TerminateProcess). Only the
+   * first attempt is exercised; the 5 s, 15 s and give-up steps are in the unit tests with an
+   * injected clock.
+   */
+  it('a killed server is restarted automatically after 1 s', async function () {
+    this.timeout(READY_WAIT_MS + 30_000);
+    const before = await openLogFromStart();
+    const pid = lastReadyPid(before.added());
+    assert.ok(pid, `no \`server ready\` line yet; log:\n${before.added()}`);
+    const log = await openLogCursor();
+    process.kill(pid);
+    await log.waitFor('server exited unexpectedly; restarting in 1 s (attempt 1 of 3)', 10_000);
+    const ready = await matchInLog(
+      log,
+      /server ready at \S+ \(opencode \S+, pid (\d+)\)/,
+      READY_WAIT_MS,
+      'the restarted server',
+    );
+    assert.notStrictEqual(Number(ready[1]), pid);
+    await log.waitFor('event stream connected', 10_000);
+  });
 });
+
+/** Pid of the newest `server ready` line in `text`, or `undefined` when there is none. */
+function lastReadyPid(text: string): number | undefined {
+  const all = [...text.matchAll(/server ready at \S+ \(opencode \S+, pid (\d+)\)/g)];
+  const last = all[all.length - 1]?.[1];
+  return last === undefined ? undefined : Number(last);
+}
+
+/** Polls until no process has this pid (`kill(pid, 0)` throws `ESRCH`), or fails after `timeoutMs`. */
+async function waitUntilGone(pid: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+      throw error;
+    }
+    if (Date.now() >= deadline)
+      assert.fail(`process ${String(pid)} still exists after ${String(timeoutMs)} ms`);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}

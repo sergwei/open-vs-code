@@ -1,0 +1,101 @@
+// Editor actions suite (issues #13/#15, phase 2 of E2-mvp-prototype).
+//
+// Protects against: the actions behind the chat's code buttons and file links silently failing in
+// a REAL VS Code even though the controller's unit tests pass with a fake editor. Each case
+// drives the same path as a webview click: `openVsCode.test.injectWebviewMessage` runs the raw
+// message through `isWebviewToHost` and the real `ChatController` + `editorActions.ts`. The
+// iframe itself is out of reach of the test API, so what the buttons look like and whether the
+// click reaches `postMessage` stay with the F5.
+//
+// This is the `main` configuration: NO workspace folder is open, which is exactly what the
+// "open without a folder" case needs. Opening a real file at a line (`editor.open` inside a
+// folder) is covered by the opt-in `realOpencode.test.ts`, whose configuration opens one.
+// Not covered here: the Attach file dialog (a native dialog, no test hook) and `insert` with the
+// focus in the side view (needs a real click on the chat view; F5 point 3).
+import * as assert from 'node:assert';
+import * as vscode from 'vscode';
+import { INJECT_WEBVIEW_MESSAGE_COMMAND_ID } from '../../src/extension/ids';
+import { openLogCursor } from './support/extensionLog';
+
+const EXTENSION_ID = 'sergwei.open-vs-code';
+
+/** Runs a raw webview message through the host, as the view would. */
+async function inject(message: unknown): Promise<void> {
+  await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, message);
+}
+
+describe('editor actions', () => {
+  before(async () => {
+    await vscode.extensions.getExtension(EXTENSION_ID)?.activate();
+  });
+
+  afterEach(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  });
+
+  /**
+   * "New file" opens an untitled document with the code and the language id the webview chose.
+   *
+   * The language comes from the fence table of the webview (`ts` -> `typescript`); the host
+   * double-checks it against `languages.getLanguages()`, so the assertion on `languageId` also
+   * proves that check let a real built-in id through.
+   */
+  it('opens an untitled document with the text and the language for editor.newFile', async () => {
+    await inject({
+      type: 'editor.newFile',
+      text: 'const a: number = 1;\n',
+      language: 'typescript',
+    });
+    const editor = vscode.window.activeTextEditor;
+    assert.ok(editor, 'no active editor after editor.newFile');
+    assert.strictEqual(editor.document.isUntitled, true);
+    assert.strictEqual(editor.document.languageId, 'typescript');
+    assert.strictEqual(editor.document.getText(), 'const a: number = 1;\n');
+  });
+
+  /**
+   * An id VS Code does not know is dropped, not an error: the document still opens, as plain text.
+   */
+  it('ignores an unknown language id instead of failing editor.newFile', async () => {
+    await inject({ type: 'editor.newFile', text: 'x', language: 'not-a-language' });
+    const editor = vscode.window.activeTextEditor;
+    assert.ok(editor);
+    assert.strictEqual(editor.document.getText(), 'x');
+    assert.strictEqual(editor.document.languageId, 'plaintext');
+  });
+
+  /**
+   * "Insert at cursor" puts the text at the cursor of the active editor, verbatim (a `$` in the
+   * code must not be read as a snippet variable, which is why the host does not use
+   * `insertSnippet`).
+   */
+  it('inserts the text at the cursor for editor.insert, without interpreting $', async () => {
+    const document = await vscode.workspace.openTextDocument({ content: 'world' });
+    const editor = await vscode.window.showTextDocument(document);
+    editor.selection = new vscode.Selection(0, 0, 0, 0);
+    await inject({ type: 'editor.insert', text: 'const $1 = ${name}; ' });
+    assert.strictEqual(document.getText(), 'const $1 = ${name}; world');
+  });
+
+  /**
+   * Copy goes through the host clipboard, not the iframe's.
+   */
+  it('writes the text to the clipboard for clipboard.write', async () => {
+    await inject({ type: 'clipboard.write', text: 'copied from the chat' });
+    assert.strictEqual(await vscode.env.clipboard.readText(), 'copied from the chat');
+  });
+
+  /**
+   * With no folder open there is nothing to resolve a path against: the editor does not change
+   * and the refusal is logged as a warning (the webview gets a notice).
+   */
+  it('refuses editor.open without a workspace folder and logs a warning', async () => {
+    assert.strictEqual(vscode.workspace.workspaceFolders, undefined, 'a folder is open');
+    const before = vscode.window.activeTextEditor;
+    const log = await openLogCursor();
+    await inject({ type: 'editor.open', path: 'src/a.ts', line: 3 });
+    // 8000 ms is our own choice (margin for a slow CI), as in the other suites.
+    await log.waitFor('editor.open failed: NoWorkspace', 8000);
+    assert.strictEqual(vscode.window.activeTextEditor, before);
+  });
+});
