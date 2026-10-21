@@ -24,7 +24,13 @@
 // ring, Escape returning the focus, the lazy New session (no session until the first prompt), the
 // in-line rename (row and header), the server-side search, switching, and a delete confirmed in the
 // MODAL dialog of VS Code (`window.dialogStyle: custom`, so it is DOM that Playwright can press),
-// declined once and confirmed once. Things that depend on
+// declined once and confirmed once. Since E4-fork-subsessions (issue #21) step 10 sends two prompts,
+// hovers and Tabs to "Fork from here" on the second user message, forks with the real mouse and
+// asserts the new session holds only the first exchange, the "Forked from" crumb, the refilled and
+// focused prompt, the "Fork" word in the session list, and that the crumb returns to the intact
+// original; then it asks the model to call the `subagent` tool and, if it does, follows the link
+// to the child ("‹ parent" crumb), back, and through "Subagent sessions (1)". If the model does not
+// call the tool the subagent half is SKIPPED with a warning. Things that depend on
 // what the model happens to write (a file reference in the reply, say) are SKIPPED with a
 // warning when absent, never failed.
 //
@@ -300,9 +306,20 @@ async function clickButton(text) {
   }
 }
 
-/** Real click in the textarea (so keyboard focus enters the iframe), then types and sends. */
+/**
+ * Real click in the textarea (so keyboard focus enters the iframe), empties it, then types and
+ * sends. Emptying first matters: a fork refills the draft with the forked prompt and the draft
+ * survives New session, so typing straight away concatenated both prompts (seen in screenshot
+ * 11h of step 10, review of #21). On an empty textarea select-all + Backspace does nothing.
+ */
 async function send(text) {
   await clickIn('textarea');
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.press('Backspace');
+  // Without this pause the first typed character was lost (screenshot 11h showed "all the
+  // subagent tool…" for "Call the…"). Cause: HYPOTHESIS, the webview re-renders the emptied
+  // textarea. The 150 ms pause: VERIFIED by the test:visual run of 21/10/2026 (153 ok, 11h clean).
+  await sleep(150);
   await page.keyboard.type(text);
   await page.keyboard.press('Enter');
 }
@@ -1173,6 +1190,13 @@ try {
       );
       row?.querySelector('.session-main')?.setAttribute('data-visual-pick', 'true');
     }, renamed);
+    // The centre of the row is only safe while the document has no scrollbar: the row actions are
+    // laid over its right end (opacity 0 still takes the click), and a 9 px overflow narrowed the
+    // row enough for the centre to land on "Rename" (found while adding step 10, issue #21).
+    const overflowPx = await web.inDoc(
+      (doc) => doc.documentElement.scrollHeight - doc.documentElement.clientHeight,
+    );
+    check(overflowPx <= 0, `the document has no vertical overflow (${String(overflowPx)} px)`);
     await clickIn('[data-visual-pick="true"]');
     await until((s) => !s.open && s.title === renamed, 20_000);
     await openList();
@@ -1246,6 +1270,275 @@ try {
       `Escape returns the focus to the Sessions button again (${JSON.stringify(state.focus)})`,
     );
     assertNoWebviewErrors('sessions');
+  });
+
+  await step('10 fork and subagent sessions (issue #21)', async () => {
+    /** What the chat shows about the open conversation. Self-contained (it is serialized). */
+    const chat = () =>
+      web.inDoc((doc) => {
+        const bar = (article) => article.querySelector('.message-actions');
+        const users = [...doc.querySelectorAll('[role="log"] .message-user')];
+        const active = doc.activeElement;
+        return {
+          blocks: doc.querySelectorAll('[role="log"] > *').length,
+          users: users.map((u) => (u.querySelector('.part-text')?.textContent ?? '').trim()),
+          bars: users.map((u) =>
+            bar(u) ? doc.defaultView.getComputedStyle(bar(u)).opacity : 'none',
+          ),
+          forkNames: users.map(
+            (u) => u.querySelector('.message-action')?.getAttribute('aria-label') ?? '',
+          ),
+          title: doc.querySelector('.chat-title')?.textContent ?? '',
+          path: doc.querySelector('nav[aria-label="Session path"]')?.textContent ?? '',
+          pathButton: doc.querySelector('nav[aria-label="Session path"] button') !== null,
+          children: doc.querySelector('details.subagent-sessions > summary')?.textContent ?? '',
+          draft: doc.querySelector('textarea')?.value ?? '',
+          focus: {
+            tag: active?.tagName ?? '',
+            cls: active?.className ?? '',
+            visible: active?.matches?.(':focus-visible') ?? false,
+          },
+          subagentLinks: doc.querySelectorAll('.subagent-link').length,
+          subagentLine: doc.querySelector('.part-subagent span')?.textContent ?? '',
+          alerts: doc.querySelectorAll('[role="alert"]').length,
+        };
+      });
+    /** Tags the Nth (1-based) user message of the log so the real mouse can find it. */
+    const tagUser = (nth) =>
+      web.inDoc((doc, n) => {
+        for (const old of doc.querySelectorAll('[data-visual-msg]')) {
+          old.removeAttribute('data-visual-msg');
+        }
+        const users = [...doc.querySelectorAll('[role="log"] .message-user')];
+        users[n - 1]?.setAttribute('data-visual-msg', 'true');
+        return users.length;
+      }, nth);
+    /** Moves the real mouse to the centre of the first element matching `selector`. */
+    const hover = async (selector) => {
+      const point = await centreOf(selector);
+      if (point) await page.mouse.move(point.x, point.y);
+      await sleep(300);
+      return point !== null;
+    };
+    const setTheme = async (theme) => {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+    };
+
+    // --- Fork from the second user message ---------------------------------------------------
+    // Step 9 left the view empty (its session was deleted): the first prompt creates a session.
+    const ONE = 'Reply with exactly: ONE. Do not use any tools.';
+    const TWO = 'Reply with exactly: TWO. Do not use any tools.';
+    await send(ONE);
+    if (!(await waitIdle(120_000))) warn('the first turn did not finish in 120 s; going on');
+    await send(TWO);
+    if (!(await waitIdle(120_000))) warn('the second turn did not finish in 120 s; going on');
+    let state = await chat();
+    check(
+      state.users.length === 2 && state.users[1].includes('TWO'),
+      `the original session has the two prompts (${JSON.stringify(state.users)})`,
+    );
+    check(
+      state.forkNames.every((name) => name.startsWith('Fork from here: Reply with exactly')),
+      `each user message has a "Fork from here" named after it (${JSON.stringify(state.forkNames)})`,
+    );
+    check(
+      (await web.inDoc(
+        (doc) => doc.querySelectorAll('.message-assistant .message-action').length,
+      )) === 0,
+      'assistant messages have no fork button',
+    );
+    const originalBlocks = state.blocks;
+    // Not the title: the model names the session some seconds after its first answer, so a title
+    // read now can differ from the one read after navigating (seen in a run of 21/10/2026).
+
+    // Hover shows the bar of that message only (opacity, so Tab can still reach it).
+    await tagUser(2);
+    check(await hover('textarea'), 'the mouse rests away from the messages');
+    state = await chat();
+    check(
+      state.bars.every((opacity) => opacity === '0'),
+      `no action bar is visible without hover or focus (${JSON.stringify(state.bars)})`,
+    );
+    check(await hover('[data-visual-msg="true"]'), 'the mouse is over the second user message');
+    state = await chat();
+    check(
+      state.bars[1] === '1' && state.bars[0] === '0',
+      `hovering a message shows ITS bar only (${JSON.stringify(state.bars)})`,
+    );
+    await shot('11a-fork-hover');
+
+    // Keyboard: click the text, Tab lands on that message's button, with a visible ring and bar.
+    await hover('textarea');
+    check(
+      await clickIn('[data-visual-msg="true"] .part-text'),
+      'the text of the message is clicked',
+    );
+    await page.keyboard.press('Tab');
+    state = await chat();
+    check(
+      state.focus.tag === 'BUTTON' && state.focus.cls.includes('message-action'),
+      `Tab reaches "Fork from here" (${JSON.stringify(state.focus)})`,
+    );
+    check(state.focus.visible, 'the focused fork button shows a focus ring');
+    check(state.bars[1] === '1', 'focusing the button shows its bar without hover');
+    await hover('textarea');
+    await shot('11b-fork-focus');
+
+    // Fork with the real mouse.
+    await web.inDoc((doc) => {
+      doc
+        .querySelector('[data-visual-msg="true"] .message-action')
+        ?.setAttribute('data-visual-fork', 'true');
+    });
+    check(await clickIn('[data-visual-fork="true"]'), '"Fork from here" is pressed');
+    const forked = await waitFor(async () => (await chat()).path.startsWith('Forked from'), 20_000);
+    state = await chat();
+    check(forked === true, `the fork opened and the header says where from ("${state.path}")`);
+    check(
+      state.users.length === 1 && state.users[0].includes('ONE'),
+      `the fork holds only the history BEFORE the message (${JSON.stringify(state.users)})`,
+    );
+    check(state.pathButton, 'the "Forked from" crumb is a button');
+    check(
+      state.draft === TWO,
+      `the prompt is refilled with the text of the forked message ("${state.draft}")`,
+    );
+    check(
+      state.focus.tag === 'TEXTAREA',
+      `the prompt has the focus after the fork (${JSON.stringify(state.focus)})`,
+    );
+    check(state.alerts === 0, 'forking raised no alert');
+    for (const [name, theme] of [
+      ['light', 'Default Light Modern'],
+      ['dark', 'Default Dark Modern'],
+      ['hc-dark', 'Default High Contrast'],
+      ['hc-light', 'Default High Contrast Light'],
+    ]) {
+      await setTheme(theme);
+      await tagUser(1);
+      await hover('[data-visual-msg="true"]');
+      await shot(`11c-fork-${name}`);
+      const look = await web.inDoc((doc) => {
+        const link = doc.querySelector('nav[aria-label="Session path"] button');
+        const bar = doc.querySelector('[data-visual-msg="true"] .message-actions');
+        return {
+          link: link ? doc.defaultView.getComputedStyle(link).color : '',
+          bar: bar ? doc.defaultView.getComputedStyle(bar).opacity : '',
+        };
+      });
+      check(
+        look.link !== '' && look.bar === '1',
+        `${name}: the crumb and the hovered action bar render (${JSON.stringify(look)})`,
+      );
+    }
+    await setTheme('Default Dark Modern');
+
+    // The fork is a root session: it is in the list with the word "Fork"; the original is intact.
+    await clickButton('Sessions');
+    const listed = await waitFor(
+      () =>
+        web.inDoc((doc) => {
+          const live = doc.querySelector('.session-picker [role="status"]')?.textContent ?? '';
+          return (
+            doc.querySelector('.session-picker') !== null &&
+            live.trim() !== '' &&
+            !/^Loading/.test(live.trim())
+          );
+        }),
+      20_000,
+      300,
+    );
+    check(listed === true, 'the session list opened');
+    const badges = await web.inDoc((doc) =>
+      [...doc.querySelectorAll('.session-row')].map(
+        (li) => li.querySelector('.session-badge')?.textContent ?? '',
+      ),
+    );
+    check(
+      badges.some((badge) => badge.includes('Fork')),
+      `the fork is listed with the word "Fork" (${JSON.stringify(badges)})`,
+    );
+    await shot('11d-fork-in-list');
+    await page.keyboard.press('Escape');
+    await sleep(300);
+
+    // "Forked from ..." goes back to the original, which still has both exchanges.
+    check(
+      await clickIn('nav[aria-label="Session path"] button'),
+      'the "Forked from" crumb is pressed',
+    );
+    const back = await waitFor(async () => {
+      const now = await chat();
+      return now.path === '' && now.users.length === 2;
+    }, 20_000);
+    state = await chat();
+    check(
+      back === true && state.users.length === 2 && state.blocks === originalBlocks,
+      `the crumb opens the original, intact (${String(state.blocks)} of ${String(originalBlocks)} blocks, ${String(state.users.length)} prompts)`,
+    );
+    assertNoWebviewErrors('fork');
+
+    // --- Subagent session ---------------------------------------------------------------------
+    // Depends on the free model calling the `subagent` tool: SKIPPED with a warning when it does not.
+    check(await clickButton('New session'), 'New session is pressed for the subagent run');
+    await page.waitForTimeout(1500);
+    await send(
+      'Call the subagent tool exactly once with agent "general", description "Say hello" and ' +
+        'prompt "Reply with exactly: HELLO". After it returns, reply with exactly: DONE.',
+    );
+    if (!(await waitIdle(150_000))) warn('the subagent turn did not finish in 150 s; going on');
+    state = await chat();
+    if (state.subagentLinks === 0) {
+      warn(
+        'SKIPPED: the model did not call the subagent tool (no "Open subagent session" in the ' +
+          'conversation), so the subagent navigation was not exercised',
+      );
+      await shot('11e-subagent-skipped');
+      return;
+    }
+    check(
+      state.subagentLine.startsWith('Subagent'),
+      `the tool block reads as a subagent line ("${state.subagentLine}")`,
+    );
+    await shot('11e-subagent-link');
+    check(await clickButton('Open subagent session'), '"Open subagent session" is pressed');
+    const inChild = await waitFor(async () => (await chat()).path.startsWith('‹'), 20_000);
+    state = await chat();
+    check(inChild === true, `the child shows the crumb "‹ parent" ("${state.path}")`);
+    check(state.pathButton, 'the parent crumb is a button');
+    check(state.users.length >= 1, 'the child conversation is shown');
+    await shot('11f-subagent-child');
+    for (const [name, theme] of [
+      ['light', 'Default Light Modern'],
+      ['hc-light', 'Default High Contrast Light'],
+    ]) {
+      await setTheme(theme);
+      await shot(`11g-subagent-child-${name}`);
+    }
+    await setTheme('Default Dark Modern');
+    check(await clickIn('nav[aria-label="Session path"] button'), 'the parent crumb is pressed');
+    const backToParent = await waitFor(async () => {
+      const now = await chat();
+      return now.path === '' && now.subagentLinks > 0;
+    }, 20_000);
+    state = await chat();
+    check(backToParent === true, `the crumb returns to the parent ("${state.title}")`);
+    check(
+      state.children === 'Subagent sessions (1)',
+      `the parent lists its subagent session ("${state.children}")`,
+    );
+    // The list opens with the keyboard-native <details> and its button opens the child.
+    check(
+      await clickIn('details.subagent-sessions > summary'),
+      'the "Subagent sessions" summary is pressed',
+    );
+    await sleep(300);
+    await shot('11h-subagent-list');
+    check(await clickIn('.subagent-child'), 'the child in the list is pressed');
+    const again = await waitFor(async () => (await chat()).path.startsWith('‹'), 20_000);
+    check(again === true, 'the list opens the same child session');
+    assertNoWebviewErrors('subagent');
   });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
