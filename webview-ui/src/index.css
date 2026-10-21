@@ -195,6 +195,26 @@ button.secondary:hover:not(:disabled),
   margin: 4px 0;
 }
 
+/* What the user answered to a permission or a question, under the tool that asked. A Reject is a
+   decision, not a failure: the warning colour touches only the border, never the text, and never
+   the error red (lesson #934). */
+.request-outcome {
+  margin: 2px 0 6px;
+  padding: 0 0 0 8px;
+  border-left: 2px solid var(--vscode-textBlockQuote-border, var(--vscode-panel-border));
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+.request-outcome[data-tone='rejected'] {
+  border-left-color: var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
+}
+
+[class*='vscode-high-contrast'] .request-outcome {
+  border-left-color: var(--vscode-contrastBorder, currentColor);
+}
+
 .message-notice {
   color: var(--vscode-descriptionForeground);
   font-style: italic;

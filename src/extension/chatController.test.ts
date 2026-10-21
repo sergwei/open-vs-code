@@ -351,7 +351,12 @@ describe('ready', () => {
       { type: 'connection.state', connection: { state: 'starting' } },
       {
         type: 'snapshot',
-        snapshot: { sessions: [], statuses: {}, requests: { permissions: [], forms: [] } },
+        snapshot: {
+          sessions: [],
+          statuses: {},
+          requests: { permissions: [], forms: [] },
+          resolutions: [],
+        },
       },
     ]);
   });
@@ -1439,5 +1444,231 @@ describe('focusRequest', () => {
     vi.spyOn(Date, 'now').mockReturnValue(now + FOCUS_REQUEST_TTL_MS + 1);
     await controller.onWebviewReady();
     expect(posted.filter((m) => m.type === 'ui.focus').length).toBe(sent);
+  });
+});
+
+// E3-resolved-history (issues #56/#18). ALL DATA FABRICATED (the event shapes follow the types and
+// the stable log lines of the controller); the full path against the synthetic server is covered by
+// `chatController.e2e.test.ts` and, in a real VS Code, by `test:visual`.
+describe('answered requests (E3-resolved-history)', () => {
+  const ask = (streams: Array<{ options: EventStreamOptions<V2Event> }>, sessionID = 'ses_old') => {
+    emit(streams, 'permission.asked', {
+      id: 'per_1',
+      sessionID,
+      action: 'read',
+      resources: ['SECRET-RESOURCE-.env', 'other'],
+      save: ['*'],
+      source: { type: 'tool', messageID: 'msg_1', id: 'call_1' },
+    });
+  };
+  const answer = (
+    streams: Array<{ options: EventStreamOptions<V2Event> }>,
+    sessionID = 'ses_old',
+    reply = 'once',
+  ) => {
+    emit(streams, 'permission.replied', { sessionID, requestID: 'per_1', reply });
+  };
+
+  it('attaches the record to permission.resolved and form.resolved, and logs only ids and the decision', () => {
+    const { api } = fakeApi();
+    const { controller, streams, posted, logs } = setup(api, 'ses_old');
+    controller.onServerState(RUNNING);
+    ask(streams);
+    answer(streams);
+    expect(posted.at(-1)).toMatchObject({
+      type: 'permission.resolved',
+      permissionID: 'per_1',
+      resolution: {
+        kind: 'permission',
+        id: 'per_1',
+        sessionID: 'ses_old',
+        tool: { messageID: 'msg_1', partID: 'call_1' },
+        decision: 'once',
+        action: 'read',
+        resource: 'SECRET-RESOURCE-.env',
+        withFeedback: false,
+      },
+    });
+    emit(streams, 'form.created', { form: questionForm('frm_1', 'ses_old') });
+    emit(streams, 'form.replied', {
+      id: 'frm_1',
+      sessionID: 'ses_old',
+      answer: { q0: 'SECRET-ANSWER' },
+    });
+    expect(posted.at(-1)).toMatchObject({
+      type: 'form.resolved',
+      formID: 'frm_1',
+      resolution: { kind: 'form', id: 'frm_1', outcome: 'answered', formKind: 'question' },
+    });
+    expect(logs).toContain('info: resolution recorded per_1 (once)');
+    expect(logs).toContain('info: resolution recorded frm_1 (answered)');
+    // Neither the resource of the permission nor the text of an answer reaches the log.
+    expect(logs.join(' | ')).not.toContain('SECRET-RESOURCE');
+    expect(logs.join(' | ')).not.toContain('SECRET-ANSWER');
+  });
+
+  it('leaves a resolved message without record when the host never saw the request asked', () => {
+    const { api } = fakeApi();
+    const { controller, streams, posted } = setup(api, 'ses_old');
+    controller.onServerState(RUNNING);
+    answer(streams);
+    const resolved = posted.at(-1);
+    expect(resolved).toMatchObject({ type: 'permission.resolved' });
+    expect(resolved !== undefined && 'resolution' in resolved).toBe(false);
+  });
+
+  it('the snapshot carries the records of the OPEN session only', async () => {
+    const { api } = fakeApi();
+    const { controller, streams, snapshots } = setup(api, 'ses_old');
+    controller.onServerState(RUNNING);
+    ask(streams, 'ses_child');
+    answer(streams, 'ses_child');
+    ask(streams, 'ses_old');
+    answer(streams, 'ses_old', 'reject');
+    await controller.resync();
+    expect(snapshots().at(-1)?.resolutions).toMatchObject([
+      { id: 'per_1', sessionID: 'ses_old', decision: 'reject' },
+    ]);
+  });
+
+  it('with no open session the snapshot carries no records', async () => {
+    const { api } = fakeApi();
+    const { controller, streams, snapshots } = setup(api);
+    controller.onServerState(RUNNING);
+    ask(streams, 'ses_child');
+    answer(streams, 'ses_child');
+    await controller.resync();
+    expect(snapshots().at(-1)?.resolutions).toEqual([]);
+  });
+
+  it('survives Restart Server and a stream stop: the records are history, not pending state', async () => {
+    const { api } = fakeApi();
+    const { controller, streams, snapshots } = setup(api, 'ses_old');
+    controller.onServerState(RUNNING);
+    ask(streams);
+    answer(streams);
+    controller.onServerState({ kind: 'restarting', reason: 'command' });
+    controller.onServerState({
+      kind: 'running',
+      server: { ...SERVER, url: 'http://127.0.0.1:43212' },
+    });
+    await controller.resync();
+    expect(snapshots().at(-1)?.resolutions).toMatchObject([{ id: 'per_1', decision: 'once' }]);
+    controller.onServerState({ kind: 'stopping' });
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(snapshots().at(-1)?.resolutions).toMatchObject([{ id: 'per_1' }]);
+  });
+
+  it('records a request that only came from the snapshot (asked before the host connected)', async () => {
+    const { api } = fakeApi({ permissions: [permissionRequest('per_1', 'ses_old')] });
+    const { controller, streams, posted } = setup(api, 'ses_old');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    answer(streams);
+    expect(posted.at(-1)).toMatchObject({
+      type: 'permission.resolved',
+      resolution: { id: 'per_1', decision: 'once' },
+    });
+  });
+
+  /**
+   * Protects the ORDER inside `resync()`: `completeWithLive` must run BEFORE `rememberAsks`.
+   * `rememberAsks` REPLACES the remembered asks, so if it received the raw REST list, an ask the
+   * stream announced while the REST was being read (and REST did not list) would be forgotten,
+   * and its later `*.resolved` would yield no record (nor would the next snapshot carry one).
+   * Found by the second review of E3-resolved-history (SUGGESTION 1); mutation-checked: moving
+   * `rememberAsks` before `completeWithLive` makes this test fail. ALL DATA FABRICATED: the race
+   * is forced by emitting the stream event from inside the fake `message.list`; whether a real
+   * server interleaves like this is UNVERIFIED (the order itself is deterministic in the host).
+   */
+  it('keeps the record of an ask that arrived by the stream while the resync was reading REST', async () => {
+    let injected = false;
+    let emitAsk: () => void = () => undefined;
+    const { api } = fakeApi({
+      messageListImpl: () => {
+        if (!injected) {
+          injected = true;
+          emitAsk();
+        }
+        return Promise.resolve({ data: [], cursor: {} });
+      },
+    });
+    const { controller, streams, posted, snapshots } = setup(api, 'ses_old');
+    emitAsk = () => {
+      ask(streams);
+    };
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    // The first resync read REST (empty permission list) and the stream added `per_1` meanwhile.
+    expect(snapshots().at(-1)?.requests.permissions).toMatchObject([{ id: 'per_1' }]);
+    answer(streams);
+    expect(posted.at(-1)).toMatchObject({
+      type: 'permission.resolved',
+      resolution: { id: 'per_1', decision: 'once' },
+    });
+    await controller.resync();
+    expect(snapshots().at(-1)?.resolutions).toMatchObject([{ id: 'per_1', decision: 'once' }]);
+  });
+
+  it('flags withFeedback only for a reject sent with text, and not when the call failed', async () => {
+    const { api } = fakeApi();
+    const { controller, streams, posted, seedPermission } = setup(api);
+    controller.onServerState(RUNNING);
+    seedPermission('per_1', 'ses_1');
+    await controller.handle({
+      type: 'permission.reply',
+      requestId: 'r1',
+      sessionID: 'ses_1',
+      permissionID: 'per_1',
+      decision: 'reject',
+      message: "don't read secrets",
+    });
+    emit(streams, 'permission.replied', {
+      sessionID: 'ses_1',
+      requestID: 'per_1',
+      reply: 'reject',
+    });
+    expect(posted.at(-1)).toMatchObject({ resolution: { withFeedback: true } });
+
+    // A reply the server refused must not leave the flag behind for a later cascade.
+    const failing = fakeApi({ replyError: { _tag: 'SomethingElse', message: 'nope' } });
+    const second = setup(failing.api);
+    second.controller.onServerState(RUNNING);
+    second.seedPermission('per_2', 'ses_1');
+    await second.controller.handle({
+      type: 'permission.reply',
+      requestId: 'r2',
+      sessionID: 'ses_1',
+      permissionID: 'per_2',
+      decision: 'reject',
+      message: 'will fail',
+    });
+    emit(second.streams, 'permission.replied', {
+      sessionID: 'ses_1',
+      requestID: 'per_2',
+      reply: 'reject',
+    });
+    expect(second.posted.at(-1)).toMatchObject({ resolution: { withFeedback: false } });
+  });
+
+  it('flags withMessage for a form cancelled with a note', async () => {
+    const { api } = fakeApi();
+    const { controller, streams, posted, seedForm } = setup(api);
+    controller.onServerState(RUNNING);
+    seedForm('frm_1', 'ses_1');
+    await controller.handle({
+      type: 'form.cancel',
+      requestId: 'c1',
+      sessionID: 'ses_1',
+      formID: 'frm_1',
+      message: 'in my own words',
+    });
+    emit(streams, 'form.cancelled', { id: 'frm_1', sessionID: 'ses_1' });
+    expect(posted.at(-1)).toMatchObject({
+      type: 'form.resolved',
+      outcome: 'cancelled',
+      resolution: { withMessage: true },
+    });
   });
 });

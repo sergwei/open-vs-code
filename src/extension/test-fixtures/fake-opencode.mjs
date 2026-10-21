@@ -49,6 +49,9 @@
 // `GET /api/permission/request` and `GET /api/form` answer `{location, data}` (NOT unwrapped by the
 // client) and `GET /api/permission/saved` answers `{data}`. An interrupt with a request pending
 // deletes it WITHOUT publishing `permission.replied`, like `permission.ts@v2.0.32` L247-258.
+// E3-resolved-history: the tool of an asking turn ends in the state a real opencode 2.0.32 gives it
+// (see `askingTool`) and its block is part of the REST message, so a snapshot read after a
+// reconnection shows what the tool block says about the answer.
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running.
 
@@ -118,20 +121,42 @@ function noContent(response) {
  *
  * `kind` is `permission` (a `read` of `.env` with a `permission.asked`) or `question` (a `question`
  * tool with a form). `before` ends with the ask itself, which is also what registers the pending
- * request; `after(outcome)` is the tool result: `success` unless the user rejected or cancelled.
- * SYNTHETIC; the event shapes follow the types of `@opencode/client@2.0.32`.
+ * request; `after(result)` is the tool result: `result.outcome` is `success` unless the user
+ * rejected or cancelled (`denied`), `result.message` the optional text of that reject/cancel and
+ * `result.answer` the form answer. SYNTHETIC, but the FINAL STATES copy the rows of a real opencode
+ * 2.0.32 database (read with `node:sqlite`, 20-21/10/2026): a rejection without a message is
+ * `error {type: "aborted", message: "The user declined this tool call"}`, a dismissed question
+ * `aborted` + "The user dismissed this question" (read in the source, not seen), a rejection with a
+ * message `error {type: "permission.rejected", message}`, a dismissal with a message
+ * `error {type: "tool.execution", message}`, and an answered `question` is `completed` with
+ * `metadata.answers: string[][]` (one array per question). `block()` is the tool block as the
+ * REST `message.list` returns it once the tool finished (`content[]` of the assistant message).
+ * The shapes follow the types of `@opencode/client@2.0.32`.
  */
 function askingTool(kind, a) {
   const toolID = nextId('call');
   const name = kind === 'permission' ? 'read' : 'question';
+  const input =
+    kind === 'permission'
+      ? { path: '.env' }
+      : {
+          questions: [
+            {
+              header: 'Letter',
+              question: 'Pick A or B',
+              options: [{ label: 'A' }, { label: 'B' }],
+            },
+            {
+              header: 'Extras',
+              question: 'Any extras?',
+              options: [{ label: 'x' }, { label: 'y' }],
+            },
+          ],
+        };
+  let state = { status: 'running', input, metadata: {} };
   const before = [
     () => broadcast('session.tool.input.started', { ...a, id: toolID, name }),
-    () =>
-      broadcast('session.tool.called', {
-        ...a,
-        id: toolID,
-        input: kind === 'permission' ? { filePath: '.env' } : { questions: [] },
-      }),
+    () => broadcast('session.tool.called', { ...a, id: toolID, input }),
   ];
   if (kind === 'permission') {
     before.push(() => {
@@ -181,21 +206,43 @@ function askingTool(kind, a) {
       broadcast('form.created', { form });
     });
   }
-  const after = (outcome) => [
-    () =>
-      outcome === 'success'
-        ? broadcast('session.tool.success', {
+  const after = (result) => {
+    if (result.outcome === 'success') {
+      const content = [{ type: 'text', text: 'ok' }];
+      const answer = result.answer ?? {};
+      const metadata =
+        kind === 'question'
+          ? { answers: [[String(answer.q0 ?? '')], Array.isArray(answer.q1) ? answer.q1 : []] }
+          : undefined;
+      state = { status: 'completed', input, content, ...(metadata ? { metadata } : {}) };
+      return [
+        () =>
+          broadcast('session.tool.success', {
             ...a,
             id: toolID,
-            content: [{ type: 'text', text: 'ok' }],
-          })
-        : broadcast('session.tool.failed', {
-            ...a,
-            id: toolID,
-            error: { type: 'tool.denied', message: 'The user declined this tool call' },
+            content,
+            ...(metadata ? { metadata } : {}),
           }),
-  ];
-  return { before, after };
+      ];
+    }
+    const hasMessage = typeof result.message === 'string' && result.message !== '';
+    const error = hasMessage
+      ? {
+          type: kind === 'permission' ? 'permission.rejected' : 'tool.execution',
+          message: result.message,
+        }
+      : {
+          type: 'aborted',
+          message:
+            kind === 'permission'
+              ? 'The user declined this tool call'
+              : 'The user dismissed this question',
+        };
+    state = { status: 'error', input, error };
+    return [() => broadcast('session.tool.failed', { ...a, id: toolID, error })];
+  };
+  const block = () => ({ type: 'tool', id: toolID, name, state, time: { created: Date.now() } });
+  return { before, after, block };
 }
 
 /** Plays the recorded turn for a prompt, one event every few milliseconds. */
@@ -208,6 +255,8 @@ function playTurn(sessionID, inboxID, text) {
     : text.includes('ASK_QUESTION')
       ? 'question'
       : undefined;
+  /** The asking tool of this turn, once it exists; its block joins the REST message at the end. */
+  let toolBlock;
   const steps = [
     () =>
       broadcast('session.inbox.enqueued', {
@@ -264,6 +313,7 @@ function playTurn(sessionID, inboxID, text) {
           time: { created: Date.now(), completed: Date.now() },
           finish: 'stop',
           content: [
+            ...(toolBlock === undefined ? [] : [toolBlock()]),
             { type: 'reasoning', text: 'thinking about it', time: { created: 1, completed: 2 } },
             { type: 'text', text: 'hello there' },
           ],
@@ -285,10 +335,11 @@ function playTurn(sessionID, inboxID, text) {
     } else {
       // The turn pauses at the ask and the rest is held in `gates` until a reply resumes it.
       const tool = askingTool(asking, a);
+      toolBlock = tool.block;
       steps.push(stepStarted, ...tool.before);
-      gates.set(sessionID, (outcome) => {
+      gates.set(sessionID, (result) => {
         gates.delete(sessionID);
-        schedule([...tool.after(outcome), ...body]);
+        schedule([...tool.after(result), ...body]);
       });
     }
   }
@@ -364,7 +415,11 @@ function handleAnswer(request, response, [, rawSession, kind, rawId, verb]) {
       noContent(response);
       broadcast('permission.replied', { sessionID, requestID: id, reply: body.decision });
       if (body.decision === 'reject') dropRequests(sessionID, true);
-      resume(body.decision === 'reject' ? 'denied' : 'success');
+      resume(
+        body.decision === 'reject'
+          ? { outcome: 'denied', message: body.message }
+          : { outcome: 'success' },
+      );
     });
     return true;
   }
@@ -398,7 +453,7 @@ function handleAnswer(request, response, [, rawSession, kind, rawId, verb]) {
       settledForms.add(id);
       noContent(response);
       broadcast('form.replied', { id, sessionID, answer });
-      resume('success');
+      resume({ outcome: 'success', answer });
     });
     return true;
   }
@@ -408,7 +463,8 @@ function handleAnswer(request, response, [, rawSession, kind, rawId, verb]) {
     settledForms.add(id);
     noContent(response);
     broadcast('form.cancelled', { id, sessionID });
-    resume('denied');
+    const note = new URL(request.url ?? '/', 'http://fake.invalid').searchParams.get('message');
+    resume({ outcome: 'denied', message: note ?? undefined });
     return true;
   }
   return false;

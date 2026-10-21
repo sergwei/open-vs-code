@@ -20,9 +20,12 @@ type Ask = { kind: 'permission'; ask: PermissionAsk } | { kind: 'form'; ask: For
  * its own session), permissions first because they block a tool, then forms, each group in order
  * of arrival; a request of another session says which session it comes from, with an "Open
  * session" button when that is a top-level session. Under the cards, the one-line results of the
- * requests answered since the last prompt ("Allowed once: Read .env"). It lives above the input
- * instead of inside the history so it is always visible without scrolling and does not touch the
- * message list (plan decision; the alternative, inline next to the tool, waits for `MessageList`).
+ * requests of OTHER sessions (or unknown to the host) answered since the last prompt ("Allowed
+ * once: Read .env"). Since E3-resolved-history the answers of the open session are not here: they
+ * hang under their tool in the conversation (`MessageList`), and the store adds no dock line for
+ * them (decision of Sergio, 21/10/2026: the dock line stays for subagents' requests because their
+ * history is not on screen). The dock lives above the input so a pending card is always visible
+ * without scrolling.
  *
  * Accessibility and focus (plan `E2-mvp-prototype/plan-fase3`): its own `aria-live="polite"` region
  * announces each new request ("Permission requested: Read .env", "Question from the agent"),

@@ -24,6 +24,11 @@
  *    prompt), the cards waiting for the server's answer (`replying`, by ask id) with the error of
  *    the last failed answer (`requestErrors`), and the pending `ui.focus` target. A request leaves
  *    the store only through `*.resolved` or a snapshot that no longer lists it.
+ *  - E3-resolved-history (issues #56/#18) adds `resolutions`: the host's record of each answered
+ *    request of the OPEN session, by request id, which the conversation hangs under the tool that
+ *    asked. A `*.resolved` of the open session that carries its record goes there and adds NO line
+ *    to `resolved`; one of another session (a subagent) or without a record keeps the dock line
+ *    until the next prompt (decision of Sergio, 21/10/2026). A snapshot replaces `resolutions`.
  * VERIFIED by `chatStore.test.ts` with fabricated messages (confirms this logic, not the host
  * contract). UNVERIFIED in a real webview until the F5 of issue #14.
  */
@@ -35,6 +40,7 @@ import type {
   MessageInfo,
   Part,
   PermissionAsk,
+  RequestResolution,
   SessionStatus,
   SessionSummary,
 } from '../../../src/shared/model';
@@ -61,7 +67,12 @@ const STALE_REQUEST_CODES = new Set([
 /** Where `ui.focus` points. */
 export type FocusTarget = Extract<HostToWebview, { type: 'ui.focus' }>['target'];
 
-/** The line that stays after a request is answered, e.g. "Allowed once: Read .env". */
+/**
+ * The dock line that stays after a request is answered, e.g. "Allowed once: Read .env". Since
+ * E3-resolved-history it is used only for requests of OTHER sessions (a subagent's) and for ones the
+ * host had no record of; those of the open session live in `ChatState.resolutions` and show in the
+ * conversation. Cleared by the next prompt.
+ */
 export interface ResolvedRequest {
   /** The request id; unique, used as the list key. */
   id: string;
@@ -100,8 +111,17 @@ export interface ChatState {
   open: OpenView;
   /** Pending permissions and forms of ANY session of the location, in order of arrival. */
   requests: { permissions: PermissionAsk[]; forms: FormAsk[] };
-  /** Results of answered requests, oldest first, until the next prompt is sent. */
+  /**
+   * Dock lines of answered requests of other sessions (or unknown to the host), oldest first,
+   * until the next prompt is sent. See {@link ResolvedRequest}.
+   */
   resolved: ResolvedRequest[];
+  /**
+   * The host's record of each answered request of the OPEN session, by request id. Persistent for
+   * the life of the document and NOT cleared by a prompt: they are history. Replaced by a
+   * snapshot, emptied when the open session is removed.
+   */
+  resolutions: { [requestId: string]: RequestResolution };
   /** Ask id -> `requestId` of the reply or cancel in flight; the card shows "Sending…" and locks. */
   replying: { [askId: string]: string };
   /** Ask id -> the error the server gave to the last reply, shown inside the card. */
@@ -136,7 +156,10 @@ export interface ChatStore {
    * `request.result` that carries an error (stored in `requestErrors`).
    */
   beginReply: (askId: string, requestId: string) => void;
-  /** Forgets the one-line results of answered requests (a new prompt starts a new turn). */
+  /**
+   * Forgets the dock lines of answered requests (a new prompt starts a new turn). Touches ONLY
+   * `resolved`: the answered requests in the conversation (`resolutions`) are history and stay.
+   */
   clearResolved: () => void;
   /** Forgets the pending `ui.focus` target (the dock carried it out). */
   clearFocusTarget: () => void;
@@ -159,6 +182,7 @@ export function createChatStore(): ChatStore {
     open: emptyOpen(),
     requests: { permissions: [], forms: [] },
     resolved: [],
+    resolutions: {},
     replying: {},
     requestErrors: {},
     focusTarget: undefined,
@@ -265,6 +289,10 @@ export function createChatStore(): ChatStore {
         ),
       );
       rebuildIndexes();
+      setState(
+        'resolutions',
+        reconcile(Object.fromEntries(snapshot.resolutions.map((entry) => [entry.id, entry]))),
+      );
       // The snapshot is the whole pending set: what it no longer lists is gone, so its card state
       // (in flight, error) must not outlive it.
       const alive = new Set([
@@ -301,6 +329,7 @@ export function createChatStore(): ChatStore {
       );
       if (isOpen(m.sessionID)) {
         setState('open', reconcile(emptyOpen(), { key: 'id' }));
+        setState('resolutions', reconcile({}));
         rebuildIndexes();
       }
     },
@@ -385,7 +414,9 @@ export function createChatStore(): ChatStore {
     'permission.resolved': (m) => {
       batch(() => {
         const ask = state.requests.permissions.find((known) => known.id === m.permissionID);
-        if (ask !== undefined) {
+        if (m.resolution !== undefined && isOpen(m.sessionID)) {
+          setState('resolutions', m.resolution.id, m.resolution);
+        } else if (ask !== undefined) {
           addResolved({
             id: ask.id,
             outcome: outcomeLabel(m.decision),
@@ -407,7 +438,9 @@ export function createChatStore(): ChatStore {
     'form.resolved': (m) => {
       batch(() => {
         const ask = state.requests.forms.find((known) => known.id === m.formID);
-        if (ask !== undefined) {
+        if (m.resolution !== undefined && isOpen(m.sessionID)) {
+          setState('resolutions', m.resolution.id, m.resolution);
+        } else if (ask !== undefined) {
           addResolved({
             id: ask.id,
             outcome: m.outcome === 'answered' ? 'Answered' : 'Dismissed',
