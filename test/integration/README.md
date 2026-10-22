@@ -24,6 +24,8 @@ running.
 
 - Linux needs a display: `xvfb-run -a npm run test:integration`. Windows and macOS: as is.
 - Needs network on the first run (VS Code download). Cache `.vscode-test/vscode-*` if wanted.
+- `npm run test:integration` runs every configuration that is not opt-in: `main`,
+  `external-server` and `fake-server`.
 - Run it before `npm run vsix` (that one rebuilds `dist/` in production mode).
 
 ## How the tests observe the extension
@@ -56,6 +58,29 @@ stored with the test-only command `openVsCode.test.setServerPassword` (an input 
 typed into). The configuration passes `--password-store=basic` on all three systems (it is in
 the `launchArgs` of `.vscode-test.mjs` unconditionally), so SecretStorage works without a keyring
 under `xvfb-run`.
+
+## The `fake-server` configuration (issue #41)
+
+`fakeServer.test.ts` runs in its own configuration (`fake-server` in `.vscode-test.mjs`), not
+opt-in, so it runs in CI on Windows, macOS and Linux with no network and no model. The extension
+runs the synthetic opencode (`src/extension/test-fixtures/fake-opencode.mjs`) as its OWN server in
+a folder it is serving: setting -> detection -> spawn -> stream -> turn, stop, `@` search, editor
+context, permissions (view hidden and visible), a question, restart and crash recovery.
+
+- **Synthetic.** A pass proves our wiring, not that the real opencode answers like this. The real
+  server is checked by the opt-in `real-opencode` suite, which keeps what only it can show (model
+  and agent choice, reasoning variant, the real 401 of an external server).
+- **How a `.mjs` becomes the server.** The profile's `settings.json` (rewritten on every start,
+  before VS Code runs) sets `openVsCode.opencodePath` to the fixture. In `ExtensionMode.Test` and
+  with `OPEN_VS_CODE_TEST_NODE` set (the config does), `src/extension/testLaunch.ts` makes the
+  extension run a `.mjs` as `node <mjs>`, both for `--version` and for `serve`. The `.exe` / shim
+  resolution of a real install is NOT exercised here (unit tests and `real-opencode` do).
+- **Folders** live under `.vscode-test/fake-server/` of the checkout (`workspace` is served,
+  `outside` holds the OutsideWorkspace file) and are wiped on every load of the configuration.
+  `FAKE_OPENCODE_LIFETIME_MS` raises the fixture's 60 s cap.
+- **Run only this suite:** `npm run test:integration -- --label fake-server` (about 30 s).
+- The cases share one server and one session and run in order; the last two (restart, kill)
+  replace the server.
 
 ## Running it from inside VS Code (agents, integrated terminals)
 

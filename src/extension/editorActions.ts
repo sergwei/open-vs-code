@@ -62,12 +62,14 @@ function workspaceFolder(): string | undefined {
  * "refuses a file outside the workspace folder (OutsideWorkspace), with no folder served" (a real
  * file of `os.tmpdir()`, whole and with a selection; the log said `request ctx-outside failed:
  * OutsideWorkspace: Only files inside the workspace folder can be added` and no `editor context
- * added` line). `--label real-opencode` (17 passing, a folder open): "adds the whole file when
- * nothing is selected", "adds one selection per non-empty selection while the chat view has the
- * focus" (two selections, after `openVsCode.chat.focus`; the log said `editor context added: 0
- * file(s), 2 selection(s)`), "warns that the saved version is what the model reads when the buffer
- * is dirty" and "refuses a file outside the open workspace folder (OutsideWorkspace)" (a file of
- * `os.tmpdir()` with the folder open). And in the real chat of `test:visual` step 16: with the
+ * added` line). `--label fake-server` (15 passing, a folder open, issue #41): "adds the whole file
+ * when nothing is selected", "adds one selection per non-empty selection while the chat view has
+ * the focus" (two selections, after `openVsCode.chat.focus`), "warns that the saved version is what
+ * the model reads when the buffer is dirty" and "refuses a file outside the open workspace folder
+ * (OutsideWorkspace)" (a file outside the served folder). These four ran before in the opt-in
+ * `real-opencode` suite (17 passing on 22/10/2026, `editor context added: 0 file(s), 2
+ * selection(s)` in the log) and moved because they never needed the real server. And in the real
+ * chat of `test:visual` step 16: with the
  * focus in the webview, "Add selection adds the chip src/sample.ts#2-3" for a selection that ended
  * at column 0 of line 4. NOT observed: a document of another non-`file` scheme (only `untitled`),
  * a symlink inside the folder pointing outside it (the check is lexical, so it passes), a
@@ -120,8 +122,11 @@ function readEditorContext(folder: string | undefined): EditorContext {
  * must open); the multi-root case itself was not run. `editorContext` is {@link readEditorContext}.
  * VERIFIED in a real VS Code 1.142 on Windows 11 (20/10/2026, `npm run test:integration`): `newFile`
  * (with a known and an unknown language id), `insert` (a `$1`/`${name}` text stays verbatim),
- * `copy` and the refusal of `open` without a folder, all in `test/integration/editorActions.test.ts`;
- * and `open` of a relative file at a line against a folder, in the opt-in `realOpencode.test.ts`.
+ * `copy` and the refusal of `open` without a folder, all in `test/integration/editorActions.test.ts`.
+ * Separately, VERIFIED in a real VS Code 1.143.0 on Windows 11 (22/10/2026,
+ * `npm run test:integration -- --label fake-server`, a synthetic server, not a real opencode): the
+ * check "opens a relative file at the requested line for editor.open" of `fakeServer.test.ts`
+ * (it ran in the opt-in `realOpencode.test.ts` until issue #41).
  * The refusal of a path outside the folder is only unit-tested (`pathPolicy.test.ts`).
  * UNVERIFIED: `pickFiles` (a native dialog cannot be
  * driven by the test API; F5), and `insert` when the focus is in the side view (whether

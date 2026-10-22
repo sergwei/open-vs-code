@@ -42,7 +42,9 @@ const userDataDir = path.join(import.meta.dirname, '.vscode-test', 'user-data');
  * exit 9 seen in the agent environment.
  *
  * `OPEN_VS_CODE_TEST_NODE` is the Node that runs the runner: the tests use it as a stand-in for
- * the opencode binary (it answers `--version` with a v24 number, so it is "unsupported").
+ * the opencode binary (it answers `--version` with a v24 number, so it is "unsupported"). It is
+ * also the Node that the Test-mode seam of `src/extension/testLaunch.ts` uses to run a `.mjs`
+ * binary (the `fake-server` configuration, issue #41).
  */
 const env = {
   ELECTRON_RUN_AS_NODE: undefined,
@@ -88,7 +90,7 @@ const main = {
   ...common,
   label: 'main',
   // Relative to this file. Compiled by `npm run compile:integration`, not by Vitest.
-  files: 'out/test/integration/**/!(realOpencode|externalServer).test.js',
+  files: 'out/test/integration/**/!(realOpencode|externalServer|fakeServer).test.js',
 };
 
 /**
@@ -187,8 +189,84 @@ fs.writeFileSync(
   ),
 );
 
+/**
+ * Configuration of `fakeServer.test.ts` (issue #41): the extension runs the synthetic opencode
+ * (`fake-opencode.mjs`) as ITS OWN server, with a workspace folder open, so the whole path
+ * setting -> detection -> spawn -> `{url}` -> stream -> turn, plus the editor cases that need a
+ * folder, runs in CI without a network or a model. Not opt-in.
+ *
+ * How the extension launches a `.mjs`: the Test-mode seam of `src/extension/testLaunch.ts`
+ * (`ExtensionMode.Test` + `OPEN_VS_CODE_TEST_NODE`, set in `env` above) runs it as
+ * `node <mjs>`. The profile's `settings.json` is written HERE, before VS Code starts, with
+ * `openVsCode.opencodePath` at the fixture, so the FIRST activation already detects it; writing it
+ * from a test would race a PATH-detected opencode on a developer machine (see the header of
+ * `realOpencode.test.ts`).
+ *
+ * Folders live under `.vscode-test/` of THIS checkout (ignored by git, and per worktree, unlike
+ * `os.tmpdir()` which two worktrees would share). `workspace` is the served folder; `outside` is
+ * where the OutsideWorkspace case writes. Both are wiped and recreated on every load, while no
+ * VS Code of this configuration is running: a delete from inside the suite right after closing an
+ * editor has hit EPERM on Windows (see the case in `fakeServer.test.ts`). The wipe is best effort:
+ * a failure only warns, because the tests rewrite what they use.
+ * `FAKE_OPENCODE_LIFETIME_MS` raises the fixture's 60 s lifetime to 10 min: the suite takes about
+ * 27 s locally, but the fixture is a stand-in that must outlive the slowest CI runner, and a
+ * server that exits on its own looks like a crash to the manager ("restarting in 1 s").
+ * XDG dirs are private as a safety net, like `external-server`. `--password-store=basic`: see
+ * `externalServer`. VERIFIED on Windows 11, VS Code 1.143.0 (22/10/2026): `npm run test:integration
+ * -- --label fake-server` printed "15 passing" in three consecutive runs (26-27 s each), and with the
+ * lifetime variable set to 5000 the later cases failed. UNVERIFIED on macOS and Linux until the CI
+ * runs it.
+ */
+const fakeRoot = path.join(import.meta.dirname, '.vscode-test', 'fake-server');
+const fakeUserDataDir = path.join(import.meta.dirname, '.vscode-test', 'user-data-fake');
+const fakeWorkspace = path.join(fakeRoot, 'workspace');
+const fakeOutside = path.join(fakeRoot, 'outside');
+const fakeOpencode = path.join(
+  import.meta.dirname,
+  'src',
+  'extension',
+  'test-fixtures',
+  'fake-opencode.mjs',
+);
+const fakeServer = {
+  ...common,
+  label: 'fake-server',
+  env: {
+    ...env,
+    OPEN_VS_CODE_TEST_USER_DATA_DIR: fakeUserDataDir,
+    OPEN_VS_CODE_TEST_FAKE_OUTSIDE_DIR: fakeOutside,
+    FAKE_OPENCODE_LIFETIME_MS: '600000',
+    XDG_DATA_HOME: path.join(import.meta.dirname, '.vscode-test', 'fake-server-xdg', 'data'),
+    XDG_STATE_HOME: path.join(import.meta.dirname, '.vscode-test', 'fake-server-xdg', 'state'),
+    XDG_CACHE_HOME: path.join(import.meta.dirname, '.vscode-test', 'fake-server-xdg', 'cache'),
+  },
+  files: 'out/test/integration/fakeServer.test.js',
+  workspaceFolder: fakeWorkspace,
+  launchArgs: [
+    '--disable-extensions',
+    `--user-data-dir=${fakeUserDataDir}`,
+    '--disable-workspace-trust',
+    '--password-store=basic',
+  ],
+  mocha: { ...common.mocha, timeout: 60000 },
+};
+try {
+  fs.rmSync(fakeRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+} catch (error) {
+  console.warn(
+    `could not wipe ${fakeRoot}: ${error instanceof Error ? error.message : String(error)}`,
+  );
+}
+fs.mkdirSync(fakeWorkspace, { recursive: true });
+fs.mkdirSync(fakeOutside, { recursive: true });
+fs.mkdirSync(path.join(fakeUserDataDir, 'User'), { recursive: true });
+fs.writeFileSync(
+  path.join(fakeUserDataDir, 'User', 'settings.json'),
+  JSON.stringify({ 'openVsCode.opencodePath': fakeOpencode }, null, 2),
+);
+
 export default defineConfig(
   process.env.OPEN_VS_CODE_REAL_OPENCODE
-    ? [main, realOpencode, externalServer]
-    : [main, externalServer],
+    ? [main, realOpencode, externalServer, fakeServer]
+    : [main, externalServer, fakeServer],
 );

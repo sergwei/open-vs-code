@@ -9,7 +9,8 @@
 //
 // This is the `main` configuration: NO workspace folder is open, which is exactly what the
 // "open without a folder" case needs. Opening a real file at a line (`editor.open` inside a
-// folder) is covered by the opt-in `realOpencode.test.ts`, whose configuration opens one.
+// folder) is covered by `fakeServer.test.ts` (issue #41), whose configuration opens one and runs
+// in CI; until then only the opt-in `realOpencode.test.ts` had it.
 // Not covered here: the Attach file dialog (a native dialog, no test hook) and `insert` with the
 // focus in the side view (needs a real click on the chat view; F5 point 3).
 import * as assert from 'node:assert';
@@ -145,7 +146,7 @@ describe('editor actions', () => {
   // configuration serves NO folder, so a real file of `os.tmpdir()` is refused whether it is a
   // whole file or a selection, and nothing is added. The cases that need a served folder (the
   // whole file, one selection per range with the chat view focused, the dirty buffer, and a file
-  // outside an OPEN folder) live in `realOpencode.test.ts`, whose configuration opens one.
+  // outside an OPEN folder) live in `fakeServer.test.ts`, whose configuration opens one.
   it('refuses a file outside the workspace folder (OutsideWorkspace), with no folder served', async () => {
     const { editor } = await openTempFile();
     const log = await openLogCursor();

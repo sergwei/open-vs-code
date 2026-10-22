@@ -99,8 +99,9 @@ export function selectionLines(start: PositionLike, end: PositionLike): LineRang
  * `path.win32` and `path.posix` (hand-made paths, run on Windows 11, 22/10/2026) and in a real
  * VS Code 1.143.0 on Windows 11 (22/10/2026) by the integration cases "refuses a file outside the
  * workspace folder (OutsideWorkspace), with no folder served" (`editorActions.test.ts`) and
- * "refuses a file outside the open workspace folder (OutsideWorkspace)" (`realOpencode.test.ts`,
- * a file of `os.tmpdir()` with a folder open). Real symlinks UNVERIFIED.
+ * "refuses a file outside the open workspace folder (OutsideWorkspace)" (`fakeServer.test.ts`,
+ * a file outside the served folder with a folder open; it ran in `realOpencode.test.ts` with a file
+ * of `os.tmpdir()` until issue #41). Real symlinks UNVERIFIED.
  */
 export function isInServedFolder(
   folder: string | undefined,

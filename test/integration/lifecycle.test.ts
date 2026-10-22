@@ -7,7 +7,8 @@
 // they did not validate (their arguments come from a link in a notification, so anyone can run
 // them), and a permission answer without a server crashing instead of reporting
 // `ServerUnavailable`. It does NOT cover the badge, the notifications or a real restart: those
-// need a server and live in the opt-in `realOpencode.test.ts`; how they look is for the F5.
+// need a server and live in `fakeServer.test.ts` (CI, a synthetic server) and in the opt-in
+// `realOpencode.test.ts` (a real one); how they look is for the F5.
 //
 // Provenance: real VS Code 1.142 on Windows 11 (the CI runs the three OS). The expected log lines
 // are the ones the code writes today (`serverManager.ts`, `chatLifecycle.ts`, `chatController.ts`);
