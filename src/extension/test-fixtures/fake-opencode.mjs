@@ -93,6 +93,11 @@
 // E6-tool-call-views (issue #26) adds a TOOLS switch: a prompt containing TOOLS plays a turn with
 // nine tool calls of different kinds (see `toolsTurn`), SYNTHETIC and written from the tool sources
 // read in the 2.0.32 tag, never recorded from a running server.
+// E7-file-context (issues #28/#29) adds `GET /api/fs/find` (`{location, data: [{path, type}]}`, a
+// SYNTHETIC list of five paths matched as a case-insensitive subsequence; an empty query is `[]`,
+// as the planner's spike against a real opencode 2.0.32 saw) and makes a prompt keep its `files`
+// (uri with its query, name, mention) in the `session.inbox.enqueued` payload and in the history,
+// the way the spike saw a real server store them. File contents are never read.
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running.
 
@@ -583,8 +588,12 @@ function selectOnSession(session, sub, body) {
   });
 }
 
-/** Plays the recorded turn for a prompt, one event every few milliseconds. */
-function playTurn(sessionID, inboxID, text) {
+/**
+ * Plays the recorded turn for a prompt, one event every few milliseconds. `files` (already in the
+ * wire shape, see `toWireFiles`) travels in the `session.inbox.enqueued` payload and is kept in the
+ * history entry of the user message, so a snapshot read later shows the attachments too.
+ */
+function playTurn(sessionID, inboxID, text, files = []) {
   const assistantMessageID = nextId('msg');
   const chosen = selectionOf(sessionID);
   const a = { sessionID, assistantMessageID };
@@ -601,13 +610,21 @@ function playTurn(sessionID, inboxID, text) {
       broadcast('session.inbox.enqueued', {
         sessionID,
         inboxID,
-        item: { type: 'user', payload: { text }, delivery: 'queue' },
+        item: {
+          type: 'user',
+          payload: { text, ...(files.length > 0 ? { files } : {}) },
+          delivery: 'queue',
+        },
       }),
     () => broadcast('session.execution.started', { sessionID }),
     () => {
-      history
-        .get(sessionID)
-        .push({ id: inboxID, type: 'user', text, time: { created: Date.now() } });
+      history.get(sessionID).push({
+        id: inboxID,
+        type: 'user',
+        text,
+        ...(files.length > 0 ? { files } : {}),
+        time: { created: Date.now() },
+      });
       broadcast('session.inbox.delivered', { sessionID, inboxID });
     },
   ];
@@ -955,6 +972,61 @@ function handleAnswer(request, response, [, rawSession, kind, rawId, verb]) {
 }
 
 /**
+ * The paths `GET /api/fs/find` knows (E7-file-context, issues #28/#29). SYNTHETIC and independent of
+ * the folder the server was started in. The shapes copy what the planner saw in a spike against a
+ * real opencode 2.0.32 (Windows 11, 22/10/2026): `{path, type}` entries; files with `/`; a
+ * directory with a trailing `\` (mixed separators); an empty query answers `[]`. INVENTED: the
+ * file names, and the ranking (here: the order of this list).
+ */
+const FIND_ENTRIES = [
+  { path: 'src/sample.ts', type: 'file' },
+  { path: 'src/shared/model.ts', type: 'file' },
+  { path: 'src/shared\\', type: 'directory' },
+  { path: 'src/util/helpers.ts', type: 'file' },
+  { path: 'README.md', type: 'file' },
+];
+
+/**
+ * Imitates `GET /api/fs/find`: keeps the entries whose path contains the characters of `query` in
+ * order, ignoring case (a subsequence match, like the fuzzy one the spike saw), then filters by
+ * `type` and cuts at `limit` (default 50, read in `search.ts@843a6c51`). An empty query is `[]`.
+ */
+function findFiles(params) {
+  const query = (params.get('query') ?? '').toLowerCase();
+  if (query === '') return [];
+  const type = params.get('type');
+  const limit = Number(params.get('limit') ?? 50);
+  const matches = (text) => {
+    let at = 0;
+    for (const char of query) {
+      at = text.indexOf(char, at) + 1;
+      if (at === 0) return false;
+    }
+    return true;
+  };
+  return FIND_ENTRIES.filter(
+    (entry) => (type === null || entry.type === type) && matches(entry.path.toLowerCase()),
+  ).slice(0, limit);
+}
+
+/**
+ * The `files` of a prompt body as the server stores them (VERIFIED by the planner spike with
+ * `resume: false`): `source.uri` keeps the URL as sent (query included), `name` and `mention` are
+ * kept as sent. `data` is empty here (a real server holds the file's base64); INVENTED: the fixture
+ * never reads the file, and says `text/plain` for everything.
+ */
+function toWireFiles(files) {
+  if (!Array.isArray(files)) return [];
+  return files.map((file) => ({
+    data: '',
+    mime: 'text/plain',
+    source: { type: 'uri', uri: file.uri },
+    ...(file.name === undefined ? {} : { name: file.name }),
+    ...(file.mention === undefined ? {} : { mention: file.mention }),
+  }));
+}
+
+/**
  * Answers the chat routes; returns false when the request is not one of them.
  * Authentication was already checked by the caller.
  */
@@ -1065,6 +1137,10 @@ function handleChat(request, response) {
     json(response, 200, { data: [] });
     return true;
   }
+  if (method === 'GET' && path === '/api/fs/find') {
+    json(response, 200, { location, data: findFiles(url.searchParams) });
+    return true;
+  }
   const act = /^\/api\/session\/([^/]+)\/(permission|form)\/([^/]+)(?:\/(reply))?$/.exec(path);
   if (act !== null) return handleAnswer(request, response, act);
   const match =
@@ -1139,7 +1215,7 @@ function handleChat(request, response) {
           delivery: body.delivery ?? 'steer',
         },
       });
-      playTurn(session.id, inboxID, String(body.text));
+      playTurn(session.id, inboxID, String(body.text), toWireFiles(body.files));
     });
     return true;
   }

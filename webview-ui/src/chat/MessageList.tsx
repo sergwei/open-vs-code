@@ -28,6 +28,7 @@ import {
 import { replyMeta } from '../selectors/selection';
 import type { OpenView } from '../store/chatStore';
 import { isStopError } from '../store/activity';
+import { AttachmentOpenButton } from './AttachmentOpenButton';
 import { PartView } from './PartView';
 
 type AssistantMessage = Extract<MessageInfo, { kind: 'assistant' }>;
@@ -106,6 +107,11 @@ function prefersReducedMotion(): boolean {
  * history goes at the end of the latest user/assistant message before it was answered, NESTED in
  * that message's `article` so `[role="log"] > *` (counted by `test:visual`) does not change. The
  * lines never move the focus nor carry a role: the log region announces their insertion.
+ *
+ * Issues #28/#29: the attachment chips of a USER message are buttons that open the file in the
+ * editor (`AttachmentOpenButton`, `editor.open` with the `file:` URL, at the start of its line
+ * range) whenever the host kept a `file:` URL for them, so they work after a resync or a Reload
+ * Window too; a chip with no such URL is plain text, as before.
  *
  * Issue #21: every USER message ends with an action bar holding "Fork from here" (decision of
  * Sergio, 21/10/2026: user messages only, a text button, shown on hover and on focus within). The
@@ -258,7 +264,14 @@ export function MessageList(props: {
                       <Show when={user().files.length > 0}>
                         <ul class="message-files" aria-label="Attached files">
                           <For each={user().files}>
-                            {(file) => <li class="chip">{file.name ?? file.uri ?? file.mime}</li>}
+                            {(file) => (
+                              <li class="chip">
+                                <AttachmentOpenButton
+                                  name={file.name ?? file.uri ?? file.mime}
+                                  uri={file.uri}
+                                />
+                              </li>
+                            )}
                           </For>
                         </ul>
                       </Show>

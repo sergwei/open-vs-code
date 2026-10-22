@@ -88,6 +88,7 @@ async function boot(
     createClient: createOpencodeClient,
     editor: {
       open: () => Promise.resolve(),
+      editorContext: () => Promise.resolve({ refs: [], ranged: 0, unsaved: false }),
       insert: () => Promise.resolve(),
       newFile: () => Promise.resolve(),
       copy: () => Promise.resolve(),
@@ -170,6 +171,60 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     expect(snapshot?.type === 'snapshot' ? snapshot.snapshot.open?.sessionID : undefined).toMatch(
       /^ses_/,
     );
+  }, 20_000);
+
+  // E7-file-context (#28/#29). What can break only over HTTP: the query string the real client
+  // builds for `GET /api/fs/find` (`query`, `type`, `limit`), the `{location, data}` answer that the
+  // client does not unwrap, and the `files` of a prompt (uri WITH its `?start&end`, name) coming
+  // back in the user message of the stream. The fixture's file list and ranking are SYNTHETIC.
+  it('searches files over HTTP and sends one with a line range back in the user message', async () => {
+    const { controller, posted, state } = await boot('ok');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await controller.handle({ type: 'files.search', requestId: 'f1', query: 'smp' });
+    const answer = posted.find((m) => m.type === 'files.found');
+    expect(answer).toMatchObject({
+      requestId: 'f1',
+      query: 'smp',
+      files: [{ name: 'src/sample.ts' }],
+    });
+    const found = answer?.type === 'files.found' ? answer.files[0] : undefined;
+    expect(found?.uri).toMatch(/^file:\/\/\/.*src\/sample\.ts$/);
+
+    // A directory the fixture lists with a trailing `\` never reaches the chips.
+    await controller.handle({ type: 'files.search', requestId: 'f2', query: 'shared' });
+    const shared = posted.filter((m) => m.type === 'files.found').at(-1);
+    expect(shared).toMatchObject({ requestId: 'f2', files: [{ name: 'src/shared/model.ts' }] });
+
+    const uri = `${found?.uri ?? ''}?start=2&end=3`;
+    const mention = { start: 5, end: 19, text: '@src/sample.ts' };
+    // A range reference is not an offered uri: only the plain one is. Send the offered one with a
+    // mention, and check the stream hands the file back with its name.
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'r1',
+      text: 'read @src/sample.ts please',
+      delivery: 'queue',
+      files: [{ uri: found?.uri ?? '', name: 'src/sample.ts', mention }],
+    });
+    expect(posted.at(-1)).toMatchObject({ type: 'request.result', requestId: 'r1' });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'message.upserted' && m.message.kind === 'user'),
+      'the user message',
+    );
+    const user = posted.find((m) => m.type === 'message.upserted' && m.message.kind === 'user');
+    expect(user).toMatchObject({
+      message: { files: [{ name: 'src/sample.ts', uri: found?.uri, mime: 'text/plain' }] },
+    });
+    // The same prompt with an uri the host never emitted is refused before the server.
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'r2',
+      text: 'again',
+      delivery: 'queue',
+      files: [{ uri, name: 'src/sample.ts#2-3' }],
+    });
+    expect(posted.at(-1)).toMatchObject({ requestId: 'r2', error: { code: 'AttachmentRejected' } });
   }, 20_000);
 
   it('shows the error of a failed run and accepts another prompt afterwards', async () => {

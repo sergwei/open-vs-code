@@ -39,8 +39,31 @@ export const MAX_SESSION_TITLE_LENGTH = 200;
 /** Longest search text `sessions.query` accepts. Our choice (issue #20), same reasoning as the title cap. */
 export const MAX_SESSION_SEARCH_LENGTH = 200;
 
-/** File picked by the user. Produced by the host (`attachments.picked`) and echoed back in `prompt.send`. */
+/**
+ * Longest text `files.search` accepts (the part after the `@`). Our choice (issues #28/#29): a
+ * path fragment never needs more, and the host passes it to the server as a search string.
+ */
+export const MAX_FILE_SEARCH_LENGTH = 200;
+
+/**
+ * File the host emitted: picked in the dialog (`attachments.picked`), taken from the editor
+ * (`attachments.picked` after `attachments.fromEditor`) or found by `files.search`
+ * (`files.found`). The webview echoes it back in `prompt.send`; the host only accepts a `uri` it
+ * emitted itself. `uri` may carry `?start=a&end=b` (a line range, 1-based, inclusive) and then
+ * `name` ends in `#a-b`.
+ */
 export type AttachmentRef = { uri: string; name: string };
+
+/**
+ * Where an `@path` mention sits in the prompt text, as the server stores it: `text` is
+ * `prompt.text.slice(start, end)` (UTF-16 offsets, the same unit as JavaScript strings). The
+ * server only copies it (VERIFIED, planner spike against opencode 2.0.32 on Windows 11,
+ * 22/10/2026); the model never sees the offsets, only the text.
+ */
+export type PromptMention = { start: number; end: number; text: string };
+
+/** A file travelling in `prompt.send`: the emitted reference plus, optionally, its `@` mention. */
+export type PromptFileRef = AttachmentRef & { mention?: PromptMention };
 
 /** Lifecycle of the opencode server as the host sees it. */
 export type ConnectionState =
@@ -160,6 +183,13 @@ export type HostToWebview =
       hasMore: boolean;
     }
   | { type: 'attachments.picked'; requestId: string; files: AttachmentRef[] }
+  | {
+      type: 'files.found';
+      requestId: string;
+      query: string;
+      files: AttachmentRef[];
+      error?: ErrorInfo;
+    }
   | { type: 'ui.focus'; target: { kind: 'permission' | 'form'; sessionID: string; id: string } }
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; error: ErrorInfo };
 
@@ -184,6 +214,14 @@ export type HostToWebview =
  * both against its catalog before touching the server, because opencode accepts any agent or model
  * on `switchAgent` / `switchModel` and only fails the next turn (VERIFIED, spike, opencode 2.0.32).
  * Absent means "leave the session as it is" (the server defaults for a new one).
+ * `files.search` (issue #28) asks the host for workspace files matching what follows an `@` in
+ * the prompt; the answer is `files.found` (NOT a `request.result`: it carries its own error, and a
+ * search must not lock the prompt). The webview debounces and only accepts the answer to its LAST
+ * request. `attachments.fromEditor` (issue #29) asks for the active file, or each non-empty
+ * selection of it with its line range, only when that file is inside the served folder (else a
+ * `request.result` error `OutsideWorkspace`); the answer is `attachments.picked` plus the usual
+ * `request.result`. `prompt.send` files may carry a `mention` (see {@link PromptMention}).
+ * The host builds every `uri` itself, so the webview can only send back what it was given.
  */
 export type WebviewToHost =
   | { type: 'ready' }
@@ -199,7 +237,7 @@ export type WebviewToHost =
       sessionID?: string;
       text: string;
       delivery: 'steer' | 'queue';
-      files: AttachmentRef[];
+      files: PromptFileRef[];
       model?: ModelRef;
       agent?: string;
     }
@@ -215,6 +253,8 @@ export type WebviewToHost =
   | { type: 'form.reply'; requestId: string; sessionID: string; formID: string; answer: FormAnswer }
   | { type: 'form.cancel'; requestId: string; sessionID: string; formID: string; message?: string }
   | { type: 'attachments.pick'; requestId: string }
+  | { type: 'attachments.fromEditor'; requestId: string }
+  | { type: 'files.search'; requestId: string; query: string }
   | { type: 'permissions.manage' }
   | { type: 'server.restart' }
   | { type: 'logs.show' }
@@ -347,9 +387,38 @@ function isAttachmentRef(value: unknown): boolean {
   );
 }
 
-/** True for a hole-free array of valid attachment refs (an empty list is valid). */
+/**
+ * True for a `mention` the host could forward: a plain object with integer offsets
+ * `0 <= start <= end` and a non-empty `text`. That the text really is `prompt.text.slice(start,
+ * end)` needs the prompt text, so it is the host handler's check (`sendPrompt`).
+ */
+function isPromptMention(value: unknown): boolean {
+  if (!isPlainObject(value)) return false;
+  const start = field(value, 'start');
+  const end = field(value, 'end');
+  return (
+    typeof start === 'number' &&
+    typeof end === 'number' &&
+    Number.isSafeInteger(start) &&
+    Number.isSafeInteger(end) &&
+    start >= 0 &&
+    end >= start &&
+    isNonEmptyString(field(value, 'text'))
+  );
+}
+
+/** True for an attachment ref with an optional, well-formed `mention`. */
+function isPromptFileRef(value: unknown): boolean {
+  return (
+    isAttachmentRef(value) &&
+    isPlainObject(value) &&
+    isOptional(field(value, 'mention'), isPromptMention)
+  );
+}
+
+/** True for a hole-free array of valid prompt file refs (an empty list is valid). */
 function isAttachmentList(value: unknown): boolean {
-  return isDenseArray(value) && value.every(isAttachmentRef);
+  return isDenseArray(value) && value.every(isPromptFileRef);
 }
 
 /**
@@ -465,6 +534,17 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
     isNonEmptyString(field(m, 'formID')) &&
     isOptional(field(m, 'message'), isString),
   'attachments.pick': requestOnly,
+  'attachments.fromEditor': requestOnly,
+  // An empty query has nothing to search for (the server answers `[]` to it anyway), so it is
+  // refused here instead of costing a round trip.
+  'files.search': (m) => {
+    const query = field(m, 'query');
+    return (
+      isNonEmptyString(field(m, 'requestId')) &&
+      isNonEmptyString(query) &&
+      query.length <= MAX_FILE_SEARCH_LENGTH
+    );
+  },
   'permissions.manage': noFields,
   'server.restart': noFields,
   'logs.show': noFields,
@@ -501,6 +581,7 @@ const HOST_TYPE_SET: Record<HostToWebview['type'], true> = {
   'request.result': true,
   'sessions.page': true,
   'attachments.picked': true,
+  'files.found': true,
   'ui.focus': true,
   notice: true,
 };

@@ -127,6 +127,36 @@
 // broken CSS. NOT observed: tools other than shell, read, grep and edit (write, patch, glob, webfetch, websearch, skill,
 // question, MCP), a running/rejected/stopped/awaiting card, Copy and "Open in editor" pressed, a
 // clipped output, macOS and Linux, a screen reader.
+//
+// Step 16 (issues #28/#29, the `@` popup and the editor context) VERIFIED on Windows 11, VS Code
+// 1.143.0, opencode 2.0.32, model `opencode/glm-5.3-flash-free`, on 22/10/2026 (last run, after the
+// review round that added the Enter-while-pending check: "all visual checks passed", exit 0, 386
+// ok lines, 0 FAIL, with the warning "the free model did not finish the turn in 120 s; the reply
+// line was not judged" and "More agents" skipped; the run before it, without that new check, had
+// 385 ok lines: the count moves with what the free model does in the turn steps). Observed with
+// the real keyboard and mouse: "Enter right after a keystroke neither sends nor picks" (decision
+// W1 of Sergio: `x` typed after `@sample` and Enter pressed at once, the box kept "@samplex" with
+// 0 chips and 0 new messages), which was NOT run against the old code, so it is not shown that
+// the check would have failed there; "typing "@sample" lists at least two files" (rows
+// `src/sample.ts`, `src/sample-extra.ts`); "the box points at the highlighted option (aria-controls and
+// aria-activedescendant)"; "the keyboard focus stays in the prompt box while the popup is open";
+// "a search does not lock Send"; text contrast of a normal row, the highlighted row and the "No
+// files match" line >= 4.5 in the four themes (the lowest, the folder part of a normal row, was
+// 5.47 in hc-light and 6.01 in dark); "Enter adds the chip src/sample.ts" and "the text
+// @src/sample.ts stays in the box" with "Enter on the popup picks the file and does not send the
+// prompt"; "ArrowUp with the popup closed recalls the last prompt"; with a turn running, "Escape
+// with the popup open does NOT stop the running turn" and "a second Escape (popup closed) stops the
+// turn"; "a mouse press picks the row" with "the focus is still in the prompt box after the mouse
+// pick"; "pressing the chip opens src/sample.ts in the editor (1 tab)"; after selecting lines 2-3
+// (the editor said "Ln 4, Col 1 (51 selected)": the selection ends at column 0 of line 4),
+// "Add selection adds the chip src/sample.ts#2-3 with the focus in the webview", so the active
+// editor is still the active editor while the focus is in the chat; "the message left with both
+// files ("src/sample.ts, src/sample.ts#2-3")"; and "the conversation chip opens src/sample.ts at
+// line 2 (status bar: "Ln 2, Col 1")". NOT observed: how many tries the new file `src/sample-extra.ts`
+// needed to be listed (the step retries for the 10 s index refresh and does not count them), the
+// unsaved-changes warning and the "Save the file first" refusal in the webview (the integration
+// suite sees only their log lines), a screen reader, a catalog of hundreds of files, macOS and
+// Linux.
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -628,6 +658,76 @@ function measureDiffLines(doc) {
     // The error line inside the unfolded body (null while the card is folded).
     failedError: measure('.tool-card .tool-body .tool-error'),
   };
+}
+
+/**
+ * Text/background contrast of the first element of each selector (issue #28, the `@` popup).
+ * `selectors` maps a name to a CSS selector and the result maps the same names to `{ratio, color,
+ * background}` or `null` when nothing matches. Self-contained, because it is serialized into the
+ * page, so the colour maths is a copy of {@link measureCode}'s; the base is the side bar
+ * background (the webview body is transparent) and each element is painted over its ancestors.
+ */
+function measureText(doc, selectors) {
+  const parse = (value) => {
+    const text = String(value).trim();
+    let match = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+%?))?\s*\)$/i.exec(
+      text,
+    );
+    if (match) {
+      let alpha = match[4] === undefined ? 1 : Number.parseFloat(match[4]);
+      if (match[4]?.endsWith('%')) alpha /= 100;
+      return [Number(match[1]), Number(match[2]), Number(match[3]), alpha];
+    }
+    match = /^#([0-9a-f]{3,8})$/i.exec(text);
+    if (match) {
+      let hex = match[1];
+      if (hex.length === 3 || hex.length === 4) hex = [...hex].map((c) => c + c).join('');
+      const alpha = hex.length === 8 ? Number.parseInt(hex.slice(6, 8), 16) / 255 : 1;
+      return [
+        Number.parseInt(hex.slice(0, 2), 16),
+        Number.parseInt(hex.slice(2, 4), 16),
+        Number.parseInt(hex.slice(4, 6), 16),
+        alpha,
+      ];
+    }
+    return null;
+  };
+  const over = (front, back) =>
+    [0, 1, 2].map((i) => front[i] * front[3] + back[i] * (1 - front[3])).concat([1]);
+  const luminance = (color) => {
+    const [r, g, b] = color.map((channel) => {
+      const value = channel / 255;
+      return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const win = doc.defaultView;
+  const root = win.getComputedStyle(doc.documentElement);
+  const base =
+    parse(root.getPropertyValue('--vscode-sideBar-background')) ??
+    parse(root.getPropertyValue('--vscode-editor-background'));
+  if (!base) return { error: 'no base background variable' };
+  const measure = (selector) => {
+    const element = doc.querySelector(selector);
+    if (!element) return null;
+    const chain = [];
+    for (let node = element; node; node = node.parentElement) chain.unshift(node);
+    let background = [base[0], base[1], base[2], 1];
+    for (const node of chain) {
+      const own = parse(win.getComputedStyle(node).backgroundColor);
+      if (own && own[3] > 0) background = over(own, background);
+    }
+    const color = parse(win.getComputedStyle(element).color);
+    const [high, low] = [luminance(over(color, background)), luminance(background)].sort(
+      (x, y) => y - x,
+    );
+    return {
+      ratio: (high + 0.05) / (low + 0.05),
+      color: win.getComputedStyle(element).color,
+      background: `rgb(${background.slice(0, 3).map(Math.round).join(', ')})`,
+    };
+  };
+  return Object.fromEntries(Object.entries(selectors).map(([name, sel]) => [name, measure(sel)]));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2038,7 +2138,9 @@ try {
     const target = path.join(workspace, 'src', 'sample.ts');
     const chips = () =>
       web.inDoc((doc) => ({
-        pending: [...doc.querySelectorAll('.chips .chip-name')].map((c) => c.textContent ?? ''),
+        pending: [...doc.querySelectorAll('.chips .chip-open, .chips .chip-name')].map(
+          (c) => c.textContent ?? '',
+        ),
         sent: [...doc.querySelectorAll('[role="log"] .message-files .chip')].map(
           (c) => c.textContent ?? '',
         ),
@@ -2818,6 +2920,326 @@ try {
     );
     console.log(`  tools judged: ${JSON.stringify(judged)}`);
     assertNoWebviewErrors('tool cards');
+  });
+
+  // Issues #28/#29 (decisions Q1-Q4 of Sergio, 22/10/2026, Engram #1064/#1065): the `@` popup and
+  // the editor context, driven with the real keyboard and mouse. It is the last step: it leaves
+  // chips and a sent message behind that no other step expects. Self-contained: it makes its own
+  // second file (`src/sample-extra.ts`) so the popup has two rows to tell apart a normal row from
+  // the highlighted one.
+  await step('16 @ mentions and editor context (issues #28/#29)', async () => {
+    const extra = path.join(workspace, 'src', 'sample-extra.ts');
+    /** What the prompt box, the popup and the conversation show. Self-contained (serialized). */
+    const ui = () =>
+      web.inDoc((doc) => {
+        const field = doc.querySelector('textarea.prompt-text');
+        const rows = [...doc.querySelectorAll('.mention-popup [role="option"]')];
+        const active = doc.activeElement;
+        const send = [...doc.querySelectorAll('button')].find(
+          (b) => b.textContent.trim() === 'Send',
+        );
+        const pointedAt = field?.getAttribute('aria-activedescendant') ?? '';
+        return {
+          popup: doc.querySelector('.mention-popup') !== null,
+          status: doc.querySelector('.mention-status')?.textContent ?? '',
+          rows: rows.map((row) => row.getAttribute('aria-label') ?? ''),
+          selected: rows.findIndex((row) => row.getAttribute('aria-selected') === 'true'),
+          value: field?.value ?? '',
+          focusOnField: active === field && doc.hasFocus(),
+          controls: field?.getAttribute('aria-controls') ?? '',
+          pointsAtSelected:
+            pointedAt !== '' &&
+            doc.getElementById(pointedAt)?.getAttribute('aria-selected') === 'true',
+          chips: [...doc.querySelectorAll('.chips .chip-open, .chips .chip-name')].map(
+            (c) => c.textContent ?? '',
+          ),
+          sent: [...doc.querySelectorAll('[role="log"] .message-files .chip')].map(
+            (c) => c.textContent ?? '',
+          ),
+          busy: [...doc.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Stop'),
+          sendDisabled: send?.disabled ?? null,
+          messages: doc.querySelectorAll('[role="log"] > *').length,
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+        };
+      });
+    const setTheme = async (theme) => {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+    };
+    const THEMES = [
+      ['light', 'Default Light Modern'],
+      ['dark', 'Default Dark Modern'],
+      ['hc-dark', 'Default High Contrast'],
+      ['hc-light', 'Default High Contrast Light'],
+    ];
+    /** Empties the prompt box with the keyboard (focus goes into it first). */
+    const clearBox = async () => {
+      await clickIn('textarea');
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.press('Backspace');
+      await sleep(200);
+    };
+    /** Types `text` into an empty prompt box, as a user would. */
+    const typeInBox = async (text) => {
+      await clearBox();
+      await page.keyboard.type(text);
+    };
+    /**
+     * Types `query` and waits for at least `min` rows. The real server refreshes its file index
+     * every 10 s, so a file written a moment ago may not be listed yet: the last character is
+     * typed again (a new search) until the rows appear, for about 40 s.
+     */
+    const searchUntil = async (query, min) => {
+      await typeInBox(query);
+      for (let attempt = 0; attempt < 14; attempt += 1) {
+        if (await waitFor(async () => (await ui()).rows.length >= min, 3_000, 250)) return true;
+        await page.keyboard.press('Backspace');
+        await sleep(100);
+        await page.keyboard.type(query.slice(-1));
+      }
+      return false;
+    };
+    const removeChips = async () => {
+      for (let guard = 0; guard < 6 && (await ui()).chips.length > 0; guard += 1) {
+        await clickIn('.chips .chip-remove');
+        await sleep(200);
+      }
+    };
+    const editorSelection = () =>
+      page
+        .locator('#status\\.editor\\.selection')
+        .first()
+        .innerText()
+        .catch(() => '');
+
+    assertNoWebviewErrors('before the @ step');
+    fs.writeFileSync(extra, 'export const extra = 1;\n');
+    check(await clickButton('New session'), 'New session is pressed');
+    await page.waitForTimeout(1500);
+
+    // --- The popup opens on "@", lists files, and the box keeps the focus ----------------------
+    check(await searchUntil('@sample', 2), 'typing "@sample" lists at least two files');
+    let state = await ui();
+    console.log(`  rows: ${JSON.stringify(state.rows)}`);
+    check(
+      state.popup &&
+        state.rows.includes('src/sample.ts') &&
+        state.rows.includes('src/sample-extra.ts'),
+      'the popup lists src/sample.ts and src/sample-extra.ts (files only, relative names)',
+    );
+    check(
+      state.controls === 'mention-list' && state.pointsAtSelected,
+      'the box points at the highlighted option (aria-controls and aria-activedescendant)',
+    );
+    check(state.focusOnField, 'the keyboard focus stays in the prompt box while the popup is open');
+    check(state.sendDisabled === false, 'a search does not lock Send');
+    await shot('16a-mention-popup');
+
+    // --- Contrast of a normal row, the highlighted one and the "no match" line, four themes ----
+    for (const [name, theme] of THEMES) {
+      await setTheme(theme);
+      if (!(await searchUntil('@sample', 2)))
+        throw new Error(`no popup rows after switching to ${name}`);
+      await page.keyboard.press('ArrowDown'); // so row 0 is NOT the highlighted one
+      await sleep(250);
+      const rowsLook = await web.inDoc(measureText, {
+        normalName: '.mention-option[aria-selected="false"] .mention-name',
+        normalDir: '.mention-option[aria-selected="false"] .mention-dir',
+        selectedName: '.mention-option[aria-selected="true"] .mention-name',
+        selectedDir: '.mention-option[aria-selected="true"] .mention-dir',
+      });
+      console.log(`  popup ${name}: ${JSON.stringify(rowsLook)}`);
+      for (const [part, look] of Object.entries(rowsLook)) {
+        check(
+          look !== null && look !== undefined && look.ratio >= 4.5,
+          `the ${part} text of the popup has contrast >= 4.5 in ${name} (${look ? look.ratio.toFixed(2) : 'not found'})`,
+        );
+      }
+      await shot(`16b-mention-popup-${name}`);
+      await typeInBox('@qqqzzz');
+      const empty = await waitFor(
+        async () => (await ui()).status.includes('No files match'),
+        20_000,
+        300,
+      );
+      check(empty === true, `a query that matches nothing says "No files match" in ${name}`);
+      const statusLook = await web.inDoc(measureText, { status: '.mention-status' });
+      check(
+        statusLook.status !== null && statusLook.status.ratio >= 4.5,
+        `the "No files match" line has contrast >= 4.5 in ${name} (${statusLook.status ? statusLook.status.ratio.toFixed(2) : 'not found'})`,
+      );
+    }
+    await setTheme('Default Dark Modern');
+
+    // --- Keyboard: the arrows move the highlight, Enter picks, nothing is sent ------------------
+    check(await searchUntil('@sample', 2), 'the popup opens again in the dark theme');
+
+    // --- Enter does nothing while the rows are those of an older text (decision W1, 22/10/2026) ---
+    // One more key, then Enter at once: the 150 ms debounce has not fired, so the popup still shows
+    // the rows of "@sample" for the text "@samplex". Nothing may be sent or picked.
+    state = await ui();
+    const messagesStale = state.messages;
+    await page.keyboard.type('x');
+    await page.keyboard.press('Enter');
+    state = await ui();
+    check(
+      state.value === '@samplex' &&
+        state.popup &&
+        state.chips.length === 0 &&
+        state.messages === messagesStale &&
+        !state.busy,
+      `Enter right after a keystroke neither sends nor picks (${JSON.stringify(state.value)}, ${String(state.chips.length)} chips, ${String(state.messages - messagesStale)} new messages)`,
+    );
+    check(
+      await searchUntil('@sample', 2),
+      'the popup lists again after the Enter that was ignored',
+    );
+    state = await ui();
+    const wanted = state.rows.indexOf('src/sample.ts');
+    const messagesBefore = state.messages;
+    for (let i = 0; i < wanted; i += 1) await page.keyboard.press('ArrowDown');
+    await sleep(250);
+    state = await ui();
+    check(
+      state.selected === wanted && state.pointsAtSelected,
+      `ArrowDown moves the highlight to src/sample.ts (row ${String(state.selected)} of ${state.rows.join(', ')})`,
+    );
+    await page.keyboard.press('Enter');
+    await waitFor(async () => (await ui()).chips.length > 0, 10_000, 250);
+    state = await ui();
+    check(
+      state.chips.length === 1 && state.chips[0] === 'src/sample.ts',
+      `Enter adds the chip src/sample.ts (${state.chips.join(', ')})`,
+    );
+    check(
+      state.value === '@src/sample.ts ',
+      `the text @src/sample.ts stays in the box (${JSON.stringify(state.value)})`,
+    );
+    check(!state.popup, 'the popup closes after the pick');
+    check(state.focusOnField, 'the focus is still in the prompt box after the pick');
+    check(
+      state.messages === messagesBefore && !state.busy,
+      'Enter on the popup picks the file and does not send the prompt',
+    );
+    await shot('16c-mention-picked');
+
+    // --- ArrowUp with the popup closed is the history again --------------------------------------
+    await removeChips();
+    await clearBox();
+    await page.keyboard.press('ArrowUp');
+    state = await ui();
+    check(
+      !state.popup && state.value !== '',
+      `ArrowUp with the popup closed recalls the last prompt (${JSON.stringify(state.value.slice(0, 40))})`,
+    );
+    await clearBox();
+
+    // --- Escape closes the popup and does NOT stop a running turn --------------------------------
+    await send('Count from 1 to 400, one number per line. Do not use tools.');
+    const running = await waitFor(isBusy, 30_000, 300);
+    if (running === true) {
+      await page.keyboard.type('@sample');
+      const open = await waitFor(async () => (await ui()).rows.length > 0, 20_000, 250);
+      check(open === true, 'the popup opens while a turn is running');
+      await page.keyboard.press('Escape');
+      await sleep(600);
+      state = await ui();
+      check(!state.popup, 'Escape closes the popup');
+      check(state.busy, 'Escape with the popup open does NOT stop the running turn');
+      check(state.value === '@sample', 'Escape leaves the text as it was');
+      await page.keyboard.press('Escape');
+      check(await waitIdle(30_000), 'a second Escape (popup closed) stops the turn');
+    } else {
+      warn('SKIPPED: the turn was not running, so Escape-versus-Stop was not tested');
+    }
+    await clearBox();
+
+    // --- Mouse: a press on a row picks it and keeps the focus in the box --------------------------
+    check(await searchUntil('@sample', 2), 'the popup opens for the mouse pick');
+    check(await clickIn('.mention-option[aria-label="src/sample.ts"]'), 'the row is pressed');
+    await waitFor(async () => (await ui()).chips.length > 0, 10_000, 250);
+    state = await ui();
+    check(
+      state.chips.length === 1 && state.chips[0] === 'src/sample.ts' && !state.popup,
+      `a mouse press picks the row (${state.chips.join(', ')})`,
+    );
+    check(state.focusOnField, 'the focus is still in the prompt box after the mouse pick');
+    check(
+      state.value === '@src/sample.ts ',
+      `the mouse pick writes the text too (${JSON.stringify(state.value)})`,
+    );
+
+    // --- The chip opens the file ------------------------------------------------------------------
+    await command('View: Close All Editors');
+    check(await clickIn('.chips .chip-open'), 'the chip name is pressed');
+    await page.waitForTimeout(1500);
+    const tabs = await page.locator('.tab.active[aria-label*="sample.ts"]').count();
+    check(tabs > 0, `pressing the chip opens src/sample.ts in the editor (${String(tabs)} tab)`);
+
+    // --- Add selection: lines 2-3 of the active editor ---------------------------------------------
+    await page.waitForTimeout(500);
+    await page.keyboard.press('ControlOrMeta+Home');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Home');
+    await page.keyboard.press('Shift+ArrowDown');
+    await page.keyboard.press('Shift+ArrowDown');
+    await sleep(300);
+    console.log(`  editor selection: "${(await editorSelection()).trim()}"`);
+    check(await clickButton('Add selection'), 'Add selection is pressed');
+    const ranged = await waitFor(
+      async () => (await ui()).chips.includes('src/sample.ts#2-3'),
+      10_000,
+      250,
+    );
+    state = await ui();
+    check(
+      ranged === true,
+      `Add selection adds the chip src/sample.ts#2-3 with the focus in the webview (${state.chips.join(', ')})`,
+    );
+    await shot('16d-add-selection');
+
+    // --- Send with both chips and the typed mention -------------------------------------------------
+    await clickIn('textarea');
+    await page.keyboard.press('End');
+    await page.keyboard.type('Reply with exactly: OK. Do not use any tools.');
+    await page.keyboard.press('Enter');
+    const left = await waitFor(async () => (await ui()).sent.length >= 2, 20_000, 300);
+    state = await ui();
+    check(
+      left === true &&
+        state.sent.includes('src/sample.ts') &&
+        state.sent.includes('src/sample.ts#2-3'),
+      `the message left with both files ("${state.sent.join(', ')}")`,
+    );
+    check(state.chips.length === 0, 'the chips left the prompt box once sent');
+    if (!(await waitIdle(120_000))) {
+      warn('SKIPPED: the free model did not finish the mention turn in 120 s');
+    }
+    await shot('16e-mention-sent');
+
+    // --- The chip of the conversation opens the file at the start of its range --------------------
+    await command('View: Close All Editors');
+    check(
+      await clickIn('[role="log"] .message-files .chip-open[aria-label*="lines 2-3"]'),
+      'the chip src/sample.ts#2-3 of the conversation is pressed',
+    );
+    await page.waitForTimeout(1500);
+    const selection = await editorSelection();
+    const sampleTabs = await page.locator('.tab.active[aria-label*="sample.ts"]').count();
+    check(
+      sampleTabs > 0 && /Ln 2\b/.test(selection),
+      `the conversation chip opens src/sample.ts at line 2 (status bar: "${selection.trim()}")`,
+    );
+    await shot('16f-chip-opens-line');
+
+    state = await ui();
+    check(
+      state.styled === 0,
+      `no inline style attribute in the webview body (${String(state.styled)})`,
+    );
+    assertNoWebviewErrors('@ mentions');
   });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.

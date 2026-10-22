@@ -47,6 +47,13 @@
 // being validated against the catalog (the server validates neither). New stable log lines, ids
 // only: `catalog loaded (<n> models, <m> agents)`, `model selected <providerID>/<id> for <sid>`,
 // `agent selected <id> for <sid>`, `default model setting ignored: invalid|unavailable`.
+//
+// E7-file-context (issues #28/#29, plan Engram #1059, decisions #1064/#1065): `@` mentions and the
+// editor context. The host searches files (`files.search` -> `files.found`) and builds every
+// attachment `uri` itself; `prompt.send` accepts the union of `pickedUris` (dialog, editor) and
+// `offeredUris` (search results, capped). New stable log lines, counts only: `file search: <n>
+// results`, `file search failed: <code>`, `editor context added: <n> file(s), <m> selection(s)`.
+// Neither the query nor any path is logged.
 
 import type { V2Event } from '@opencode/client';
 import type { Catalog, ErrorInfo, ModelRef, SessionStatus, SessionSummary } from '../shared/model';
@@ -58,12 +65,14 @@ import {
   type HostToWebview,
   type OpenSession,
   type PendingAsks,
+  type PromptMention,
   type Sender,
   type Snapshot,
   type WebviewToHost,
 } from '../shared/protocol';
 import { createEventTranslator, type EventTranslator } from './eventTranslator';
 import { runEventStream, type StreamState } from './eventStream';
+import { toSearchRefs } from './fileMentions';
 import { resolvePreferredModel } from './modelPreference';
 import type { ChatApi } from './opencodeClient';
 import { safeLog, type ServerLog } from './opencodeServer';
@@ -90,6 +99,21 @@ const SESSION_LIMIT = 50;
 
 /** How many messages of the open session the snapshot asks for (the API maximum is 200). */
 const MESSAGE_LIMIT = 200;
+
+/**
+ * How many files one `@` search asks for. Our choice (issue #28): a popup of 20 rows is already
+ * more than fits in a side bar, and the server ranks the best match first. The server's own
+ * default is 50 (`search.ts@843a6c51`, read).
+ */
+export const FILE_SEARCH_LIMIT = 20;
+
+/**
+ * How many search results the host remembers as attachable (`offeredUris`); the oldest are
+ * forgotten first. Our choice (issue #28), generous because a result is only a short string and a
+ * chip can sit in the prompt for a long time; a chip whose result was evicted is refused with
+ * `AttachmentRejected` and the user picks it again (it takes more than 5000 results to get there).
+ */
+export const OFFERED_URIS_MAX = 5000;
 
 /**
  * Where the controller keeps the id of the last session this extension opened IN EACH FOLDER
@@ -146,16 +170,43 @@ export const FOCUS_REQUEST_TTL_MS = 10_000;
  * `notice`. The text to copy or insert is never logged.
  */
 export interface EditorActions {
-  /** Opens `path` (relative to the served folder, absolute or `file://`) at a 1-based position. */
-  open(path: string, line?: number, column?: number): Promise<void>;
+  /**
+   * Opens `path` (relative to the served folder, absolute or `file://`) at a 1-based position.
+   * `folder` is the folder the SERVER serves; when it is given, the path is resolved against it
+   * (issue #28: with several workspace folders the chip of a file of the served one must open),
+   * otherwise against the folder the host would pick on its own.
+   */
+  open(path: string, line?: number, column?: number, folder?: string): Promise<void>;
+  /**
+   * Issue #29: the references to attach for the active editor. Rejects with `NoActiveEditor`
+   * (nothing open), `NoFileOnDisk` (untitled or a non-`file` scheme) or `OutsideWorkspace` (the
+   * file is not inside `folder`, or there is no `folder`). See {@link EditorContext}.
+   */
+  editorContext(folder: string | undefined): Promise<EditorContext>;
   /** Replaces every selection of the active editor with `text`. */
   insert(text: string): Promise<void>;
   /** Opens an untitled document with `text`; `language` is a VS Code language id. */
   newFile(text: string, language?: string): Promise<void>;
   /** Puts `text` on the system clipboard. */
   copy(text: string): Promise<void>;
-  /** Shows the file picker; the returned `uri`s are the only ones `prompt.send` will accept. */
+  /**
+   * Shows the file picker; the returned `uri`s join the ones `prompt.send` accepts (with the ones
+   * `files.search` listed and the ones `editorContext` returned: the host only sends what it
+   * emitted itself).
+   */
   pickFiles(): Promise<AttachmentRef[]>;
+}
+
+/**
+ * What the active editor contributes to a prompt (issue #29): the whole file, or one reference per
+ * non-empty selection (`ranged` of them, each limited to its lines). `unsaved` is true when the
+ * buffer differs from the disk: the server reads the SAVED file (decision Q3 of Sergio), so the
+ * user is warned. Never carries the text of the buffer.
+ */
+export interface EditorContext {
+  refs: AttachmentRef[];
+  ranged: number;
+  unsaved: boolean;
 }
 
 /** External effects of the controller, injected so tests need no VS Code, network or processes. */
@@ -310,6 +361,14 @@ const EMPTY_SNAPSHOT: Snapshot = {
  * The choice of model and agent is a draft in the webview and travels in `prompt.send`; `sendPrompt`
  * validates it against `catalog` and applies it just before the prompt (alternative discarded:
  * apply on every click, which adds `*-switched` noise and reconfigures a running turn).
+ * Issues #28/#29 (`E7-file-context`, plan Engram #1059) add the file context: `files.search` asks
+ * the server for files matching the text after an `@` and answers `files.found` (never a
+ * `request.result`; each search aborts the previous one, and a superseded or late answer is
+ * dropped), `attachments.fromEditor` takes the active file or selections from the editor, and
+ * `prompt.send` accepts the `uri`s of both (`offeredUris` for search results, capped, plus
+ * `pickedUris` for the dialog and the editor, whose threat model is on that field) and forwards a
+ * file's `mention` only when it
+ * points at the prompt text it claims. `editor.open` is resolved against the SERVED folder.
  * VERIFIED with a fake client (unit tests) and against a synthetic HTTP/SSE server
  * (`chatController.e2e.test.ts`, real client and stream loop). The permission and question flows
  * against a real opencode are exercised only by the opt-in `realOpencode.test.ts` (see its
@@ -325,8 +384,32 @@ export class ChatController {
   private connection: ConnectionState = { state: 'starting' };
   /** Open session of the SERVED folder; read from the memory when a server comes up. */
   private open: string | undefined;
-  /** `uri`s emitted by the file picker; `prompt.send` accepts no other attachment. */
+  /**
+   * `uri`s the host took from two sources: the native file dialog and `editorContext`.
+   * `prompt.send` accepts these and {@link offeredUris}, no other attachment. No cap: a user does
+   * not pick thousands.
+   *
+   * Threat model, as it stands (decision W2 of Sergio, 22/10/2026). The dialog is a native modal,
+   * so only the user can fill it. `attachments.fromEditor` is NOT a proof of a click: it is a
+   * webview message, and a compromised webview can send it without the user. What bounds it is
+   * on the editor side: it yields only the file ACTIVE in the editor (or its selections), and only
+   * when that file is inside the served folder (`OutsideWorkspace` otherwise). So the worst a
+   * compromised webview gets whitelisted is the file the user already has in front of them inside
+   * the project, `.env` or a git-ignored file included; the model's `read` permission is skipped
+   * for it. It cannot name any other path. Accepted risk; closing it needs a user gesture the host
+   * can see (a command or a native confirmation), which the plan did not ask for.
+   */
   private readonly pickedUris = new Set<string>();
+  /**
+   * `uri`s the host listed in `files.found`, in insertion order and capped at
+   * {@link OFFERED_URIS_MAX}. Kept apart from `pickedUris` because they are not a choice yet: a
+   * result becomes a chip only when the user picks it, but the host cannot tell which, so every
+   * result stays attachable. Narrower than "any file inside the folder", which a compromised
+   * webview could use to attach `.env` and skip the model's `read` permission.
+   */
+  private readonly offeredUris = new Set<string>();
+  /** The file search in flight; a newer one or `stopStream` aborts it. */
+  private fileSearch: AbortController | undefined;
   private readonly pending = createPendingRequests();
   /**
    * What the user answered, kept for the history (E3-resolved-history). Created ONCE for the life of
@@ -484,10 +567,14 @@ export class ChatController {
    * The asks remembered for the resolutions die with them (`forgetAsks`), but the RESOLUTIONS
    * already recorded stay: they are history, and Restart Server must not wipe them. The catalog
    * goes too (it described that server) and a catalog load in flight is cut off from publishing.
+   * A file search in flight is aborted (its answer would describe the old server); `offeredUris`
+   * stays, like `pickedUris`, so a chip pending in the webview survives Restart Server.
    */
   private stopStream(): void {
     this.streamAbort?.abort();
     this.streamAbort = undefined;
+    this.fileSearch?.abort();
+    this.fileSearch = undefined;
     this.client = undefined;
     this.server = undefined;
     this.generation++; // a snapshot in flight for the old server must not be published
@@ -1353,6 +1440,148 @@ export class ChatController {
   }
 
   /**
+   * `attachments.fromEditor` (issue #29): asks the editor side for the active file, or each
+   * non-empty selection with its line range, remembers the `uri`s in `pickedUris` (not proof of a
+   * click, unlike the dialog; the editor side limits it to the served folder, see that field) and
+   * answers with `attachments.picked` and a successful result, which is how the existing chip
+   * row, its dedupe by `uri` and its restore on a failed send are reused. A buffer with unsaved
+   * changes still attaches the file on disk and adds a `warning` notice, because the server reads
+   * the saved version (decision Q3 of Sergio, 22/10/2026). An expected failure
+   * (`NoActiveEditor`, `NoFileOnDisk`, `OutsideWorkspace`) becomes the error of the
+   * `request.result`, which the store turns into a notice; nothing is whitelisted then. Needs no
+   * running server but does need the served folder (`this.server?.folder`): without one the editor
+   * side refuses with `OutsideWorkspace`. The log lines `editor context added: N file(s), M
+   * selection(s)` carry counts, never paths or text; a dirty buffer also logs `editor context: the
+   * buffer has unsaved changes, the saved file is attached`.
+   * VERIFIED by unit tests with a fake editor (including "whitelists nothing when the editor
+   * refuses a file outside the served folder"), and against a real VS Code 1.143.0 and a real
+   * opencode 2.0.32 on Windows 11 (22/10/2026, `--label real-opencode`, 17 passing): "adds the
+   * whole file when nothing is selected", "warns that the saved version is what the model reads
+   * when the buffer is dirty" (log lines `editor context: the buffer has unsaved changes` and
+   * `editor context added: 1 file(s), 0 selection(s)`), "refuses a file outside the open
+   * workspace folder (OutsideWorkspace)", and "adds the selection of the active file and sends it
+   * with its line range", where the host logged `editor context added: 0 file(s), 1
+   * selection(s)`, then `prompt accepted for ses_…` and `turn finished: succeeded` for a prompt
+   * carrying that `?start=1&end=2` reference. NOT observed: the warning notice reaching the
+   * webview (the controller test sees it posted).
+   */
+  private async attachFromEditor(requestId: string): Promise<void> {
+    try {
+      const context = await this.deps.editor.editorContext(this.server?.folder);
+      for (const ref of context.refs) this.pickedUris.add(ref.uri);
+      this.post({ type: 'attachments.picked', requestId, files: context.refs });
+      if (context.unsaved) {
+        this.log.warn('editor context: the buffer has unsaved changes, the saved file is attached');
+        this.post({
+          type: 'notice',
+          level: 'warning',
+          error: {
+            code: 'UnsavedChanges',
+            message: 'Unsaved changes: the model reads the saved version',
+          },
+        });
+      }
+      this.log.info(
+        `editor context added: ${String(context.refs.length - context.ranged)} file(s), ${String(context.ranged)} selection(s)`,
+      );
+      this.result(requestId);
+    } catch (error) {
+      this.result(requestId, error);
+    }
+  }
+
+  /**
+   * `files.search` (issue #28): looks for files whose path matches `query` and answers with
+   * `files.found`, never with a `request.result` (it must not lock the prompt, and a typed key is
+   * not worth a notice: the error travels inside the answer and the popup shows it).
+   *
+   * Each call aborts the one before (`RequestOptions.signal`). A search replaced by a newer one
+   * ends silently, so the webview only ever sees the answer to its newest query. A search cut off
+   * because the server stopped or changed (`stopStream`) answers its own `requestId` with a
+   * `ServerUnavailable` error instead, so the popup leaves "Searching…" and shows it. A `find()`
+   * that simply hangs has no timeout and is not covered: it ends when the user types, presses
+   * Escape, blurs, or the server stops. Results are mapped by `toSearchRefs` against the
+   * served folder (directories, traversals and mixed separators are handled there) and every
+   * `uri` is added to {@link offeredUris}, the second half of the whitelist `prompt.send`
+   * checks. Without a client the answer is a `ServerUnavailable` error. The log line `file search:
+   * N results` has the count only: the query is the user's words. A failure logs `file search
+   * failed: <code>`.
+   * VERIFIED by unit tests with a fake client and by the e2e against the synthetic server. Against
+   * a real opencode 2.0.32 on Windows 11, VS Code 1.143.0 (22/10/2026): the call, the shape and the
+   * empty-query answer come from the planner spike; the opt-in `real-opencode` case "finds a file
+   * with files.search and sends a prompt that mentions it" logged `file search: 1 results` for
+   * `sample` and the host accepted, and the real server admitted, a prompt with that file and a
+   * `mention` (`prompt accepted for ses_…`, then `turn finished: succeeded`); and `test:visual` step
+   * 16 listed `src/sample.ts` and `src/sample-extra.ts` for `@sample` in the real popup. NOT
+   * observed: a failed search against a real server (only the fake client throws), the
+   * eviction of `offeredUris` (unit-tested), POSIX.
+   */
+  private async searchFiles(
+    message: Extract<WebviewToHost, { type: 'files.search' }>,
+  ): Promise<void> {
+    const { requestId, query } = message;
+    this.fileSearch?.abort();
+    const client = this.client;
+    const server = this.server;
+    if (client === undefined || server === undefined) {
+      this.post({
+        type: 'files.found',
+        requestId,
+        query,
+        files: [],
+        error: toErrorInfo(unavailable(), this.secrets),
+      });
+      return;
+    }
+    const controller = new AbortController();
+    this.fileSearch = controller;
+    // True when the search ended without an answer to publish. A newer search owns `fileSearch`
+    // (it is set to a different controller): stay silent, the webview waits for that one. Otherwise
+    // the server went away (`stopStream` cleared it and swapped the client): answer with an error,
+    // or the popup would keep saying "Searching…" for a request nobody will resolve.
+    const abandoned = (): boolean => {
+      if (!controller.signal.aborted && client === this.client) return false;
+      if (this.fileSearch === undefined || this.fileSearch === controller) {
+        this.post({
+          type: 'files.found',
+          requestId,
+          query,
+          files: [],
+          error: toErrorInfo(unavailable(), this.secrets),
+        });
+      }
+      return true;
+    };
+    try {
+      const found = await client.file.find(
+        { query, type: 'file', limit: FILE_SEARCH_LIMIT },
+        { signal: controller.signal },
+      );
+      if (abandoned()) return;
+      const files = toSearchRefs(server.folder, found.data.slice(0, FILE_SEARCH_LIMIT));
+      for (const file of files) {
+        // Delete first so a result seen again counts as the newest, not as one about to be evicted.
+        this.offeredUris.delete(file.uri);
+        this.offeredUris.add(file.uri);
+      }
+      while (this.offeredUris.size > OFFERED_URIS_MAX) {
+        const oldest = this.offeredUris.values().next();
+        if (oldest.done) break;
+        this.offeredUris.delete(oldest.value);
+      }
+      this.log.info(`file search: ${String(files.length)} results`);
+      this.post({ type: 'files.found', requestId, query, files });
+    } catch (error) {
+      if (abandoned()) return;
+      const info = toErrorInfo(error, this.secrets);
+      this.log.warn(`file search failed: ${info.code}`);
+      this.post({ type: 'files.found', requestId, query, files: [], error: info });
+    } finally {
+      if (this.fileSearch === controller) this.fileSearch = undefined;
+    }
+  }
+
+  /**
    * Sends the permission decision. Throws what the client throws (the server's error body) or the
    * `ServerUnavailable` body; callers turn it into a `request.result` or a return value.
    *
@@ -1610,12 +1839,14 @@ export class ChatController {
    *
    * `prompt.send` creates a session when none is open (with the model and agent the webview chose,
    * issues #23/#24), then calls `session.prompt` with the
-   * delivery the webview chose and the attachments the file picker emitted. `session.new` (lazy)
+   * delivery the webview chose and the attachments the host emitted. `session.new` (lazy)
    * and `session.open` change the open session. `session.abort` interrupts the turn (issue #16).
    * Issue #20: `sessions.query`, `session.rename` and `session.delete` serve the session list.
    * Issue #21: `session.fork` forks the open session before a message and opens the fork.
    * `editor.*`, `clipboard.write` and `attachments.pick` go to `deps.editor` and never need the
    * server; a failure becomes a `warning` notice (those messages carry no `requestId`).
+   * Issues #28/#29: `files.search` asks the server for files (answer `files.found`) and
+   * `attachments.fromEditor` takes the active file or selections from the editor.
    * Phase 3: `permission.reply`, `form.reply` and `form.cancel` call the server (a reply that fails
    * because the request is gone also resyncs, since the snapshot tells the truth);
    * `permissions.manage` runs the saved-permissions manager; `server.restart` and `logs.show` go
@@ -1668,6 +1899,12 @@ export class ChatController {
       'attachments.pick': (m) => {
         pending.push(this.pickAttachments(m.requestId));
       },
+      'attachments.fromEditor': (m) => {
+        pending.push(this.attachFromEditor(m.requestId));
+      },
+      'files.search': (m) => {
+        pending.push(this.searchFiles(m));
+      },
       'permissions.manage': () => {
         pending.push(this.manageSavedPermissions());
       },
@@ -1679,7 +1916,9 @@ export class ChatController {
       },
       'editor.open': (m) => {
         pending.push(
-          this.editorAction(m.type, () => this.deps.editor.open(m.path, m.line, m.column)),
+          this.editorAction(m.type, () =>
+            this.deps.editor.open(m.path, m.line, m.column, this.server?.folder),
+          ),
         );
       },
       'editor.insert': (m) => {
@@ -1937,9 +2176,13 @@ export class ChatController {
 
   /**
    * `prompt.send`: see {@link handle}. Never throws; the outcome goes out as `request.result`.
-   * Every `files[].uri` must be in `pickedUris`, else the whole prompt is refused with
-   * `AttachmentRejected` before touching the server (the attachment name is not trusted either,
-   * but it is only a label).
+   * Every `files[].uri` must be in `pickedUris` or `offeredUris` (what the dialog, the editor
+   * button or a search emitted), else the whole prompt is refused with `AttachmentRejected` before
+   * touching the server (the attachment name is not trusted either, but it is only a label). A
+   * file may carry the `mention` of its `@path` text (issue #28); it is forwarded only when
+   * `text.slice(start, end)` equals its `text`, otherwise the file goes without it (see
+   * {@link sameMention}). Chip and text are independent: deleting the `@path` text leaves the file
+   * attached with no mention, and deleting the chip leaves a plain `@path` the model reads as text.
    *
    * Issues #23/#24: when the message carries a `model` and/or an `agent`, they are checked against
    * the catalog FIRST (loading it if the host has none; a catalog that cannot be read is
@@ -1969,11 +2212,15 @@ export class ChatController {
     const { requestId } = message;
     const client = this.client;
     if (client === undefined) return this.result(requestId, unavailable());
-    if (message.files.some((file) => !this.pickedUris.has(file.uri))) {
-      this.log.warn(`prompt ${requestId} rejected: an attachment was not emitted by the picker`);
+    if (
+      message.files.some(
+        (file) => !this.pickedUris.has(file.uri) && !this.offeredUris.has(file.uri),
+      )
+    ) {
+      this.log.warn(`prompt ${requestId} rejected: an attachment was not emitted by the host`);
       return this.result(requestId, {
         _tag: 'AttachmentRejected',
-        message: 'Only files chosen with the Attach button can be sent',
+        message: 'Only files chosen in the chat can be sent',
       });
     }
     try {
@@ -2023,7 +2270,16 @@ export class ChatController {
         text: message.text,
         delivery: message.delivery,
         ...(message.files.length > 0
-          ? { files: message.files.map((file) => ({ uri: file.uri, name: file.name })) }
+          ? {
+              files: message.files.map((file) => {
+                const mention = sameMention(file.mention, message.text);
+                return {
+                  uri: file.uri,
+                  name: file.name,
+                  ...(mention === undefined ? {} : { mention }),
+                };
+              }),
+            }
           : {}),
       });
       this.log.info(`prompt accepted for ${sessionID}`);
@@ -2058,6 +2314,20 @@ export class ChatController {
     this.stopStream();
     this.deps.attention.update([]);
   }
+}
+
+/**
+ * The `mention` a file may keep, or `undefined` to send the file without one.
+ *
+ * The webview computes the offsets, and the guard only checks their shape: here it is checked that
+ * they still point at the text they claim (`text.slice(start, end) === mention.text`). A mention
+ * that does not would make the server store a lie about the prompt, so it is dropped silently; the
+ * file itself still goes. A copy is returned so nothing but `start`, `end` and `text` travels.
+ */
+function sameMention(mention: PromptMention | undefined, text: string): PromptMention | undefined {
+  if (mention === undefined) return undefined;
+  if (text.slice(mention.start, mention.end) !== mention.text) return undefined;
+  return { start: mention.start, end: mention.end, text: mention.text };
 }
 
 /** Error body for a request that arrives while there is no running server. */

@@ -13,6 +13,9 @@
 // Not covered here: the Attach file dialog (a native dialog, no test hook) and `insert` with the
 // focus in the side view (needs a real click on the chat view; F5 point 3).
 import * as assert from 'node:assert';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { INJECT_WEBVIEW_MESSAGE_COMMAND_ID } from '../../src/extension/ids';
 import { openLogCursor } from './support/extensionLog';
@@ -24,13 +27,19 @@ async function inject(message: unknown): Promise<void> {
   await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, message);
 }
 
+/** Temp folders made by the editor-context cases, removed after each case. */
+const tempDirs: string[] = [];
+
 describe('editor actions', () => {
   before(async () => {
     await vscode.extensions.getExtension(EXTENSION_ID)?.activate();
   });
 
   afterEach(async () => {
+    // A dirty buffer would make the close ask to save: revert first so the editors really close.
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    for (const dir of tempDirs.splice(0)) await fs.rm(dir, { recursive: true, force: true });
   });
 
   /**
@@ -97,5 +106,61 @@ describe('editor actions', () => {
     // 8000 ms is our own choice (margin for a slow CI), as in the other suites.
     await log.waitFor('editor.open failed: NoWorkspace', 8000);
     assert.strictEqual(vscode.window.activeTextEditor, before);
+  });
+
+  // Issue #29, decision Q3 of Sergio. These drive `attachments.fromEditor` through the real
+  // `ChatController` and the real `readEditorContext`; what the webview does with the answer
+  // (chips, the unsaved-changes notice) is out of reach of the test API and is `test:visual`.
+  // The outcome is read from the log lines the controller writes: `request <id> failed: <code>`
+  // and `editor context added: N file(s), M selection(s)`.
+
+  /** Opens a file of `os.tmpdir()` with four lines, which the test removes afterwards. */
+  async function openTempFile(): Promise<{ uri: vscode.Uri; editor: vscode.TextEditor }> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ovsc-context-'));
+    const file = path.join(dir, 'sample.ts');
+    await fs.writeFile(file, 'one\ntwo\nthree\nfour\n');
+    tempDirs.push(dir);
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    const editor = await vscode.window.showTextDocument(document);
+    return { uri: document.uri, editor };
+  }
+
+  it('refuses the editor context with no editor open (NoActiveEditor)', async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    assert.strictEqual(vscode.window.activeTextEditor, undefined);
+    const log = await openLogCursor();
+    await inject({ type: 'attachments.fromEditor', requestId: 'ctx-none' });
+    await log.waitFor('request ctx-none failed: NoActiveEditor', 8000);
+  });
+
+  it('refuses an untitled document (NoFileOnDisk: Save the file first)', async () => {
+    const document = await vscode.workspace.openTextDocument({ content: 'draft' });
+    await vscode.window.showTextDocument(document);
+    const log = await openLogCursor();
+    await inject({ type: 'attachments.fromEditor', requestId: 'ctx-untitled' });
+    await log.waitFor('request ctx-untitled failed: NoFileOnDisk: Save the file first', 8000);
+  });
+
+  // Decision W2 of Sergio (22/10/2026): only files inside the served folder can be added. This
+  // configuration serves NO folder, so a real file of `os.tmpdir()` is refused whether it is a
+  // whole file or a selection, and nothing is added. The cases that need a served folder (the
+  // whole file, one selection per range with the chat view focused, the dirty buffer, and a file
+  // outside an OPEN folder) live in `realOpencode.test.ts`, whose configuration opens one.
+  it('refuses a file outside the workspace folder (OutsideWorkspace), with no folder served', async () => {
+    const { editor } = await openTempFile();
+    const log = await openLogCursor();
+    await inject({ type: 'attachments.fromEditor', requestId: 'ctx-outside' });
+    await log.waitFor(
+      'request ctx-outside failed: OutsideWorkspace: Only files inside the workspace folder can be added',
+      8000,
+    );
+    editor.selection = new vscode.Selection(1, 0, 2, 2);
+    await vscode.commands.executeCommand('openVsCode.chat.focus');
+    await inject({ type: 'attachments.fromEditor', requestId: 'ctx-outside-selection' });
+    await log.waitFor('request ctx-outside-selection failed: OutsideWorkspace', 8000);
+    assert.ok(
+      !log.added().includes('editor context added'),
+      `a file outside the folder was added; log:\n${log.added()}`,
+    );
   });
 });

@@ -24,6 +24,7 @@ import {
   HOST_TO_WEBVIEW_TYPES,
   isHostToWebview,
   isWebviewToHost,
+  MAX_FILE_SEARCH_LENGTH,
   MAX_SESSION_SEARCH_LENGTH,
   MAX_SESSION_TITLE_LENGTH,
   WEBVIEW_TO_HOST_TYPES,
@@ -173,6 +174,12 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
     requestId: 'r1',
     files: [{ uri: 'file:///a.ts', name: 'a.ts' }],
   },
+  'files.found': {
+    type: 'files.found',
+    requestId: 'r1',
+    query: 'a',
+    files: [{ uri: 'file:///ws/src/a.ts', name: 'src/a.ts' }],
+  },
   'ui.focus': { type: 'ui.focus', target: { kind: 'permission', sessionID: 's1', id: 'perm1' } },
   notice: { type: 'notice', level: 'warning', error },
 };
@@ -217,6 +224,8 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   },
   'form.cancel': { type: 'form.cancel', requestId: 'r1', sessionID: 's1', formID: 'f1' },
   'attachments.pick': { type: 'attachments.pick', requestId: 'r1' },
+  'attachments.fromEditor': { type: 'attachments.fromEditor', requestId: 'r1' },
+  'files.search': { type: 'files.search', requestId: 'r1', query: 'prompt' },
   'permissions.manage': { type: 'permissions.manage' },
   'server.restart': { type: 'server.restart' },
   'logs.show': { type: 'logs.show' },
@@ -389,6 +398,49 @@ describe('isWebviewToHost', () => {
     expect(isWebviewToHost({ ...fork, sessionID: '' })).toBe(false);
     expect(isWebviewToHost({ ...fork, requestId: '' })).toBe(false);
     expect(isWebviewToHost({ ...fork, messageID: 7 })).toBe(false);
+  });
+
+  // Issues #28/#29. Fabricated messages: they pin the guard. An empty query is refused because the
+  // real server answers `data: []` to it (planner spike, opencode 2.0.32), so it would only cost a
+  // round trip; the length cap is our own choice.
+  it('bounds files.search and validates attachments.fromEditor (issues #28/#29)', () => {
+    const search = WEBVIEW_SAMPLES['files.search'];
+    expect(isWebviewToHost(search)).toBe(true);
+    expect(isWebviewToHost({ ...search, query: '' })).toBe(false);
+    expect(isWebviewToHost({ ...search, query: 'x'.repeat(MAX_FILE_SEARCH_LENGTH) })).toBe(true);
+    expect(isWebviewToHost({ ...search, query: 'x'.repeat(MAX_FILE_SEARCH_LENGTH + 1) })).toBe(
+      false,
+    );
+    expect(isWebviewToHost({ ...search, query: 3 })).toBe(false);
+    expect(isWebviewToHost({ ...search, requestId: '' })).toBe(false);
+    expect(isWebviewToHost({ type: 'files.search', query: 'a' })).toBe(false);
+    expect(isWebviewToHost({ type: 'attachments.fromEditor' })).toBe(false);
+    expect(isWebviewToHost({ type: 'attachments.fromEditor', requestId: '' })).toBe(false);
+  });
+
+  // Issue #28 (decision Q1). Fabricated messages: they pin the guard. Whether the text matches the
+  // offsets is not checkable here (the guard does not see the prompt text) and is the host's job.
+  it('accepts a well-formed mention on a prompt file and rejects malformed ones', () => {
+    const base = WEBVIEW_SAMPLES['prompt.send'];
+    const file = { uri: 'file:///a.ts', name: 'a.ts' };
+    const withMention = (mention: unknown) => ({ ...base, files: [{ ...file, mention }] });
+    expect(isWebviewToHost(withMention({ start: 0, end: 5, text: '@a.ts' }))).toBe(true);
+    expect(isWebviewToHost(withMention(undefined))).toBe(true);
+    const bad: unknown[] = [
+      { start: -1, end: 5, text: '@a.ts' },
+      { start: 5, end: 4, text: '@a.ts' },
+      { start: 0.5, end: 5, text: '@a.ts' },
+      { start: 0, end: 5, text: '' },
+      { start: 0, end: 5 },
+      { start: '0', end: 5, text: '@a.ts' },
+      { start: 0, end: Number.MAX_SAFE_INTEGER + 1, text: '@a.ts' },
+      '@a.ts',
+      null,
+      [],
+    ];
+    for (const mention of bad) {
+      expect(isWebviewToHost(withMention(mention)), JSON.stringify(mention)).toBe(false);
+    }
   });
 
   it('bounds editor.open line and column to safe integers >= 1', () => {

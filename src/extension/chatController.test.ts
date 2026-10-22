@@ -29,6 +29,8 @@
 // against a synthetic server.
 import type {
   AgentInfo,
+  FileFindInput,
+  FileFindOutput,
   FormInfo,
   FormListOutput,
   ModelInfo,
@@ -41,15 +43,20 @@ import type {
   SessionsResponse,
   V2Event,
 } from '@opencode/client';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ModelRef } from '../shared/model';
 import type { HostToWebview, Snapshot, WebviewToHost } from '../shared/protocol';
-import type { AttachmentRef } from '../shared/protocol';
+import type { AttachmentRef, PromptFileRef } from '../shared/protocol';
 import {
   ChatController,
+  FILE_SEARCH_LIMIT,
   FOCUS_REQUEST_TTL_MS,
+  OFFERED_URIS_MAX,
   type ChatControllerDeps,
   type EditorActions,
+  type EditorContext,
   type SavedPermission,
 } from './chatController';
 import type { EventStreamOptions } from './eventStream';
@@ -121,6 +128,11 @@ type FakeOptions = Partial<{
   };
   /** Rejects `switchAgent` / `switchModel` with this server error body. */
   switchError: object;
+  /** Replaces `file.find` (issue #28); receives the input and the abort signal of the call. */
+  findImpl: (
+    input: FileFindInput,
+    options?: { readonly signal?: AbortSignal },
+  ) => Promise<FileFindOutput>;
 }>;
 
 /** A catalog model in the shape of a real `ModelInfo` (fields trimmed to what the mapping reads). */
@@ -211,6 +223,7 @@ function fakeApi(options: FakeOptions = {}) {
   const sessionRemoves: unknown[] = [];
   const creates: unknown[] = [];
   const switches: string[] = [];
+  const finds: FileFindInput[] = [];
   /** Rejects like the real client: with the server's error BODY, an object, not an Error. */
   const failWith = (body: object): Promise<never> =>
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
@@ -369,6 +382,16 @@ function fakeApi(options: FakeOptions = {}) {
         return Promise.resolve({ location: LOCATION, data: options.agents ?? DEFAULT_AGENTS });
       },
     },
+    file: {
+      find: (input, requestOptions) => {
+        calls.push('file.find');
+        finds.push(input);
+        return (options.findImpl ?? (() => Promise.resolve({ location: LOCATION, data: [] })))(
+          input,
+          requestOptions,
+        );
+      },
+    },
     form: {
       list: () => {
         calls.push('form.list');
@@ -417,21 +440,30 @@ function fakeApi(options: FakeOptions = {}) {
     sessionRemoves,
     creates,
     switches,
+    finds,
   };
 }
 
 /**
  * A fake {@link EditorActions} that records its calls as `name(args)` strings. `failWith` makes
- * every method reject with that error; `picked` is what the file picker returns.
+ * every method reject with that error; `picked` is what the file picker returns and `context` what
+ * the editor-context button gets.
  */
-function fakeEditor(options: { failWith?: Error; picked?: AttachmentRef[] } = {}) {
+function fakeEditor(
+  options: { failWith?: Error; picked?: AttachmentRef[]; context?: EditorContext } = {},
+) {
   const calls: unknown[][] = [];
   const run = (name: string, ...args: unknown[]): Promise<void> => {
     calls.push([name, ...args]);
     return options.failWith === undefined ? Promise.resolve() : Promise.reject(options.failWith);
   };
   const editor: EditorActions = {
-    open: (path, line, column) => run('open', path, line, column),
+    open: (path, line, column, folder) => run('open', path, line, column, folder),
+    editorContext: (folder) => {
+      calls.push(['editorContext', folder]);
+      if (options.failWith !== undefined) return Promise.reject(options.failWith);
+      return Promise.resolve(options.context ?? { refs: [], ranged: 0, unsaved: false });
+    },
     insert: (text) => run('insert', text),
     newFile: (text, language) => run('newFile', text, language),
     copy: (text) => run('copy', text),
@@ -987,7 +1019,7 @@ describe('editor actions and attachments', () => {
     await controller.handle({ type: 'editor.newFile', text: 'echo hi', language: 'shellscript' });
     await controller.handle({ type: 'clipboard.write', text: 'copied' });
     expect(calls).toEqual([
-      ['open', 'src/a.ts', 42, 7],
+      ['open', 'src/a.ts', 42, 7, undefined],
       ['insert', 'const $x = 1;'],
       ['newFile', 'echo hi', 'shellscript'],
       ['copy', 'copied'],
@@ -1044,6 +1076,339 @@ describe('editor actions and attachments', () => {
     const { controller, posted } = setup(fakeApi().api, undefined, editor);
     await controller.handle({ type: 'attachments.pick', requestId: 'p1' });
     expect(posted.at(-1)).toMatchObject({ requestId: 'p1', error: { message: 'dialog failed' } });
+  });
+});
+
+// E7-file-context (issues #28/#29). Provenance: a FAKE client and a fake editor; the entry shapes
+// copy the ones the planner saw in a spike against a real opencode 2.0.32 (Windows 11,
+// 22/10/2026): `{path, type}`, directories with a trailing `\`. They confirm the controller's
+// logic (whitelist, abort of the superseded search, scrubbing), not the contract with the server;
+// the round trip over HTTP is `chatController.e2e.test.ts` and the real server is the opt-in suite.
+describe('file mentions and editor context (issues #28/#29)', () => {
+  const found = (...paths: string[]): FileFindOutput => ({
+    location: LOCATION,
+    data: paths.map((path) => ({
+      path,
+      type: path.endsWith('\\') ? ('directory' as const) : ('file' as const),
+    })),
+  });
+  // The controller maps results with the `path` of the machine running the test, and SERVER's
+  // folder is a Windows one: building the expected reference the same way keeps the case valid on
+  // Linux and macOS (where `C:\work` is just an odd relative folder name).
+  const refOf = (relative: string) => ({
+    uri: pathToFileURL(path.resolve(SERVER.folder, relative)).href,
+    name: relative,
+  });
+  const sendWith = (files: PromptFileRef[], text = 'look') =>
+    ({
+      type: 'prompt.send',
+      requestId: 'r1',
+      text,
+      delivery: 'queue',
+      files,
+    }) satisfies WebviewToHost;
+
+  it('asks the server for files only, with the limit, and maps the answer', async () => {
+    const { api, finds } = fakeApi({
+      findImpl: () => Promise.resolve(found('src/a.ts', 'src/shared\\', 'src\\b.ts')),
+    });
+    const { controller, posted, logs } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'files.search', requestId: 'f1', query: 'needle' });
+    expect(finds).toEqual([{ query: 'needle', type: 'file', limit: FILE_SEARCH_LIMIT }]);
+    expect(posted.at(-1)).toEqual({
+      type: 'files.found',
+      requestId: 'f1',
+      query: 'needle',
+      files: [refOf('src/a.ts'), refOf('src/b.ts')],
+    });
+    // The count only: the query is the user's words.
+    expect(logs).toContain('info: file search: 2 results');
+    expect(logs.join(' | ')).not.toContain('needle');
+  });
+
+  it('never answers a search with a request.result and leaves Send usable', async () => {
+    const { api } = fakeApi({ findImpl: () => Promise.resolve(found('a.ts')) });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'files.search', requestId: 'f1', query: 'a' });
+    expect(posted.some((m) => m.type === 'request.result')).toBe(false);
+  });
+
+  it('answers a search without a server with ServerUnavailable inside files.found', async () => {
+    const { controller, posted } = setup(fakeApi().api);
+    await controller.handle({ type: 'files.search', requestId: 'f1', query: 'a' });
+    expect(posted).toEqual([
+      {
+        type: 'files.found',
+        requestId: 'f1',
+        query: 'a',
+        files: [],
+        error: { code: 'ServerUnavailable', message: 'The opencode server is not running' },
+      },
+    ]);
+  });
+
+  it('scrubs the server URL and password from a failed search', async () => {
+    const { api } = fakeApi({
+      findImpl: () =>
+        // The real client rejects with the server's error BODY (an object), not an Error.
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        Promise.reject({
+          _tag: 'UnauthorizedError',
+          message: `no at ${SERVER.url} ${SERVER.password}`,
+        }),
+    });
+    const { controller, posted, logs } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'files.search', requestId: 'f1', query: 'a' });
+    const answer = posted.at(-1);
+    expect(answer).toMatchObject({
+      type: 'files.found',
+      files: [],
+      error: { code: 'UnauthorizedError' },
+    });
+    expect(JSON.stringify(answer)).not.toContain('43211');
+    expect(JSON.stringify(answer)).not.toContain(SERVER.password);
+    expect(logs).toContain('warn: file search failed: UnauthorizedError');
+  });
+
+  it('aborts the superseded search and publishes only the newest answer', async () => {
+    const signals: Array<AbortSignal | undefined> = [];
+    const resolvers: Array<(output: FileFindOutput) => void> = [];
+    const { api } = fakeApi({
+      findImpl: (_input, options) => {
+        signals.push(options?.signal);
+        return new Promise<FileFindOutput>((resolve) => resolvers.push(resolve));
+      },
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    const first = controller.handle({ type: 'files.search', requestId: 'f1', query: 'a' });
+    const second = controller.handle({ type: 'files.search', requestId: 'f2', query: 'ab' });
+    expect(signals[0]?.aborted).toBe(true);
+    expect(signals[1]?.aborted).toBe(false);
+    // The old one resolves late: it must not be published.
+    resolvers[0]?.(found('old.ts'));
+    resolvers[1]?.(found('new.ts'));
+    await Promise.all([first, second]);
+    const answers = posted.filter((m) => m.type === 'files.found');
+    expect(answers).toHaveLength(1);
+    expect(answers[0]).toMatchObject({ requestId: 'f2', files: [{ name: 'new.ts' }] });
+  });
+
+  // Defends the popup from staying on "Searching…" when the server stops mid-search (review of
+  // E7-file-context, round 2, W1). Synthetic: a fake client whose promise the test settles by hand.
+  it('answers its own requestId with ServerUnavailable when the server stops mid-search', async () => {
+    const resolvers: Array<(output: FileFindOutput) => void> = [];
+    const { api } = fakeApi({
+      findImpl: () => new Promise<FileFindOutput>((resolve) => resolvers.push(resolve)),
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    const pending = controller.handle({ type: 'files.search', requestId: 'f1', query: 'a' });
+    controller.onServerState({ kind: 'stopped' });
+    resolvers[0]?.(found('a.ts'));
+    await pending;
+    expect(posted.filter((m) => m.type === 'files.found')).toEqual([
+      {
+        type: 'files.found',
+        requestId: 'f1',
+        query: 'a',
+        files: [],
+        error: { code: 'ServerUnavailable', message: 'The opencode server is not running' },
+      },
+    ]);
+  });
+
+  it('also answers with ServerUnavailable when the aborted find() rejects', async () => {
+    const { api } = fakeApi({
+      findImpl: (_input, options) =>
+        new Promise<FileFindOutput>((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+            once: true,
+          });
+        }),
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    const pending = controller.handle({ type: 'files.search', requestId: 'f1', query: 'a' });
+    controller.onServerState({ kind: 'stopped' });
+    await pending;
+    expect(posted.filter((m) => m.type === 'files.found')).toMatchObject([
+      { requestId: 'f1', files: [], error: { code: 'ServerUnavailable' } },
+    ]);
+  });
+
+  it('stays silent for a search replaced by a newer one whose find() rejects on abort', async () => {
+    const resolvers: Array<(output: FileFindOutput) => void> = [];
+    const { api } = fakeApi({
+      findImpl: (_input, options) =>
+        new Promise<FileFindOutput>((resolve, reject) => {
+          resolvers.push(resolve);
+          options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+            once: true,
+          });
+        }),
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    const first = controller.handle({ type: 'files.search', requestId: 'f1', query: 'a' });
+    const second = controller.handle({ type: 'files.search', requestId: 'f2', query: 'ab' });
+    resolvers[1]?.(found('new.ts'));
+    await Promise.all([first, second]);
+    const answers = posted.filter((m) => m.type === 'files.found');
+    expect(answers).toHaveLength(1);
+    expect(answers[0]).toMatchObject({ requestId: 'f2' });
+  });
+
+  it('accepts a prompt file the search offered, and refuses one it invented', async () => {
+    const { api, prompts } = fakeApi({ findImpl: () => Promise.resolve(found('src/a.ts')) });
+    const { controller, posted } = setup(api, 'ses_old');
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'files.search', requestId: 'f1', query: 'a' });
+    const offered = refOf('src/a.ts');
+    await controller.handle(sendWith([offered]));
+    expect(prompts).toEqual([
+      { sessionID: 'ses_old', text: 'look', delivery: 'queue', files: [offered] },
+    ]);
+    await controller.handle(sendWith([{ uri: 'file:///C:/work/.env', name: '.env' }]));
+    expect(prompts).toHaveLength(1);
+    expect(posted.at(-1)).toMatchObject({
+      error: { code: 'AttachmentRejected', message: 'Only files chosen in the chat can be sent' },
+    });
+  });
+
+  it('forgets the oldest offered uri after OFFERED_URIS_MAX results', async () => {
+    let next = 0;
+    const { api, prompts } = fakeApi({
+      findImpl: () => {
+        const paths = Array.from({ length: FILE_SEARCH_LIMIT }, () => `f${String(next++)}.ts`);
+        return Promise.resolve(found(...paths));
+      },
+    });
+    const { controller } = setup(api, 'ses_old');
+    controller.onServerState(RUNNING);
+    const searches = Math.ceil(OFFERED_URIS_MAX / FILE_SEARCH_LIMIT) + 1;
+    for (let index = 0; index < searches; index++) {
+      await controller.handle({ type: 'files.search', requestId: `f${String(index)}`, query: 'f' });
+    }
+    // f0.ts was the very first result: it is out by now; the last one is still in.
+    await controller.handle(sendWith([refOf('f0.ts')]));
+    expect(prompts).toHaveLength(0);
+    await controller.handle(sendWith([refOf(`f${String(next - 1)}.ts`)]));
+    expect(prompts).toHaveLength(1);
+  });
+
+  it('forwards a mention only when it points at the text it claims', async () => {
+    const file = refOf('src/a.ts');
+    const { api, prompts } = fakeApi({ findImpl: () => Promise.resolve(found('src/a.ts')) });
+    const { controller } = setup(api, 'ses_old');
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'files.search', requestId: 'f1', query: 'a' });
+    const text = 'read @src/a.ts now';
+    const mention = { start: 5, end: 14, text: '@src/a.ts' };
+    await controller.handle(sendWith([{ ...file, mention }], text));
+    await controller.handle(
+      sendWith([{ ...file, mention: { start: 0, end: 9, text: '@src/a.ts' } }], text),
+    );
+    expect(prompts.map((prompt) => prompt.files)).toEqual([[{ ...file, mention }], [file]]);
+  });
+
+  it('adds the editor context to the whitelist and answers like the file picker', async () => {
+    const refs = [{ uri: 'file:///C:/work/src/a.ts?start=2&end=3', name: 'src/a.ts#2-3' }];
+    const { editor, calls } = fakeEditor({ context: { refs, ranged: 1, unsaved: false } });
+    const { api, prompts } = fakeApi();
+    const { controller, posted, logs } = setup(api, 'ses_old', editor);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'attachments.fromEditor', requestId: 'e1' });
+    expect(calls).toEqual([['editorContext', 'C:\\work']]);
+    expect(posted.slice(-2)).toEqual([
+      { type: 'attachments.picked', requestId: 'e1', files: refs },
+      { type: 'request.result', requestId: 'e1' },
+    ]);
+    expect(logs).toContain('info: editor context added: 0 file(s), 1 selection(s)');
+    await controller.handle(sendWith(refs));
+    expect(prompts).toHaveLength(1);
+  });
+
+  it('warns that the model reads the saved version when the buffer is dirty', async () => {
+    const refs = [{ uri: 'file:///C:/work/src/a.ts', name: 'src/a.ts' }];
+    const { editor } = fakeEditor({ context: { refs, ranged: 0, unsaved: true } });
+    const { controller, posted, logs } = setup(fakeApi().api, undefined, editor);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'attachments.fromEditor', requestId: 'e1' });
+    expect(posted).toContainEqual({
+      type: 'notice',
+      level: 'warning',
+      error: {
+        code: 'UnsavedChanges',
+        message: 'Unsaved changes: the model reads the saved version',
+      },
+    });
+    // The file still attaches, and the log has counts only.
+    expect(posted).toContainEqual({ type: 'attachments.picked', requestId: 'e1', files: refs });
+    expect(logs).toContain('info: editor context added: 1 file(s), 0 selection(s)');
+    expect(logs.join(' | ')).not.toContain('src/a.ts');
+  });
+
+  it('answers a failing editor context through request.result and attaches nothing', async () => {
+    const failure = Object.assign(new Error('Save the file first'), { name: 'NoFileOnDisk' });
+    const { editor } = fakeEditor({ failWith: failure });
+    const { controller, posted } = setup(fakeApi().api, undefined, editor);
+    await controller.handle({ type: 'attachments.fromEditor', requestId: 'e1' });
+    expect(posted).toEqual([
+      {
+        type: 'request.result',
+        requestId: 'e1',
+        error: { code: 'NoFileOnDisk', message: 'Save the file first' },
+      },
+    ]);
+  });
+
+  // Decision W2 of Sergio (22/10/2026). The editor side refuses a file outside the served folder
+  // (the fake stands for it, `isInServedFolder` is unit-tested in `fileMentions.test.ts`); the
+  // controller must then leave the whitelist alone, or `prompt.send` would take a `uri` the user
+  // never attached. The fake's error is a hand-made copy of the real one.
+  it('whitelists nothing when the editor refuses a file outside the served folder', async () => {
+    const outside = Object.assign(
+      new Error('Only files inside the workspace folder can be added'),
+      {
+        name: 'OutsideWorkspace',
+      },
+    );
+    const { editor, calls } = fakeEditor({ failWith: outside });
+    const { api, calls: apiCalls } = fakeApi();
+    const { controller, posted } = setup(api, 'ses_old', editor);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'attachments.fromEditor', requestId: 'e1' });
+    expect(calls).toEqual([['editorContext', 'C:\\work']]);
+    expect(posted.at(-1)).toEqual({
+      type: 'request.result',
+      requestId: 'e1',
+      error: {
+        code: 'OutsideWorkspace',
+        message: 'Only files inside the workspace folder can be added',
+      },
+    });
+    expect(posted.map((message) => message.type)).not.toContain('attachments.picked');
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'r1',
+      text: 'look',
+      delivery: 'queue',
+      files: [{ uri: 'file:///C:/Users/me/.ssh/config', name: 'config' }],
+    });
+    expect(apiCalls).not.toContain('session.prompt');
+    expect(posted.at(-1)).toMatchObject({ error: { code: 'AttachmentRejected' } });
+  });
+
+  it('opens a chip against the folder the server serves', async () => {
+    const { editor, calls } = fakeEditor();
+    const { controller } = setup(fakeApi().api, undefined, editor);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'editor.open', path: 'file:///C:/work/src/a.ts', line: 2 });
+    expect(calls).toEqual([['open', 'file:///C:/work/src/a.ts', 2, undefined, 'C:\\work']]);
   });
 });
 

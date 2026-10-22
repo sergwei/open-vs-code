@@ -13,10 +13,10 @@
 // (F5 points 1, 6, 8-11).
 import { createRoot } from 'solid-js';
 import { render } from 'solid-js/web';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MessageInfo, Part, RequestResolution, SessionStatus } from '../../src/shared/model';
 import type { HostToWebview, WebviewToHost } from '../../src/shared/protocol';
-import { App } from './App';
+import { App, FILE_SEARCH_DEBOUNCE_MS } from './App';
 import { createChatStore, type ChatStore } from './store/chatStore';
 import { must, splitRequestId } from './testing';
 import { createUiState } from './uiState';
@@ -951,7 +951,10 @@ describe('fork from a message (issue #21)', () => {
     h.button('Fork from here: look at these').click();
     h.apply({ type: 'request.result', requestId: splitRequestId(h.sent[0]).requestId });
     // Only the pending chips of the prompt box: the message's own chips are in the conversation.
-    const chips = [...h.container.querySelectorAll('.chips .chip-name')].map((c) => c.textContent);
+    // The chip name is a button that opens the file (a `file:` uri) or plain text (anything else).
+    const chips = [...h.container.querySelectorAll('.chips .chip-open, .chips .chip-name')].map(
+      (c) => c.textContent,
+    );
     expect(chips).toEqual(['a.ts']);
   });
 
@@ -1688,5 +1691,264 @@ describe('reasoning variant selector (issue #61)', () => {
     });
     expect(variantTrigger(h)?.getAttribute('aria-disabled')).toBe('true');
     expect(h.container.querySelector('.prompt-actions .variant-trigger')).not.toBeNull();
+  });
+});
+
+// E7-file-context (issues #28/#29, decisions Q1-Q4 of Sergio). Protects: one `files.search` per
+// pause in typing (and none in `pending`, or Send would lock on every key), only the answer to the
+// newest search reaching the popup, a picked result becoming BOTH a chip and `@name` text with the
+// offsets of that text sent as `mention` (and a chip and its text staying independent when one of
+// them is deleted), the files and mentions being structured-cloneable (a store Proxy would throw
+// DataCloneError in `postMessage`), Add selection asking the host and failing with a visible
+// notice, and the chips of the conversation opening the file at the start of its range.
+// Provenance: fabricated host messages, jsdom, fake timers; the real round trip is
+// `chatController.e2e.test.ts` and `test:visual` step 16.
+describe('@ mentions and the editor context (issues #28/#29)', () => {
+  const SAMPLE = { uri: 'file:///ws/src/sample.ts', name: 'src/sample.ts' };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** The ids of the `files.search` requests sent so far, oldest first. */
+  const searches = (h: Harness) =>
+    h.sent.flatMap((message) => (message.type === 'files.search' ? [message] : []));
+
+  /** Types `text` (caret at its end) and lets the debounce fire. */
+  function typeAndWait(h: Harness, text: string): void {
+    const field = h.textarea();
+    field.value = text;
+    field.setSelectionRange(text.length, text.length);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    vi.advanceTimersByTime(FILE_SEARCH_DEBOUNCE_MS);
+  }
+
+  const press = (h: Harness, key: string): void => {
+    h.textarea().dispatchEvent(
+      new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }),
+    );
+  };
+
+  it('asks the host once after typing pauses, and does not lock Send', () => {
+    vi.useFakeTimers();
+    const h = start();
+    h.apply(connected);
+    for (const text of ['@s', '@sa', '@sam']) h.type(text);
+    expect(searches(h)).toEqual([]);
+    vi.advanceTimersByTime(FILE_SEARCH_DEBOUNCE_MS);
+    expect(searches(h)).toMatchObject([{ type: 'files.search', query: 'sam' }]);
+    expect(h.store.state.pending).toEqual([]);
+    expect(h.button('Send').disabled).toBe(false);
+  });
+
+  it('does not search for a bare @, and forgets the results when the popup closes', () => {
+    vi.useFakeTimers();
+    const h = start();
+    h.apply(connected);
+    typeAndWait(h, '@');
+    expect(searches(h)).toEqual([]);
+    typeAndWait(h, '@sa');
+    const request = searches(h)[0];
+    h.textarea().focus(); // jsdom fires `blur` only for an element that has the focus
+    h.textarea().blur();
+    h.apply({
+      type: 'files.found',
+      requestId: request?.requestId ?? '',
+      query: 'sa',
+      files: [SAMPLE],
+    });
+    expect(h.store.state.fileSearch.files).toEqual([]);
+  });
+
+  it('shows only the answer to the newest search', () => {
+    vi.useFakeTimers();
+    const h = start();
+    h.apply(connected);
+    typeAndWait(h, '@sa');
+    typeAndWait(h, '@sam');
+    const [first, second] = searches(h);
+    h.apply({
+      type: 'files.found',
+      requestId: first?.requestId ?? '',
+      query: 'sa',
+      files: [SAMPLE],
+    });
+    expect(h.container.querySelectorAll('[role="option"]')).toHaveLength(0);
+    h.apply({
+      type: 'files.found',
+      requestId: second?.requestId ?? '',
+      query: 'sam',
+      files: [{ uri: 'file:///ws/src/shared/model.ts', name: 'src/shared/model.ts' }],
+    });
+    expect([...h.container.querySelectorAll('[role="option"]')].map((o) => o.textContent)).toEqual([
+      'model.tssrc/shared',
+    ]);
+  });
+
+  /** Types `look @sa`, answers the search with SAMPLE and picks it with Enter. */
+  function pickSample(h: Harness): void {
+    typeAndWait(h, 'look @sa');
+    const request = searches(h)[0];
+    h.apply({
+      type: 'files.found',
+      requestId: request?.requestId ?? '',
+      query: 'sa',
+      files: [SAMPLE],
+    });
+    press(h, 'Enter');
+  }
+
+  it('turns a picked result into a chip and @name text, and sends the offsets of that text', () => {
+    vi.useFakeTimers();
+    const h = start();
+    h.apply(connected);
+    pickSample(h);
+    expect(h.textarea().value).toBe('look @src/sample.ts ');
+    expect(
+      [...h.container.querySelectorAll('.chips .chip-open')].map((c) => c.textContent),
+    ).toEqual(['src/sample.ts']);
+    expect(h.store.state.fileSearch.requestId).toBeUndefined();
+    expect(h.sent).toHaveLength(1); // only the search: Enter picked, it did not send
+
+    h.button('Send').click();
+    const prompt = h.sent[1];
+    expect(prompt).toMatchObject({
+      type: 'prompt.send',
+      // The trailing space was trimmed before the offsets were computed.
+      text: 'look @src/sample.ts',
+      files: [{ ...SAMPLE, mention: { start: 5, end: 19, text: '@src/sample.ts' } }],
+    });
+    expect(() => structuredClone(prompt)).not.toThrow();
+    // Sending forgets the search.
+    expect(h.store.state.fileSearch.requestId).toBeUndefined();
+  });
+
+  // Q1: chip and text are independent. Deleting the text keeps the file; deleting the chip keeps
+  // the text, which the model then reads as a plain @path.
+  it('sends the file without a mention when its @name text was deleted', () => {
+    vi.useFakeTimers();
+    const h = start();
+    h.apply(connected);
+    pickSample(h);
+    h.type('look');
+    h.button('Send').click();
+    const prompt = h.sent[1];
+    expect(prompt).toMatchObject({ text: 'look', files: [SAMPLE] });
+    expect(prompt && 'files' in prompt ? prompt.files[0] : undefined).toEqual(SAMPLE);
+  });
+
+  it('keeps the @name text as plain text when the chip is removed', () => {
+    vi.useFakeTimers();
+    const h = start();
+    h.apply(connected);
+    pickSample(h);
+    h.button('Remove src/sample.ts').click();
+    expect(h.container.querySelector('.chip')).toBeNull();
+    expect(h.textarea().value).toBe('look @src/sample.ts ');
+    h.button('Send').click();
+    expect(h.sent[1]).toMatchObject({ text: 'look @src/sample.ts', files: [] });
+  });
+
+  it('puts a picked file back as a chip, with the text, when the send fails', () => {
+    vi.useFakeTimers();
+    const h = start();
+    h.apply(connected);
+    pickSample(h);
+    h.button('Send').click();
+    const sent = h.sent[1];
+    h.apply({
+      type: 'request.result',
+      requestId: sent && 'requestId' in sent ? sent.requestId : '',
+      error: { code: 'ServerUnavailable', message: 'down' },
+    });
+    expect(h.textarea().value).toBe('look @src/sample.ts');
+    expect(h.container.querySelectorAll('.chips .chip-open')).toHaveLength(1);
+  });
+
+  it('asks the host for the editor context and shows what comes back as chips', () => {
+    const h = start();
+    h.apply(connected);
+    h.button('Add selection').click();
+    const request = h.sent[0];
+    expect(request).toMatchObject({ type: 'attachments.fromEditor' });
+    const requestId = request && 'requestId' in request ? request.requestId : '';
+    expect(h.store.state.pending).toEqual([requestId]);
+    h.apply(
+      {
+        type: 'attachments.picked',
+        requestId,
+        files: [{ uri: 'file:///ws/src/a.ts?start=2&end=3', name: 'src/a.ts#2-3' }],
+      },
+      { type: 'request.result', requestId },
+    );
+    expect(must(h.container, '.chips .chip-open').textContent).toBe('src/a.ts#2-3');
+    expect(h.store.state.pending).toEqual([]);
+  });
+
+  it('shows why Add selection found nothing to add', () => {
+    const h = start();
+    h.apply(connected);
+    h.button('Add selection').click();
+    const request = h.sent[0];
+    h.apply({
+      type: 'request.result',
+      requestId: request && 'requestId' in request ? request.requestId : '',
+      error: { code: 'NoFileOnDisk', message: 'Save the file first' },
+    });
+    expect(must(h.container, '[role="alert"]').textContent).toContain('Save the file first');
+    expect(h.container.querySelector('.chip')).toBeNull();
+  });
+
+  it('keeps Add selection inert, and aria-disabled, without a connection', () => {
+    const h = start();
+    const add = h.button('Add selection');
+    expect(add.getAttribute('aria-disabled')).toBe('true');
+    add.click();
+    expect(h.sent).toEqual([]);
+    h.apply(connected);
+    expect(add.getAttribute('aria-disabled')).toBeNull();
+  });
+
+  it('opens a file of the conversation at the start of its range from its chip', () => {
+    const h = start();
+    h.apply(
+      ...openSession([
+        userWithFiles('m1', 'read this', [
+          { mime: 'text/plain', uri: 'file:///ws/src/a.ts?start=2&end=3', name: 'src/a.ts#2-3' },
+          { mime: 'text/plain', name: 'no-uri.txt' },
+        ]),
+      ]),
+    );
+    const chips = h.container.querySelectorAll('[role="log"] .message-files .chip');
+    expect(chips).toHaveLength(2);
+    // Only a chip with a `file:` URL is a button; the other stays plain text.
+    expect(h.container.querySelectorAll('[role="log"] .chip-open')).toHaveLength(1);
+    h.button('Open src/a.ts, lines 2-3').click();
+    expect(h.sent).toEqual([{ type: 'editor.open', path: 'file:///ws/src/a.ts', line: 2 }]);
+  });
+
+  it('forgets the search when the open session changes', () => {
+    vi.useFakeTimers();
+    const h = start();
+    h.apply(connected);
+    typeAndWait(h, '@sa');
+    const request = searches(h)[0];
+    h.apply({
+      type: 'snapshot',
+      snapshot: {
+        sessions: [{ id: 'ses_2', createdAt: 1, updatedAt: 2 }],
+        statuses: {},
+        open: { sessionID: 'ses_2', messages: [], parts: {} },
+        requests: { permissions: [], forms: [] },
+        resolutions: [],
+      },
+    });
+    h.apply({
+      type: 'files.found',
+      requestId: request?.requestId ?? '',
+      query: 'sa',
+      files: [SAMPLE],
+    });
+    expect(h.store.state.fileSearch.files).toEqual([]);
   });
 });
