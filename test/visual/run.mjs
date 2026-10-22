@@ -3304,6 +3304,175 @@ try {
     );
     assertNoWebviewErrors('@ mentions');
   });
+
+  // Issue #25 (decisions of Sergio, 22/10/2026, Engram #1097): the dimmed context line under the
+  // session title, after a REAL turn with the free model. The free model costs 0, so the line must
+  // show no cost; a paid/costly turn and a compaction are covered only by the synthetic e2e (this
+  // run has no credentials and no UI to compact before issue #34). Self-contained: it makes its own
+  // session. The 80 % warning level is not reachable with one short turn and is NOT judged here.
+  await step('17 context and cost line (issue #25)', async () => {
+    const THEMES = [
+      ['light', 'Default Light Modern'],
+      ['dark', 'Default Dark Modern'],
+      ['hc-dark', 'Default High Contrast'],
+      ['hc-light', 'Default High Contrast Light'],
+    ];
+    /** The line: text, names, level, style attributes and where it sits. Self-contained (serialized). */
+    const line = () =>
+      web.inDoc((doc) => {
+        const element = doc.querySelector('.usage-line');
+        if (!element) return null;
+        const shown = element.querySelector('[aria-hidden="true"]');
+        const spoken = element.querySelector('.visually-hidden');
+        return {
+          // The visible shorthand (the aria-hidden span) and the full sentence (visually hidden).
+          text: shown?.textContent ?? '',
+          label: spoken?.textContent ?? '',
+          tooltip: shown?.getAttribute('title') ?? '',
+          // What assistive tech reads: the text outside every aria-hidden subtree.
+          readable: [...element.children]
+            .filter((child) => child.getAttribute('aria-hidden') !== 'true')
+            .map((child) => child.textContent ?? '')
+            .join(''),
+          tag: element.tagName,
+          ownAria: ['role', 'aria-label', 'title'].filter((name) => element.hasAttribute(name)),
+          level: element.getAttribute('data-level') ?? '',
+          live: element.hasAttribute('aria-live') || element.closest('[aria-live]') !== null,
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+          underTitle:
+            element.parentElement?.classList.contains('header-area') === true &&
+            element.previousElementSibling?.classList.contains('chat-header') === true,
+          overflowPx: element.scrollWidth - element.clientWidth,
+        };
+      });
+    /**
+     * Text/background contrast of the line. Self-contained (it is serialized into the page); the
+     * colour maths is a copy of the one in {@link measureCode}. The base is the side bar background
+     * (the webview body is transparent), and the line is painted over its ancestors.
+     */
+    const contrast = () =>
+      web.inDoc((doc) => {
+        const parse = (value) => {
+          const text = String(value).trim();
+          let match =
+            /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+%?))?\s*\)$/i.exec(
+              text,
+            );
+          if (match) {
+            let alpha = match[4] === undefined ? 1 : Number.parseFloat(match[4]);
+            if (match[4]?.endsWith('%')) alpha /= 100;
+            return [Number(match[1]), Number(match[2]), Number(match[3]), alpha];
+          }
+          match = /^#([0-9a-f]{3,8})$/i.exec(text);
+          if (match) {
+            let hex = match[1];
+            if (hex.length === 3 || hex.length === 4) hex = [...hex].map((c) => c + c).join('');
+            const alpha = hex.length === 8 ? Number.parseInt(hex.slice(6, 8), 16) / 255 : 1;
+            return [
+              Number.parseInt(hex.slice(0, 2), 16),
+              Number.parseInt(hex.slice(2, 4), 16),
+              Number.parseInt(hex.slice(4, 6), 16),
+              alpha,
+            ];
+          }
+          return null;
+        };
+        const over = (front, back) =>
+          [0, 1, 2].map((i) => front[i] * front[3] + back[i] * (1 - front[3])).concat([1]);
+        const luminance = (color) => {
+          const [r, g, b] = color.map((channel) => {
+            const value = channel / 255;
+            return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+          });
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const win = doc.defaultView;
+        const element = doc.querySelector('.usage-line');
+        if (!element) return null;
+        const root = win.getComputedStyle(doc.documentElement);
+        const base =
+          parse(root.getPropertyValue('--vscode-sideBar-background')) ??
+          parse(root.getPropertyValue('--vscode-editor-background'));
+        if (!base) return null;
+        const chain = [];
+        for (let node = element; node; node = node.parentElement) chain.unshift(node);
+        let background = [base[0], base[1], base[2], 1];
+        for (const node of chain) {
+          const own = parse(win.getComputedStyle(node).backgroundColor);
+          if (own && own[3] > 0) background = over(own, background);
+        }
+        const color = parse(win.getComputedStyle(element).color);
+        if (!color) return null;
+        const [high, low] = [luminance(over(color, background)), luminance(background)].sort(
+          (x, y) => y - x,
+        );
+        return {
+          ratio: (high + 0.05) / (low + 0.05),
+          color: win.getComputedStyle(element).color,
+          background: `rgb(${background.slice(0, 3).map(Math.round).join(', ')})`,
+        };
+      });
+
+    assertNoWebviewErrors('before the context line step');
+    check(await clickButton('New session'), 'New session is pressed');
+    await page.waitForTimeout(1500);
+    check((await line()) === null, 'a session that has not answered yet shows no context line');
+    await send('Reply with exactly: DONE');
+    if (!(await waitIdle(120_000)))
+      warn('the free model did not finish the turn in 120 s; going on');
+    // The usage of a step arrives with `step.ended`, a moment before the turn goes idle.
+    const appeared = await waitFor(async () => (await line()) !== null, 20_000);
+    check(appeared === true, 'the context line appears once a step has reported its tokens');
+    const state = await line();
+    console.log(`  line: ${JSON.stringify(state)}`);
+    check(
+      state !== null && /^Context \d+[KM]? \/ \d+[KM]? \(\d+%\)$/.test(state.text),
+      `the text reads "Context <n>K / <limit>K (<p>%)" and nothing else, no cost for the free model (${JSON.stringify(state?.text)})`,
+    );
+    check(
+      state !== null &&
+        /^Context: [\d,]+ tokens of [\d,]+ \(\d+%\)\.$/.test(state.label) &&
+        state.readable === state.label,
+      `what a screen reader reads is the full sentence once, the shorthand is aria-hidden (${JSON.stringify(state?.readable)})`,
+    );
+    check(
+      state?.tag === 'P' &&
+        state.ownAria.length === 0 &&
+        state.tooltip === state.label &&
+        state.live === false,
+      `the line is a plain <p> with no role, aria-label or title of its own, the tooltip sits on the aria-hidden span, and it is not a live region (own: ${JSON.stringify(state?.ownAria)})`,
+    );
+    check(
+      state?.level === 'normal',
+      `one short turn leaves the context level normal (${state?.level})`,
+    );
+    check(state?.underTitle === true, 'the line sits in the header area right under the title bar');
+    check(
+      state?.styled === 0,
+      `no inline style attribute in the webview body (${String(state?.styled)})`,
+    );
+    check(
+      state !== null && state.overflowPx <= 1,
+      `the line fits its width, nothing is cut (overflow ${String(state?.overflowPx)} px)`,
+    );
+
+    for (const [name, theme] of THEMES) {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+      const look = await contrast();
+      console.log(`  line contrast ${name}: ${JSON.stringify(look)}`);
+      check(
+        look !== null && look.ratio >= 4.5,
+        `the context line has text contrast >= 4.5 in ${name} (${look ? look.ratio.toFixed(2) : 'not found'})`,
+      );
+      await shot(`17-context-line-${name}`);
+    }
+    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
+    await page.waitForTimeout(2500);
+    assertNoWebviewErrors('context line');
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;

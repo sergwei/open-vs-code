@@ -213,6 +213,13 @@ describe('real opencode', function () {
       text.includes('turn finished: succeeded'),
       `the turn did not end succeeded; log:\n${text}`,
     );
+    // Issue #25: the real server publishes `session.usage.updated` with accumulated totals while the
+    // turn runs (before `execution.succeeded`), and the host logs ids and a token count only.
+    assert.match(
+      text,
+      /usage updated for ses_\w+: [1-9]\d* tokens/,
+      `no usage update with tokens was logged; log:\n${text}`,
+    );
   });
 
   /**
