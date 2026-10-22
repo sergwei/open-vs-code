@@ -1003,3 +1003,87 @@ describe('catalog and selection draft (issues #23/#24)', () => {
     });
   });
 });
+
+// E7-file-context (#28). Protects: the popup shows only the answer to the LAST search (typing leaves
+// older ones in flight), a search never touches `pending` (a keystroke must not disable Send),
+// and the results are plain copies (a store Proxy would throw DataCloneError in `postMessage`).
+describe('file search (issue #28)', () => {
+  const found = (requestId: string, query: string, names: string[]) =>
+    ({
+      type: 'files.found' as const,
+      requestId,
+      query,
+      files: names.map((name) => ({ uri: `file:///ws/${name}`, name })),
+    }) satisfies Parameters<ChatStore['apply']>[0];
+
+  it('accepts only the answer to the newest request', () => {
+    withStore((store) => {
+      store.beginFileSearch('f1', 'a');
+      store.beginFileSearch('f2', 'ab');
+      store.apply(found('f1', 'a', ['old.ts']));
+      expect(store.state.fileSearch.files).toEqual([]);
+      expect(store.state.fileSearch.loading).toBe(true);
+      store.apply(found('f2', 'ab', ['new.ts']));
+      expect(store.state.fileSearch).toMatchObject({
+        query: 'ab',
+        loading: false,
+        files: [{ name: 'new.ts' }],
+      });
+    });
+  });
+
+  it('never touches pending and keeps the previous results while a newer search runs', () => {
+    withStore((store) => {
+      store.beginFileSearch('f1', 'a');
+      store.apply(found('f1', 'a', ['a.ts']));
+      store.beginFileSearch('f2', 'ab');
+      expect(store.state.pending).toEqual([]);
+      expect(store.state.fileSearch.files).toHaveLength(1);
+      expect(store.state.fileSearch).toMatchObject({ query: 'ab', loading: true });
+    });
+  });
+
+  it('keeps the error of a failed search and clears it on the next one', () => {
+    withStore((store) => {
+      store.beginFileSearch('f1', 'a');
+      store.apply({
+        type: 'files.found',
+        requestId: 'f1',
+        query: 'a',
+        files: [],
+        error: { code: 'ServerUnavailable', message: 'down' },
+      });
+      expect(store.state.fileSearch.error).toEqual({ code: 'ServerUnavailable', message: 'down' });
+      store.beginFileSearch('f2', 'ab');
+      expect(store.state.fileSearch.error).toBeUndefined();
+    });
+  });
+
+  it('ignores every answer after the search was cleared', () => {
+    withStore((store) => {
+      store.beginFileSearch('f1', 'a');
+      store.clearFileSearch();
+      store.apply(found('f1', 'a', ['late.ts']));
+      expect(store.state.fileSearch).toEqual({
+        requestId: undefined,
+        query: '',
+        files: [],
+        loading: false,
+        error: undefined,
+      });
+    });
+  });
+
+  it('stores structured-cloneable copies of the results', () => {
+    withStore((store) => {
+      store.beginFileSearch('f1', 'a');
+      const message = found('f1', 'a', ['a.ts']);
+      store.apply(message);
+      const stored = store.state.fileSearch.files[0];
+      expect(stored).toBeDefined();
+      expect(stored).not.toBe(message.files[0]);
+      const plain = { uri: stored?.uri, name: stored?.name };
+      expect(() => structuredClone(plain)).not.toThrow();
+    });
+  });
+});

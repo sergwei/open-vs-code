@@ -1387,6 +1387,11 @@ button.secondary:hover:not(:disabled),
   margin-left: auto;
 }
 
+/* Add selection and Attach sit side by side: only the first one takes the free space. */
+.prompt-actions > button.secondary + button.secondary {
+  margin-left: 0;
+}
+
 /* ---------- agent and model selectors (issues #23/#24) ---------- */
 
 /* Build | Plan: native radios hidden visually, each label is a segment. */
@@ -1548,6 +1553,102 @@ button.secondary[aria-disabled='true'] {
   border: 0;
 }
 
+/* The name of a chip is a button that opens the file (issues #28/#29): it looks like the text. */
+.chip-open {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.chip-open:hover {
+  text-decoration: underline;
+}
+
+/* ---------- the @ popup (issue #28) ---------- */
+
+/* Over the top edge of the prompt box, like the model panel; the focus stays in the textarea. */
+.mention-popup {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  z-index: 10;
+  margin-bottom: 4px;
+  display: flex;
+  flex-direction: column;
+  max-height: 40vh;
+  box-sizing: border-box;
+  overflow: hidden;
+  color: var(--vscode-editorSuggestWidget-foreground, var(--vscode-foreground));
+  background: var(--vscode-editorSuggestWidget-background, var(--vscode-editorWidget-background));
+  border: 1px solid
+    var(--vscode-editorSuggestWidget-border, var(--vscode-widget-border, transparent));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, transparent);
+}
+
+.mention-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.mention-option {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.mention-option:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+/* The highlighted row (the one Enter picks): the suggest widget's own selection colours. */
+.mention-option[aria-selected='true'] {
+  color: var(--vscode-editorSuggestWidget-selectedForeground, var(--vscode-foreground));
+  background: var(
+    --vscode-editorSuggestWidget-selectedBackground,
+    var(--vscode-list-activeSelectionBackground)
+  );
+}
+
+.mention-name {
+  flex: none;
+  max-width: 70%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-dir {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+}
+
+.mention-option[aria-selected='true'] .mention-dir {
+  color: inherit;
+}
+
+.mention-status {
+  padding: 4px 8px;
+  color: var(--vscode-foreground);
+}
+
 /* ---------- high contrast ---------- */
 
 [class*='vscode-high-contrast'] .message-user,
@@ -1568,6 +1669,7 @@ button.secondary[aria-disabled='true'] {
 [class*='vscode-high-contrast'] button.secondary,
 [class*='vscode-high-contrast'] .session-picker,
 [class*='vscode-high-contrast'] .model-panel,
+[class*='vscode-high-contrast'] .mention-popup,
 [class*='vscode-high-contrast'] .agent-toggle,
 [class*='vscode-high-contrast'] .session-search,
 [class*='vscode-high-contrast'] .subagent-sessions,
@@ -1604,6 +1706,20 @@ button.secondary[aria-disabled='true'] {
   background: transparent;
   outline: 1px solid var(--vscode-contrastBorder);
   border-left-color: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+}
+
+/* The highlighted @ row needs a mark that does not rely on a tint. */
+[class*='vscode-high-contrast'] .mention-option[aria-selected='true'] {
+  background: transparent;
+  color: var(--vscode-foreground);
+  outline: 1px solid var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+  outline-offset: -1px;
+}
+
+[class*='vscode-high-contrast'] .mention-option:hover {
+  background: transparent;
+  outline: 1px dashed var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+  outline-offset: -1px;
 }
 
 [class*='vscode-high-contrast'] .model-option:hover {

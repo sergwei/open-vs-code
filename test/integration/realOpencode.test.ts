@@ -49,8 +49,11 @@
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
 import { spawn } from 'node:child_process';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
+import { toEditorRef } from '../../src/extension/fileMentions';
 import {
   CLEAR_SERVER_PASSWORD_COMMAND_ID,
   CONFIG_SECTION,
@@ -401,6 +404,213 @@ describe('real opencode', function () {
     assert.fail(
       `${file} did not become the active editor; active: ${vscode.window.activeTextEditor?.document.uri.fsPath ?? '(none)'}`,
     );
+  });
+
+  /**
+   * `@` mention search (issue #28) against a REAL opencode: `files.search` reaches
+   * `GET /api/fs/find`, the answer is mapped and the host logs `file search: N results` with N >= 1
+   * for a file that exists in the served folder; and a prompt that mentions that file (its `uri`
+   * is built here the way the host builds it, `pathToFileURL`) is accepted by the whitelist
+   * (`offeredUris`) and by the server, with a `mention`, and the turn ends `succeeded`.
+   *
+   * Protects: the v2 route and its `{location, data}` answer (the issue text cites the v1
+   * `/find/file`), the `type: 'file'` and `limit` query, and the real server accepting
+   * `files[].mention`. The search is retried for up to 25 s: the real server refreshes its file
+   * index every 10 s (read in `search.ts@843a6c51`), so a file written a moment ago may not be
+   * listed yet; 25 s and the 2 s pause are our own choices. Writes `src/sample.ts` (the same file
+   * as the case above) into the temporary workspace folder. Needs network and the free model for
+   * the turn. The reply text is not asserted.
+   */
+  it('finds a file with files.search and sends a prompt that mentions it', async function () {
+    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    assert.ok(folder, 'no workspace folder is open');
+    const file = path.join(folder, 'src', 'sample.ts');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'export const a = 1;\nexport const b = 2;\nexport const c = 3;\n');
+
+    const log = await openLogCursor();
+    const deadline = Date.now() + 25_000;
+    let attempt = 0;
+    while (!/file search: [1-9]\d* results/.test(log.added()) && Date.now() < deadline) {
+      attempt += 1;
+      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+        type: 'files.search',
+        requestId: `integration-find-${String(attempt)}`,
+        query: 'sample',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+    assert.ok(
+      /file search: [1-9]\d* results/.test(log.added()),
+      `no search returned a result for "sample" in ${attempt} attempts; log:\n${log.added()}`,
+    );
+
+    const text = 'Reply with exactly: OK. Do not use any tools. See @src/sample.ts';
+    const marker = '@src/sample.ts';
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'integration-mention-1',
+      text,
+      delivery: 'queue',
+      files: [
+        {
+          uri: pathToFileURL(file).href,
+          name: 'src/sample.ts',
+          mention: {
+            start: text.indexOf(marker),
+            end: text.indexOf(marker) + marker.length,
+            text: marker,
+          },
+        },
+      ],
+    });
+    await log.waitFor('prompt accepted for ses_', 10_000);
+    await log.waitFor('turn finished: ', TURN_WAIT_MS);
+    const added = log.added();
+    assert.ok(!added.includes('rejected: an attachment'), `the file was refused; log:\n${added}`);
+    assert.ok(
+      added.includes('turn finished: succeeded'),
+      `the turn did not succeed; log:\n${added}`,
+    );
+  });
+
+  /**
+   * Editor context (issue #29) against a REAL opencode and a real folder: the selection of the open
+   * file becomes one reference with its line range, and a prompt that carries that reference
+   * (built with the same `toEditorRef` the host uses, `?start=1&end=2`) is accepted by the host and
+   * by the real server, and the turn ends `succeeded`.
+   *
+   * Protects: `attachments.fromEditor` inside a folder (the unit-tested name/URL logic with a real
+   * `TextEditor`), and the real server taking a `file://…?start&end` URL. What the model DID with
+   * the range is not asserted (the reply is free text); the spike of the planner saw the stored
+   * `data` hold exactly the selected lines. Depends on `src/sample.ts` from the case above.
+   */
+  it('adds the selection of the active file and sends it with its line range', async function () {
+    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    assert.ok(folder, 'no workspace folder is open');
+    const file = path.join(folder, 'src', 'sample.ts');
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    const editor = await vscode.window.showTextDocument(document);
+    editor.selection = new vscode.Selection(0, 0, 1, 5);
+
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'attachments.fromEditor',
+      requestId: 'integration-context-1',
+    });
+    await log.waitFor('editor context added: 0 file(s), 1 selection(s)', 8_000);
+
+    const ref = toEditorRef(folder, file, { start: 1, end: 2 });
+    assert.strictEqual(ref.name, 'src/sample.ts#1-2');
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'integration-context-2',
+      text: 'Reply with exactly: OK. Do not use any tools.',
+      delivery: 'queue',
+      files: [ref],
+    });
+    await log.waitFor('prompt accepted for ses_', 10_000);
+    await log.waitFor('turn finished: ', TURN_WAIT_MS);
+    const added = log.added();
+    assert.ok(!added.includes('rejected: an attachment'), `the range was refused; log:\n${added}`);
+    assert.ok(
+      added.includes('turn finished: succeeded'),
+      `the turn did not succeed; log:\n${added}`,
+    );
+  });
+
+  // Editor context cases that need a served folder (decision W2 of Sergio, 22/10/2026: only files
+  // inside it can be added). They moved here from `editorActions.test.ts`, whose configuration has
+  // no folder. No turn is sent: the outcome is read from the log lines the controller writes
+  // (`request <id> failed: <code>` and `editor context added: N file(s), M selection(s)`).
+
+  /**
+   * Opens `src/sample.ts` of the served folder, writing it if the case above did not, with an
+   * empty selection at the start: an editor already open keeps the selection a previous case left
+   * (a first run of these cases saw the old selection counted instead of the whole file).
+   */
+  async function openSample(): Promise<vscode.TextEditor> {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    assert.ok(folder, 'no workspace folder is open');
+    const file = path.join(folder, 'src', 'sample.ts');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'export const a = 1;\nexport const b = 2;\nexport const c = 3;\n');
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    const editor = await vscode.window.showTextDocument(document);
+    editor.selections = [new vscode.Selection(0, 0, 0, 0)];
+    return editor;
+  }
+
+  it('adds the whole file when nothing is selected', async function () {
+    await openSample();
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'attachments.fromEditor',
+      requestId: 'integration-context-file',
+    });
+    await log.waitFor('editor context added: 1 file(s), 0 selection(s)', 8_000);
+  });
+
+  // The focus sits in the chat view when a user presses the button, so the view is focused first:
+  // `activeTextEditor` must still be the file.
+  it('adds one selection per non-empty selection while the chat view has the focus', async function () {
+    const editor = await openSample();
+    editor.selections = [new vscode.Selection(0, 0, 0, 4), new vscode.Selection(2, 0, 2, 4)];
+    await vscode.commands.executeCommand('openVsCode.chat.focus');
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'attachments.fromEditor',
+      requestId: 'integration-context-selections',
+    });
+    await log.waitFor('editor context added: 0 file(s), 2 selection(s)', 8_000);
+  });
+
+  it('warns that the saved version is what the model reads when the buffer is dirty', async function () {
+    const editor = await openSample();
+    try {
+      await editor.edit((builder) => {
+        builder.insert(new vscode.Position(0, 0), 'unsaved ');
+      });
+      assert.strictEqual(editor.document.isDirty, true);
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+        type: 'attachments.fromEditor',
+        requestId: 'integration-context-dirty',
+      });
+      await log.waitFor('editor context: the buffer has unsaved changes', 8_000);
+      await log.waitFor('editor context added: 1 file(s), 0 selection(s)', 8_000);
+    } finally {
+      // Back to the saved text, so later cases read the file as written.
+      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    }
+  });
+
+  it('refuses a file outside the open workspace folder (OutsideWorkspace)', async function () {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ovsc-outside-'));
+    try {
+      const file = path.join(dir, 'secret.ts');
+      fs.writeFileSync(file, 'export const secret = 1;\n');
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+      await vscode.window.showTextDocument(document);
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+        type: 'attachments.fromEditor',
+        requestId: 'integration-context-outside',
+      });
+      await log.waitFor(
+        'request integration-context-outside failed: OutsideWorkspace: Only files inside the workspace folder can be added',
+        8_000,
+      );
+      assert.ok(
+        !log.added().includes('editor context added'),
+        `a file outside the folder was added; log:\n${log.added()}`,
+      );
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // ---------------------------------------------------------------------------------------------

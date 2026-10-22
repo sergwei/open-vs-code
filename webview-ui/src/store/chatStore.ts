@@ -42,6 +42,10 @@
  *    changes which session is open; a snapshot that keeps the same open session leaves it alone.
  *    Nothing is sent to the host when the user picks: `prompt.send` carries the choice (decision of
  *    21/10/2026, Engram #1012). Alternative discarded: keep it only in the server's session.
+ *  - E7-file-context (issue #28) adds `fileSearch`, the results of the `@` popup. Like the session
+ *    list it stays OUT of `pending` (a keystroke must not disable Send) and accepts only the answer
+ *    to the LAST request (`fileSearch.requestId`), so a slow answer to an old query cannot replace
+ *    a newer one. `files.found` carries its own error, shown by the popup, not as a notice.
  * VERIFIED by `chatStore.test.ts` with fabricated messages (confirms this logic, not the host
  * contract). UNVERIFIED in a real webview until the F5 of issue #14.
  */
@@ -134,6 +138,20 @@ export interface SessionBrowserState {
   requestId: string | undefined;
 }
 
+/**
+ * The results of the `@` popup. `query` is the text they answer (or, while `loading`, the text
+ * being asked), `files` the host's references for it, `error` why the search failed. `requestId`
+ * is the newest request; only its answer is accepted. `files` keeps the previous results while a
+ * newer search is in flight, so the list does not flash empty on every pause in typing.
+ */
+export interface FileSearchState {
+  requestId: string | undefined;
+  query: string;
+  files: AttachmentRef[];
+  loading: boolean;
+  error: ErrorInfo | undefined;
+}
+
 /** A rename or delete of one session waiting for the host, with the request that will end it. */
 export interface SessionOp {
   op: 'renaming' | 'deleting';
@@ -164,6 +182,8 @@ export interface ChatState {
   browser: SessionBrowserState;
   /** Renames and deletes in flight, by session id. */
   sessionOps: { [sessionID: string]: SessionOp };
+  /** The `@` popup's results (issue #28). */
+  fileSearch: FileSearchState;
   open: OpenView;
   /** Pending permissions and forms of ANY session of the location, in order of arrival. */
   requests: { permissions: PermissionAsk[]; forms: FormAsk[] };
@@ -208,6 +228,17 @@ export interface ChatStore {
    * arrives. Does NOT touch `pending`.
    */
   beginSessionOp: (sessionID: string, op: SessionOp['op'], requestId: string) => void;
+  /**
+   * Starts a file search (issue #28): `requestId` becomes the only one whose `files.found` is
+   * accepted and the popup shows "searching" for `query`. Does NOT touch `pending`, so Send stays
+   * usable; the previous results stay until the answer arrives.
+   */
+  beginFileSearch: (requestId: string, query: string) => void;
+  /**
+   * Forgets the results and the request in flight: whatever answer arrives later is ignored. Called
+   * when the popup closes, when the prompt is sent and when the open session changes.
+   */
+  clearFileSearch: () => void;
   /** Removes the notice with that id (the user dismissed it). */
   dismissNotice: (id: number) => void;
   /** Adds files to the draft attachments, skipping any `uri` already there. */
@@ -248,6 +279,11 @@ export interface ChatStore {
   restoreSelection: (saved: SelectionDraft) => void;
 }
 
+/** No search: no request to wait for, no results. */
+function emptyFileSearch(): FileSearchState {
+  return { requestId: undefined, query: '', files: [], loading: false, error: undefined };
+}
+
 /** Empty open view: no session yet. */
 function emptyOpen(): OpenView {
   return { sessionID: undefined, messages: [], parts: {} };
@@ -273,6 +309,7 @@ export function createChatStore(): ChatStore {
       requestId: undefined,
     },
     sessionOps: {},
+    fileSearch: emptyFileSearch(),
     open: emptyOpen(),
     requests: { permissions: [], forms: [] },
     resolved: [],
@@ -658,6 +695,19 @@ export function createChatStore(): ChatStore {
       addDraftFiles(m.files);
     },
 
+    'files.found': (m) => {
+      // Only the answer to the newest search counts: typing leaves older ones in flight.
+      if (m.requestId !== state.fileSearch.requestId) return;
+      setState('fileSearch', {
+        query: m.query,
+        // Plain copies: the elements are read back into `postMessage` (a chip), and a store Proxy
+        // cannot be structured-cloned.
+        files: m.files.map((file) => ({ uri: file.uri, name: file.name })),
+        loading: false,
+        error: m.error,
+      });
+    },
+
     'ui.focus': (m) => {
       setState('focusTarget', m.target);
     },
@@ -680,6 +730,12 @@ export function createChatStore(): ChatStore {
     },
     beginSessionOp: (sessionID, op, requestId) => {
       setState('sessionOps', sessionID, { op, requestId });
+    },
+    beginFileSearch: (requestId, query) => {
+      setState('fileSearch', { requestId, query, loading: true, error: undefined });
+    },
+    clearFileSearch: () => {
+      setState('fileSearch', emptyFileSearch());
     },
     dismissNotice: (id) => {
       setState('notices', (notices) => notices.filter((notice) => notice.id !== id));

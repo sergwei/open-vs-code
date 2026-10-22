@@ -1,8 +1,9 @@
-import { createEffect, createMemo, createSignal, on, Show, untrack } from 'solid-js';
+import { createEffect, createMemo, createSignal, on, onCleanup, Show, untrack } from 'solid-js';
 import type { AttachmentRef } from '../../src/shared/protocol';
 import { EmptyState } from './chat/EmptyState';
 import { Header } from './chat/Header';
 import { HostContext, type SendToHost } from './chat/hostContext';
+import { mentionsFor } from './chat/mentionQuery';
 import { MessageList, type UserMessage } from './chat/MessageList';
 import { nextRequestId, PromptInput } from './chat/PromptInput';
 import { createHistory } from './chat/promptHistory';
@@ -25,6 +26,14 @@ import type { UiState } from './uiState';
 
 /** Built from its code point: a literal one in the source trips `no-irregular-whitespace`. */
 const NO_BREAK_SPACE = String.fromCharCode(0xa0);
+
+/**
+ * How long typing must pause before the `@` popup asks the host for files. Our choice (issue #28,
+ * plan Engram #1059): short enough to feel immediate, long enough that typing `@sample` costs one
+ * request, not six. Not measured with a real user; the host answers in 2-9 ms once the index is
+ * warm and about 1.3 s the first time (planner spike, real opencode 2.0.32).
+ */
+export const FILE_SEARCH_DEBOUNCE_MS = 150;
 
 /** What the last `prompt.send` carried, so a failed send can give the user their text back. */
 interface LastSend {
@@ -81,11 +90,23 @@ interface LastFork {
  * sent to the host when the user picks. The draft is persisted with the prompt draft, keyed by the
  * open session, and restored into the store at start.
  *
+ * Issues #28/#29 (decisions Q1-Q4 of Sergio, 22/10/2026, Engram #1064/#1065): the `@` popup's
+ * search is debounced here ({@link FILE_SEARCH_DEBOUNCE_MS}; the timer dies with the component and
+ * with a closed popup) and goes to the host as `files.search`, outside `pending`, so Send stays
+ * usable; the store keeps the answer to the last request. Picking a result adds the chip (the
+ * text `@name` is written by `PromptInput`). On send, each file is paired with the offsets of its
+ * `@name` in the text that goes out (`mentionsFor`); the file travels without a mention when the
+ * user deleted the text, and a typed `@name` without its chip is plain text. "Add selection" asks
+ * the host for the active file or selection (`attachments.fromEditor`, the answer reuses
+ * `attachments.picked`). The search is forgotten when a prompt is sent or the open session changes.
+ *
  * Decisions: Send is disabled while the session is busy and Stop takes its place (plan decision
  * 6; `steer`/`queue` while busy is not offered); every prompt goes with `delivery: 'queue'`;
  * Retry resends the text of the last user message of the open session, with the attachments of
- * it that this document picked itself (the host only accepts URIs its picker emitted; HYPOTHESIS
- * that the server echoes the same URI back in the user message, so a mismatch drops the file).
+ * it that this document picked itself (the host only accepts URIs it emitted; the planner's spike
+ * against a real opencode 2.0.32 saw the stored `source.uri` keep the URL as sent, query included,
+ * so the echoed URI matches; HYPOTHESIS for messages read back through `message.list`, and the
+ * mention is computed again from the resent text).
  * The "Stopped" announcement is decided by a flag set when Stop is pressed, so an abort the
  * server refuses and a turn that then ends on its own would still say "Stopped" (accepted).
  * VERIFIED by `App.test.tsx` in jsdom with a fake host; UNVERIFIED in a real webview (themes,
@@ -94,8 +115,8 @@ interface LastFork {
 export function App(props: { store: ChatStore; send: SendToHost; uiState: UiState }) {
   const state = props.store.state;
   const history = createHistory(props.uiState.history);
-  // Attachments pending when the view was last hidden. The host keeps the URIs its picker
-  // emitted for as long as it lives, so they are still accepted; if the host restarted, the send
+  // Attachments pending when the view was last hidden. The host keeps the URIs it emitted (picker,
+  // editor, search results up to a cap) for as long as it lives, so they are still accepted; if the host restarted, the send
   // fails with AttachmentRejected and the user removes the chip.
   props.store.addDraftFiles(props.uiState.files);
   props.store.restoreSelection({
@@ -250,6 +271,40 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     ),
   );
 
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => {
+    if (searchTimer !== undefined) clearTimeout(searchTimer);
+  });
+
+  /** Cancels the pending debounce and forgets the results: a late answer is then ignored. */
+  const clearFileSearch = (): void => {
+    if (searchTimer !== undefined) clearTimeout(searchTimer);
+    searchTimer = undefined;
+    props.store.clearFileSearch();
+  };
+
+  /**
+   * The `@` popup asks for `query` (or reports it closed with `undefined`). A closed popup and the
+   * bare `@` (empty query) forget everything; otherwise the request goes out once typing pauses
+   * ({@link FILE_SEARCH_DEBOUNCE_MS}), with its own id so only its answer is accepted.
+   */
+  const searchFiles = (query: string | undefined): void => {
+    if (query === undefined || query === '') {
+      clearFileSearch();
+      return;
+    }
+    if (searchTimer !== undefined) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      searchTimer = undefined;
+      const requestId = nextRequestId();
+      props.store.beginFileSearch(requestId, query);
+      props.send({ type: 'files.search', requestId, query });
+    }, FILE_SEARCH_DEBOUNCE_MS);
+  };
+
+  // The results belong to the conversation the user was typing in.
+  createEffect(on(() => state.open.sessionID, clearFileSearch, { defer: true }));
+
   /** Sends a prompt and starts waiting for its result. */
   const sendPrompt = (text: string, files: AttachmentRef[]): void => {
     const requestId = nextRequestId();
@@ -258,13 +313,15 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     // history in the conversation (`state.resolutions`) and stay.
     props.store.clearResolved();
     props.store.begin(requestId);
+    clearFileSearch();
     props.send({
       type: 'prompt.send',
       requestId,
       ...(state.open.sessionID === undefined ? {} : { sessionID: state.open.sessionID }),
       text,
       delivery: 'queue',
-      files,
+      // `lastSend.files` stays the plain refs: a failed send puts those back as chips.
+      files: mentionsFor(text, files),
       ...selectionToSend(selectionInput()),
     });
     focusInput?.();
@@ -309,6 +366,18 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     const requestId = nextRequestId();
     props.store.begin(requestId);
     props.send({ type: 'attachments.pick', requestId });
+  };
+
+  /**
+   * "Add selection" (issue #29): asks the host for the active file, or each non-empty selection of
+   * it with its line range. The files arrive as `attachments.picked`, like Attach, and a problem
+   * (no editor, a file not on disk) comes back as a notice through the `request.result`.
+   */
+  const addSelection = (): void => {
+    if (!connected()) return;
+    const requestId = nextRequestId();
+    props.store.begin(requestId);
+    props.send({ type: 'attachments.fromEditor', requestId });
   };
 
   /**
@@ -409,9 +478,18 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
           busy={busy()}
           sendDisabled={!canSend()}
           attachDisabled={!connected()}
+          addSelectionDisabled={!connected()}
+          fileSearch={state.fileSearch}
+          onMentionQuery={searchFiles}
+          onMentionPick={(file) => {
+            // Plain copy: the chip is read back into a `postMessage` when the prompt is sent.
+            props.store.addDraftFiles([{ uri: file.uri, name: file.name }]);
+            clearFileSearch();
+          }}
           onSubmit={submit}
           onStop={stop}
           onAttach={attach}
+          onAddSelection={addSelection}
           onRemoveFile={props.store.removeDraftFile}
           onFocusReady={(focus) => {
             focusInput = focus;

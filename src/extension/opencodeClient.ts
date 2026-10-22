@@ -11,6 +11,8 @@ import { OpenCode } from '@opencode/client';
 import type {
   AgentListInput,
   AgentListOutput,
+  FileFindInput,
+  FileFindOutput,
   FormListInput,
   FormListOutput,
   MessageListInput,
@@ -144,6 +146,23 @@ export interface ChatApi {
   };
   provider: { list(input?: ProviderListInput): Promise<ProviderListOutput> };
   agent: { list(input?: AgentListInput): Promise<AgentListOutput> };
+  /**
+   * File search of the @ mentions (issue #28). `find` is `GET /api/fs/find` (the `/find/file` of
+   * the issue text is v1); the answer is `{location, data}` UNWRAPPED, `data` holding
+   * `{path, type}` entries. `signal` aborts the request (a newer keystroke supersedes it).
+   * VERIFIED by the planner spike against a real opencode 2.0.32 (Windows 11, 22/10/2026, `fetch`
+   * with Basic auth and `x-opencode-directory`): the match is a case-insensitive fuzzy one
+   * (`promptinput` found `webview-ui/src/chat/PromptInput.tsx`), git-ignored paths are left out,
+   * an EMPTY query answers `data: []`, files come with `/` but directories end in `\` on Windows
+   * (mixed separators), and the first call took 1313 ms (ripgrep scan) and the next ones 2-9 ms.
+   * POSIX (another search backend) UNVERIFIED: the host normalises every path it gets.
+   */
+  file: {
+    find(
+      input: FileFindInput,
+      options?: { readonly signal?: AbortSignal },
+    ): Promise<FileFindOutput>;
+  };
   /** Pending requests of the whole location: both lists return `{location, data}` UNWRAPPED. */
   form: { list(input?: FormListInput): Promise<FormListOutput> };
   permission: {
