@@ -14,11 +14,13 @@
 #   versioned, so without them "CLAUDE.md and .claude/ do not ship" would be checked against
 #   files that do not exist in CI.
 # - `vsix` uses `--skip-license` until a LICENSE exists (issue #42): drop the flag then.
-# - The integration step is a placeholder for issue #41: `--if-present` skips it until a
-#   `test:integration` script exists. If #41 names it differently it will be skipped silently.
+# - The integration step runs every configuration of `.vscode-test.mjs` that is not opt-in
+#   (`main`, `external-server` and `fake-server`, issue #41). No `--if-present`: if the script is
+#   renamed the step must fail, not be skipped.
 #
 # UNVERIFIED until the first run on the pull request: nothing here has run on macOS or Linux.
-# Check there: Node version (>= 24.15), "117 passed | 1 skipped" from Vitest, "OK: N files"
+# Check there: Node version (>= 24.15), the Vitest summary, the three "passing" lines of the
+# integration step (22 + 1 pending, 8 and 15 on Windows), "OK: N files"
 # from the "Check package contents" step printed after the canaries, and one .vsix artifact per OS.
 
 name: CI
@@ -75,14 +77,15 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Placeholder for issue #41 (integration tests with @vscode/test-electron).
+      # Integration tests (issue #41): a real VS Code, three configurations, no network beyond the
+      # VS Code download and no model (the server of `fake-server` is the synthetic fixture).
       - name: Integration tests
         if: runner.os != 'Linux'
-        run: npm run test:integration --if-present
+        run: npm run test:integration
 
       - name: Integration tests (Linux, virtual display)
         if: runner.os == 'Linux'
-        run: xvfb-run -a npm run test:integration --if-present
+        run: xvfb-run -a npm run test:integration
 
       - name: Create canary files
         shell: bash

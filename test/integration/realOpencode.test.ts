@@ -14,6 +14,13 @@
 //   OPEN_VS_CODE_REAL_OPENCODE=<path to opencode.exe> npm run test:integration
 // To run only this suite: add `-- --label real-opencode`.
 //
+// Issue #41: the cases that did not need the real server (`editor.open`, the whole-file, several
+// selections, dirty-buffer and OutsideWorkspace editor-context cases) moved to `fakeServer.test.ts`,
+// which runs the synthetic opencode in CI; their OutsideWorkspace case also stopped deleting a temp
+// folder from inside the suite (EPERM on Windows). Several flows are covered in both suites on
+// purpose: there with the fixture (deterministic, CI), here with the real server and model.
+// Helpers shared by both live in `support/serverCases.ts`.
+//
 // Phase 3 (issues #18/#44/#19/#10) cases, observed on Windows 11 with VS Code 1.142.0 and the
 // free default model on 2026-10-20 (two runs; in the first, the older case "streams a real
 // prompt" saw no turn end within 60 s; the second run passed all 9 and the same prompt finished
@@ -49,7 +56,6 @@
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
 import { spawn } from 'node:child_process';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
@@ -72,7 +78,13 @@ import {
   readUrlLine,
   waitForExit,
 } from '../../src/extension/opencodeServer';
-import { openLogCursor, openLogFromStart } from './support/extensionLog';
+import { openLogCursor, openLogFromStart, type LogCursor } from './support/extensionLog';
+import {
+  lastReadyPid,
+  matchInLog as sharedMatchInLog,
+  sendPrompt,
+  waitUntilGone,
+} from './support/serverCases';
 
 const EXTENSION_ID = 'sergwei.open-vs-code';
 // Above STARTUP_TIMEOUT_MS (30 s) of the extension, so a start that really hangs fails with the
@@ -365,48 +377,6 @@ describe('real opencode', function () {
   });
 
   /**
-   * A file link in a reply (issue #15) opens the file at the line, inside the served folder.
-   *
-   * Protects: `editor.open` resolving a RELATIVE path against the folder the server serves, and
-   * the 1-based line of the protocol becoming VS Code's 0-based selection (line 3 -> index 2).
-   * Writes `src/sample.ts` into the temporary workspace folder of this configuration (never the
-   * repository). Paths are compared case-insensitively on Windows. The refusal of a path OUTSIDE
-   * the folder is covered by `pathPolicy.test.ts` (pure); not repeated here.
-   * NOT covered: attachments, because `attachments.pick` opens a native dialog that cannot be
-   * injected; that case stays with the F5 (point 8 of the plan).
-   */
-  it('opens a relative file at the requested line for editor.open', async function () {
-    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    assert.ok(folder, 'no workspace folder is open');
-    const file = path.join(folder, 'src', 'sample.ts');
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, 'export const a = 1;\nexport const b = 2;\nexport const c = 3;\n');
-
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'editor.open',
-      path: 'src/sample.ts',
-      line: 3,
-    });
-
-    const same = (a: string, b: string): boolean =>
-      process.platform === 'win32'
-        ? a.toLowerCase() === b.toLowerCase()
-        : path.normalize(a) === path.normalize(b);
-    const deadline = Date.now() + 8_000;
-    while (Date.now() < deadline) {
-      const editor = vscode.window.activeTextEditor;
-      if (editor && same(editor.document.uri.fsPath, file)) {
-        assert.strictEqual(editor.selection.active.line, 2);
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    assert.fail(
-      `${file} did not become the active editor; active: ${vscode.window.activeTextEditor?.document.uri.fsPath ?? '(none)'}`,
-    );
-  });
-
-  /**
    * `@` mention search (issue #28) against a REAL opencode: `files.search` reaches
    * `GET /api/fs/find`, the answer is mapped and the host logs `file search: N results` with N >= 1
    * for a file that exists in the served folder; and a prompt that mentions that file (its `uri`
@@ -417,8 +387,9 @@ describe('real opencode', function () {
    * `/find/file`), the `type: 'file'` and `limit` query, and the real server accepting
    * `files[].mention`. The search is retried for up to 25 s: the real server refreshes its file
    * index every 10 s (read in `search.ts@843a6c51`), so a file written a moment ago may not be
-   * listed yet; 25 s and the 2 s pause are our own choices. Writes `src/sample.ts` (the same file
-   * as the case above) into the temporary workspace folder. Needs network and the free model for
+   * listed yet; 25 s and the 2 s pause are our own choices. Writes `src/sample.ts` into the
+   * temporary workspace folder (the fake-server suite has its own file with the same name in
+   * its fixed workspace folder). Needs network and the free model for
    * the turn. The reply text is not asserted.
    */
   it('finds a file with files.search and sends a prompt that mentions it', async function () {
@@ -521,97 +492,10 @@ describe('real opencode', function () {
     );
   });
 
-  // Editor context cases that need a served folder (decision W2 of Sergio, 22/10/2026: only files
-  // inside it can be added). They moved here from `editorActions.test.ts`, whose configuration has
-  // no folder. No turn is sent: the outcome is read from the log lines the controller writes
-  // (`request <id> failed: <code>` and `editor context added: N file(s), M selection(s)`).
-
-  /**
-   * Opens `src/sample.ts` of the served folder, writing it if the case above did not, with an
-   * empty selection at the start: an editor already open keeps the selection a previous case left
-   * (a first run of these cases saw the old selection counted instead of the whole file).
-   */
-  async function openSample(): Promise<vscode.TextEditor> {
-    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    assert.ok(folder, 'no workspace folder is open');
-    const file = path.join(folder, 'src', 'sample.ts');
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, 'export const a = 1;\nexport const b = 2;\nexport const c = 3;\n');
-    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
-    const editor = await vscode.window.showTextDocument(document);
-    editor.selections = [new vscode.Selection(0, 0, 0, 0)];
-    return editor;
-  }
-
-  it('adds the whole file when nothing is selected', async function () {
-    await openSample();
-    const log = await openLogCursor();
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'attachments.fromEditor',
-      requestId: 'integration-context-file',
-    });
-    await log.waitFor('editor context added: 1 file(s), 0 selection(s)', 8_000);
-  });
-
-  // The focus sits in the chat view when a user presses the button, so the view is focused first:
-  // `activeTextEditor` must still be the file.
-  it('adds one selection per non-empty selection while the chat view has the focus', async function () {
-    const editor = await openSample();
-    editor.selections = [new vscode.Selection(0, 0, 0, 4), new vscode.Selection(2, 0, 2, 4)];
-    await vscode.commands.executeCommand('openVsCode.chat.focus');
-    const log = await openLogCursor();
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'attachments.fromEditor',
-      requestId: 'integration-context-selections',
-    });
-    await log.waitFor('editor context added: 0 file(s), 2 selection(s)', 8_000);
-  });
-
-  it('warns that the saved version is what the model reads when the buffer is dirty', async function () {
-    const editor = await openSample();
-    try {
-      await editor.edit((builder) => {
-        builder.insert(new vscode.Position(0, 0), 'unsaved ');
-      });
-      assert.strictEqual(editor.document.isDirty, true);
-      const log = await openLogCursor();
-      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-        type: 'attachments.fromEditor',
-        requestId: 'integration-context-dirty',
-      });
-      await log.waitFor('editor context: the buffer has unsaved changes', 8_000);
-      await log.waitFor('editor context added: 1 file(s), 0 selection(s)', 8_000);
-    } finally {
-      // Back to the saved text, so later cases read the file as written.
-      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
-    }
-  });
-
-  it('refuses a file outside the open workspace folder (OutsideWorkspace)', async function () {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ovsc-outside-'));
-    try {
-      const file = path.join(dir, 'secret.ts');
-      fs.writeFileSync(file, 'export const secret = 1;\n');
-      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
-      await vscode.window.showTextDocument(document);
-      const log = await openLogCursor();
-      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-        type: 'attachments.fromEditor',
-        requestId: 'integration-context-outside',
-      });
-      await log.waitFor(
-        'request integration-context-outside failed: OutsideWorkspace: Only files inside the workspace folder can be added',
-        8_000,
-      );
-      assert.ok(
-        !log.added().includes('editor context added'),
-        `a file outside the folder was added; log:\n${log.added()}`,
-      );
-    } finally {
-      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  // The editor-context cases that only need a served folder (whole file, several selections, dirty
+  // buffer, OutsideWorkspace) and the `editor.open` case moved to `fakeServer.test.ts` (issue #41):
+  // they never used the real server, and there they run in CI. The case above stays because it
+  // checks the real server accepting a `file://…?start&end` reference.
 
   // ---------------------------------------------------------------------------------------------
   // Phase 3 (issues #18, #44, #19, #10). These cases depend on the free model CHOOSING to use the
@@ -632,36 +516,20 @@ describe('real opencode', function () {
   const READ_ENV_PROMPT =
     'Use the read tool to read the file .env in the current folder and reply with its first line.';
 
-  /** Sends `text` as if the webview had, and waits for the server to accept it. */
-  async function sendPrompt(log: Awaited<ReturnType<typeof openLogCursor>>, text: string) {
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'prompt.send',
-      requestId: `integration-${String(Date.now())}`,
-      text,
-      delivery: 'queue',
-      files: [],
-    });
-    await log.waitFor('prompt accepted for ses_', 10_000);
-  }
-
-  /** Waits for `pattern` in the lines added since the mark and returns its match. */
-  async function matchInLog(
-    log: Awaited<ReturnType<typeof openLogCursor>>,
+  /** `matchInLog` with the hint that, against the real server, a missing line may be the model. */
+  function matchInLog(
+    log: LogCursor,
     pattern: RegExp,
     timeoutMs: number,
     what: string,
   ): Promise<RegExpExecArray> {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const found = pattern.exec(log.added());
-      if (found) return found;
-      if (Date.now() >= deadline) {
-        assert.fail(
-          `${what} did not appear within ${String(timeoutMs)} ms (the model may not have used the tool); log:\n${log.added()}`,
-        );
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    return sharedMatchInLog(
+      log,
+      pattern,
+      timeoutMs,
+      what,
+      ' (the model may not have used the tool)',
+    );
   }
 
   /**
@@ -949,26 +817,3 @@ describe('real opencode', function () {
     }
   });
 });
-
-/** Pid of the newest `server ready` line in `text`, or `undefined` when there is none. */
-function lastReadyPid(text: string): number | undefined {
-  const all = [...text.matchAll(/server ready at \S+ \(opencode \S+, pid (\d+)\)/g)];
-  const last = all[all.length - 1]?.[1];
-  return last === undefined ? undefined : Number(last);
-}
-
-/** Polls until no process has this pid (`kill(pid, 0)` throws `ESRCH`), or fails after `timeoutMs`. */
-async function waitUntilGone(pid: number, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    try {
-      process.kill(pid, 0);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
-      throw error;
-    }
-    if (Date.now() >= deadline)
-      assert.fail(`process ${String(pid)} still exists after ${String(timeoutMs)} ms`);
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-}

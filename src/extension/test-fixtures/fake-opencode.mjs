@@ -23,8 +23,9 @@
 //                 (once), to exercise the reconnection of the host
 // FAKE_OPENCODE_VERSION sets the version reported by `--version` and `/api/info`.
 //
-// Chat routes (issue #14, used by the Vitest e2e `chatController.e2e.test.ts`, NOT by the VS Code
-// integration tests: the extension cannot launch `node fixture.mjs` as a binary). They imitate
+// Chat routes (issue #14, used by the Vitest e2e `chatController.e2e.test.ts`, and, since
+// issue #41, by the `fake-server` VS Code integration suite, where the extension runs it as
+// `node fixture.mjs` through the Test-mode seam of `testLaunch.ts`). They imitate
 // what the planner RECORDED from a real opencode 2.0.32 on 2026-10-20 (Windows 11): REST answers
 // wrapped in `{data}`, `session.list` as `{data, cursor}`, `GET /api/session/:unknown` as 404
 // `SessionNotFoundError`, and a prompt that produces the event order
@@ -99,7 +100,8 @@
 // (uri with its query, name, mention) in the `session.inbox.enqueued` payload and in the history,
 // the way the spike saw a real server store them. File contents are never read.
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
-// Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running.
+// Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running;
+// FAKE_OPENCODE_LIFETIME_MS (positive integer, ms) overrides it for `serve` (issue #41).
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -1230,6 +1232,22 @@ if (args.includes('--version')) {
   runServe();
 }
 
+/**
+ * Lifetime cap of `serve`, in ms: 60 000 unless `FAKE_OPENCODE_LIFETIME_MS` holds a positive
+ * integer (issue #41: the `fake-server` integration suite outlives 60 s and sets it to 600 000).
+ * Anything else (empty, negative, NaN, a float) is meant to fall back to the default so a typo
+ * cannot make the fake exit at once or never.
+ * VERIFIED on Windows 11 (22/10/2026), by running `npm run test:integration -- --label
+ * fake-server` with the variable set to 600000 (what `.vscode-test.mjs` sets): the fake-server
+ * suite finished with 15 passing, and a mutation with 5000 made the later cases fail because the
+ * server had exited. HYPOTHESIS: the fallback for invalid values, which no test runs; a
+ * `FAKE_OPENCODE_LIFETIME_MS=abc` start observed to stay up past 60 s would confirm it.
+ */
+function lifetimeMs() {
+  const raw = process.env.FAKE_OPENCODE_LIFETIME_MS ?? '';
+  return /^[1-9]\d*$/.test(raw) ? Number(raw) : 60_000;
+}
+
 /** Runs the `serve --stdio` imitation described in the file header. */
 function runServe() {
   const password = process.env.OPENCODE_PASSWORD;
@@ -1260,7 +1278,7 @@ function runServe() {
     return;
   }
 
-  setTimeout(() => process.exit(0), 60_000); // hard cap, see header
+  setTimeout(() => process.exit(0), lifetimeMs()); // hard cap, see header
 
   if (has('grandchild')) {
     // detached on Windows only: there Node puts non-detached children in a job object that kills
