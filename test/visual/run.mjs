@@ -82,46 +82,49 @@
 // ~09:56-09:57, on the final tree: the whole run passed ("all visual checks passed", exit 0) and
 // step 14 used `opencode/glm-5.3-flash-free` (variants low/high/max). Both halves of "the control
 // appears only for a model with variants" RAN in that run (not skipped): `opencode/big-pickle`
-// showed no control, and "another model starts on Default or shows no control" held. The log
-// (`.vscode-test/visual/user-data/logs/20261022T095051/window1/exthost/sergwei.open-vs-code/
-// OpenCode.log`) shows `model selected opencode/glm-5.3-flash-free for ses_… (variant low)` at
-// 09:56:55.960, `prompt accepted` at 09:56:55.989 and `turn finished: succeeded` at 09:56:58.038;
-// the screenshots `14a`-`14h` in `.vscode-test/visual/shots/` (four themes for the panel and the
-// chosen state, the focus ring, the reply line ending in "· low", the new session and the
-// reopened one) were written in that run (09:56:22-09:57:00). NOT observed: a screen reader,
+// showed no control, and "another model starts on Default or shows no control" held. The
+// extension's OpenCode.log of that run shows `model selected opencode/glm-5.3-flash-free for
+// ses_… (variant low)` at 09:56:55.960, `prompt accepted` at 09:56:55.989 and `turn finished:
+// succeeded` at 09:56:58.038; the step also checked, in four themes, the panel and the chosen
+// state, the focus ring, the reply line ending in "· low", the new session and the reopened one
+// (the check "the reopened session shows the variant the SERVER stored ("Reasoning: low")"
+// passed). NOT observed: a screen reader,
 // macOS and Linux, a catalog whose models list no variants (the step SKIPS then), and the host
 // refusing an unlisted variant against a real server.
 //
 // Step 15 (issue #26, tool cards) VERIFIED on Windows 11, VS Code 1.143.0, opencode 2.0.32, model
-// `opencode/glm-5.3-flash-free`, on 22/10/2026 in the final run (13:59:27-14:05; "all visual checks
-// passed", exit 0, 326 ok lines, 0 FAIL; its console output is kept in `.vscode-test/visual/
-// run-output.txt`, the line numbers below are that file's). The model completed shell, read, grep
-// and edit from ONE combined prompt (no retry prompt was needed): line 304 `cards:
-// ["shell:completed","read:completed","grep:completed","edit:completed"]`, so shell, read and edit
-// were NOT skipped. The log (`.vscode-test/visual/user-data/logs/20261022T135923/window1/exthost/
-// sergwei.open-vs-code/OpenCode.log`) has the combined prompt as `prompt accepted` 14:04:11.728 to
-// `turn finished: succeeded` 14:04:17.265, and the failing read asked ONCE (no retry) as 14:04:37.157
-// to 14:04:38.484; screenshots `15a`-`15e` were written 14:04:17-14:04:50. Real headers (lines
-// 308-311): "Shell node --version · done · exit 0", "Read src/sample.ts · done · lines 1-30", "Grep
-// greet in src · done · 1 match", "Edit src/sample.ts · done · +1 −1". Per tool (lines 314-346):
-// Shift+Tab from the prompt box reached the toggle with a visible ring, Enter opened it, the body
-// was right (shell "v24.22.0"; read the file; grep the match; edit 1 hunk line, 1 added, 1
-// deleted), Space closed it. Diff text contrast >= 4.5 in the four themes, header words too
-// (lowest 5.47, lines 349-374). Last card: line 375 `the header of the last card
+// `opencode/glm-5.3-flash-free`, on 22/10/2026 in the final run of the polish round (~15:23-15:30,
+// on the final tree; "all visual checks passed", exit 0, 326 ok lines, 0 FAIL; an earlier run of
+// the same step on 22/10/2026 13:59-14:05 printed the same checks except the last one below). The
+// model completed shell, read, grep and edit from ONE combined prompt (no retry prompt was
+// needed): the line `cards: ["shell:completed","read:completed","grep:completed",
+// "edit:completed"]`, so shell, read and edit were NOT skipped. In the extension's OpenCode.log of
+// the final run the combined prompt is `prompt accepted` 15:29:21.382 to `turn finished:
+// succeeded` 15:29:28.795, and the failing read asked ONCE (no retry) as 15:29:48.935 to
+// 15:29:50.112. Real headers: "Shell node --version · done · exit 0", "Read src/sample.ts ·
+// done · lines 1-30", "Grep greet in src · done · 1 match", "Edit src/sample.ts · done · +1 −1".
+// Per tool: Shift+Tab from the prompt box reached the toggle with a visible ring, Enter opened
+// it, the body was right (shell "v24.22.0"; read the file; grep the match; edit 1 hunk line, 1
+// added, 1 deleted), Space closed it. Diff text contrast >= 4.5 in the four themes, header words
+// too (lowest 5.47). Last card: `the header of the last card
 // (data-tool="edit") is still in view after unfolding it (true)`: `tagCard` now really marks the
 // LAST card (an earlier version passed two arguments to `inDoc`, which forwards one, and silently
 // tagged the first card, so the older "last card" claims were about the shell card; Engram #1041
 // C1), and it prints the `data-tool` it marked. It proves the header was in view, NOT that the
-// deferred `scrollIntoView` of `ToolCard` moved anything. Failed (lines 376-390): the model called
+// deferred `scrollIntoView` of `ToolCard` moved anything. Failed: the model called
 // read on the missing `src/does-not-exist.ts` at the first ask; the card said "Read
 // src/does-not-exist.ts · failed · File not found: src/does-not-exist.ts", folded, error tone, the
 // unfolded body held the same line, the header fitted its toggle, and the chip text contrast was
-// 8.68 / 8.03 / 21.00 / 14.55 in light / dark / hc-dark / hc-light. If the model never calls the
-// tool the failed part is SKIPPED with an explicit `warn` (not in this run). The check found two
-// real defects in earlier runs of this round (bare errorForeground 3.16 in light; an error line
-// running over the "Open" link in the side bar), both fixed in `index.css`; the overflow check is
-// a regression check added after the fix and was not run against the broken CSS. NOT observed:
-// tools other than shell, read, grep and edit (write, patch, glob, webfetch, websearch, skill,
+// 8.68 / 8.03 / 21.00 / 14.55 in light / dark / hc-dark / hc-light. The error text inside the
+// unfolded body (`.tool-error`, foreground text with the error colour on a left border) passed
+// "the error text of the unfolded failed body has text contrast >= 4.5 in light|dark|hc-dark|
+// hc-light" with 10.55 / 11.06 / 21.00 / 14.55; it was NOT measured with the old bare
+// `errorForeground` text (its 3.16 in light is the chip's, inferred for the body). If the model
+// never calls the tool the failed part is SKIPPED with an explicit `warn` (not in this run). The
+// check found two real defects in earlier runs of this round (bare errorForeground 3.16 in
+// light; an error line running over the "Open" link in the side bar), both fixed in `index.css`;
+// the overflow check is a regression check added after the fix and was not run against the
+// broken CSS. NOT observed: tools other than shell, read, grep and edit (write, patch, glob, webfetch, websearch, skill,
 // question, MCP), a running/rejected/stopped/awaiting card, Copy and "Open in editor" pressed, a
 // clipped output, macOS and Linux, a screen reader.
 import { chromium } from 'playwright-core';
@@ -622,6 +625,8 @@ function measureDiffLines(doc) {
     result: measure('.tool-card .tool-result'),
     // The error tone of a real failed call (step 15, the read of a missing file).
     failedStatus: measure('.tool-card .tool-status[data-tone="error"]'),
+    // The error line inside the unfolded body (null while the card is folded).
+    failedError: measure('.tool-card .tool-body .tool-error'),
   };
 }
 
@@ -2751,6 +2756,18 @@ try {
           opened?.expanded === 'true' && opened.body && (opened.text ?? '').includes(firstLine),
           `unfolded, the failed body contains the header's error line (${JSON.stringify((opened?.text ?? '').slice(0, 200))})`,
         );
+        // The error text of the open body, in every theme, while the card stays unfolded.
+        for (const [name, theme] of THEMES) {
+          await setTheme(theme);
+          const errorLook = (await web.inDoc(measureDiffLines)).failedError;
+          console.log(`  failed body error contrast ${name}: ${JSON.stringify(errorLook)}`);
+          check(
+            errorLook !== null && errorLook !== undefined && errorLook.ratio >= 4.5,
+            `the error text of the unfolded failed body has text contrast >= 4.5 in ${name} (${errorLook ? errorLook.ratio.toFixed(2) : 'not found'})`,
+          );
+          await shot(`15f-tool-failed-body-${name}`);
+        }
+        await setTheme('Default Dark Modern');
         await page.keyboard.press('Space');
         await sleep(300);
       } else {
