@@ -41,6 +41,22 @@ not add sessions to your `~/.local/share/opencode`. Checked on Windows 11 with o
 new `opencode.db` appears there, the real one keeps its modification time, and the free model
 works); POSIX is unchecked.
 
+## The `external-server` configuration (issue #11)
+
+`externalServer.test.ts` runs in its own configuration (`external-server` in `.vscode-test.mjs`),
+not opt-in, with its own user data dir `.vscode-test/user-data-external` and an empty workspace
+folder under the OS temp dir. Why a separate profile: the suite stores secrets and writes
+`openVsCode.serverUrl`, and a run that dies half way must not leave either in the profile of
+`main`. `.vscode-test.mjs` rewrites that profile's `settings.json` on every start, so the first
+activation is already in external mode (`serverUrl` on the discard port 9, no password) and
+`openVsCode.opencodePath` points at a file that does not exist, which makes it impossible to
+launch a real opencode by accident. The "external server" is `fake-opencode.mjs` started by the
+test (synthetic); the real one is the last case of the opt-in `real-opencode` suite. Passwords are
+stored with the test-only command `openVsCode.test.setServerPassword` (an input box cannot be
+typed into). The configuration passes `--password-store=basic` on all three systems (it is in
+the `launchArgs` of `.vscode-test.mjs` unconditionally), so SecretStorage works without a keyring
+under `xvfb-run`.
+
 ## Running it from inside VS Code (agents, integrated terminals)
 
 A process that descends from a VS Code extension host inherits `ELECTRON_RUN_AS_NODE=1` and many

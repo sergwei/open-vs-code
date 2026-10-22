@@ -1,7 +1,14 @@
 import * as vscode from 'vscode';
 import type { DetectionResult } from './opencodeBinary';
 import { fetchServerInfo, safeLog, startServer, stopServer } from './opencodeServer';
-import { RESTART_SERVER_COMMAND_ID, SELECT_FOLDER_COMMAND_ID } from './ids';
+import {
+  RESTART_SERVER_COMMAND_ID,
+  SELECT_FOLDER_COMMAND_ID,
+  SERVER_URL_SETTING,
+  SET_SERVER_PASSWORD_COMMAND_ID,
+} from './ids';
+import { failureActions, ForgottenPasswords } from './externalServer';
+import { readServerTarget, registerServerCredentials } from './serverCredentials';
 import {
   describeServerFailure,
   describeServerState,
@@ -9,9 +16,6 @@ import {
   ServerManager,
   type ServerState,
 } from './serverManager';
-
-const SHOW_LOGS = 'Show Logs';
-const RESTART_SERVER = 'Restart Server';
 
 /**
  * `workspaceState` key of the folder the user chose to serve (an `fsPath`). Not a secret. The
@@ -21,7 +25,9 @@ const SERVED_FOLDER_KEY = 'openVsCode.servedFolder';
 
 /**
  * Restarts the server (the command, the toolbar button and the webview's Restart button) and,
- * when nothing could be restarted, tells the user why instead of failing silently.
+ * when nothing could be restarted, tells the user why instead of failing silently. With an
+ * external target (issue #11) "restart" means reconnect: the external server is not ours to
+ * restart, and the manager never answers `no-binary` in that case.
  *
  * Resolves after the restart attempt settled; the outcome of the new start is the manager's
  * state, not this function's. `no-binary` (no detection accepted an opencode v2 yet) and
@@ -42,7 +48,38 @@ export async function restartServerWithFeedback(manager: ServerManager): Promise
 }
 
 /**
- * Wires the server lifecycle (issues #8, #10) into VS Code and returns what `activate` needs.
+ * Runs the button the user pressed on a server-failure notification (`failureActions`). `undefined`
+ * means the notification was dismissed. Retry and Restart Server are the same action: the
+ * manager restarts its own server, or reconnects to the external one. UNVERIFIED in a real window
+ * (no test API for notification buttons); the underlying commands are the ones the integration
+ * suites call.
+ */
+async function runFailureAction(
+  choice: string | undefined,
+  manager: ServerManager,
+  channel: vscode.LogOutputChannel,
+): Promise<void> {
+  switch (choice) {
+    case 'Show Logs':
+      channel.show();
+      break;
+    case 'Set Password':
+      await vscode.commands.executeCommand(SET_SERVER_PASSWORD_COMMAND_ID);
+      break;
+    case 'Open Settings':
+      await vscode.commands.executeCommand('workbench.action.openSettings', SERVER_URL_SETTING);
+      break;
+    case 'Retry':
+    case 'Restart Server':
+      await restartServerWithFeedback(manager);
+      break;
+    default:
+      break;
+  }
+}
+
+/**
+ * Wires the server lifecycle (issues #8, #10, #11) into VS Code and returns what `activate` needs.
  *
  * Thin adapter over the pure `serverManager.ts`: picks the workspace folder to serve (the one the
  * user chose with "Select Workspace Folder", else the first on disk), builds the manager
@@ -69,6 +106,20 @@ export async function restartServerWithFeedback(manager: ServerManager): Promise
  * in the log. As defence in depth every log call made here goes through `safeLog`, so even a
  * channel closed early cannot interrupt a transition or the tree kill. The two commands and the
  * folder listener are plain disposables in `context.subscriptions` (they hold no process).
+ * External server (issue #11): the target the manager follows (own process or the server in
+ * `openVsCode.serverUrl`) is read with `readServerTarget` and refreshed whenever the setting or
+ * the stored password changes, so no reload is needed. `registerServerLifecycle` stays
+ * SYNCHRONOUS even though `secrets.get` is not: everything is registered at once and the target
+ * is resolved right after, in the background. The alternative (making the function async, so the
+ * target is known before the first detection) would have forced `activate`, and every caller,
+ * to await a keychain that can be slow. The window that leaves open is closed on purpose: the
+ * binary detection decides by reading the setting synchronously (it skips itself when the URL is
+ * set), and the manager ignores detections while the target is external, so no process can be
+ * launched in that gap. A resolution that lost the race against a newer one is dropped (run
+ * counter). A Forget Server Password is remembered per origin (`ForgottenPasswords`) so a password
+ * that VS Code hands back right after it is not used. The failure notification takes its buttons from `failureActions(reason)`: Set
+ * Password, Open Settings, Retry or Restart Server (the last two both reconnect when the target is
+ * external) and Show Logs.
  * Workspace Trust: the extension declares no `capabilities.untrustedWorkspaces`, so it does not
  * activate in Restricted Mode and nothing is launched against an untrusted folder (HYPOTHESIS:
  * VS Code's documented default, not exercised).
@@ -108,12 +159,30 @@ export function registerServerLifecycle(
     const failure = describeServerFailure(previous, next);
     previous = next;
     if (failure !== undefined) {
-      void vscode.window.showErrorMessage(failure, RESTART_SERVER, SHOW_LOGS).then((choice) => {
-        if (choice === SHOW_LOGS) channel.show();
-        else if (choice === RESTART_SERVER) void restartServerWithFeedback(manager);
-      });
+      const reason = next.kind === 'unavailable' ? next.reason : 'start-failed';
+      void vscode.window
+        .showErrorMessage(failure, ...failureActions(reason))
+        .then((choice) => runFailureAction(choice, manager, channel));
     }
   });
+
+  // The target is resolved in the background (see the header); a stale resolution is dropped.
+  let targetRun = 0;
+  const forgotten = new ForgottenPasswords();
+  const refreshTarget = (): void => {
+    const run = ++targetRun;
+    readServerTarget(context, log, forgotten)
+      .then((target) => {
+        if (run === targetRun) manager.setTarget(target);
+      })
+      .catch((error: unknown) => {
+        log.error(
+          `could not resolve the server target: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+  };
+  registerServerCredentials(context, log, refreshTarget, forgotten);
+  refreshTarget();
 
   context.subscriptions.push(
     vscode.commands.registerCommand(RESTART_SERVER_COMMAND_ID, async () => {

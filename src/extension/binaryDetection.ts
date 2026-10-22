@@ -1,5 +1,11 @@
 import * as vscode from 'vscode';
-import { CONFIG_SECTION, OPENCODE_PATH_KEY, OPENCODE_PATH_SETTING } from './ids';
+import {
+  CONFIG_SECTION,
+  OPENCODE_PATH_KEY,
+  OPENCODE_PATH_SETTING,
+  SERVER_URL_KEY,
+  SERVER_URL_SETTING,
+} from './ids';
 import {
   describeDetection,
   detectOpencodeBinary,
@@ -28,6 +34,14 @@ const SHOW_LOGS = 'Show Logs';
  * The notification and its buttons have no test API: seen by hand with F5 on Windows only
  * (2026-10-19). HYPOTHESIS that
  * `workbench.action.openSettings` with a query filters by the setting id.
+ *
+ * Issue #11: when `openVsCode.serverUrl` is not empty the extension connects to an external
+ * server instead of launching one, so the run logs `binary detection skipped: openVsCode.serverUrl
+ * is set` and ends there (no attempts, no `onResult`, no notification). It also re-runs when that
+ * setting changes, so emptying it brings detection (and the own server) back without a reload.
+ * The decision reads the setting synchronously; that is what keeps a process from being launched
+ * before the async target (password from SecretStorage) is known. VERIFIED in a real VS Code by
+ * `externalServer.test.ts` (the skip line on activation, the detection line after emptying it).
  */
 export function registerBinaryDetection(
   context: vscode.ExtensionContext,
@@ -38,6 +52,16 @@ export function registerBinaryDetection(
 
   const detect = async (): Promise<void> => {
     const current = ++run;
+    // With an external server configured (issue #11) we launch nothing, so there is no binary to
+    // find and no warning to give; the manager would ignore the result anyway.
+    const serverUrl = vscode.workspace
+      .getConfiguration(CONFIG_SECTION)
+      .get<string>(SERVER_URL_KEY, '')
+      .trim();
+    if (serverUrl !== '') {
+      channel.info(`binary detection skipped: ${SERVER_URL_SETTING} is set`);
+      return;
+    }
     const settingPath = vscode.workspace
       .getConfiguration(CONFIG_SECTION)
       .get<string>(OPENCODE_PATH_KEY, '')
@@ -83,7 +107,12 @@ export function registerBinaryDetection(
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration(OPENCODE_PATH_SETTING)) start();
+      if (
+        event.affectsConfiguration(OPENCODE_PATH_SETTING) ||
+        event.affectsConfiguration(SERVER_URL_SETTING)
+      ) {
+        start();
+      }
     }),
   );
   start();

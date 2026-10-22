@@ -75,6 +75,20 @@ describe('ids.ts matches package.json contributes', () => {
     expect(setting).toMatchObject({ type: 'string', default: '', scope: 'window' });
   });
 
+  // Issue #11. Scope `machine`, like the executable path: a `.vscode/settings.json` of a cloned
+  // repository must not be able to point the prompts and the code of the user at another server.
+  // The password commands are contributed; the one that stores a password without the input box
+  // (test mode only) must NOT be.
+  it('declares the external-server setting (scope machine) and its password commands', () => {
+    const setting = manifest.contributes.configuration.properties[ids.SERVER_URL_SETTING];
+    expect(ids.SERVER_URL_SETTING).toBe(`${ids.CONFIG_SECTION}.${ids.SERVER_URL_KEY}`);
+    expect(setting).toMatchObject({ type: 'string', default: '', scope: 'machine' });
+    const commands = manifest.contributes.commands.map((c) => c.command);
+    expect(commands).toContain(ids.SET_SERVER_PASSWORD_COMMAND_ID);
+    expect(commands).toContain(ids.CLEAR_SERVER_PASSWORD_COMMAND_ID);
+    expect(commands).not.toContain(ids.TEST_SET_SERVER_PASSWORD_COMMAND_ID);
+  });
+
   it('has a constant for every contributed command', () => {
     const missing = manifest.contributes.commands
       .map((c) => c.command)

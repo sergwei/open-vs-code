@@ -534,6 +534,18 @@ describe('isHostToWebview', () => {
     ).toBe(true);
   });
 
+  // Issue #11: the three reasons of the external-server mode. The guard does not look at `reason`
+  // (shallow), so this pins that they pass and, through the type, that `ConnectionState` has them.
+  it('accepts an unavailable connection with each external-server reason', () => {
+    for (const reason of ['unreachable', 'unauthorized', 'invalid-url'] as const) {
+      const message: HostToWebview = {
+        type: 'connection.state',
+        connection: { state: 'unavailable', reason, error: { code: reason, message: 'x' } },
+      };
+      expect(isHostToWebview(message)).toBe(true);
+    }
+  });
+
   it('is deliberately shallow: accepts a part.delta without delta', () => {
     // Documents the trade-off recorded in the guard header; change it only as a decision.
     expect(isHostToWebview({ type: 'part.delta' })).toBe(true);

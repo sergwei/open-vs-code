@@ -88,7 +88,7 @@ const main = {
   ...common,
   label: 'main',
   // Relative to this file. Compiled by `npm run compile:integration`, not by Vitest.
-  files: 'out/test/integration/**/!(realOpencode).test.js',
+  files: 'out/test/integration/**/!(realOpencode|externalServer).test.js',
 };
 
 /**
@@ -135,4 +135,60 @@ if (process.env.OPEN_VS_CODE_REAL_OPENCODE) {
   fs.mkdirSync(realOpencode.workspaceFolder, { recursive: true });
 }
 
-export default defineConfig(process.env.OPEN_VS_CODE_REAL_OPENCODE ? [main, realOpencode] : [main]);
+/**
+ * Configuration of `externalServer.test.ts` (issue #11): not opt-in, because its "server" is the
+ * synthetic fixture started by the test itself, so it needs no real opencode.
+ *
+ * Why its own user data dir: the suite stores secrets and writes `openVsCode.serverUrl`; a run
+ * that dies half way must not leave either in the profile of `main` (whose detection tests assume
+ * the setting is empty). The profile's `settings.json` is rewritten here, before VS Code starts,
+ * so that the FIRST activation is already in external mode (criterion of the issue: no server
+ * launched, no detection) with `serverUrl` at the discard port 9 and no password stored, and
+ * `openVsCode.opencodePath` at an absolute path that does not exist: emptying `serverUrl` brings
+ * the detection back, and it can only end `invalid-setting`, never start a real opencode. The
+ * folder is an empty directory under the OS temp dir, like the `real-opencode` one, and the XDG
+ * variables go to a private dir as a safety net in case anything does launch opencode.
+ * `--password-store=basic` is a Linux flag (SecretStorage without a keyring under xvfb);
+ * HYPOTHESIS that it is harmless on Windows and macOS, and that it is enough on the Linux CI:
+ * check on the first CI run of this branch.
+ */
+const externalUserDataDir = path.join(import.meta.dirname, '.vscode-test', 'user-data-external');
+const externalServer = {
+  ...common,
+  label: 'external-server',
+  env: {
+    ...env,
+    OPEN_VS_CODE_TEST_USER_DATA_DIR: externalUserDataDir,
+    XDG_DATA_HOME: path.join(import.meta.dirname, '.vscode-test', 'external-server-xdg', 'data'),
+    XDG_STATE_HOME: path.join(import.meta.dirname, '.vscode-test', 'external-server-xdg', 'state'),
+    XDG_CACHE_HOME: path.join(import.meta.dirname, '.vscode-test', 'external-server-xdg', 'cache'),
+  },
+  files: 'out/test/integration/externalServer.test.js',
+  workspaceFolder: path.join(os.tmpdir(), 'open-vs-code-external-workspace'),
+  launchArgs: [
+    '--disable-extensions',
+    `--user-data-dir=${externalUserDataDir}`,
+    '--disable-workspace-trust',
+    '--password-store=basic',
+  ],
+  mocha: { ...common.mocha, timeout: 60000 },
+};
+fs.mkdirSync(externalServer.workspaceFolder, { recursive: true });
+fs.mkdirSync(path.join(externalUserDataDir, 'User'), { recursive: true });
+fs.writeFileSync(
+  path.join(externalUserDataDir, 'User', 'settings.json'),
+  JSON.stringify(
+    {
+      'openVsCode.serverUrl': 'http://127.0.0.1:9',
+      'openVsCode.opencodePath': path.join(os.tmpdir(), 'open-vs-code-no-such-opencode'),
+    },
+    null,
+    2,
+  ),
+);
+
+export default defineConfig(
+  process.env.OPEN_VS_CODE_REAL_OPENCODE
+    ? [main, realOpencode, externalServer]
+    : [main, externalServer],
+);

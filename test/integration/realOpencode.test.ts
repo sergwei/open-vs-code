@@ -34,6 +34,13 @@
 // runs this). Not observed: how the toast or its links look, the badge on the icon, a REST
 // snapshot taken while a request is pending, `form.cancel`, an interrupt with a request pending.
 //
+// External server case (issue #11), the last `it`: observed on Windows 11 with VS Code 1.143.0 and
+// opencode 2.0.32 on 22/10/2026. The real server accepted the Basic credential (the extension
+// logged "connected to the external server at ... (opencode 2.0.32)" and a turn finished
+// `succeeded` through it) and answered a wrong password with HTTP 401 (the extension logged
+// "GET /api/info failed: HTTP 401" and "server not available (unauthorized)"). Not observed
+// against a real opencode: a refused connection and a timeout. Details in the header of the case.
+//
 // Out of scope: the STOP. Nothing public in the extension stops the server before the window
 // closes (`deactivate` does it), and a test cannot observe its own host shutting down. The test
 // prints the pid so whoever runs it can check afterwards that the process is gone (Windows:
@@ -41,18 +48,27 @@
 // plain Node (spike of 2026-10-20) but NOT through `deactivate` in VS Code.
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
+import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
+  CLEAR_SERVER_PASSWORD_COMMAND_ID,
   CONFIG_SECTION,
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
   OPENCODE_PATH_KEY,
   OPENCODE_PATH_SETTING,
   REPLY_PERMISSION_COMMAND_ID,
   RESTART_SERVER_COMMAND_ID,
+  SERVER_URL_KEY,
+  TEST_SET_SERVER_PASSWORD_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
-import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
+import {
+  killTree,
+  PINNED_OPENCODE_VERSION,
+  readUrlLine,
+  waitForExit,
+} from '../../src/extension/opencodeServer';
 import { openLogCursor, openLogFromStart } from './support/extensionLog';
 
 const EXTENSION_ID = 'sergwei.open-vs-code';
@@ -626,6 +642,101 @@ describe('real opencode', function () {
     );
     assert.notStrictEqual(Number(ready[1]), pid);
     await log.waitFor('event stream connected', 10_000);
+  });
+
+  /**
+   * External server (issue #11) against a REAL opencode: the test starts a second `opencode serve
+   * --stdio` itself, with a known password, and points `openVsCode.serverUrl` at it. The
+   * extension must stop its own server, check `GET /api/info` with Basic `opencode:<password>`,
+   * report the connection with the pinned version, and run a real turn through it. A wrong
+   * password must be refused by the REAL server (a genuine 401), which the synthetic fixture of
+   * `externalServer.test.ts` cannot prove.
+   *
+   * Last on purpose: it swaps the server the cases above share, and puts the profile back at the
+   * end (the setting emptied and the password forgotten make the extension launch its own server
+   * again with the binary it already detected; that relaunch is not awaited here). Both servers
+   * use the SAME database (the redirected XDG dirs of
+   * the configuration), so the session the earlier cases left open exists on the external one too.
+   * The reply text is not asserted. Needs network and the free default model, like the cases above.
+   *
+   * VERIFIED on Windows 11, VS Code 1.143.0, real opencode 2.0.32, 22/10/2026 (suite of 12, all
+   * passing): the log showed "connected to the external server at http://127.0.0.1:<port>
+   * (opencode 2.0.32)", "prompt accepted for ses_...", "turn finished: succeeded for ses_...", and,
+   * after the wrong password, "could not connect to the external server at ...: GET /api/info
+   * failed: HTTP 401" followed by "server not available (unauthorized)". NOT covered here: a
+   * refused connection or a timeout against a real opencode (the refusal is in
+   * `externalServer.test.ts`, against the fixture), and macOS/Linux (UNVERIFIED).
+   */
+  it('connects to an external real opencode, and a wrong password is refused', async function () {
+    this.timeout(READY_WAIT_MS + TURN_WAIT_MS + 30_000);
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    assert.ok(folder, 'no workspace folder is open');
+    const password = 'real-external-pw';
+    const child = spawn(binary, ['serve', '--stdio', '--hostname', '127.0.0.1', '--port', '0'], {
+      cwd: folder,
+      env: { ...process.env, OPENCODE_PASSWORD: password },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      shell: false,
+    });
+    child.stderr.resume();
+    const quiet = {
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+    };
+    try {
+      const origin = await readUrlLine(child.stdout, READY_WAIT_MS, quiet);
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(TEST_SET_SERVER_PASSWORD_COMMAND_ID, {
+        origin,
+        password,
+      });
+      await vscode.workspace
+        .getConfiguration(CONFIG_SECTION)
+        .update(SERVER_URL_KEY, origin, vscode.ConfigurationTarget.Global);
+      await log.waitFor('opencode server stopped', READY_WAIT_MS);
+      await log.waitFor(
+        `connected to the external server at ${origin} (opencode ${PINNED_OPENCODE_VERSION})`,
+        READY_WAIT_MS,
+      );
+      await log.waitFor('event stream connected', 10_000);
+      assert.ok(!log.added().includes(password), 'the password is in the log');
+
+      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+        type: 'prompt.send',
+        requestId: 'integration-external-1',
+        text: 'Reply with exactly: hello there',
+        delivery: 'queue',
+        files: [],
+      });
+      await log.waitFor('prompt accepted for ses_', 10_000);
+      await log.waitFor('turn finished: ', TURN_WAIT_MS);
+      assert.ok(
+        log.added().includes('turn finished: succeeded'),
+        `the turn through the external server did not succeed; log:\n${log.added()}`,
+      );
+
+      log.mark();
+      await vscode.commands.executeCommand(TEST_SET_SERVER_PASSWORD_COMMAND_ID, {
+        origin,
+        password: 'not-the-password',
+      });
+      await log.waitFor('server not available (unauthorized)', 10_000);
+      assert.ok(!log.added().includes('not-the-password'), 'the wrong password is in the log');
+    } finally {
+      await vscode.workspace
+        .getConfiguration(CONFIG_SECTION)
+        .update(SERVER_URL_KEY, undefined, vscode.ConfigurationTarget.Global);
+      await vscode.commands.executeCommand(CLEAR_SERVER_PASSWORD_COMMAND_ID);
+      child.stdin.end();
+      // Back-up (S5 of the review): a real opencode that ignores the EOF must not outlive the run.
+      if (!(await waitForExit(child, 10_000))) {
+        await killTree(child, quiet);
+        await waitForExit(child, 10_000);
+      }
+    }
   });
 });
 

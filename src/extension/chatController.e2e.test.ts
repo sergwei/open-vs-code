@@ -129,6 +129,7 @@ async function boot(
       folder,
       binaryPath: process.execPath,
       pid: server.child.pid,
+      source: 'spawned',
     },
   };
   return { controller, posted, remembered, state, attention };

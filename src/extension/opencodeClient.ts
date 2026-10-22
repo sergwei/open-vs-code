@@ -1,5 +1,5 @@
 // Creates the `@opencode/client` instance the host uses to talk to the server it spawned
-// (issue #9). Architecture rule 1: this module, like every importer of the client, lives in
+// or, with `openVsCode.serverUrl` set, to the external one it connected to (issues #9, #11). Architecture rule 1: this module, like every importer of the client, lives in
 // `src/extension/**`; the webview never sees the URL, the port or the password.
 //
 // The client package is ESM-only (exports only the `import` condition) and the host is bundled
