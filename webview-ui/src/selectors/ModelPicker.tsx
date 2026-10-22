@@ -1,7 +1,14 @@
 import { createEffect, createMemo, createSignal, For, on, Show } from 'solid-js';
 import type { Catalog, ModelOption, ModelRef } from '../../../src/shared/model';
 import { dismissOutside } from './dismissOutside';
-import { groupModels, modelLabel, modelMeta, sameModel, type EffectiveModel } from './selection';
+import {
+  groupModels,
+  modelLabel,
+  modelMeta,
+  pickModel,
+  sameModel,
+  type EffectiveModel,
+} from './selection';
 
 /** Built from its code point: a literal one in the source trips `no-irregular-whitespace`. */
 const NO_BREAK_SPACE = String.fromCharCode(0xa0);
@@ -34,7 +41,10 @@ const keyOf = (model: { providerID: string; id: string }): string =>
  * (its visible text is inside the name: WCAG 2.5.3) and uses `aria-disabled`, not `disabled`: it
  * can hold the focus when the connection drops, and a disabled button throws the focus onto the
  * page. Picking does NOT talk to the host: the choice is a draft the prompt carries (decision of
- * 21/10/2026, Engram #1012).
+ * 21/10/2026, Engram #1012). Since issue #61 the reasoning variant is NOT in the trigger text any
+ * more (the `VariantPicker` next to it shows it), and picking goes through {@link pickModel}: the
+ * model already in use keeps its variant, any other starts on Default (decision of 22/10/2026,
+ * Engram #1021).
  * VERIFIED by `ModelPicker.test.tsx` in jsdom (focus checked with `document.activeElement`); the
  * look, the upward panel in a narrow side bar and the focus ring are checked by `npm run test:visual`
  * step 11 on Windows; screen readers UNVERIFIED. HYPOTHESIS (review #1015 S2): the "N models" live
@@ -78,8 +88,7 @@ export function ModelPicker(props: {
   const label = createMemo(() => {
     const effective = props.effective;
     if (effective === undefined) return 'Model';
-    let text = modelLabel(effective.ref, effective.option);
-    if (effective.ref.variant !== undefined) text = `${text} · ${effective.ref.variant}`;
+    const text = modelLabel(effective.ref, effective.option);
     if (effective.option === undefined) return `${text} (unavailable)`;
     if (effective.source === 'default') return `${text} (default)`;
     return text;
@@ -102,7 +111,7 @@ export function ModelPicker(props: {
   };
 
   const pick = (option: ModelOption): void => {
-    props.onSelect({ providerID: option.providerID, id: option.id });
+    props.onSelect(pickModel(props.effective, option));
     close(true);
   };
 

@@ -3027,13 +3027,86 @@ describe('catalog and selection (issues #23/#24)', () => {
       expect(calls.filter((c) => c === 'model.list')).toHaveLength(2);
     });
 
-    it('refuses a variant the model does not list', async () => {
-      const { api, calls } = fakeApi();
-      const { controller, posted } = setup(api);
+    // Issue #61. FABRICATED catalog (variants low/high as the spike saw for glm-5.3-flash-free).
+    it('refuses a variant the model does not list: VariantUnavailable, no server call, catalog reloaded', async () => {
+      const { api, calls, creates, switches } = fakeApi();
+      const { controller, posted, prefs } = setup(api);
       controller.onServerState(RUNNING);
       await controller.handle(send({ model: { ...GLM, variant: 'ultra' } }));
-      expect(lastResult(posted)).toMatchObject({ error: { code: 'ModelUnavailable' } });
+      expect(lastResult(posted)).toMatchObject({
+        requestId: 'r1',
+        error: { code: 'VariantUnavailable' },
+      });
+      expect(creates).toEqual([]);
+      expect(switches).toEqual([]);
       expect(calls).not.toContain('session.prompt');
+      expect(prefs.writes).toEqual([]);
+      await flush();
+      await flush();
+      expect(calls.filter((c) => c === 'model.list')).toHaveLength(2);
+    });
+
+    it('a variant "default" from the webview counts as no variant (new session)', async () => {
+      const { api, creates } = fakeApi();
+      const { controller, posted, logs, prefs } = setup(api);
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ model: { ...GLM, variant: 'default' } }));
+      expect(lastResult(posted)).toEqual({ type: 'request.result', requestId: 'r1' });
+      expect(creates).toEqual([{ model: GLM }]);
+      expect(logs).toContain('info: model selected opencode/glm-5.3-flash-free for ses_new');
+      expect(prefs.writes).toEqual([GLM]);
+    });
+
+    it('a variant "default" on a session stored on high switches back to no variant', async () => {
+      const { api, switches } = fakeApi({
+        sessions: ['ses_old'],
+        sessionSelection: { model: { ...GLM, variant: 'high' } },
+      });
+      const { controller } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      await controller.handle(
+        send({ sessionID: 'ses_old', model: { ...GLM, variant: 'default' } }),
+      );
+      expect(switches).toEqual(['model:opencode/glm-5.3-flash-free']);
+    });
+
+    // Protects against `isModelRef` accepting extra keys: a foreign key from the webview must not
+    // reach `session.create` nor the persisted last model. Synthetic message, no real webview.
+    it('does not pass keys other than providerID, id and variant on to the server or the memory', async () => {
+      const { api, creates } = fakeApi();
+      const { controller, prefs } = setup(api);
+      controller.onServerState(RUNNING);
+      const withExtra = { ...GLM, variant: 'high', extra: 'x' };
+      await controller.handle(send({ model: withExtra }));
+      expect(creates).toEqual([{ model: { ...GLM, variant: 'high' } }]);
+      expect(prefs.writes).toEqual([{ ...GLM, variant: 'high' }]);
+      expect(Object.keys(prefs.writes[0] ?? {})).toEqual(['providerID', 'id', 'variant']);
+    });
+
+    it('creates a new session with the variant, logs it at the end of the line and remembers it', async () => {
+      const { api, creates } = fakeApi();
+      const { controller, logs, prefs } = setup(api);
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ model: { ...GLM, variant: 'high' } }));
+      expect(creates).toEqual([{ model: { ...GLM, variant: 'high' } }]);
+      expect(logs).toContain(
+        'info: model selected opencode/glm-5.3-flash-free for ses_new (variant high)',
+      );
+      expect(prefs.writes).toEqual([{ ...GLM, variant: 'high' }]);
+    });
+
+    it('switching an existing session to a variant logs it at the end of the line', async () => {
+      const { api, switches } = fakeApi({
+        sessions: ['ses_old'],
+        sessionSelection: { model: GLM },
+      });
+      const { controller, logs } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ sessionID: 'ses_old', model: { ...GLM, variant: 'low' } }));
+      expect(switches).toEqual(['model:opencode/glm-5.3-flash-free@low']);
+      expect(logs).toContain(
+        'info: model selected opencode/glm-5.3-flash-free for ses_old (variant low)',
+      );
     });
 
     it('refuses a hidden or subagent agent: AgentUnavailable', async () => {

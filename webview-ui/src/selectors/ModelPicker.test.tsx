@@ -308,6 +308,26 @@ describe('keyboard', () => {
     expect(h.trigger().getAttribute('aria-expanded')).toBe('false');
   });
 
+  // Issue #61 (decision of Sergio, 22/10/2026, Engram #1021). The variant has its own control now.
+  it('the trigger no longer carries the reasoning variant', () => {
+    const h = start({ providerID: 'opencode', id: 'glm-5.3-flash-free', variant: 'high' });
+    expect(h.trigger().textContent).toBe('GLM-5.3-Flash Free');
+    expect(h.trigger().getAttribute('aria-label')).toBe('Model: GLM-5.3-Flash Free');
+  });
+
+  it('picking the model already in use keeps its variant, picking another starts on Default', () => {
+    const h = start({ providerID: 'opencode', id: 'glm-5.3-flash-free', variant: 'high' });
+    h.open();
+    (h.options()[1] as HTMLElement).click();
+    expect(h.picked).toEqual([
+      { providerID: 'opencode', id: 'glm-5.3-flash-free', variant: 'high' },
+    ]);
+    h.open();
+    (h.options()[0] as HTMLElement).click();
+    expect(h.picked[1]).toEqual({ providerID: 'opencode', id: 'big-pickle' });
+    expect('variant' in (h.picked[1] ?? {})).toBe(false);
+  });
+
   it('Escape closes without picking and returns the focus to the button', () => {
     const h = start();
     h.open();

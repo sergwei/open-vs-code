@@ -33,7 +33,8 @@ export type ErrorInfo = { code: string; message: string; detail?: string };
  * Provider/model pair as opencode names it. `id` is the CATALOG id (`ModelInfo.id`), not the
  * provider's API model id. An absent `variant` means "default": the host normalizes the
  * `variant: "default"` the server echoes back (VERIFIED, issue #23 spike, opencode 2.0.32,
- * Windows 11, 21/10/2026).
+ * Windows 11, 21/10/2026). The webview never sends `"default"` either (issue #61): "Default" is the
+ * reference without a `variant`, and the host drops the string if it arrives anyway.
  */
 export type ModelRef = { providerID: string; id: string; variant?: string };
 

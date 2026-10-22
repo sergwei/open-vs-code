@@ -18,9 +18,12 @@ import {
   modelLabel,
   modelMeta,
   normalizeModelSearch,
+  pickModel,
   replyMeta,
   sameModel,
   selectionToSend,
+  variantChoices,
+  withVariant,
   type SelectionInput,
 } from './selection';
 
@@ -248,5 +251,97 @@ describe('texts', () => {
     expect(replyMeta(catalog, 'general', { providerID: 'p', id: 'm', variant: 'low' })).toBe(
       'general · p/m · low',
     );
+  });
+});
+
+// Issue #61. FABRICATED: `variants` low/high/max are what the spike saw for glm-5.3-flash-free; a
+// model with variants and one without are enough to cover the rules.
+describe('reasoning variants (issue #61)', () => {
+  const withVariants: Catalog = {
+    ...catalog,
+    models: catalog.models.map((m) =>
+      m.id === 'glm-5.3-flash-free' ? { ...m, variants: ['low', 'high', 'max'] } : m,
+    ),
+  };
+  const effective = (extra: Partial<SelectionInput> = {}) =>
+    effectiveModel(input({ catalog: withVariants, ...extra }));
+
+  it('variantChoices is invisible without an effective model or for a model with no variants', () => {
+    expect(variantChoices(undefined)).toEqual({ options: [], visible: false });
+    expect(variantChoices(effective())).toEqual({ options: [], visible: false });
+  });
+
+  it('variantChoices lists the catalog ids in order with no variant chosen (Default)', () => {
+    expect(variantChoices(effective({ draft: { model: GLM } }))).toEqual({
+      options: ['low', 'high', 'max'],
+      visible: true,
+    });
+  });
+
+  it('variantChoices marks the current variant, from the draft or from the open session row', () => {
+    expect(variantChoices(effective({ draft: { model: { ...GLM, variant: 'high' } } }))).toEqual({
+      options: ['low', 'high', 'max'],
+      current: 'high',
+      visible: true,
+    });
+    const fromTui = effective({
+      hasSession: true,
+      row: row({ model: { ...GLM, variant: 'low' } }),
+    });
+    expect(variantChoices(fromTui)).toMatchObject({ current: 'low', visible: true });
+  });
+
+  it('variantChoices reports a variant the catalog does not list as missing, and stays visible', () => {
+    const choices = variantChoices(effective({ draft: { model: { ...GLM, variant: 'ultra' } } }));
+    expect(choices).toEqual({
+      options: ['low', 'high', 'max'],
+      current: 'ultra',
+      missing: 'ultra',
+      visible: true,
+    });
+    // Even a model with no variants at all shows a variant that was set on it.
+    expect(
+      variantChoices(effective({ draft: { model: { ...PICKLE, variant: 'low' } } })),
+    ).toMatchObject({ options: [], missing: 'low', visible: true });
+  });
+
+  it('withVariant returns a plain copy, and undefined removes the variant (never "default")', () => {
+    const base = { ...GLM, variant: 'high' };
+    expect(withVariant(base, 'low')).toEqual({ ...GLM, variant: 'low' });
+    const cleared = withVariant(base, undefined);
+    expect(cleared).toEqual(GLM);
+    expect('variant' in cleared).toBe(false);
+    expect(withVariant(base, 'low')).not.toBe(base);
+    expect(structuredClone(withVariant(base, 'low'))).toEqual({ ...GLM, variant: 'low' });
+  });
+
+  it('pickModel keeps the variant when the same model is picked again', () => {
+    const current = effective({ draft: { model: { ...GLM, variant: 'high' } } });
+    expect(pickModel(current, GLM)).toEqual({ ...GLM, variant: 'high' });
+  });
+
+  it('pickModel starts any other model on Default (ids do not mean the same across models)', () => {
+    const current = effective({ draft: { model: { ...GLM, variant: 'high' } } });
+    const picked = pickModel(current, PICKLE);
+    expect(picked).toEqual(PICKLE);
+    expect('variant' in picked).toBe(false);
+    expect(pickModel(undefined, GLM)).toEqual(GLM);
+  });
+
+  it('selectionToSend carries the variant of the draft and of the open session row', () => {
+    expect(
+      selectionToSend(
+        input({ catalog: withVariants, draft: { model: { ...GLM, variant: 'high' } } }),
+      ),
+    ).toEqual({ agent: 'build', model: { ...GLM, variant: 'high' } });
+    expect(
+      selectionToSend(
+        input({
+          catalog: withVariants,
+          hasSession: true,
+          row: row({ model: { ...GLM, variant: 'low' } }),
+        }),
+      ),
+    ).toEqual({ model: { ...GLM, variant: 'low' } });
   });
 });

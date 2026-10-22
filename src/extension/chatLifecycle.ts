@@ -41,13 +41,17 @@ const LAST_MODEL_KEY = 'openVsCode.lastModel';
 /**
  * Reads the last model used from `globalState`. The stored value is untrusted (an old version or
  * another extension host could have written anything): only an object with non-empty string
- * `providerID` and `id` counts, and a variant is dropped because the UI offers none.
+ * `providerID` and `id` counts. Since issue #61 a `variant` is kept when it is a non-empty string
+ * other than `"default"` (that spelling means "no variant" and is never stored by the controller);
+ * whether the catalog still lists it is decided later by `resolvePreferredModel`. UNVERIFIED: a
+ * variant surviving a window reload in a real `globalState`.
  */
 function readLastModel(context: vscode.ExtensionContext): ModelRef | undefined {
   const stored = context.globalState.get<unknown>(LAST_MODEL_KEY);
   if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) return undefined;
-  const { providerID, id } = stored as Record<string, unknown>;
+  const { providerID, id, variant } = stored as Record<string, unknown>;
   if (!isFilled(providerID) || !isFilled(id)) return undefined;
+  if (isFilled(variant) && variant !== 'default') return { providerID, id, variant };
   return { providerID, id };
 }
 

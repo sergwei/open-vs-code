@@ -14,8 +14,11 @@ import {
   effectiveAgent,
   effectiveModel,
   selectionToSend,
+  variantChoices,
+  withVariant,
   type SelectionInput,
 } from './selectors/selection';
+import { VariantPicker } from './selectors/VariantPicker';
 import { deriveActivity } from './store/activity';
 import type { ChatStore } from './store/chatStore';
 import type { UiState } from './uiState';
@@ -53,6 +56,10 @@ interface LastFork {
  * other sessions' requests) whenever a prompt is sent. The answered requests of the open session
  * are not in the dock: `MessageList` shows them under their tool (E3-resolved-history), so sending
  * a prompt does not erase them.
+ *
+ * Issue #61 mounts the `VariantPicker` after the model button: its choices come from the effective
+ * model (`variantChoices`), and picking one stores the effective model reference with that
+ * variant as the draft (`withVariant`), so `selectionToSend` carries it with the next prompt.
  *
  * Issue #20 adds the session list to the header (open, search, rename, delete; the host confirms a
  * delete) and makes New session lazy. Deleting the open session leaves the view empty (the store
@@ -421,6 +428,16 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
                 effective={effectiveModel(selectionInput())}
                 disabled={!connected()}
                 onSelect={props.store.selectModel}
+              />
+              <VariantPicker
+                choices={variantChoices(effectiveModel(selectionInput()))}
+                disabled={!connected() || state.catalog === undefined}
+                onSelect={(variant) => {
+                  const effective = effectiveModel(selectionInput());
+                  if (effective !== undefined) {
+                    props.store.selectModel(withVariant(effective.ref, variant));
+                  }
+                }}
               />
             </>
           }
