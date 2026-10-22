@@ -508,23 +508,19 @@ button.secondary:hover:not(:disabled),
 }
 
 /*
- * A short result ("exit 1", "+1 -1") is not cut while the argument can still give way (shrink 1
- * against 20), but a long one (the first line of an error) must be able to shrink once the argument
- * is at its minimum: with shrink 0 it ran over the "Open" link in the narrow side bar (seen in the
- * capture 15e-tool-failed-light of the 22/10/2026 run). The status word never shrinks.
- */
-.tool-status {
-  flex-shrink: 0;
-}
-
-/*
  * Plain foreground, NOT textPreformat-foreground: in "Default High Contrast Light" that pair is
- * made for a tinted box and the argument vanished (seen in the step 15 capture 15c-diff-hc-light).
+ * made for a tinted box and the argument vanished (seen in a step 15 capture in that theme; the
+ * check "the card header ... has text contrast >= 4.5 in hc-light" of `test:visual` guards it).
  */
 .tool-arg {
   color: var(--vscode-foreground);
 }
 
+/*
+ * The status word never shrinks, so a long result (the first line of an error) is the one that
+ * gives way once the argument is at its minimum: a result with shrink 0 ran over the "Open" link
+ * in the narrow side bar (seen in a capture of the 22/10/2026 step 15 run).
+ */
 .tool-status {
   flex: none;
 }
@@ -666,11 +662,19 @@ button.secondary:hover:not(:disabled),
   color: var(--vscode-descriptionForeground);
 }
 
+/*
+ * The error text of an unfolded card: normal foreground with the error colour on a left border,
+ * the same pattern as the "failed" chip. Bare `errorForeground` as text on the side bar measured
+ * 3.16:1 in "Default Light Modern" (step 15 run of 22/10/2026, on the chip), under the 4.5 that
+ * Sergio asked for; step 15 now measures this text in the four themes.
+ */
 .tool-error {
   margin: 2px 0;
+  padding-left: 6px;
+  border-left: 2px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  color: var(--vscode-errorForeground);
+  color: var(--vscode-foreground);
 }
 
 [class*='vscode-high-contrast'] .tool-card,
