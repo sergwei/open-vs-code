@@ -46,6 +46,10 @@
  *    list it stays OUT of `pending` (a keystroke must not disable Send) and accepts only the answer
  *    to the LAST request (`fileSearch.requestId`), so a slow answer to an old query cannot replace
  *    a newer one. `files.found` carries its own error, shown by the popup, not as a notice.
+ *  - E5-context-usage (issue #25) adds nothing to the reducers: the accumulated usage rides in
+ *    `SessionSummary.usage` (`session.upserted` reconciles it into the same row object) and the
+ *    compaction boundary in `OpenView.compactedAt` (copied by `snapshot`, cleared when a snapshot
+ *    brings none). The context itself is computed from the messages by `chat/usage.ts`.
  * VERIFIED by `chatStore.test.ts` with fabricated messages (confirms this logic, not the host
  * contract). UNVERIFIED in a real webview until the F5 of issue #14.
  */
@@ -116,11 +120,16 @@ export interface Notice {
   requestId?: string;
 }
 
-/** The session being shown. `sessionID` is `undefined` before the first prompt creates one. */
+/**
+ * The session being shown. `sessionID` is `undefined` before the first prompt creates one.
+ * `compactedAt` (issue #25) is the boundary of the last completed compaction, copied from the
+ * snapshot and absent when there is none; only a snapshot changes it.
+ */
 export interface OpenView {
   sessionID: string | undefined;
   messages: MessageInfo[];
   parts: { [messageID: string]: Part[] };
+  compactedAt?: number;
 }
 
 /**
@@ -425,7 +434,12 @@ export function createChatStore(): ChatStore {
         reconcile(
           open === undefined
             ? emptyOpen()
-            : { sessionID: open.sessionID, messages: open.messages, parts: open.parts },
+            : {
+                sessionID: open.sessionID,
+                messages: open.messages,
+                parts: open.parts,
+                ...(open.compactedAt === undefined ? {} : { compactedAt: open.compactedAt }),
+              },
           { key: 'id' },
         ),
       );

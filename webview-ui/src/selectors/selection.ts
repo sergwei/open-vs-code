@@ -237,8 +237,11 @@ export function groupModels(catalog: Catalog | undefined, search: string): Model
   return groups;
 }
 
-/** "200K" / "1M" for a token count; whole numbers only, rounded down. */
-function compactTokens(count: number): string {
+/**
+ * "200K" / "1M" for a token count; whole numbers only, rounded down. Exported since issue #25: the
+ * context line in the header (`chat/usage.ts`) writes its numbers the same way as the model list.
+ */
+export function compactTokens(count: number): string {
   if (count >= 1_000_000) return `${String(Math.floor(count / 1_000_000))}M`;
   if (count >= 1_000) return `${String(Math.floor(count / 1_000))}K`;
   return String(count);

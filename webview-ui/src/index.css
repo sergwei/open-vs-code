@@ -113,6 +113,23 @@ button.secondary:hover:not(:disabled),
   text-overflow: ellipsis;
 }
 
+/* ---------- context and cost line (issue #25) ---------- */
+
+/* Dimmed line under the title. The warning level is a border, never a text colour. */
+.usage-line {
+  margin: 2px 0 0;
+  padding: 0 4px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  border-left: 2px solid transparent;
+}
+
+.usage-line[data-level='high'] {
+  color: var(--vscode-foreground);
+  border-left-color: var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder));
+  background: var(--vscode-inputValidation-warningBackground, transparent);
+}
+
 /* ---------- related sessions (issue #21) ---------- */
 
 /* "‹ parent" or "Forked from ..." above the title. */

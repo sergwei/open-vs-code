@@ -102,6 +102,49 @@ describe('snapshot', () => {
     });
   });
 
+  // Issue #25: the compaction boundary travels in the snapshot only; a snapshot without it must
+  // clear the old one (the reconcile of `open` removes the key).
+  it('stores compactedAt from the snapshot and clears it when the next one has none', () => {
+    withStore((store) => {
+      const snapshot = (compactedAt?: number) => ({
+        type: 'snapshot' as const,
+        snapshot: {
+          ...openSnapshot(),
+          open: {
+            sessionID: SES,
+            messages: [],
+            parts: {},
+            ...(compactedAt ? { compactedAt } : {}),
+          },
+        },
+      });
+      store.apply(snapshot(500));
+      expect(store.state.open.compactedAt).toBe(500);
+      store.apply(snapshot());
+      expect(store.state.open.compactedAt).toBeUndefined();
+    });
+  });
+
+  it('keeps the identity of a session row when session.upserted brings new usage', () => {
+    withStore((store) => {
+      const usage = (input: number) => ({
+        cost: 0.1,
+        tokens: { input, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      });
+      store.apply({
+        type: 'session.upserted',
+        session: { id: SES, createdAt: 1, updatedAt: 1, usage: usage(10) },
+      });
+      const row = store.state.sessions[SES];
+      store.apply({
+        type: 'session.upserted',
+        session: { id: SES, createdAt: 1, updatedAt: 1, usage: usage(20) },
+      });
+      expect(store.state.sessions[SES]).toBe(row);
+      expect(store.state.sessions[SES]?.usage?.tokens.input).toBe(20);
+    });
+  });
+
   it('goes back to an empty open view when the snapshot has none', () => {
     withStore((store) => {
       store.apply({

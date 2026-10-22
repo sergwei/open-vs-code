@@ -81,6 +81,7 @@ import { createRequestResolutions } from './requestResolutions';
 import type { RunningServerInfo, ServerState } from './serverManager';
 import { createSessionBrowser } from './sessionBrowser';
 import {
+  lastCompactionAt,
   toAgentOptions,
   toErrorInfo,
   toFormAsk,
@@ -651,6 +652,13 @@ export class ChatController {
    * `session.forked` (issue #21) is the ONLY event a fork publishes (no `session.created`) and has
    * no title, so the translator cannot build the row: {@link refreshSession} reads it. VERIFIED by
    * the planner spike (opencode 2.0.32, Windows 11, 21/10/2026).
+   * Issue #25: `session.compaction.ended` of the OPEN session resyncs (the compaction boundary comes
+   * from the REST messages, so no protocol message was added; a compaction of another session needs
+   * nothing, its totals arrive as `session.usage.updated`), and `session.usage.updated` writes the
+   * stable line `usage updated for <sid>: <n> tokens` (ids and a number only) that the opt-in
+   * `realOpencode.test.ts` waits for. HYPOTHESIS: a resync with a turn in flight (automatic
+   * compaction mid-turn) keeps the in-flight message through `mergeLive`/`mergeStatuses`, which were
+   * built for that but never run with a compaction.
    */
   private onEvent(event: V2Event): void {
     try {
@@ -672,6 +680,24 @@ export class ChatController {
         this.log.info('location shutdown; refreshing the snapshot');
         void this.resync();
         void this.loadCatalog();
+        return;
+      }
+      if (event.type === 'session.usage.updated') {
+        const total = event.data.tokens;
+        const count =
+          total.input + total.output + total.reasoning + total.cache.read + total.cache.write;
+        this.log.info(`usage updated for ${event.data.sessionID}: ${String(count)} tokens`);
+      }
+      if (
+        event.type === 'session.compaction.ended' &&
+        this.open !== undefined &&
+        event.data.sessionID === this.open
+      ) {
+        // The boundary of the context indicator lives in the snapshot (`compactedAt`), not in a
+        // message of its own (issue #25). Not translated: the branch returns first, and the translator
+        // has no case for it anyway (it would give `[]`).
+        this.log.info(`compaction ended for ${event.data.sessionID}; refreshing the snapshot`);
+        void this.resync();
         return;
       }
       if (
@@ -919,6 +945,10 @@ export class ChatController {
    * the 50 newest: the open session's children (`session.list({ parentID })`, in parallel with the
    * messages), its parent and its fork origin (`session.get` each). All cosmetic: a failure is a
    * `debug` line and the snapshot still goes out (same rule as the open session's own row).
+   * Issue #25: the rows go through `translator.mergeUsage()` (a `session.usage.updated` that
+   * arrived during the reads wins over the older REST totals), and `open.compactedAt` is the
+   * `time.created` of the last completed compaction among the messages read (`lastCompactionAt`).
+   * The 200-message window is the only horizon: a compaction older than it is not seen.
    */
   async resync(): Promise<void> {
     const client = this.client;
@@ -1001,7 +1031,14 @@ export class ChatController {
         rawMessages = [];
       }
       for (const id of this.live.removed) delete statuses[id];
-      const rows = sessions.filter((row) => !this.live.removed.has(row.id));
+      // The totals of `session.usage.updated` seen since `beginResync` are newer than the REST rows.
+      const rows = this.translator.mergeUsage(
+        sessions.filter((row) => !this.live.removed.has(row.id)),
+      );
+      if (open !== undefined) {
+        const compactedAt = lastCompactionAt(rawMessages);
+        if (compactedAt !== undefined) open.compactedAt = compactedAt;
+      }
       this.translator.setOpen(this.open);
       this.translator.seed({ sessions: rows, messages: rawMessages });
       const requests = this.completeWithLive(restRequests);

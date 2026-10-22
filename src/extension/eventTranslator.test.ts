@@ -334,6 +334,72 @@ describe('sessions', () => {
   });
 });
 
+// Issue #25. The totals are the ones the planner's spike saw on a real opencode 2.0.32 after one
+// turn (Windows 11, 22/10/2026: `usage.updated` = `session.get` = `{input:4951, output:4,
+// cache.read:4608}`); the event envelope is built by hand. Protects: (1) usage is not activity, so
+// `updatedAt` must not move; (2) a snapshot read BEFORE the event must not overwrite the newer
+// totals (`mergeUsage`); (3) a usage event must not be lost for a row that was not mirrored yet.
+describe('session usage', () => {
+  const tokens = { input: 4951, output: 4, reasoning: 0, cache: { read: 4608, write: 0 } };
+  const usage = {
+    cost: 0,
+    tokens: { input: 4951, output: 4, reasoning: 0, cacheRead: 4608, cacheWrite: 0 },
+  };
+  const usageEvent = (sessionID: string, cost = 0) =>
+    ev('session.usage.updated', { sessionID, cost, tokens }, 7000);
+
+  it('upserts a mirrored row with the new usage and leaves updatedAt alone', () => {
+    const t = createEventTranslator();
+    t.seed({ sessions: [{ id: SES, title: 'T', createdAt: 1, updatedAt: 2 }], messages: [] });
+    expect(t.translate(usageEvent(SES))).toEqual([
+      {
+        type: 'session.upserted',
+        session: { id: SES, title: 'T', createdAt: 1, updatedAt: 2, usage },
+      },
+    ]);
+  });
+
+  it('gives nothing for a row it never mirrored', () => {
+    expect(createEventTranslator().translate(usageEvent('ses_new'))).toEqual([]);
+  });
+
+  it('keeps the usage in the rows a later rename or model switch emits', () => {
+    const t = createEventTranslator();
+    t.seed({ sessions: [{ id: SES, createdAt: 1, updatedAt: 2 }], messages: [] });
+    t.translate(usageEvent(SES));
+    expect(t.translate(ev('session.renamed', { sessionID: SES, title: 'N' }, 8000))).toMatchObject([
+      { session: { title: 'N', usage } },
+    ]);
+    expect(
+      t.translate(
+        ev('session.model.selected', { sessionID: SES, model: { providerID: 'p', id: 'm' } }, 9000),
+      ),
+    ).toMatchObject([{ session: { usage } }]);
+  });
+
+  it('mergeUsage overlays what the stream said since beginResync, and only that', () => {
+    const t = createEventTranslator();
+    const stale = {
+      cost: 0,
+      tokens: { input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    };
+    const rows = [
+      { id: SES, createdAt: 1, updatedAt: 2, usage: stale },
+      { id: 'ses_2', createdAt: 1, updatedAt: 2, usage: stale },
+    ];
+    t.translate(usageEvent(SES)); // before beginResync: forgotten
+    t.beginResync();
+    expect(t.mergeUsage(rows)).toBe(rows);
+    t.translate(usageEvent(SES)); // arrives while REST is being read, for an unmirrored row too
+    expect(t.mergeUsage(rows)).toEqual([
+      { id: SES, createdAt: 1, updatedAt: 2, usage },
+      { id: 'ses_2', createdAt: 1, updatedAt: 2, usage: stale },
+    ]);
+    t.beginResync();
+    expect(t.mergeUsage(rows)).toBe(rows);
+  });
+});
+
 describe('tools', () => {
   const a = { sessionID: SES, assistantMessageID: ASSISTANT };
 

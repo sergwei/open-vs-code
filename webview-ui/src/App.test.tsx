@@ -1191,6 +1191,28 @@ describe('related sessions in the header (issue #21)', () => {
   });
 });
 
+// Issue #25: where the context line sits (Sergio's choice: under the title, in the header area) and
+// that it appears only once a step has reported usage. FABRICATED snapshot; the line itself is
+// tested in `UsageIndicator.test.tsx`.
+describe('context and cost line (issue #25)', () => {
+  it('sits in the header area after the title bar, and only once there is usage', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
+    expect(h.container.querySelector('.usage-line')).toBeNull();
+    h.apply({
+      type: 'message.upserted',
+      sessionID: SES,
+      message: assistant('m2', {
+        tokens: { input: 4912, output: 2, reasoning: 0, cacheRead: 4096, cacheWrite: 0 },
+      }),
+    });
+    const line = must(h.container, '.header-area > .usage-line');
+    expect(line.querySelector('[aria-hidden="true"]')?.textContent).toBe('Context 9K');
+    expect(line.querySelector('.visually-hidden')?.textContent).toBe('Context: 9,010 tokens.');
+    expect(line.previousElementSibling?.classList.contains('chat-header')).toBe(true);
+  });
+});
+
 // E5 / issues #23 and #24: the agent switch and the model picker in the prompt row, and what
 // `prompt.send` carries. FABRICATED catalog and snapshots (the shapes are the ones the planner spike
 // saw in a real opencode 2.0.32, but these tests prove the wiring and the precedence, not the

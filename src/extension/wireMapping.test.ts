@@ -18,6 +18,7 @@ import type {
   SessionMessageInfo,
 } from '@opencode/client';
 import {
+  lastCompactionAt,
   sanitizeText,
   toAgentOptions,
   toErrorInfo,
@@ -36,6 +37,8 @@ function wire<T>(json: string): T {
 }
 
 const SECRETS = { url: 'http://127.0.0.1:43211', password: 'S3cr3t-pass_word' };
+
+const ZERO_TOKENS = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
 
 // Issues #23/#24. The model JSON follows the fields of a REAL `ModelInfo` as the planner spike saw
 // them (opencode 2.0.32, Windows 11, 21/10/2026: `glm-5.3-flash-free`, variants low/high/max,
@@ -124,7 +127,40 @@ describe('toSessionSummary', () => {
       outcome: 'succeeded',
       createdAt: 1000,
       updatedAt: 2000,
+      usage: { cost: 0, tokens: ZERO_TOKENS },
     });
+  });
+
+  // Issue #25. The numbers are the totals the planner's spike saw on a real opencode 2.0.32 after
+  // one turn (Windows 11, 22/10/2026: `{input:4951, output:4, cache.read:4608}`); the JSON is
+  // rebuilt by hand, so this pins OUR mapping (cache.read/write -> cacheRead/cacheWrite), not the
+  // contract.
+  it('maps the accumulated cost and tokens of the row to usage', () => {
+    const info = wire<SessionInfo>(`{
+      "id": "ses_1", "projectID": "prj", "cost": 0.0123,
+      "tokens": {"input":4951,"output":4,"reasoning":0,"cache":{"read":4608,"write":7}},
+      "time": {"created": 1, "updated": 2}
+    }`);
+    expect(toSessionSummary(info).usage).toEqual({
+      cost: 0.0123,
+      tokens: { input: 4951, output: 4, reasoning: 0, cacheRead: 4608, cacheWrite: 7 },
+    });
+  });
+
+  // Issue #25, review S4. FABRICATED rows that lack a field the types call required: the mapping
+  // must degrade to "no usage" instead of throwing (a throw would fail the whole resync for a
+  // cosmetic line). No real server was seen to send such a row.
+  it('sets usage only when both cost and tokens are present, and never throws', () => {
+    const noTokens = wire<SessionInfo>(`{
+      "id": "ses_1", "projectID": "prj", "cost": 0.5, "time": {"created": 1, "updated": 2}
+    }`);
+    const noCost = wire<SessionInfo>(`{
+      "id": "ses_1", "projectID": "prj",
+      "tokens": {"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}},
+      "time": {"created": 1, "updated": 2}
+    }`);
+    expect(toSessionSummary(noTokens)).toEqual({ id: 'ses_1', createdAt: 1, updatedAt: 2 });
+    expect(toSessionSummary(noCost)).toEqual({ id: 'ses_1', createdAt: 1, updatedAt: 2 });
   });
 
   // Issue #21. The `fork` JSON is copied from the shape the planner spike saw (opencode 2.0.32,
@@ -142,6 +178,7 @@ describe('toSessionSummary', () => {
       forkOf: 'ses_1',
       createdAt: 1,
       updatedAt: 2,
+      usage: { cost: 0, tokens: ZERO_TOKENS },
     });
     const child = wire<SessionInfo>(`{
       "id": "ses_3", "parentID": "ses_1", "projectID": "prj", "cost": 0,
@@ -150,6 +187,46 @@ describe('toSessionSummary', () => {
     }`);
     expect(toSessionSummary(child).forkOf).toBeUndefined();
     expect(toSessionSummary(child).parentID).toBe('ses_1');
+  });
+});
+
+// Issue #25. The `compaction` message shape follows the REST message the planner's spike saw after
+// a manual `session.compact` on a real opencode 2.0.32 (22/10/2026: `status: "completed"`,
+// `time.created` = the `compaction.started` event); the running and failed variants and their
+// field sets come from the TYPES only. Protects the rule that only a COMPLETED compaction moves
+// the boundary of the context indicator.
+describe('lastCompactionAt', () => {
+  const compaction = (id: string, status: string, created: number): SessionMessageInfo =>
+    wire<SessionMessageInfo>(
+      `{"id": "${id}", "type": "compaction", "status": "${status}", "reason": "manual",
+        "summary": "s", "recent": "r", "time": {"created": ${String(created)}}}`,
+    );
+  const user = wire<SessionMessageInfo>(
+    '{"id": "msg_u", "type": "user", "text": "hi", "time": {"created": 5}, "files": []}',
+  );
+
+  it('is undefined without a compaction', () => {
+    expect(lastCompactionAt([])).toBeUndefined();
+    expect(lastCompactionAt([user])).toBeUndefined();
+  });
+
+  it('reads the time of a completed one', () => {
+    expect(lastCompactionAt([user, compaction('msg_c', 'completed', 100)])).toBe(100);
+  });
+
+  it('ignores running and failed compactions', () => {
+    expect(
+      lastCompactionAt([compaction('msg_r', 'running', 300), compaction('msg_f', 'failed', 400)]),
+    ).toBeUndefined();
+    expect(
+      lastCompactionAt([compaction('msg_c', 'completed', 100), compaction('msg_f', 'failed', 400)]),
+    ).toBe(100);
+  });
+
+  it('takes the newest of several whatever their order', () => {
+    expect(
+      lastCompactionAt([compaction('b', 'completed', 200), compaction('a', 'completed', 100)]),
+    ).toBe(200);
   });
 });
 

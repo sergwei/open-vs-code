@@ -18,6 +18,15 @@
 //     the issue #23 spike, opencode 2.0.32, Windows 11, 21/10/2026); a row it does not know gives
 //     `[]` and the next snapshot brings it. The reload events of the catalog (`model.updated`,
 //     `agent.updated`...) are NOT handled here: the controller reloads the catalog itself.
+//   - `session.usage.updated` (issue #25) carries the ACCUMULATED cost and tokens of a session and
+//     is volatile (no `durable`). A MIRRORED row becomes a `session.upserted` with the new `usage`
+//     and an untouched `updatedAt` (usage is not activity: the title generation also publishes
+//     it); a row it does not know gives `[]`. Either way the latest usage is remembered until the
+//     next `beginResync`, so `mergeUsage` can overlay it on REST rows read before it arrived.
+//     VERIFIED by the planner spike (opencode 2.0.32, Windows 11, 22/10/2026); not re-run here:
+//     the totals of `usage.updated` equal `session.get` and `session.list` after a turn
+//     (plan line "tras el turno `usage.updated` = `GET` = `list` = `{input:4951, output:4,
+//     cache.read:4608}`"). UNVERIFIED for paid models and for the compaction usage in a live VS Code.
 // Self-healing instead of buffering: every closing event (`*.ended`, `step.*`, `tool.*`) emits the
 // WHOLE object, so what a snapshot/stream gap lost is repaired when the block closes. A delta for
 // an unknown message or block is dropped (deltas are not idempotent, so they cannot be replayed).
@@ -30,6 +39,7 @@ import type {
   Part,
   SessionStatus,
   SessionSummary,
+  SessionUsage,
   ToolState,
 } from '../shared/model';
 import {
@@ -170,10 +180,19 @@ export interface EventTranslator {
    */
   mergeLive(open: OpenSession): OpenSession;
   /**
-   * Marks the start of a resync: forgets the statuses remembered so far. Call it BEFORE the REST
-   * reads, so {@link EventTranslator.mergeStatuses} only holds what the stream said since then.
+   * Marks the start of a resync: forgets the statuses and the usage remembered so far. Call it
+   * BEFORE the REST reads, so {@link EventTranslator.mergeStatuses} and
+   * {@link EventTranslator.mergeUsage} only hold what the stream said since then.
    */
   beginResync(): void;
+  /**
+   * Returns `rows` with the `usage` of each session replaced by the latest `session.usage.updated`
+   * the stream delivered since `beginResync`, for the rows it saw. The REST rows were read before
+   * publication and the totals only grow, so a newer streamed value must win (rule "the snapshot is
+   * a photo" of opencode-api §4). Rows it did not see, and every other field, come back untouched;
+   * returns `rows` itself when the stream said nothing.
+   */
+  mergeUsage(rows: SessionSummary[]): SessionSummary[];
   /**
    * Overlays on `statuses` (read from REST, possibly before the stream moved on) the latest status
    * the stream derived from `session.execution.*` / `retry.scheduled` since `beginResync`.
@@ -214,6 +233,10 @@ export interface EventTranslator {
  * holds the rows of the pages the user browsed, so a rename of an older session is forwarded.
  * VERIFIED by `eventTranslator.test.ts` (fabricated rows); a rename of an old session by another
  * client has only been seen through the synthetic server of `chatController.e2e.test.ts`.
+ * Issue #25 added `session.usage.updated` and `mergeUsage`. The logic is covered by
+ * `eventTranslator.test.ts` with hand-built events (numbers copied from the planner's spike); that
+ * the real server sends the event is covered only by the opt-in `realOpencode.test.ts` (its
+ * "streams a real prompt to the end" asserts the log line `usage updated for ses_…`).
  */
 export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslator {
   const sessions = new Map<string, SessionSummary>();
@@ -223,6 +246,11 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
   const liveUsers = new Map<string, Extract<MessageInfo, { kind: 'user' }>>();
   /** Latest status the stream derived per session since `beginResync`, to override a stale snapshot. */
   const liveStatuses = new Map<string, SessionStatus>();
+  /**
+   * Latest accumulated usage the stream gave per session since `beginResync` (bounded like
+   * `liveStatuses`), to override a stale REST row. Remembered even for sessions not mirrored.
+   */
+  const liveUsage = new Map<string, SessionUsage>();
   /** `time.created` of the newest message of the last REST read, `undefined` when it was empty. */
   let restNewest: number | undefined;
   let open: string | undefined;
@@ -297,6 +325,15 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
   return {
     beginResync() {
       liveStatuses.clear();
+      liveUsage.clear();
+    },
+
+    mergeUsage(rows) {
+      if (liveUsage.size === 0) return rows;
+      return rows.map((row) => {
+        const usage = liveUsage.get(row.id);
+        return usage === undefined ? row : { ...row, usage };
+      });
     },
 
     mergeStatuses(statuses) {
@@ -430,6 +467,21 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
             agent: event.data.agent,
             updatedAt: event.created,
           };
+          sessions.set(next.id, next);
+          return [{ type: 'session.upserted', session: next }];
+        }
+        case 'session.usage.updated': {
+          const { data } = event;
+          const usage: SessionUsage = { cost: data.cost, tokens: toTokenUsage(data.tokens) };
+          if (liveUsage.size >= MAX_LIVE_STATUSES) {
+            const oldest = liveUsage.keys().next();
+            if (!oldest.done) liveUsage.delete(oldest.value);
+          }
+          liveUsage.delete(data.sessionID); // re-insert at the end so the oldest is evicted first
+          liveUsage.set(data.sessionID, usage);
+          const row = sessions.get(data.sessionID);
+          if (row === undefined) return []; // not mirrored: a snapshot will bring the full row
+          const next: SessionSummary = { ...row, usage };
           sessions.set(next.id, next);
           return [{ type: 'session.upserted', session: next }];
         }

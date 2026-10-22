@@ -85,11 +85,22 @@ export type ConnectionState =
     }
   | { state: 'stopped' };
 
-/** Full state of the session the user has open. `parts` is keyed by message id. */
+/**
+ * Full state of the session the user has open. `parts` is keyed by message id.
+ *
+ * `compactedAt` (issue #25) is the epoch-ms `time.created` of the LAST completed compaction in the
+ * messages the host read (absent when there is none). The context indicator ignores every
+ * assistant message created at or before it, because a compaction replaces the earlier history in
+ * the model prompt although `message.list` still lists it (VERIFIED by the planner spike, opencode
+ * 2.0.32, Windows 11, 22/10/2026; not re-run here; plan line "Los mensajes previos SIGUEN
+ * listados"). It only changes with a snapshot:
+ * the host resyncs when `session.compaction.ended` arrives for the open session.
+ */
 export type OpenSession = {
   sessionID: string;
   messages: MessageInfo[];
   parts: { [messageID: string]: Part[] };
+  compactedAt?: number;
 };
 
 /**
@@ -138,6 +149,8 @@ export type Snapshot = {
  * `catalog` (issues #23/#24) is the whole list of models, providers and selectable agents of the
  * server, with the model the host proposes for a new session; it REPLACES the previous catalog,
  * is re-sent after every `ready`, and is absent until the first load succeeds.
+ * `session.upserted` is also what carries a change of `usage` (issue #25), sent after each step that
+ * ends; nothing new flows from the webview to the host for it.
  */
 export type HostToWebview =
   | { type: 'connection.state'; connection: ConnectionState }

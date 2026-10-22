@@ -892,6 +892,128 @@ describe('resync', () => {
   });
 });
 
+// Issue #25. The compaction message and the usage totals follow what the planner's spike saw on a
+// real opencode 2.0.32 (Windows 11, 22/10/2026); the controller is driven with a FAKE client, so
+// this protects OUR wiring: the boundary reaching the snapshot, the stream winning over an older
+// REST read (one case per direction, opencode-api §4), and the resync on `compaction.ended` of the
+// open session only.
+describe('context usage (issue #25)', () => {
+  const compaction = (status: string, created: number): SessionMessageInfo =>
+    wire<SessionMessageInfo>(
+      `{"id":"msg_c${String(created)}","type":"compaction","status":"${status}","reason":"manual","summary":"s","recent":"r","time":{"created":${String(created)}}}`,
+    );
+  const usageRow = (id: string, input: number): SessionInfo =>
+    wire<SessionInfo>(
+      `{"id":"${id}","projectID":"p","cost":0.5,"tokens":{"input":${String(input)},"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1,"updated":2},"location":{"directory":"C:\\\\work"}}`,
+    );
+
+  it('puts the time of the last completed compaction in the open session of the snapshot', async () => {
+    const { api } = fakeApi({
+      messages: [compaction('running', 900), compaction('completed', 500)],
+    });
+    const { controller, snapshots } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(snapshots().at(-1)?.open?.compactedAt).toBe(500);
+  });
+
+  it('leaves compactedAt out when no compaction completed', async () => {
+    const { api } = fakeApi({ messages: [compaction('failed', 900)] });
+    const { controller, snapshots } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(snapshots().at(-1)?.open).toBeDefined();
+    expect(snapshots().at(-1)?.open?.compactedAt).toBeUndefined();
+  });
+
+  it('carries the REST totals of each row as usage', async () => {
+    const { api } = fakeApi({
+      listImpl: () => Promise.resolve({ data: [usageRow('ses_a', 700)], cursor: {} }),
+    });
+    const { controller, snapshots } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(snapshots().at(-1)?.sessions[0]?.usage).toEqual({
+      cost: 0.5,
+      tokens: { input: 700, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
+  it('lets a usage update that arrived while REST was being read win over the older row', async () => {
+    let release: (value: { data: SessionInfo[]; cursor: object }) => void = () => undefined;
+    const { api } = fakeApi({
+      listImpl: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    });
+    const { controller, streams, snapshots } = setup(api);
+    controller.onServerState(RUNNING);
+    const pending = controller.resync();
+    await flush();
+    emit(streams, 'session.usage.updated', {
+      sessionID: 'ses_a',
+      cost: 0.75,
+      tokens: { input: 900, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    });
+    release({ data: [usageRow('ses_a', 700)], cursor: {} });
+    await pending;
+    expect(snapshots().at(-1)?.sessions[0]?.usage?.tokens.input).toBe(900);
+    expect(snapshots().at(-1)?.sessions[0]?.usage?.cost).toBe(0.75);
+  });
+
+  it('does not let a usage update from before the resync overwrite a newer REST row', async () => {
+    const { api } = fakeApi({
+      listImpl: () => Promise.resolve({ data: [usageRow('ses_a', 700)], cursor: {} }),
+    });
+    const { controller, streams, snapshots } = setup(api);
+    controller.onServerState(RUNNING);
+    emit(streams, 'session.usage.updated', {
+      sessionID: 'ses_a',
+      cost: 0.1,
+      tokens: { input: 5, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    });
+    await controller.resync();
+    expect(snapshots().at(-1)?.sessions[0]?.usage?.tokens.input).toBe(700);
+  });
+
+  it('logs a usage update with the session id and a token count only', () => {
+    const { controller, streams, logs } = setup(fakeApi().api);
+    controller.onServerState(RUNNING);
+    emit(streams, 'session.usage.updated', {
+      sessionID: 'ses_a',
+      cost: 0,
+      tokens: { input: 4951, output: 4, reasoning: 0, cache: { read: 4608, write: 0 } },
+    });
+    expect(logs).toContain('info: usage updated for ses_a: 9563 tokens');
+  });
+
+  it('resyncs when the OPEN session finishes a compaction, and only then', async () => {
+    const { api, calls } = fakeApi();
+    const { controller, streams, logs } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    const before = calls.filter((c) => c === 'session.list').length;
+    emit(streams, 'session.compaction.ended', {
+      sessionID: 'ses_other',
+      reason: 'manual',
+      text: 't',
+      recent: 'r',
+    });
+    await flush();
+    expect(calls.filter((c) => c === 'session.list')).toHaveLength(before);
+    emit(streams, 'session.compaction.ended', {
+      sessionID: 'ses_open',
+      reason: 'manual',
+      text: 't',
+      recent: 'r',
+    });
+    await flush();
+    expect(calls.filter((c) => c === 'session.list')).toHaveLength(before + 1);
+    expect(logs).toContain('info: compaction ended for ses_open; refreshing the snapshot');
+  });
+});
+
 describe('server state', () => {
   it('starts one stream per running server and ignores a repeated running state', () => {
     const { controller, streams } = setup(fakeApi().api);
@@ -2888,6 +3010,10 @@ describe('session.fork (issue #21)', () => {
         forkOf: 'ses_1',
         createdAt: 1,
         updatedAt: 2,
+        usage: {
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+        },
       },
     });
   });
