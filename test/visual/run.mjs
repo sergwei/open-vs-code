@@ -226,7 +226,6 @@ for (const required of ['dist/extension.js', 'dist/webview/assets/index.js']) {
 
 fs.rmSync(shotsDir, { recursive: true, force: true });
 fs.mkdirSync(shotsDir, { recursive: true });
-
 // Assigned inside the `try` at the bottom, so that a failure while creating them (the VS Code
 // download, say) still reaches `cleanup`.
 let workspace;
@@ -302,12 +301,76 @@ async function connectWorkbench(timeoutMs = 90_000) {
   throw new Error(`could not connect to VS Code over CDP: ${String(lastError)}`);
 }
 
-/** Saves a screenshot of the whole window and remembers its path. */
+/**
+ * Saves a screenshot of the whole window and remembers its path.
+ *
+ * For the names in `README_CROPS` it also saves a webview-only crop (`cropWebview`).
+ */
 async function shot(name) {
   const file = path.join(shotsDir, `${name}.png`);
   await page.screenshot({ path: file });
   shots.push(file);
+  if (README_CROPS.has(name)) await cropWebview(name);
   return file;
+}
+
+// --- README image crops (issue #42) -----------------------------------------------------------
+
+/** Shots that also get a webview-only crop in `readmeDir`: candidates for `docs/images/`. */
+const README_CROPS = new Set([
+  '02b-markdown',
+  '05b-card',
+  '07a-question',
+  '10a-sessions-dark',
+  '11c-fork-dark',
+  '12b-model-panel-dark',
+  '12f-reply-meta-dark',
+  '15a-tool-cards-folded',
+  '15b-tool-edit-open',
+  '15c-diff-dark',
+  '16a-mention-popup',
+  '16e-mention-sent',
+]);
+
+const readmeDir = path.join(workDir, 'readme');
+// Cleared at start, like `shotsDir`: crops of an earlier run must not survive to be copied into
+// docs/images/ as if they were new. Declared here, not next to `shotsDir`, because of the const.
+fs.rmSync(readmeDir, { recursive: true, force: true });
+
+/**
+ * Saves a PNG of just the chat webview (the `iframe.webview.ready` box) to `readmeDir`.
+ *
+ * Why: the full-window shots carry the VS Code watermark logo, a toast, the Copilot panel and the
+ * temporary workspace name, none of which may appear in a README (VS Code branding rules). The
+ * clip is the iframe's bounding box in page coordinates, the same box `centreOf` adds to the
+ * in-frame coordinates. It never fails the run: a missing frame is a warning. `boundingBox()`
+ * waits for the element and THROWS a TimeoutError when there is no iframe at all (it returns null
+ * only for an attached but invisible one), so the call carries a short timeout and a `.catch`
+ * that turns both cases into the warning. The files are copied BY HAND to `docs/images/` after
+ * looking at them, because what the free model writes changes on every run.
+ * HYPOTHESIS for the throwing case: read in playwright-core `lib/client/locator.js`
+ * (`boundingBox` goes through `_withElement` with a timeout), not run without a frame; to check
+ * it, call `cropWebview` while no chat view is open and expect the warning, not a failed step.
+ * VERIFIED on Windows 11 with VS Code stable (2026-10-22): after a full run that ended with
+ * "all visual checks passed", the 12 crops were opened one by one and show the chat content
+ * (Markdown, cards, model list), not an empty frame, so the clip does include the out-of-process
+ * iframe. Not observed: other operating systems, or a frame that is partly off-screen.
+ */
+async function cropWebview(name) {
+  const frame = await page
+    .locator('iframe.webview.ready')
+    .first()
+    .boundingBox({ timeout: 5_000 })
+    .catch(() => null);
+  if (!frame) {
+    warn(`no webview frame to crop for ${name}`);
+    return;
+  }
+  fs.mkdirSync(readmeDir, { recursive: true });
+  await page.screenshot({
+    path: path.join(readmeDir, `${name}.png`),
+    clip: { x: frame.x, y: frame.y, width: frame.width, height: frame.height },
+  });
 }
 
 /** (Re)opens the CDP connection to the webview target, replacing the previous one. */

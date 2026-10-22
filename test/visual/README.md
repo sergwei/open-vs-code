@@ -60,6 +60,11 @@ layout shift in the few milliseconds between the check and the click, nor clicks
 ## Where things go
 
 - Screenshots: `.vscode-test/visual/shots/` (ignored by git). The paths are printed at the end.
+- README crops: for the shots listed in `README_CROPS` (`run.mjs`), a PNG of only the chat
+  webview goes to `.vscode-test/visual/readme/` (the full-window shots carry the VS Code logo
+  watermark, toasts and the temporary workspace path). The images of the root README
+  (`docs/images/`) are copied from there BY HAND after looking at each one, because what the free
+  model writes changes on every run: check that no user path or leftover card appears.
 - Profile and extensions dir: `.vscode-test/visual/user-data` and `extensions`, wiped at the start
   of every run. Your own VS Code and its `settings.json` are not touched.
 - opencode's data, state and cache: `.vscode-test/visual/opencode-xdg` (wiped at the start). The
