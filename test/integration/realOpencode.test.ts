@@ -18,8 +18,8 @@
 // free default model on 2026-10-20 (two runs; in the first, the older case "streams a real
 // prompt" saw no turn end within 60 s; the second run passed all 9 and the same prompt finished
 // in 4 s). HYPOTHESIS that the free model was slow or stuck: the log of that first run
-// (`.vscode-test/user-data/logs/20261020T205411/window1/exthost/sergwei.open-vs-code/OpenCode.log`,
-// kept) shows `prompt accepted` at 20:54:16 and NO `turn finished` line of any kind until the
+// (the extension's OpenCode.log of that run, read on 20/10/2026) shows `prompt accepted` at
+// 20:54:16 and NO `turn finished` line of any kind until the
 // next case's prompt at 20:55:16, which queued behind it and was cut by the interrupt; nothing in
 // that log points at the model or rules it out. To check: rerun until it repeats and read the
 // server's own session messages for that prompt.
@@ -259,12 +259,11 @@ describe('real opencode', function () {
    * under the reply) is `test:visual` step 14. Needs network and the free model.
    *
    * VERIFIED on Windows 11, VS Code 1.143.0, opencode 2.0.32, on 22/10/2026 ~09:50 (run of the
-   * `real-opencode` label on the final tree, 11 passing; OpenCode.log read afterwards, in
-   * `.vscode-test/user-data/logs/20261022T094935`): `model selected
-   * opencode/glm-5.3-flash-free for ses_… (variant low)` at 09:50:12.869, then `prompt accepted`
-   * at 09:50:12.874 and `turn finished: succeeded` at 09:50:28.212, so the real server took the
-   * variant and `VariantUnavailableError` did not show up. NOT observed: that error itself (no
-   * unlisted variant was sent to a real server), macOS and Linux (UNVERIFIED).
+   * `real-opencode` label on the final tree, 11 passing; OpenCode.log read afterwards): `model
+   * selected opencode/glm-5.3-flash-free for ses_… (variant low)` at 09:50:12.869, then `prompt
+   * accepted` at 09:50:12.874 and `turn finished: succeeded` at 09:50:28.212, so the real server
+   * took the variant and `VariantUnavailableError` did not show up. NOT observed: that error
+   * itself (no unlisted variant was sent to a real server), macOS and Linux (UNVERIFIED).
    */
   it('applies a chosen reasoning variant before the prompt', async function () {
     this.timeout(TURN_WAIT_MS + READY_WAIT_MS);

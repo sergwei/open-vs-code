@@ -1,17 +1,18 @@
 // Protects the reasoning-variant control (issue #61) from the ways such a widget quietly breaks:
 //   - a control that shows up for a model with nothing to choose, or that hides a variant which is
 //     set but no longer listed (the user would not know why the host refuses the send);
-//   - a panel without a keyboard model (focus on the current entry, arrows, Enter, Escape giving the
-//     focus back to the button) or with the current entry marked only by colour;
-//   - a button that is `disabled` while it holds the focus (the focus falls onto the page) instead of
-//     `aria-disabled`, and an accessible name that does not contain the visible text (WCAG 2.5.3);
+//   - a panel without a keyboard model (focus on the current entry, arrows, Enter, Escape giving
+//     the focus back to the button) or with the current entry marked only by colour;
+//   - a button that is `disabled` while it holds the focus (the focus falls onto the page)
+//     instead of `aria-disabled`, and an accessible name that does not contain the visible text
+//     (WCAG 2.5.3);
 //   - "Default" reaching the host as the string "default" instead of an absent variant.
 //
-// Provenance: FABRICATED choices rendered in jsdom (the ids low/high/max are what the planner's spike
-// saw for glm-5.3-flash-free in a real opencode 2.0.32, Windows 11, 21/10/2026). They confirm the
-// wiring of the component, not the layout, the upward panel in a narrow side bar, the real mouse, the
-// focus ring or a screen reader (`npm run test:visual` step 14 covers the first three on Windows; the
-// last is UNVERIFIED). Focus is checked with `document.activeElement`.
+// Provenance: FABRICATED choices rendered in jsdom (the ids low/high/max are what the planner's
+// spike saw for glm-5.3-flash-free in a real opencode 2.0.32, Windows 11, 21/10/2026). They
+// confirm the wiring of the component, not the layout, the upward panel in a narrow side bar, the
+// real mouse, the focus ring or a screen reader (`npm run test:visual` step 14 covers the first
+// three on Windows; the last is UNVERIFIED). Focus is checked with `document.activeElement`.
 import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { must, mount, type Mounted } from '../testing';

@@ -31,8 +31,8 @@ const asTool = (part: Part): ToolPart | undefined => (part.type === 'tool' ? par
  * Issue #21: the "Open subagent session" button of a `subagent` tool now lives in the card header
  * and calls `onOpenSession` with the child id (`ToolCard` documents it). VERIFIED by
  * `App.test.tsx` (jsdom, fabricated blocks). VERIFIED in a real VS Code: `test:visual` step 10
- * (22/10/2026, final run 13:59:27-14:05, Windows 11, output in `.vscode-test/visual/run-output.txt`)
- * printed, at lines 186, 187 and 193, `ok the tool block reads as a subagent line ("Subagent Say
+ * (22/10/2026, the run of 13:59:27-14:05, Windows 11, VS Code 1.143.0, opencode 2.0.32)
+ * printed `ok the tool block reads as a subagent line ("Subagent Say
  * hello (general) · done")`, `ok "Open subagent session" is pressed` and `ok the parent lists its
  * subagent session ("Subagent sessions (1)")`. NOT observed: the
  * `running` header of a subagent card in a real run, and a subagent card without a child id.

@@ -31,12 +31,12 @@ const ANSI_CSI = new RegExp(`${ESC}\\[[0-9;?]*[ -/]*[@-~]`, 'g');
  * deleted line whose text starts with `-- ` is still a deletion. A patch with no headers (or with
  * no `@@` at all) is classified by the first character of each line, so nothing is lost. The
  * trailing empty string that `split` leaves after the final newline is not a line.
- * VERIFIED on one real patch: `test:visual` step 15 (22/10/2026 final run 13:59-14:05, Windows 11,
- * opencode 2.0.32, `.vscode-test/visual/run-output.txt` line 336) edited `value2 = 2;` in `src/sample.ts`, and the open card showed 1 hunk line, 1 added and
- * 1 deleted line and no header text (checks "the edit body is a diff with added (1) and deleted (1)
- * lines", log line "edit hunk lines: 1"). HYPOTHESIS for the rest: CRLF files, a patch with several
- * hunks or files, and "\ No newline" markers were never seen in a real patch; `patchLines.test.ts`
- * uses fabricated patches, so it confirms this parser only.
+ * VERIFIED on one real patch: `test:visual` step 15 (the run of 22/10/2026 13:59-14:05, Windows 11,
+ * opencode 2.0.32) edited `value2 = 2;` in `src/sample.ts`, and the open card showed 1 hunk line,
+ * 1 added and 1 deleted line and no header text (checks "the edit body is a diff with added (1)
+ * and deleted (1) lines", log line "edit hunk lines: 1"). HYPOTHESIS for the rest: CRLF files, a
+ * patch with several hunks or files, and "\ No newline" markers were never seen in a real patch;
+ * `patchLines.test.ts` uses fabricated patches, so it confirms this parser only.
  */
 export function parsePatch(patch: string): DiffLine[] {
   const lines = patch.split('\n');

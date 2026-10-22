@@ -75,10 +75,11 @@ export function planAttention(
  * build ourselves are added afterwards, untouched.
  *
  * Why remove instead of escaping with a backslash: VERIFIED by reading the VS Code 1.142 bundle
- * (`.vscode-test/.../workbench.desktop.main.js`, review of 20/10/2026) that the notification
- * does NOT parse Markdown: it links text with the pattern `[label](https?:|command:|file:target)`
- * and shows every other character as is, so a `\` would be printed and the escape would work only
- * by accident of breaking that pattern. Also read there: the message is built as `title: message`.
+ * (the `workbench.desktop.main.js` of the downloaded build, review of 20/10/2026) that the
+ * notification does NOT parse Markdown: it links text with the pattern
+ * `[label](https?:|command:|file:target)` and shows every other character as is, so a `\` would
+ * be printed and the escape would work only by accident of breaking that pattern. Also read
+ * there: the message is built as `title: message`.
  * HYPOTHESIS that the same holds in other VS Code versions (1.105 is the minimum supported); to
  * check, repeat the read on that bundle or watch a notification with brackets in F5 point 4.
  */
