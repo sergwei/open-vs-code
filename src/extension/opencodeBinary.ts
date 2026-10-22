@@ -364,8 +364,18 @@ export function describeDetection(result: DetectionResult): DetectionDescription
  * `runVersion` never rejects: exit codes, ENOENT, EACCES/ENOEXEC and timeouts become
  * `{ ok: false, detail }` with the stderr (first 300 chars) for the log.
  * VERIFIED on Windows 11 by a test that runs `node --version` through it; POSIX UNVERIFIED.
+ *
+ * `launchFor` (issue #41) maps the path to the command that really runs; the default is the path
+ * itself with no extra args, i.e. the behaviour above. Only the Test-mode seam of `testLaunch.ts`
+ * passes something else (a `.mjs` stand-in run through Node); `--version` is appended after the
+ * args it returns.
  */
-export function nodeDeps(): BinaryDeps {
+export function nodeDeps(
+  launchFor: (p: string) => { command: string; args: string[] } = (p) => ({
+    command: p,
+    args: [],
+  }),
+): BinaryDeps {
   return {
     platform: process.platform,
     env: { PATH: process.env['PATH'], PATHEXT: process.env['PATHEXT'] },
@@ -387,9 +397,10 @@ export function nodeDeps(): BinaryDeps {
     readText: (p) => readFile(p, 'utf8'),
     runVersion: (p) =>
       new Promise<VersionRun>((resolve) => {
+        const { command, args } = launchFor(p);
         execFile(
-          p,
-          ['--version'],
+          command,
+          [...args, '--version'],
           { timeout: VERSION_TIMEOUT_MS, windowsHide: true, shell: false, encoding: 'utf8' },
           (error, stdout, stderr) => {
             if (error === null) {

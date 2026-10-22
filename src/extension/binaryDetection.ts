@@ -12,6 +12,7 @@ import {
   nodeDeps,
   type DetectionResult,
 } from './opencodeBinary';
+import { launchCommandFor, testLaunchFrom } from './testLaunch';
 
 const OPEN_SETTINGS = 'Open Settings';
 const SHOW_LOGS = 'Show Logs';
@@ -42,6 +43,15 @@ const SHOW_LOGS = 'Show Logs';
  * The decision reads the setting synchronously; that is what keeps a process from being launched
  * before the async target (password from SecretStorage) is known. VERIFIED in a real VS Code by
  * `externalServer.test.ts` (the skip line on activation, the detection line after emptying it).
+ *
+ * Issue #41: in `ExtensionMode.Test` with `OPEN_VS_CODE_TEST_NODE` set, a `.mjs` setting is run as
+ * `node <mjs> --version` (`testLaunch.ts`), so the `fake-server` suite can use the synthetic
+ * opencode as the extension's own server. Outside the test host the dependencies are the plain
+ * `nodeDeps()`, built on every detection (not once at registration) because it captures
+ * `process.env.PATH`/`PATHEXT` and the platform when called; only the launch rule is computed
+ * once. HYPOTHESIS that this per-detection read matters in practice (it only does if something
+ * mutates `process.env.PATH` after activation); no test observes it, since this file needs
+ * `vscode` and has no unit test.
  */
 export function registerBinaryDetection(
   context: vscode.ExtensionContext,
@@ -49,6 +59,12 @@ export function registerBinaryDetection(
   onResult?: (result: DetectionResult) => void,
 ): void {
   let run = 0;
+  // Test-mode seam (issue #41): `undefined`, hence plain `nodeDeps()`, outside the test host.
+  // Only the launch rule is fixed at registration; `nodeDeps` runs inside `detect` so that PATH,
+  // PATHEXT and the platform are read afresh on every detection.
+  const launchFor = launchCommandFor(
+    testLaunchFrom(context.extensionMode === vscode.ExtensionMode.Test, process.env),
+  );
 
   const detect = async (): Promise<void> => {
     const current = ++run;
@@ -66,7 +82,7 @@ export function registerBinaryDetection(
       .getConfiguration(CONFIG_SECTION)
       .get<string>(OPENCODE_PATH_KEY, '')
       .trim();
-    const result = await detectOpencodeBinary({ settingPath }, nodeDeps());
+    const result = await detectOpencodeBinary({ settingPath }, nodeDeps(launchFor));
     if (current !== run) return;
 
     for (const attempt of result.attempts) {
