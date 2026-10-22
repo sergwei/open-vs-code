@@ -5,9 +5,15 @@
 # package.json: vsce aborts when both exist.
 # CI checks the result with scripts/check-vsix.mjs: any new file that must ship needs its `!`
 # line here AND, if it is essential, an entry in that script's required list.
+# Ships: the two bundles, the two media files the manifest points at, LICENSE and CHANGELOG.
+# media/icon.svg is the SOURCE of media/icon.png and stays out; README images live in
+# docs/images/ (not packaged: vsce rewrites their relative links to GitHub raw URLs).
+# Regenerate the icon (resvg-js-cli, version pinned, not a devDependency; 256 px wide):
+#   npx -y @resvg/resvg-js-cli@2.6.2-beta.1 --fit-width 256 media/icon.svg media/icon.png
 **
 !dist/extension.js
 !dist/webview/**
-!media/**
+!media/activity.svg
+!media/icon.png
 !LICENSE*
 !CHANGELOG.md

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Source of media/icon.png (not packaged). Original artwork: the speech bubble and </> glyph
+       of media/activity.svg, enlarged on a solid background. No third-party marks. -->
+  <rect width="256" height="256" fill="#14304f"/>
+  <g transform="translate(8 3) scale(10)" fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 5h16v11H10l-4 4v-4H4z" stroke="#ffffff"/>
+    <path d="M9 9l-2 2 2 2M15 9l2 2-2 2" stroke="#7dd3fc"/>
+  </g>
+</svg>
