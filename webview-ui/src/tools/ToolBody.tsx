@@ -41,11 +41,15 @@ function clampMatches(groups: MatchGroup[], max: number): { groups: MatchGroup[]
  * open state lives in `ToolCard`, so that does not fold it. Lists are clipped at
  * {@link MAX_LINES} with a notice. A path is a {@link PathLink}; a grep hit opens its line.
  * VERIFIED by `ToolCard.test.tsx` (fabricated blocks rendered in jsdom). VERIFIED in a real VS Code
- * for the shell, read, grep and edit bodies (`test:visual` step 15, 22/10/2026 final run 13:59-14:05,
- * Windows 11; the bodies it printed are listed in `toolView.ts`), and the text of the `error`
- * section of a failed read (`run-output.txt` line 383). NOT observed: the `paths` section (glob),
- * the `note` section, how the `error` section looks, a clipped output (the real outputs were short), and the
- * `matches` clip notice.
+ * for the shell, read, grep and edit bodies (`test:visual` step 15, the run of 22/10/2026
+ * 13:59-14:05, Windows 11; the bodies it printed are listed in `toolView.ts`), and the text of the
+ * `error` section of a failed read (the check "unfolded, the failed body contains the header's
+ * error line ("File not found: src/does-not-exist.ts")" passed). The contrast of that text was
+ * measured in the run of 22/10/2026 15:23-15:30 (Windows 11, VS Code 1.143.0, opencode 2.0.32):
+ * the check "the error text of the unfolded failed body has text contrast >= 4.5 in
+ * light|dark|hc-dark|hc-light" passed with 10.55, 11.06, 21.00 and 14.55. NOT observed: how the
+ * `error` section looks beyond that contrast (not judged), the `paths` section (glob), the `note`
+ * section, a clipped output (the real outputs were short), and the `matches` clip notice.
  */
 export function ToolBody(props: { part: ToolPart }) {
   const sections = createMemo(() => toolBody(props.part));

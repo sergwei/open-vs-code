@@ -1953,11 +1953,10 @@ export class ChatController {
    * against a real opencode 2.0.32 on Windows 11 (22/10/2026), on the final tree: the opt-in
    * `real-opencode` case "applies a chosen reasoning variant before the prompt" logged
    * `model selected opencode/glm-5.3-flash-free … (variant low)` at 09:50:12.869, `prompt
-   * accepted` at 09:50:12.874 and `turn finished: succeeded` at 09:50:28.212
-   * (`.vscode-test/user-data/logs/20261022T094935`, OpenCode.log); `test:visual` step 14 repeated
-   * it with the real UI at 09:56:55.960 / 09:56:55.989 / 09:56:58.038
-   * (`.vscode-test/visual/user-data/logs/20261022T095051`). NOT observed: the host refusing an
-   * unlisted variant against a real server, macOS and Linux (UNVERIFIED).
+   * accepted` at 09:50:12.874 and `turn finished: succeeded` at 09:50:28.212 (the extension's
+   * own OpenCode.log); `test:visual` step 14 repeated it with the real UI at 09:56:55.960 /
+   * 09:56:55.989 / 09:56:58.038 (same log lines, same OS and versions). NOT observed: the host
+   * refusing an unlisted variant against a real server, macOS and Linux (UNVERIFIED).
    */
   private async sendPrompt(
     message: Extract<WebviewToHost, { type: 'prompt.send' }>,

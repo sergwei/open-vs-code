@@ -39,9 +39,9 @@ type Entry = { value: string | undefined; label: string; current: boolean; missi
  * (22/10/2026, jsdom, test injected in memory: open, focus inside the panel, `visible: false` gave
  * `trigger === null` and `document.activeElement === BODY`). Not pinned by a committed test.
  * VERIFIED on Windows 11, VS Code 1.143.0, on 22/10/2026 ~09:56 by `npm run test:visual` step 14
- * on the final tree (real mouse, four themes, focus ring, screenshots `14a`-`14h` in
- * `.vscode-test/visual/shots/`, log in `.vscode-test/visual/user-data/logs/20261022T095051`; the
- * run is recorded in the header of `test/visual/run.mjs`). NOT observed: screen readers, macOS
+ * on the final tree (real mouse, four themes, focus ring; the check "the reopened session shows
+ * the variant the SERVER stored ("Reasoning: low")" passed, and the run is recorded in the header
+ * of `test/visual/run.mjs`). NOT observed: screen readers, macOS
  * and Linux (UNVERIFIED).
  */
 export function VariantPicker(props: {
@@ -113,7 +113,8 @@ export function VariantPicker(props: {
   // A panel left open when the connection drops, or when the control disappears, closes. On a
   // disconnect the focus sits on a panel entry (it moves there on open) that is about to be
   // unmounted, so it goes back to the trigger, which stays mounted. When the control disappears the
-  // trigger is unmounted with it, `trigger` has nothing to focus and the focus falls to the body.
+  // trigger is unmounted with it, the detached trigger cannot take the focus and the focus falls to
+  // the body.
   createEffect(() => {
     if (props.disabled || !props.choices.visible) {
       close(panel?.contains(document.activeElement) === true);

@@ -38,23 +38,23 @@ type ToolPart = Extract<Part, { type: 'tool' }>;
  * names, state kept across an update, the deferred scroll call). The keyboard is NOT tested in
  * jsdom (it does not turn Enter/Space into a click on a button).
  * VERIFIED in a real VS Code (`test:visual` step 15, Windows 11, VS Code 1.143.0, opencode 2.0.32,
- * 22/10/2026, final run 13:59:27-14:05 whose output is kept in `.vscode-test/visual/run-output.txt`;
- * log `.vscode-test/visual/user-data/logs/20261022T135923/window1/exthost/sergwei.open-vs-code/OpenCode.log`,
- * step-15 prompts 14:04:11.728-14:04:17.265 and 14:04:37.157-14:04:38.484), with the checks of that
- * file: line 306 "every tool card is folded by default (aria-expanded=false, no .tool-body in the
- * DOM)"; for each of shell, read, edit and grep (lines 314-346) "Shift+Tab from the prompt box
- * reaches the X toggle", "...with a visible focus ring", "Enter opens the X card and its body
- * appears", "opening the card adds no child to the log (6 -> 6)" and "Space closes the X card and
- * removes its body"; line 375 `the header of the last card (data-tool="edit") is still in view after
- * unfolding it (true)` (the tagged card is the LAST one, an edit, now printed by the check; it
- * shows the header was in view, not that `scrollIntoView` moved anything). The failed card of a
- * read of a missing file (lines 376-390): "failed" with the error tone, the first error line in the
- * header, folded by default, the header fits its toggle (overflow 0 px) and the "failed" chip has
- * contrast 8.68 (light), 8.03 (dark), 21.00 (hc-dark) and 14.55 (hc-light). The header-text
+ * 22/10/2026, the run of 13:59:27-14:05; the extension's OpenCode.log has the step-15 prompts at
+ * 14:04:11.728-14:04:17.265 and 14:04:37.157-14:04:38.484), with the checks of that step: "every
+ * tool card is folded by default (aria-expanded=false, no .tool-body in the DOM)"; for each of
+ * shell, read, edit and grep "Shift+Tab from the prompt box reaches the X toggle", "...with a
+ * visible focus ring", "Enter opens the X card and its body appears", "opening the card adds no
+ * child to the log (6 -> 6)" and "Space closes the X card and removes its body"; `the header of
+ * the last card (data-tool="edit") is still in view after unfolding it (true)` (the tagged card is
+ * the LAST one, an edit, printed by the check; it shows the header was in view, not that
+ * `scrollIntoView` moved anything). The failed card of a read of a missing file: the checks "the
+ * failed read card says "failed" with the error tone", "the failed card shows the first line of the
+ * error in its header", "the failed card is folded by default", "the failed header fits inside its
+ * toggle, nothing runs over the Open link (overflow 0 px)", and "the error-toned "failed" word has
+ * text contrast >= 4.5 in light|dark|hc-dark|hc-light" (8.68, 8.03, 21.00, 14.55). The header-text
  * contrast (title, argument, status, result) was >= 4.5 in the four themes (lowest 5.47, status in
- * hc-light, lines 349-374). Two defects only a real run showed were fixed in `index.css`: the bare
+ * hc-light). Two defects only a real run showed were fixed in `index.css`: the bare
  * `errorForeground` of the chip measured 3.16 in light, and a long error line ran over the "Open"
- * link in the side bar (capture `15e-tool-failed-light.png` of the first run). NOT observed: a
+ * link in the side bar (seen in a capture of the first run). NOT observed: a
  * screen reader; whether `scrollIntoView` is needed or moves anything; a card in `running`,
  * `awaiting`, `rejected` or `stopped` state in a real run; macOS and Linux.
  */

@@ -23,9 +23,9 @@ const MARKER: Readonly<Record<DiffLine['kind'], string>> = {
  * sideways instead of wrapping so the columns keep their meaning. The file name opens the file when
  * the section has a `path`.
  * VERIFIED by `ToolCard.test.tsx` (classes, markers and the clip notice from fabricated lines).
- * VERIFIED in a real VS Code (`test:visual` step 15, 22/10/2026 final run 13:59-14:05, Windows 11,
- * VS Code 1.143.0, `.vscode-test/visual/run-output.txt` lines 336-370) for a real 1-line edit: the
- * open card had 1 added and 1 deleted line, and the checks
+ * VERIFIED in a real VS Code (`test:visual` step 15, the run of 22/10/2026 13:59-14:05,
+ * Windows 11, VS Code 1.143.0, opencode 2.0.32) for a real 1-line edit: the open card had 1 added
+ * and 1 deleted line, and the checks
  * "diff text contrast >= 4.5 in light|dark|hc-dark|hc-light" passed (add/del 9.21/7.46 light,
  * 5.98/7.94 dark, 21.00 hc-dark, 14.55 hc-light; hc themes use a 2.4px left border, no tint).
  * Those ratios are text against the line background; the contrast of the tint against the plain

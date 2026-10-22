@@ -11,10 +11,11 @@ import { useSend } from '../chat/hostContext';
  * `role="link"` code span: it is reachable with Tab and answers Enter and Space for free. The
  * accessible name carries the whole path and the line, because the visible text may be a short
  * name. VERIFIED by `ToolCard.test.tsx` (message sent, fabricated paths). VERIFIED in a real VS Code
- * for the header "Open" button of a read card: `test:visual` step 15 (22/10/2026, final run 13:59-14:05, Windows 11)
- * pressed it with the real mouse and the check "pressing the path opens src/sample.ts in the editor
- * (1 tab)" passed (line 394 of `.vscode-test/visual/run-output.txt`). NOT observed: the line variant (`at line N`) and the grep hit buttons in a real
- * editor (the grep body had them, but the run did not press them), a path outside the folder.
+ * for the header "Open" button of a read card: `test:visual` step 15 (the run of 22/10/2026
+ * 13:59-14:05, Windows 11) pressed it with the real mouse and the check "pressing the path opens
+ * src/sample.ts in the editor (1 tab)" passed (VS Code 1.143.0, opencode 2.0.32). NOT observed: the
+ * line variant (`at line N`) and the grep hit buttons in a real editor (the grep body had them, but
+ * the run did not press them), a path outside the folder.
  */
 export function PathLink(props: { path: string; line?: number; text?: string }) {
   const send = useSend();
