@@ -281,8 +281,9 @@ describe('toolBody', () => {
   });
 
   // Protects review W1 (Engram #1039): the server builds the content as `[output?, notice?]`
-  // (`shell.ts@843a6c51` L80-81, read, not observed in a run), so an EMPTY output with exit 1 is
-  // `["Exited with code 1"]` alone and the notice must not be painted as the Output block.
+  // (`tool/plugin/shell.ts@843a6c51` L79-81, read, not observed in a run). A real empty output
+  // arrives as "(no output)" (next case); this fabricated notice-alone block is only the defensive
+  // path: a notice must never be painted as the Output block.
   it('shell: a notice alone is a note and the output is "No output."', () => {
     const part = done('shell', { command: 'false' }, [text('Exited with code 1')]);
     expect(toolBody(part)).toEqual([
@@ -291,6 +292,58 @@ describe('toolBody', () => {
       { kind: 'note', text: 'Exited with code 1' },
     ]);
     expect(toolSummary(part, false).result).toBe('exit 1');
+  });
+
+  // Protects the polish round of E6 (Engram #1049): `core/src/shell.ts@843a6c51` L249 returns
+  // "(no output)" for a command that printed nothing and the notice follows as its own item.
+  // Fabricated block built from that read; no real run produced it.
+  it('shell: "(no output)" is "No output." and the notice stays a note after it', () => {
+    const part = done('shell', { command: 'false' }, [
+      text('(no output)'),
+      text('Exited with code 1'),
+    ]);
+    expect(toolBody(part)).toEqual([
+      { kind: 'code', label: 'Command', text: 'false', from: 'head' },
+      { kind: 'note', text: 'No output.' },
+      { kind: 'note', text: 'Exited with code 1' },
+    ]);
+  });
+
+  // The REAL background shape, read in `tool/plugin/shell.ts@843a6c51` (`backgroundResult` L96-101
+  // fills the output, `resultMessages` L79-81 appends the instruction): two items, the "moved to
+  // the background" text as the output and the instruction as a note. Fabricated from that read;
+  // no real background shell was run.
+  it('shell: a background shell sends [moved-to-background text, instruction]', () => {
+    const moved =
+      'Command moved to the background (shell ID: abc).\nOutput is streaming to: /tmp/abc.log';
+    const instruction =
+      'You will be notified automatically when the command finishes. DO NOT poll for completion.';
+    const part = done('shell', { command: 'npm run dev' }, [text(moved), text(instruction)], {
+      status: 'running',
+    });
+    expect(toolBody(part)).toEqual([
+      { kind: 'code', label: 'Command', text: 'npm run dev', from: 'head' },
+      { kind: 'code', label: 'Output', text: moved, from: 'tail' },
+      { kind: 'note', text: instruction },
+      { kind: 'note', text: 'Still running in the background.' },
+    ]);
+    expect(toolSummary(part, false).result).toBe('running in background');
+  });
+
+  // DEFENSIVE path, not the shape of 843a6c51 (there the instruction never comes alone, see the
+  // previous case): if another version sent the instruction without an output item, it must be a
+  // note and never the Output block. Fabricated block.
+  it('shell: defensive, the background instruction alone is a note, not the Output block', () => {
+    const instruction =
+      'You will be notified automatically when the command finishes. DO NOT poll for completion.';
+    const part = done('shell', { command: 'npm run dev' }, [text(instruction)], {
+      status: 'running',
+    });
+    const sections = toolBody(part);
+    expect(sections.some((section) => section.kind === 'code' && section.label === 'Output')).toBe(
+      false,
+    );
+    expect(sections).toContainEqual({ kind: 'note', text: instruction });
   });
 
   it('shell: Killed and Timed out notices alone are notes too', () => {

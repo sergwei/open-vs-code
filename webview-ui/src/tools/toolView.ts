@@ -13,25 +13,24 @@
  * blocks, so they confirm the mapping and say nothing about the server.
  *
  * VERIFIED against a real opencode 2.0.32 on Windows 11, VS Code 1.143.0, 22/10/2026, by step 15
- * of `test:visual` (the final run, 13:59:27-14:05, the model `opencode/glm-5.3-flash-free`; console
- * output kept in `.vscode-test/visual/run-output.txt`, "all visual checks passed", 326 `ok` lines, 0
- * FAIL; log `.vscode-test/visual/user-data/logs/20261022T135923/window1/exthost/sergwei.open-vs-code/OpenCode.log`,
- * the combined step-15 prompt is `prompt accepted` 14:04:11.728 to `turn finished: succeeded`
- * 14:04:17.265 and the failing-read prompt 14:04:37.157 to 14:04:38.484).
- * What that run printed for the four tools it made the model call (`run-output.txt` lines 304-311,
- * `cards:` and `header:`):
+ * of `test:visual` (the run of 13:59:27-14:05, the model `opencode/glm-5.3-flash-free`; "all
+ * visual checks passed", 326 `ok` lines, 0 FAIL; in the extension's OpenCode.log the combined
+ * step-15 prompt is `prompt accepted` 14:04:11.728 to `turn finished: succeeded` 14:04:17.265 and
+ * the failing-read prompt 14:04:37.157 to 14:04:38.484).
+ * What that run printed for the four tools it made the model call (the `cards:` and `header:`
+ * lines):
  * - shell `node --version`: header "Shell node --version · done · exit 0" and a body with the command
  *   and the output "v24.22.0" (check "the shell body shows the output of node --version").
  * - read `src/sample.ts`: header "Read src/sample.ts · done · lines 1-30" and the file contents with
  *   `N: ` line prefixes in the body (check "the read body shows the contents of src/sample.ts").
  * - grep `greet` in `src`: header "Grep greet in src · done · 1 match"; the body parsed into 1 group
- *   with a path button and a line button (line 345 "grep matches: 1 grouped, 2 path buttons"); the
+ *   with a path button and a line button (log line "grep matches: 1 grouped, 2 path buttons"); the
  *   path came back ABSOLUTE (`c:\Users\...\src\sample.ts`), not relative.
  * - edit of `value2 = 2;`: header "Edit src/sample.ts · done · +1 −1" and a body with 1 hunk line, 1
- *   added and 1 deleted line, headers removed (line 336 "edit hunk lines: 1" and the check "the edit
- *   body is a diff with added (1) and deleted (1) lines"), so the real `metadata.files[].patch` has
- *   the `@@` shape `parsePatch` expects.
- * - a REAL failed call, read of the missing `src/does-not-exist.ts` (lines 376-383): header "Read
+ *   added and 1 deleted line, headers removed (log line "edit hunk lines: 1" and the check "the
+ *   edit body is a diff with added (1) and deleted (1) lines"), so the real
+ *   `metadata.files[].patch` has the `@@` shape `parsePatch` expects.
+ * - a REAL failed call, read of the missing `src/does-not-exist.ts`: header "Read
  *   src/does-not-exist.ts · failed · File not found: src/does-not-exist.ts", error tone, folded by
  *   default, and once unfolded the body contains that same line.
  * NOT observed: which source produced "1 match" (`metadata.matches` or the "Found N matches" text)
@@ -301,17 +300,38 @@ export function toolStatus(part: ToolPart, awaiting: boolean): StatusView {
 }
 
 /**
- * True for the one-line notices the shell tool appends to its content, wherever they sit.
+ * True for the notices the shell tool appends to its content as a separate item, wherever they sit.
  *
- * The server builds the content as `[output?, notice?]` (`tool/plugin/shell.ts` L80-81 of tag
- * 843a6c51, READ with `gh api` by the reviewer, Engram #1039 W1), so a command with an empty output
- * yields the notice ALONE at index 0. The wordings are those three; the match is anchored so a
- * command that merely prints "Exited with code 1" among other text is still output.
- * HYPOTHESIS: the exact wordings come from that read; none was observed in a real run (the real
- * shell call of `test:visual` exited 0, which adds no notice). Check against a failing real command.
+ * The server builds the content as `[output?, notice?]` (`resultMessages` in
+ * `tool/plugin/shell.ts` L79-81 of tag 843a6c51, READ with `gh api` on 22/10/2026), and the notice
+ * is a SEPARATE item after the output when the exit code is not 0, there was a signal or a
+ * timeout. A command with no output does not yield the notice alone: the shell session returns
+ * "(no output)" as its output (`packages/core/src/shell.ts` L249, same tag), see
+ * {@link isNoOutput}. A background shell does not send its instruction alone either:
+ * `backgroundResult` (same file, L96-101) always fills the output with "Command moved to the
+ * background (shell ID: …).\nOutput is streaming to: …", so the real content is that text plus
+ * the instruction. A notice with no output item before it is therefore DEFENSIVE (another version
+ * might emit it). The foreground wordings are those three; the match is anchored so a command that
+ * merely prints "Exited with code 1" among other text is still output; the background instruction
+ * is recognised by its first sentence.
+ * HYPOTHESIS: the wordings come from that read; none was observed in a real run (the real shell
+ * call of `test:visual` exited 0, which adds no notice). Check against a failing real command.
  */
 function isShellNotice(text: string): boolean {
-  return /^(Exited with code -?\d+|Killed by \S+|Timed out before completion)$/.test(text);
+  return (
+    /^(Exited with code -?\d+|Killed by \S+|Timed out before completion)$/.test(text) ||
+    text.startsWith('You will be notified automatically when the command finishes.')
+  );
+}
+
+/**
+ * True for the placeholder the shell session returns as the output of a command that printed
+ * nothing ("(no output)", `packages/core/src/shell.ts` L249 of tag 843a6c51, READ with `gh api`
+ * on 22/10/2026). It is not output: the card says "No output." instead. HYPOTHESIS: never seen in
+ * a real run (the real shell call of `test:visual` printed "v24.22.0").
+ */
+function isNoOutput(text: string): boolean {
+  return text === '(no output)';
 }
 
 /** Result text of a shell block: the exit code, a signal, a timeout, or background work. */
@@ -451,9 +471,9 @@ function headerParts(part: ToolPart): HeaderParts {
  * explains it; a pending or waiting one shows none either (the result is not known yet).
  * VERIFIED by `toolView.test.ts` for the mapping (fabricated blocks). VERIFIED against a real
  * server for the five headers printed in the header of this file (shell, read, grep, edit and the
- * failed read of a missing file, `run-output.txt` lines 308-311 and 376); every other tool name,
- * and the rejected/stopped/awaiting statuses, are NOT observed in a real run (their headers are
- * fabricated-test only).
+ * failed read of a missing file, the `header:` and `failed header:` lines of the run); every other
+ * tool name, and the rejected/stopped/awaiting statuses, are NOT observed in a real run (their
+ * headers are fabricated-test only).
  */
 export function toolSummary(part: ToolPart, awaiting: boolean): ToolSummary {
   const status = toolStatus(part, awaiting);
@@ -533,7 +553,12 @@ function diffSections(part: ToolPart): BodySection[] {
  * The sections of the unfolded card of `part`.
  *
  * - `shell`: the command, its output (the TAIL is kept when clipped: the error is at the end and
- *   the server already sends the last 50 KiB) and the warning items ("Exited with code 1").
+ *   the server already sends the last 50 KiB) and the notice item that follows it ("Exited with
+ *   code 1", "Killed by …", "Timed out before completion"), which the server adds as a separate
+ *   item whenever the exit is not 0, there was a signal or a timeout. A command with no output
+ *   arrives as "(no output)" and is shown as "No output."; the background instruction of a shell
+ *   with `metadata.status === 'running'` is a note (it follows the "moved to the background"
+ *   output, see {@link isShellNotice}), never the Output block.
  * - `read`, `webfetch`, `websearch`, `subagent`: the text, clipped from the head.
  * - `edit`, `patch`: a mini diff per file of `metadata.files`; an `edit` without metadata (still
  *   running or failed) shows its input as "-old / +new" with no alignment; `write`: the whole
@@ -543,10 +568,17 @@ function diffSections(part: ToolPart): BodySection[] {
  *   generic view (input as JSON, output as text), which is the safety net for MCP tools.
  * A failed block ends with an `error` section. While the input streams, a single note says so.
  * VERIFIED against a real server for the shell, read, grep and edit bodies (what the run printed
- * is in the header of this file) and for the text of the `error` section of a failed read (line 383
- * of `run-output.txt`: the unfolded body contains the error line; the section's look was not
- * judged); the bodies of every other tool are HYPOTHESIS. The generic fallback is what protects against being wrong, and `toolView.test.ts`
- * checks it with malformed data (fabricated, so it says nothing about real malformed output).
+ * is in the header of this file) and for the text of the `error` section of a failed read (the
+ * check "unfolded, the failed body contains the header's error line ("File not found:
+ * src/does-not-exist.ts")" passed). The contrast of that section was measured in the run of
+ * 22/10/2026 15:23-15:30 (Windows 11, VS Code 1.143.0, opencode 2.0.32): the check "the error text
+ * of the unfolded failed body has text contrast >= 4.5 in light|dark|hc-dark|hc-light" passed with
+ * 10.55, 11.06, 21.00 and 14.55. NOT observed: how the section looks beyond that contrast (its look
+ * was not judged). The bodies of every other tool are HYPOTHESIS, and so are the "(no output)" and
+ * notice items of the shell: they come from reading tag 843a6c51 and `toolView.test.ts`
+ * (fabricated blocks). The generic fallback is what protects against being wrong, and
+ * `toolView.test.ts` checks it with malformed data (fabricated, so it says nothing about real
+ * malformed output).
  */
 export function toolBody(part: ToolPart): BodySection[] {
   const state = part.state;
@@ -570,9 +602,13 @@ export function toolBody(part: ToolPart): BodySection[] {
       if (state.status === 'running') {
         sections.push({ kind: 'note', text: 'The output appears when the command finishes.' });
       } else {
-        // The output is the first item that is not a server notice: with an empty output the
-        // server sends the notice ALONE ("Exited with code 1"), and it must not be painted as output.
-        const outputIndex = texts.findIndex((text) => text !== '' && !isShellNotice(text));
+        // The output is the first item that is neither a notice nor the "(no output)" placeholder.
+        // The notice is a separate item after the output. A background shell sends
+        // ["moved to the background" text, instruction] (`backgroundResult`, L96-101), so the
+        // instruction never comes alone there; if some version did, it must not be output.
+        const outputIndex = texts.findIndex(
+          (text) => text !== '' && !isShellNotice(text) && !isNoOutput(text),
+        );
         const outputText = outputIndex === -1 ? undefined : texts[outputIndex];
         if (outputText !== undefined) {
           sections.push({
@@ -585,7 +621,9 @@ export function toolBody(part: ToolPart): BodySection[] {
           sections.push({ kind: 'note', text: 'No output.' });
         }
         texts.forEach((text, index) => {
-          if (index !== outputIndex && text !== '') sections.push({ kind: 'note', text });
+          if (index !== outputIndex && text !== '' && !isNoOutput(text)) {
+            sections.push({ kind: 'note', text });
+          }
         });
       }
       if (stringAt(state.metadata, 'status') === 'running' && state.status === 'completed') {
