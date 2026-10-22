@@ -66,5 +66,28 @@ export const DEFAULT_MODEL_KEY = 'defaultModel';
 /** Full id of the default-model setting (`contributes.configuration.properties`). */
 export const DEFAULT_MODEL_SETTING = `${CONFIG_SECTION}.${DEFAULT_MODEL_KEY}`;
 
+/** Key of the external-server URL setting inside {@link CONFIG_SECTION} (issue #11). */
+export const SERVER_URL_KEY = 'serverUrl';
+
+/**
+ * Full id of the external-server URL setting (`contributes.configuration.properties`). Empty
+ * means "launch my own server"; a loopback address means "connect to that one".
+ */
+export const SERVER_URL_SETTING = `${CONFIG_SECTION}.${SERVER_URL_KEY}`;
+
+/** Command id of "OpenCode: Set Server Password" (contributed; issue #11). */
+export const SET_SERVER_PASSWORD_COMMAND_ID = 'openVsCode.setServerPassword';
+
+/** Command id of "OpenCode: Forget Server Password" (contributed; issue #11). */
+export const CLEAR_SERVER_PASSWORD_COMMAND_ID = 'openVsCode.clearServerPassword';
+
+/**
+ * Internal command that stores a server password without the input box (issue #11). Registered
+ * ONLY when the extension runs in `ExtensionMode.Test` and deliberately NOT declared in
+ * `contributes`, like {@link INJECT_WEBVIEW_MESSAGE_COMMAND_ID}: the integration tests cannot
+ * type into a `showInputBox`.
+ */
+export const TEST_SET_SERVER_PASSWORD_COMMAND_ID = 'openVsCode.test.setServerPassword';
+
 /** Display name of the log output channel. */
 export const LOG_CHANNEL_NAME = 'OpenCode';

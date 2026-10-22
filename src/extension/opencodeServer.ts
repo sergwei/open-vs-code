@@ -553,20 +553,57 @@ export async function stopServer(
   return { how: 'unkillable' };
 }
 
+/** What went wrong in {@link fetchServerInfo}; see {@link ServerInfoError}. */
+export type ServerInfoErrorKind = 'transport' | 'unauthorized' | 'http-status' | 'malformed';
+
+/**
+ * Typed failure of {@link fetchServerInfo} (issue #11).
+ *
+ * The messages are the ones this function always threw, so the spawn mode keeps logging the same
+ * text; the new `kind` (and `status` for `http-status`) lets the external-server mode tell
+ * "nobody there" from "wrong password" from "not an opencode v2" without parsing messages. For
+ * `transport` the original error is in `cause` (a refused connection is a `TypeError: fetch
+ * failed` whose own `cause` carries the `code`; a timeout is a `TimeoutError` DOMException).
+ * `unauthorized` is the HTTP 401 case only. The messages never contain the password.
+ * VERIFIED for the refused connection in the extension host (VS Code 1.143.0, Windows 11,
+ * 22/10/2026, `externalServer.test.ts`): the log shows "GET /api/info failed: fetch failed <-
+ * fetch failed <- connect ECONNREFUSED 127.0.0.1:<port> [ECONNREFUSED]", i.e. a `TypeError:
+ * fetch failed` whose `cause` carries the code. The `TimeoutError` DOMException is VERIFIED only
+ * by a probe under plain Node 24.22 on Windows 11 (22/10/2026: "The operation was aborted due to
+ * timeout"); inside the extension host it is UNVERIFIED.
+ */
+export class ServerInfoError extends Error {
+  constructor(
+    readonly kind: ServerInfoErrorKind,
+    message: string,
+    readonly status?: number,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = 'ServerInfoError';
+  }
+}
+
 /**
  * Asks the server for `GET /api/info` with Basic auth and returns `{ version, pid }`.
  *
  * Plain `fetch` on purpose (decision of Sergio, 2026-10-20): no `@opencode/client` yet, that is
  * issue #9. `fetchImpl` is injectable for tests and as an escape hatch if the extension host's
- * proxy layer intercepts loopback (HYPOTHESIS, not checked). Rejects on network failure,
- * timeout, non-2xx status or a body without a string `version`; the messages never contain
+ * proxy layer intercepts loopback (HYPOTHESIS, not checked). Rejects with a
+ * {@link ServerInfoError} on network failure or timeout (`transport`), HTTP 401
+ * (`unauthorized`), another non-2xx status (`http-status`, with `status`) or a body that is not
+ * JSON / has no string `version` (`malformed`); the messages never contain
  * the password. The request ends at the first of `timeoutMs` and the optional `signal`
  * (combined with `AbortSignal.any`), so the manager can cancel it when `stop()` is called
  * instead of waiting up to {@link INFO_TIMEOUT_MS}. The body shape `{ version, pid, urls, paths }`
  * is VERIFIED against the real opencode 2.0.32 (Windows 11, spike on 2026-10-20: 200 with
  * `{version,pid,urls,paths:{tmp},capabilities}`); the abort is VERIFIED against a synthetic
  * `fetchImpl` that honours it. Inside the extension host the global `fetch` is UNVERIFIED (the
- * spike ran under plain Node).
+ * spike ran under plain Node). The `kind` mapping is VERIFIED by unit tests with synthetic
+ * responses. The `unauthorized` kind is VERIFIED against a real opencode 2.0.32 by the external
+ * case of the opt-in `realOpencode.test.ts` (see its header for the run). The `transport` kind
+ * was seen in a real VS Code only against the synthetic fixture after it exited (see
+ * {@link ServerInfoError}); against a real opencode it is UNVERIFIED.
  */
 export async function fetchServerInfo(
   url: string,
@@ -583,24 +620,32 @@ export async function fetchServerInfo(
       signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
     });
   } catch (error) {
-    throw new Error(
+    throw new ServerInfoError(
+      'transport',
       `GET /api/info failed: ${error instanceof Error ? error.message : String(error)}`,
+      undefined,
       { cause: error },
     );
   }
-  if (!response.ok) throw new Error(`GET /api/info failed: HTTP ${response.status}`);
+  if (!response.ok) {
+    throw new ServerInfoError(
+      response.status === 401 ? 'unauthorized' : 'http-status',
+      `GET /api/info failed: HTTP ${response.status}`,
+      response.status,
+    );
+  }
   let body: unknown;
   try {
     body = await response.json();
   } catch {
-    throw new Error('GET /api/info returned a body that is not JSON');
+    throw new ServerInfoError('malformed', 'GET /api/info returned a body that is not JSON');
   }
   if (typeof body !== 'object' || body === null || !('version' in body)) {
-    throw new Error('GET /api/info returned a body without a version');
+    throw new ServerInfoError('malformed', 'GET /api/info returned a body without a version');
   }
   const { version } = body;
   if (typeof version !== 'string') {
-    throw new Error('GET /api/info returned a version that is not a string');
+    throw new ServerInfoError('malformed', 'GET /api/info returned a version that is not a string');
   }
   const pid = 'pid' in body && typeof body.pid === 'number' ? body.pid : undefined;
   return { version, pid };

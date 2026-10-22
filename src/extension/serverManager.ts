@@ -8,7 +8,20 @@
 // a cap, restart when the binary or the served folder changes under a running server, the choice
 // of the folder to serve in a multi-root window, and a stop that also cancels the backoff timer.
 // The timer and the clock are injected (`schedule`, `now`) so the tests need no real waiting.
+//
+// Issue #11 adds a second kind of server: one that somebody else runs. The manager follows a
+// `ServerTarget` (`spawn` = launch our own, the default; `external` = connect to a URL with a
+// password; `external-invalid` = the setting is wrong). The external path never starts a process:
+// it checks `GET /api/info` and goes to `running`, and an unreachable server stays
+// `unavailable/unreachable` until the user retries (decision of Sergio, 2026-10-22, Engram
+// `E1-external-server/decisions/no-auto-retry`).
 
+import {
+  describeExternalFailure,
+  describeFailureCause,
+  sameTarget,
+  type ServerTarget,
+} from './externalServer';
 import { describeDetection, type DetectionResult } from './opencodeBinary';
 import {
   checkServerVersion,
@@ -34,35 +47,53 @@ export const AUTO_RESTART_DELAYS_MS: readonly number[] = [1000, 5000, 15000];
  */
 export const STABLE_RUN_MS = 120_000;
 
-/** What a consumer (issue #9) needs to talk to a running server. */
+/**
+ * What a consumer (issue #9) needs to talk to a running server. `source` says who owns the
+ * process: `spawned` is ours (`binaryPath` is the executable, `pid` its pid) and `external` is
+ * somebody else's (`binaryPath` is `undefined`, `pid` is the one `/api/info` reported). The
+ * password stays in the host: it is never sent to the webview (architecture rule 1).
+ */
 export interface RunningServerInfo {
   url: string;
   password: string;
   version: string;
   folder: string;
-  binaryPath: string;
+  binaryPath: string | undefined;
   pid: number | undefined;
+  source: 'spawned' | 'external';
 }
 
 /**
  * Why the server is not available. The first four match `ConnectionState` in `src/shared`
- * on purpose (issues #9/#14 map them); `exited` is new: the server died while running.
+ * on purpose (issues #9/#14 map them); `exited` is new: the server died while running. Issue #11
+ * adds the three of the external mode: `unreachable` (nobody answers), `unauthorized` (no password
+ * stored, or the server rejected it) and `invalid-url` (the setting is not a usable address).
  */
 export type UnavailableReason =
-  'no-workspace' | 'binary-missing' | 'unsupported-version' | 'start-failed' | 'exited';
+  | 'no-workspace'
+  | 'binary-missing'
+  | 'unsupported-version'
+  | 'start-failed'
+  | 'exited'
+  | 'unreachable'
+  | 'unauthorized'
+  | 'invalid-url';
 
 /** Why a restart happens; it ends up in the log line `restarting the server (<reason>)`. */
-export type RestartReason = 'command' | 'binary-changed' | 'folder-changed' | 'crash';
+export type RestartReason =
+  'command' | 'binary-changed' | 'folder-changed' | 'crash' | 'target-changed';
 
 /**
  * Lifecycle of the single server. `stopped` is final. `restarting` covers the stop of the old
  * process and the wait for its start attempt to settle; the new attempt then goes through
- * `starting`. An `unavailable/exited` with `retryInMs` is NOT final: a restart is scheduled
- * (`attempt` is 1-based); without it the manager gave up.
+ * `starting` (own process) or `connecting` (external server, issue #11). An `unavailable/exited`
+ * with `retryInMs` is NOT final: a restart is scheduled (`attempt` is 1-based); without it the
+ * manager gave up.
  */
 export type ServerState =
   | { kind: 'idle' }
   | { kind: 'starting'; folder: string; binaryPath: string }
+  | { kind: 'connecting'; folder: string; url: string }
   | { kind: 'running'; server: RunningServerInfo }
   | { kind: 'restarting'; reason: RestartReason }
   | {
@@ -159,6 +190,13 @@ export function pickWorkspaceFolder(
  * `restarting the server (<reason>)` and `server exited unexpectedly; restarting in <s> s
  * (attempt <i> of 3)`. VERIFIED by unit tests; the lines in a real VS Code were seen by the
  * opt-in `realOpencode.test.ts` (see its header for the run).
+ *
+ * The external-server lines (issue #11) are `connecting to the external server at <url> for
+ * <folder>` and `connected to the external server at <url> (opencode <v>)`. The second is NOT
+ * `server ready at ...` on purpose: `realOpencode.test.ts` counts those lines with a regex to
+ * know how many servers WE started. The log is the one place the URL may appear; the unit tests
+ * pin both lines, and the integration suite `externalServer.test.ts` waits for them in a real VS
+ * Code.
  */
 export function describeServerState(state: ServerState): {
   level: 'info' | 'warn' | 'error';
@@ -172,8 +210,19 @@ export function describeServerState(state: ServerState): {
         level: 'info',
         message: `starting the server for ${state.folder} with ${state.binaryPath}`,
       };
+    case 'connecting':
+      return {
+        level: 'info',
+        message: `connecting to the external server at ${state.url} for ${state.folder}`,
+      };
     case 'running': {
       const s = state.server;
+      if (s.source === 'external') {
+        return {
+          level: 'info',
+          message: `connected to the external server at ${s.url} (opencode ${s.version})`,
+        };
+      }
       return {
         level: 'info',
         message: `server ready at ${s.url} (opencode ${s.version}, pid ${String(s.pid)})`,
@@ -189,7 +238,9 @@ export function describeServerState(state: ServerState): {
         };
       }
       const level =
-        state.reason === 'start-failed' || state.reason === 'exited'
+        state.reason === 'start-failed' ||
+        state.reason === 'exited' ||
+        state.reason === 'unreachable'
           ? 'error'
           : state.reason === 'no-workspace'
             ? 'info'
@@ -205,11 +256,15 @@ export function describeServerState(state: ServerState): {
 
 /**
  * Text for an error notification when the server fails after we tried to run it, else
- * `undefined`. Only a transition from `starting` or `running` into start-failed, exited or
- * unsupported-version notifies: detection problems and a missing workspace were already
+ * `undefined`. Only a transition from `starting`, `connecting` or `running` into start-failed,
+ * exited or unsupported-version notifies: detection problems and a missing workspace were already
  * reported (issue #7) or are not an error. An `unavailable` that still has a restart scheduled
  * (`retryInMs`) is silent: only the moment the manager gives up is worth a notification (phase 3,
- * so a one-off crash that heals itself never pops up). VERIFIED by unit tests.
+ * so a one-off crash that heals itself never pops up). The three reasons of the external mode
+ * (`unreachable`, `unauthorized`, `invalid-url`; issue #11) notify whatever the previous state
+ * was: they only come from a connection the user asked for (setting, password or Retry), a
+ * wrong password can follow another one, and an invalid URL never goes through `connecting`.
+ * VERIFIED by unit tests.
  */
 export function describeServerFailure(
   previous: ServerState,
@@ -217,7 +272,20 @@ export function describeServerFailure(
 ): string | undefined {
   if (next.kind !== 'unavailable') return undefined;
   if (next.retryInMs !== undefined) return undefined;
-  if (previous.kind !== 'starting' && previous.kind !== 'running') return undefined;
+  if (
+    next.reason === 'unreachable' ||
+    next.reason === 'unauthorized' ||
+    next.reason === 'invalid-url'
+  ) {
+    return next.message;
+  }
+  if (
+    previous.kind !== 'starting' &&
+    previous.kind !== 'connecting' &&
+    previous.kind !== 'running'
+  ) {
+    return undefined;
+  }
   if (
     next.reason !== 'start-failed' &&
     next.reason !== 'exited' &&
@@ -248,6 +316,19 @@ export function describeServerFailure(
  * counter resets when the server lived {@link STABLE_RUN_MS} or when the user restarts it. A
  * restart that fails to START is not retried: that is configuration, not a crash.
  *
+ * External target (issue #11, {@link setTarget}): the manager follows a `ServerTarget`. With an
+ * `external` one it never launches a process: with a stored password it publishes `connecting` and asks
+ * `GET /api/info` (no password = `unauthorized`, an unusable address = `invalid-url`, both
+ * published directly, without `connecting` and without touching the network), then checks
+ * the major version and goes `running` with `source: 'external'`. Binary detections are only
+ * remembered (so going back to `spawn` can use them), `restart()` reconnects instead of
+ * answering `no-binary`, and there is no child, hence no exit watch, no crash backoff and no kill.
+ * A failure is `unreachable` / `unauthorized` / `unsupported-version` / `invalid-url` and stays
+ * that way until the user retries or changes the setting or the password: NO automatic retry
+ * (Sergio's decision). A server that goes away AFTER connecting is not noticed here: the event
+ * stream of the chat shows "Reconnecting", and Restart Server (reconnect) re-checks it. The
+ * messages that reach the webview carry no URL, port or raw cause (see `describeExternalFailure`).
+ *
  * `stop()` is idempotent and final: afterwards no detection or timer starts anything; it also
  * cancels the backoff timer and waits for a restart in flight. The injected log is wrapped with
  * `safeLog`, so a log that throws (a closed channel) can never interrupt a transition or the stop.
@@ -259,7 +340,10 @@ export function describeServerFailure(
  * `restart('command')` gave a new pid, the stream reconnected and the old pid was gone
  * (`kill(pid, 0)` threw `ESRCH`), and a server killed from outside was restarted after the first
  * 1 s backoff. NOT exercised against a real server: the 5 s and 15 s steps, the give-up, the
- * binary change and the folder change (unit tests with fakes only); POSIX UNVERIFIED.
+ * binary change and the folder change (unit tests with fakes only); POSIX UNVERIFIED. The
+ * external target is VERIFIED with fakes (unit tests) and, in a real VS Code against the
+ * synthetic fixture, by `externalServer.test.ts`; see the external case of `realOpencode.test.ts`
+ * for the real opencode.
  */
 export class ServerManager {
   private current: ServerState = { kind: 'idle' };
@@ -274,8 +358,14 @@ export class ServerManager {
   /** The last binary a detection accepted; the restart launches this one. */
   private lastUsablePath: string | undefined;
   private restartPromise: Promise<RestartResult> | undefined;
-  /** Binary and folder the restart in flight launched with; compared after it to catch a change. */
-  private lastLaunch: { binaryPath: string; folder: string } | undefined;
+  /** What the manager follows: its own server (default) or an external one. See {@link setTarget}. */
+  private target: ServerTarget = { kind: 'spawn' };
+  /**
+   * Target, binary (spawn only) and folder the restart in flight launched with; compared after it
+   * to catch a change that arrived meanwhile.
+   */
+  private lastLaunch:
+    { target: ServerTarget; binaryPath: string | undefined; folder: string } | undefined;
   private retryTimer: ScheduledTimer | undefined;
   /** Automatic restarts used since the server last proved stable (or the user restarted it). */
   private crashAttempts = 0;
@@ -314,15 +404,20 @@ export class ServerManager {
    * detection, and again whenever the choice changes (a folder removed or picked by the user).
    * A `no-workspace` choice stops whatever runs and moves to `unavailable/no-workspace`; a
    * different folder than before restarts the server (reason `folder-changed`) once a binary is
-   * known, and the first call, made before any detection, just records it. Extra folders are
-   * logged as not served.
+   * known (or an external target is set), and the first call, made before any detection, just
+   * records it. Extra folders are logged as not served.
    */
   setFolder(choice: FolderChoice): void {
     const previous = this.folderChoice;
     this.folderChoice = choice;
     const kind = this.current.kind;
     if ('reason' in choice) {
-      if (kind === 'running' || kind === 'starting' || kind === 'restarting') {
+      if (
+        kind === 'running' ||
+        kind === 'starting' ||
+        kind === 'connecting' ||
+        kind === 'restarting'
+      ) {
         void this.restart('folder-changed');
       } else {
         this.cancelRetryTimer();
@@ -336,15 +431,42 @@ export class ServerManager {
     }
     const unchanged =
       previous !== undefined && !('reason' in previous) && previous.folder === choice.folder;
-    if (!unchanged && this.lastUsablePath !== undefined && !this.disposed) {
+    const canLaunch = this.lastUsablePath !== undefined || this.target.kind !== 'spawn';
+    if (!unchanged && canLaunch && !this.disposed) {
       void this.restart('folder-changed');
     }
   }
 
   /**
+   * Chooses what the manager follows: launch its own server (`spawn`, the default) or connect to
+   * an external one (issue #11). Idempotent: an equal target (same URL AND password) does nothing.
+   *
+   * A change restarts with reason `target-changed`, which stops whatever was running (a child we
+   * spawned is stopped, a connection in flight is aborted) and then connects or launches as the
+   * new target says. Two shortcuts: before anything was ever started (state `idle`) an external
+   * target connects at once without the `restarting` step, and a `spawn` target does nothing,
+   * since the binary detection launches it; and with no folder chosen yet only the target is
+   * recorded, because `setFolder` starts the connection when a folder arrives. Call it from the
+   * lifecycle whenever the setting or the password changes. VERIFIED with fakes (unit tests).
+   */
+  setTarget(target: ServerTarget): void {
+    if (this.disposed || sameTarget(this.target, target)) return;
+    this.target = target;
+    const choice = this.folderChoice;
+    if (choice === undefined || 'reason' in choice) return;
+    if (this.current.kind === 'idle') {
+      if (target.kind !== 'spawn') this.launching = this.connect(target, choice.folder);
+      return;
+    }
+    void this.restart('target-changed');
+  }
+
+  /**
    * Reacts to a detection result from `registerBinaryDetection`. Never throws; failures end in
    * an `unavailable` state and the log. A usable result is remembered as the binary the next
-   * restart uses, even when it cannot be launched right now.
+   * restart uses, even when it cannot be launched right now. With an external target (issue #11)
+   * a detection launches nothing and changes no state: a usable path is only remembered, so a
+   * later switch back to `spawn` can use it, and a missing binary is not an error.
    */
   onDetection(result: DetectionResult): void {
     if (this.disposed) return;
@@ -354,6 +476,7 @@ export class ServerManager {
     if (usable) {
       const binaryPath = result.binary.path;
       this.lastUsablePath = binaryPath;
+      if (this.target.kind !== 'spawn') return;
       if (this.folderChoice === undefined || 'reason' in this.folderChoice) return;
       if (kind === 'idle' || kind === 'unavailable') {
         // A detection is a user action: it overrides a pending backoff and clears the counter.
@@ -369,6 +492,7 @@ export class ServerManager {
       return;
     }
 
+    if (this.target.kind !== 'spawn') return;
     if (kind === 'idle' || kind === 'unavailable') {
       if (this.folderChoice !== undefined && 'reason' in this.folderChoice) return;
       this.setState({
@@ -393,7 +517,10 @@ export class ServerManager {
    * rejects. Resolves `no-binary` when no detection accepted a binary yet, `no-workspace` for a
    * `command` restart with no folder, `disposed` after `stop()`, else `attempted` (the new start
    * may still fail; that shows in the state). A user-made restart (any reason but `crash`)
-   * resets the automatic-restart counter. VERIFIED with fakes (unit tests); against a real
+   * resets the automatic-restart counter. With an external target it RECONNECTS instead of
+   * launching (and never answers `no-binary`, since no binary is needed); a `target-changed`
+   * restart back to `spawn` with no known binary ends in `idle` and answers `no-binary`, the next
+   * detection launches. VERIFIED with fakes (unit tests); against a real
    * opencode only by the opt-in integration suite on Windows.
    */
   restart(reason: RestartReason): Promise<RestartResult> {
@@ -406,7 +533,11 @@ export class ServerManager {
       this.deps.log.info('restart ignored: no workspace folder to serve');
       return Promise.resolve('no-workspace');
     }
-    if (this.lastUsablePath === undefined) {
+    if (
+      this.target.kind === 'spawn' &&
+      reason !== 'target-changed' &&
+      this.lastUsablePath === undefined
+    ) {
       this.deps.log.info('restart ignored: no usable opencode binary has been detected yet');
       return Promise.resolve('no-binary');
     }
@@ -421,30 +552,42 @@ export class ServerManager {
    * The body of {@link restart}, run once per restart. Order matters: cancel the backoff timer,
    * abort a start in progress, take the running server out (so its `exit` is ignored), publish
    * `restarting` BEFORE the first await, stop the old process, wait for an aborted attempt to
-   * clean up its child, and only then launch, unless `stop()` ran meanwhile.
+   * clean up its child, and only then launch (a `spawn` target) or connect (an external one),
+   * unless `stop()` ran meanwhile. It loops: after a pass that did launch or connect, it compares
+   * what that pass used with what is current (folder, target, binary) and, if a change was
+   * coalesced into the restart meanwhile, runs another pass with the matching reason
+   * (`folder-changed`, `target-changed`, `binary-changed`); otherwise it returns the result of the
+   * last pass. VERIFIED by the unit tests of `serverManager.test.ts` with synthetic changes.
    */
   private async doRestart(reason: RestartReason): Promise<RestartResult> {
     let current = reason;
     for (;;) {
       this.lastLaunch = undefined;
       const result = await this.restartOnce(current);
-      const used = this.lastLaunch as { binaryPath: string; folder: string } | undefined;
+      const used = this.lastLaunch as
+        { target: ServerTarget; binaryPath: string | undefined; folder: string } | undefined;
       if (result !== 'attempted' || this.disposed || used === undefined) return result;
-      // A folder or binary change that arrived while this restart was already launching was
-      // coalesced into it (W1 of the review) and would be lost: the server runs what was read
-      // BEFORE the change. Restart once more with the values that are current now.
+      // A folder, target or binary change that arrived while this restart was already launching
+      // was coalesced into it (W1 of the review) and would be lost: the server runs what was read
+      // BEFORE the change. Restart once more with the values that are current now. The binary
+      // only matters to a `spawn` launch.
       const choice = this.folderChoice;
       const folderNow = choice !== undefined && 'folder' in choice ? choice.folder : undefined;
       if (folderNow !== undefined && folderNow !== used.folder) current = 'folder-changed';
-      else if (this.lastUsablePath !== undefined && this.lastUsablePath !== used.binaryPath) {
+      else if (!sameTarget(used.target, this.target)) current = 'target-changed';
+      else if (
+        this.target.kind === 'spawn' &&
+        this.lastUsablePath !== undefined &&
+        this.lastUsablePath !== used.binaryPath
+      ) {
         current = 'binary-changed';
       } else return result;
     }
   }
 
   /**
-   * One pass of {@link doRestart}: stops, waits and launches once, remembering in `lastLaunch`
-   * which binary and folder it launched with.
+   * One pass of {@link doRestart}: stops, waits and launches (or, with an external target,
+   * connects) once, remembering in `lastLaunch` which target, binary and folder it used.
    */
   private async restartOnce(reason: RestartReason): Promise<RestartResult> {
     this.cancelRetryTimer();
@@ -467,8 +610,19 @@ export class ServerManager {
       });
       return 'no-workspace';
     }
-    if (binaryPath === undefined) return 'no-binary';
-    this.lastLaunch = { binaryPath, folder: choice.folder };
+    const target = this.target;
+    if (target.kind !== 'spawn') {
+      this.lastLaunch = { target, binaryPath: undefined, folder: choice.folder };
+      this.launching = this.connect(target, choice.folder);
+      await this.launching;
+      return 'attempted';
+    }
+    if (binaryPath === undefined) {
+      // Back to `spawn` with nothing detected yet: wait in `idle`; the next detection launches.
+      this.setState({ kind: 'idle' });
+      return 'no-binary';
+    }
+    this.lastLaunch = { target, binaryPath, folder: choice.folder };
     this.launching = this.launch(binaryPath, choice.folder);
     await this.launching;
     return 'attempted';
@@ -557,6 +711,7 @@ export class ServerManager {
             folder,
             binaryPath,
             pid: server.child.pid,
+            source: 'spawned',
           },
         });
         server.child.once('exit', (code, signal) => {
@@ -599,6 +754,81 @@ export class ServerManager {
     ) {
       this.deps.log.info(`retrying with the binary detected meanwhile: ${retry}`);
       await this.launch(retry, folder);
+    }
+  }
+
+  /**
+   * Connects to an external server (issue #11): the counterpart of {@link launch} that starts no
+   * process.
+   *
+   * `external-invalid` goes straight to `unavailable/invalid-url` and a target with no stored
+   * password to `unavailable/unauthorized` WITHOUT a request (a v2 server always has a password,
+   * so asking without one is a guaranteed 401; VERIFIED by reading `server-process.ts@843a6c51`
+   * on 2026-10-22). Otherwise it publishes `connecting`, asks `GET /api/info` through the
+   * injected `fetchInfo` and judges the major version like {@link launch}: a 1.x server is
+   * `unsupported-version`, another minor only warns. A failed request goes through
+   * `describeExternalFailure` (reason and webview-safe text) and the full cause, with the URL,
+   * to the log. The attempt is cancelled by `stop()` and by a restart through `abort`; a
+   * cancelled attempt publishes nothing, so a restart never flashes a spurious failure. It never
+   * rejects and never retries by itself. There is no child: `running` stays `undefined`, so
+   * there is no exit watch and nothing to kill. VERIFIED with fakes (unit tests) and against the
+   * synthetic fixture in a real VS Code (`externalServer.test.ts`); the real opencode only by the
+   * opt-in external case of `realOpencode.test.ts`.
+   */
+  private async connect(target: ServerTarget, folder: string): Promise<void> {
+    this.pendingPath = undefined;
+    if (target.kind === 'external-invalid') {
+      this.setState({ kind: 'unavailable', reason: 'invalid-url', message: target.message });
+      return;
+    }
+    if (target.kind !== 'external') return;
+    if (target.password === undefined) {
+      this.setState({
+        kind: 'unavailable',
+        reason: 'unauthorized',
+        message:
+          'No password is stored for the external opencode server. Run "OpenCode: Set Server Password".',
+      });
+      return;
+    }
+    const controller = new AbortController();
+    this.abort = controller;
+    this.setState({ kind: 'connecting', folder, url: target.url });
+    try {
+      const info = await this.deps.fetchInfo(target.url, target.password, controller.signal);
+      if (this.disposed || controller.signal.aborted) return;
+      const check = checkServerVersion(info.version);
+      if (check.kind === 'unsupported') {
+        this.deps.log.error(check.message);
+        this.setState({
+          kind: 'unavailable',
+          reason: 'unsupported-version',
+          message: check.message,
+        });
+        return;
+      }
+      if (check.kind === 'warn') this.deps.log.warn(check.message);
+      this.setState({
+        kind: 'running',
+        server: {
+          url: target.url,
+          password: target.password,
+          version: info.version,
+          folder,
+          binaryPath: undefined,
+          pid: info.pid,
+          source: 'external',
+        },
+      });
+    } catch (error) {
+      if (this.disposed || controller.signal.aborted) return;
+      const failure = describeExternalFailure(error);
+      this.deps.log.error(
+        `could not connect to the external server at ${target.url}: ${describeFailureCause(error)}`,
+      );
+      this.setState({ kind: 'unavailable', reason: failure.reason, message: failure.message });
+    } finally {
+      if (this.abort === controller) this.abort = undefined;
     }
   }
 

@@ -415,7 +415,11 @@ export class ChatController {
    * a `ConnectionState`. Re-entering `running` with the same URL and password is a no-op.
    *
    * Phase 3: a new server reads the session remembered for ITS folder (`memory.get(folder)`);
-   * `restarting` looks like `starting` to the webview; an `unavailable` that still has a restart
+   * `restarting` and `connecting` (an external server being checked, issue #11) look like
+   * `starting` to the webview; the `message` of an `unavailable` is copied as is to the webview,
+   * which is why the external-server messages carry no URL, port or raw cause (the webview never
+   * learns where the server is; `describeExternalFailure`). The re-entry check compares URL and
+   * password, so a new password for the same server creates a new client. An `unavailable` that still has a restart
    * scheduled (`retryInMs`) is `reconnecting` with its attempt number, so the banner says
    * "Reconnecting (n)" instead of an error the manager is already healing. Leaving `running` drops
    * the pending requests (they died with the server) and clears the badge.
@@ -444,6 +448,7 @@ export class ChatController {
       }
       case 'idle':
       case 'starting':
+      case 'connecting':
       case 'restarting':
         this.stopStream();
         this.setConnection({ state: 'starting' });

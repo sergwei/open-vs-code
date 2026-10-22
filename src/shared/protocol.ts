@@ -49,7 +49,15 @@ export type ConnectionState =
   | { state: 'reconnecting'; attempt: number; error?: ErrorInfo }
   | {
       state: 'unavailable';
-      reason: 'binary-missing' | 'unsupported-version' | 'no-workspace' | 'start-failed' | 'exited';
+      reason:
+        | 'binary-missing'
+        | 'unsupported-version'
+        | 'no-workspace'
+        | 'start-failed'
+        | 'exited'
+        | 'unreachable'
+        | 'unauthorized'
+        | 'invalid-url';
       error: ErrorInfo;
     }
   | { state: 'stopped' };

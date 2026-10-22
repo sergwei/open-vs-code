@@ -64,6 +64,7 @@ const SERVER = {
   folder: 'C:\\work',
   binaryPath: 'opencode.exe',
   pid: 1,
+  source: 'spawned' as const,
 };
 const RUNNING: ServerState = { kind: 'running', server: SERVER };
 
@@ -1606,6 +1607,42 @@ describe('server commands, reconnecting banner and per-folder memory (issue #10)
     expect(posted.at(-1)).toEqual({ type: 'connection.state', connection: { state: 'starting' } });
     controller.onServerState({ kind: 'unavailable', reason: 'exited', message: 'gave up' });
     expect(posted.at(-1)).toMatchObject({ connection: { state: 'unavailable', reason: 'exited' } });
+  });
+
+  // Issue #11. Synthetic states: what the manager would publish for an external server.
+  it('shows connecting as starting, and the external-server failures with their own reason', () => {
+    const { controller, posted } = setup(fakeApi().api);
+    controller.onServerState({
+      kind: 'connecting',
+      folder: 'C:\\work',
+      url: 'http://127.0.0.1:4096',
+    });
+    expect(posted.at(-1)).toEqual({ type: 'connection.state', connection: { state: 'starting' } });
+    for (const reason of ['unreachable', 'unauthorized', 'invalid-url'] as const) {
+      controller.onServerState({ kind: 'unavailable', reason, message: `msg ${reason}` });
+      expect(posted.at(-1)).toEqual({
+        type: 'connection.state',
+        connection: {
+          state: 'unavailable',
+          reason,
+          error: { code: reason, message: `msg ${reason}` },
+        },
+      });
+    }
+  });
+
+  it('a new password for the same external URL builds a new client and stream', () => {
+    const { controller, streams } = setup(fakeApi().api);
+    const external = (password: string): ServerState => ({
+      kind: 'running',
+      server: { ...SERVER, binaryPath: undefined, source: 'external', password },
+    });
+    controller.onServerState(external('one'));
+    controller.onServerState(external('one'));
+    expect(streams).toHaveLength(1);
+    controller.onServerState(external('two'));
+    expect(streams).toHaveLength(2);
+    expect(streams[0]?.aborted()).toBe(true);
   });
 
   it("remembers the open session PER folder: switching folders reopens that folder's session", async () => {

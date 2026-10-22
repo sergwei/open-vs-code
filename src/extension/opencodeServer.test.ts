@@ -21,6 +21,7 @@ import {
   buildServeEnv,
   checkServerVersion,
   fetchServerInfo,
+  ServerInfoError,
   parseUrlLine,
   safeLog,
   serveArgs,
@@ -206,6 +207,48 @@ describe('pure helpers', () => {
     await expect(
       fetchServerInfo('http://127.0.0.1:1', 'pw', reply({ version: '2.0.32', pid: 7 })),
     ).resolves.toEqual({ version: '2.0.32', pid: 7 });
+  });
+
+  // Issue #11: the external-server mode needs to tell a wrong password from "not opencode" from
+  // "nobody there". Synthetic responses; the messages are the ones the spawn mode always logged.
+  it('fetchServerInfo throws a ServerInfoError whose kind tells the failures apart', async () => {
+    const reply =
+      (body: unknown, status = 200): typeof fetch =>
+      () =>
+        Promise.resolve(new Response(JSON.stringify(body), { status }));
+    const kindOf = async (fetchImpl: typeof fetch): Promise<unknown> => {
+      const error = await fetchServerInfo('http://127.0.0.1:1', 'pw', fetchImpl).catch(
+        (e: unknown) => e,
+      );
+      return error instanceof ServerInfoError
+        ? { kind: error.kind, status: error.status, message: error.message }
+        : error;
+    };
+    await expect(kindOf(reply({}, 401))).resolves.toEqual({
+      kind: 'unauthorized',
+      status: 401,
+      message: 'GET /api/info failed: HTTP 401',
+    });
+    await expect(kindOf(reply({}, 404))).resolves.toMatchObject({
+      kind: 'http-status',
+      status: 404,
+    });
+    await expect(kindOf(reply({}, 500))).resolves.toMatchObject({
+      kind: 'http-status',
+      status: 500,
+    });
+    await expect(kindOf(reply({ pid: 1 }))).resolves.toMatchObject({ kind: 'malformed' });
+    await expect(kindOf(reply({ version: 3 }))).resolves.toMatchObject({ kind: 'malformed' });
+    const notJson: typeof fetch = () => Promise.resolve(new Response('<html>', { status: 200 }));
+    await expect(kindOf(notJson)).resolves.toMatchObject({
+      kind: 'malformed',
+      message: 'GET /api/info returned a body that is not JSON',
+    });
+    const cause = new Error('connect ECONNREFUSED');
+    const down: typeof fetch = () => Promise.reject(cause);
+    const error = await fetchServerInfo('http://127.0.0.1:1', 'pw', down).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ServerInfoError);
+    expect(error).toMatchObject({ kind: 'transport', cause });
   });
 
   it('fetchServerInfo ends as soon as the caller aborts, long before its own timeout', async () => {

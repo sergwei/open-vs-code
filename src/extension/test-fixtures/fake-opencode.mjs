@@ -18,6 +18,7 @@
 //   grandchild    spawns a `node` grandchild (stdio ignored) and reports its pid on stderr
 //   port-zero     prints a URL with port 0 when it was given `--port`
 //   always-401    answers 401 to every /api/info
+//   no-info       answers 404 to /api/info (a server that is not opencode v2; issue #11)
 //   sse-drop      cuts the FIRST `GET /api/event` connection right after its first frame
 //                 (once), to exercise the reconnection of the host
 // FAKE_OPENCODE_VERSION sets the version reported by `--version` and `/api/info`.
@@ -1203,6 +1204,11 @@ function runServe() {
     if (!authorized) {
       response.writeHead(401, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ _tag: 'UnauthorizedError', message: 'unauthorized' }));
+      return;
+    }
+    if (request.url === '/api/info' && has('no-info')) {
+      response.writeHead(404);
+      response.end();
       return;
     }
     if (request.url === '/api/info') {

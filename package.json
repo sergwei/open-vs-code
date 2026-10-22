@@ -45,6 +45,14 @@
           "scope": "machine",
           "markdownDescription": "Absolute path to the opencode **v2** executable. Leave empty to search `PATH` for `opencode2`, then `opencode`."
         },
+        "openVsCode.serverUrl": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "pattern": "^\\s*$|^\\s*[hH][tT][tT][pP][sS]?://",
+          "patternErrorMessage": "Write the address of a server on this machine, like http://127.0.0.1:4096.",
+          "markdownDescription": "Address of an opencode **v2** server that is already running on **this machine**, for example `http://127.0.0.1:4096` (`127.0.0.1`, `[::1]` and `localhost` are accepted, over `http` or `https`). When set, the extension does **not** launch its own server. Its password is not a setting: run **OpenCode: Set Server Password** (the user is always `opencode`). Leave empty to let the extension launch its own server."
+        },
         "openVsCode.defaultModel": {
           "type": "string",
           "default": "",
@@ -74,6 +82,16 @@
       {
         "command": "openVsCode.managePermissions",
         "title": "Manage Saved Permissions",
+        "category": "OpenCode"
+      },
+      {
+        "command": "openVsCode.setServerPassword",
+        "title": "Set Server Password",
+        "category": "OpenCode"
+      },
+      {
+        "command": "openVsCode.clearServerPassword",
+        "title": "Forget Server Password",
         "category": "OpenCode"
       }
     ],

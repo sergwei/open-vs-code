@@ -19,8 +19,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
+import type { ServerTarget } from './externalServer';
 import type { DetectionResult } from './opencodeBinary';
 import {
+  ServerInfoError,
   ServerStartError,
   startServer,
   stopServer,
@@ -830,6 +832,372 @@ describe('ServerManager with real processes and a log that throws', () => {
   }, 30_000);
 });
 
+// Issue #11. What they protect: with an external target the manager NEVER launches a process
+// (`start` is never called, whatever the detection says), it reaches `running` only after
+// `GET /api/info` answered with a v2 version, every way of failing has its own reason, nothing
+// retries by itself (decision of Sergio, 2026-10-22), a change of target, password or folder
+// reconnects, going back to `spawn` uses the binary detected meanwhile, `stop()` cancels a
+// connection in flight, and no log line carries the password. SYNTHETIC: `fetchInfo` is a fake and
+// the errors are hand-built; the same flows against a fixture server in a real VS Code are in
+// `test/integration/externalServer.test.ts`.
+describe('ServerManager with an external target', () => {
+  const URL_A = 'http://127.0.0.1:4096';
+  const ext = (password = 'pw-secret', url = URL_A): ServerTarget => ({
+    kind: 'external',
+    url,
+    password,
+  });
+  const noPassword: ServerTarget = { kind: 'external', url: URL_A, password: undefined };
+  const info = (version = '2.0.32'): Promise<ServerInfo> => Promise.resolve({ version, pid: 99 });
+
+  it('connects before any detection: connecting -> running, and never starts a process', async () => {
+    const { manager, start, fetchInfo, states } = harness({ fetchInfo: () => info() });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext());
+    await reach(manager, 'running');
+    expect(states.map((s) => s.kind)).toEqual(['connecting', 'running']);
+    expect(states[0]).toEqual({ kind: 'connecting', folder: '/work/project', url: URL_A });
+    expect(manager.state).toMatchObject({
+      kind: 'running',
+      server: {
+        url: URL_A,
+        password: 'pw-secret',
+        version: '2.0.32',
+        folder: '/work/project',
+        binaryPath: undefined,
+        pid: 99,
+        source: 'external',
+      },
+    });
+    expect(start).not.toHaveBeenCalled();
+    expect(fetchInfo).toHaveBeenCalledWith(URL_A, 'pw-secret', expect.any(AbortSignal));
+  });
+
+  it('also connects when the folder arrives after the target', async () => {
+    const { manager, start } = harness({ fetchInfo: () => info() });
+    manager.setTarget(ext());
+    expect(manager.state.kind).toBe('idle');
+    manager.setFolder(folderChoice);
+    await reach(manager, 'running');
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('a detection, usable or not, launches nothing and changes no state', async () => {
+    const { manager, start, states } = harness({ fetchInfo: () => info() });
+    manager.setFolder(folderChoice);
+    manager.onDetection(notFound); // before the target: becomes binary-missing, as ever
+    manager.setTarget(ext());
+    await reach(manager, 'running');
+    const seen = states.length;
+    manager.onDetection(okResult());
+    manager.onDetection(notFound);
+    manager.onDetection(unsupported);
+    expect(manager.state.kind).toBe('running');
+    expect(states).toHaveLength(seen);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('a target with no password is unauthorized WITHOUT a request', () => {
+    const { manager, fetchInfo, start, states } = harness();
+    manager.setFolder(folderChoice);
+    manager.setTarget(noPassword);
+    expect(manager.state).toMatchObject({ kind: 'unavailable', reason: 'unauthorized' });
+    expect(states.map((s) => s.kind)).toEqual(['unavailable']);
+    expect(fetchInfo).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    // ...and the notification fires although no `connecting` came before.
+    expect(describeServerFailure({ kind: 'idle' }, manager.state)).toContain('Set Server Password');
+  });
+
+  it('an unusable setting is invalid-url with the message it carries', () => {
+    const { manager, fetchInfo } = harness();
+    manager.setFolder(folderChoice);
+    manager.setTarget({ kind: 'external-invalid', message: 'bad address' });
+    expect(manager.state).toEqual({
+      kind: 'unavailable',
+      reason: 'invalid-url',
+      message: 'bad address',
+    });
+    expect(fetchInfo).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['unauthorized', new ServerInfoError('unauthorized', 'x', 401), 'unauthorized'],
+    ['http 404', new ServerInfoError('http-status', 'x', 404), 'unsupported-version'],
+    ['not json', new ServerInfoError('malformed', 'x'), 'unsupported-version'],
+    ['transport', new ServerInfoError('transport', 'x'), 'unreachable'],
+    ['http 503', new ServerInfoError('http-status', 'x', 503), 'unreachable'],
+  ])('maps a failed /api/info (%s) to the reason %s', async (_name, error, reason) => {
+    const { manager, states } = harness({ fetchInfo: () => Promise.reject(error) });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext());
+    await reach(manager, 'unavailable');
+    expect(manager.state).toMatchObject({ kind: 'unavailable', reason });
+    expect(states.map((s) => s.kind)).toEqual(['connecting', 'unavailable']);
+    // A failure the user can act on notifies from `connecting`.
+    expect(describeServerFailure(states[0] as ServerState, manager.state)).toBeDefined();
+  });
+
+  it('a 1.x server is unsupported-version and is not "running"', async () => {
+    const { manager } = harness({ fetchInfo: () => info('1.19.3') });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext());
+    await reach(manager, 'unavailable');
+    expect(manager.state).toMatchObject({ kind: 'unavailable', reason: 'unsupported-version' });
+  });
+
+  it('a different 2.x only warns in the log and still connects', async () => {
+    const { manager, messages } = harness({ fetchInfo: () => info('2.1.0') });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext());
+    await reach(manager, 'running');
+    expect(messages.some((m) => m.includes('built against 2.0.32'))).toBe(true);
+  });
+
+  it('does NOT retry by itself when the server is unreachable (decision of Sergio)', async () => {
+    const { manager, timers, fetchInfo } = harness({
+      fetchInfo: () => Promise.reject(new ServerInfoError('transport', 'x')),
+    });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext());
+    await reach(manager, 'unavailable');
+    expect(timers).toHaveLength(0);
+    expect(manager.state).toMatchObject({ kind: 'unavailable', reason: 'unreachable' });
+    expect('retryInMs' in manager.state).toBe(false);
+    expect(fetchInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it('Retry (restart "command") reconnects and never answers no-binary', async () => {
+    let up = false;
+    const { manager, fetchInfo, start, states } = harness({
+      fetchInfo: () => (up ? info() : Promise.reject(new ServerInfoError('transport', 'x'))),
+    });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext());
+    await reach(manager, 'unavailable');
+    up = true;
+    await expect(manager.restart('command')).resolves.toBe('attempted');
+    expect(manager.state).toMatchObject({ kind: 'running', server: { source: 'external' } });
+    expect(fetchInfo).toHaveBeenCalledTimes(2);
+    expect(start).not.toHaveBeenCalled();
+    expect(states).toContainEqual({ kind: 'restarting', reason: 'command' });
+  });
+
+  it('an equal target is a no-op, a new password reconnects with it', async () => {
+    const { manager, fetchInfo } = harness({ fetchInfo: () => info() });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext('one'));
+    await reach(manager, 'running');
+    manager.setTarget(ext('one'));
+    expect(fetchInfo).toHaveBeenCalledTimes(1);
+    manager.setTarget(ext('two'));
+    await vi.waitFor(() => {
+      expect(fetchInfo).toHaveBeenCalledTimes(2);
+      expect(manager.state).toMatchObject({ kind: 'running', server: { password: 'two' } });
+    });
+    expect(fetchInfo).toHaveBeenLastCalledWith(URL_A, 'two', expect.any(AbortSignal));
+  });
+
+  it('a changed folder reconnects with the new folder', async () => {
+    const { manager, fetchInfo, start } = harness({ fetchInfo: () => info() });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext());
+    await reach(manager, 'running');
+    manager.setFolder({ folder: '/other', ignored: [] });
+    await vi.waitFor(() => {
+      expect(manager.state).toMatchObject({ kind: 'running', server: { folder: '/other' } });
+    });
+    expect(fetchInfo).toHaveBeenCalledTimes(2);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('spawn -> external stops the child we launched and then connects', async () => {
+    const { manager, stop, created, fetchInfo, states } = harness({ fetchInfo: () => info() });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    await reach(manager, 'running');
+    expect(manager.state).toMatchObject({ server: { source: 'spawned' } });
+    manager.setTarget(ext());
+    await vi.waitFor(() => {
+      expect(manager.state).toMatchObject({ kind: 'running', server: { source: 'external' } });
+    });
+    expect(stop).toHaveBeenCalledWith(created[0]);
+    expect(states.map((s) => s.kind)).toEqual([
+      'starting',
+      'running',
+      'restarting',
+      'connecting',
+      'running',
+    ]);
+    expect(states[2]).toEqual({ kind: 'restarting', reason: 'target-changed' });
+    // The stopped child's exit must not be taken for a crash.
+    expect(fetchInfo).toHaveBeenCalledTimes(2); // once by the spawn start, once external
+  });
+
+  it('external -> spawn launches with the binary detected meanwhile', async () => {
+    const { manager, start, states } = harness({ fetchInfo: () => info() });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext());
+    await reach(manager, 'running');
+    manager.onDetection(okResult('/bin/late')); // remembered only
+    expect(start).not.toHaveBeenCalled();
+    manager.setTarget({ kind: 'spawn' });
+    await vi.waitFor(() => {
+      expect(manager.state).toMatchObject({ kind: 'running', server: { source: 'spawned' } });
+    });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ command: '/bin/late' }));
+    expect(states.map((s) => s.kind)).toEqual([
+      'connecting',
+      'running',
+      'restarting',
+      'starting',
+      'running',
+    ]);
+  });
+
+  it('external -> spawn with no binary known waits in idle; the next detection launches', async () => {
+    const { manager, start } = harness({ fetchInfo: () => info() });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext());
+    await reach(manager, 'running');
+    manager.setTarget({ kind: 'spawn' });
+    await reach(manager, 'idle');
+    expect(start).not.toHaveBeenCalled();
+    manager.onDetection(okResult());
+    await reach(manager, 'running');
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(manager.state).toMatchObject({ server: { source: 'spawned' } });
+  });
+
+  it('stop() during a connection aborts its request and publishes no failure', async () => {
+    let seen: AbortSignal | undefined;
+    const { manager, states } = harness({
+      fetchInfo: (_url, _password, signal) =>
+        new Promise<ServerInfo>((_resolve, reject) => {
+          seen = signal;
+          signal.addEventListener('abort', () => {
+            reject(new Error('aborted'));
+          });
+        }),
+    });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext());
+    expect(manager.state.kind).toBe('connecting');
+    await manager.stop();
+    expect(seen?.aborted).toBe(true);
+    expect(manager.state.kind).toBe('stopped');
+    expect(states.map((s) => s.kind)).toEqual(['connecting', 'stopping', 'stopped']);
+  });
+
+  it('a restart during a connection drops that attempt silently', async () => {
+    const attempts: Array<(version: ServerInfo) => void> = [];
+    const signals: AbortSignal[] = [];
+    const { manager, states } = harness({
+      fetchInfo: (_url, _password, signal) =>
+        new Promise<ServerInfo>((resolve, reject) => {
+          signals.push(signal);
+          attempts.push(resolve);
+          signal.addEventListener('abort', () => {
+            reject(new Error('aborted'));
+          });
+        }),
+    });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext());
+    const restarting = manager.restart('command');
+    await vi.waitFor(() => {
+      expect(attempts).toHaveLength(2);
+    });
+    expect(signals[0]?.aborted).toBe(true);
+    attempts[1]?.({ version: '2.0.32', pid: 5 });
+    await restarting;
+    expect(manager.state).toMatchObject({ kind: 'running', server: { pid: 5 } });
+    expect(states.some((s) => s.kind === 'unavailable')).toBe(false);
+  });
+
+  it('a target change that arrives while a restart is launching is not lost', async () => {
+    const { manager, start } = harness({ fetchInfo: () => info() });
+    manager.setFolder(folderChoice);
+    manager.setTarget(ext('one'));
+    await reach(manager, 'running');
+    const restarting = manager.restart('command');
+    manager.setTarget(ext('two')); // coalesced into the restart in flight
+    await restarting;
+    expect(manager.state).toMatchObject({ kind: 'running', server: { password: 'two' } });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('no log line ever contains the password', async () => {
+    const failing = harness({
+      fetchInfo: () => Promise.reject(new ServerInfoError('unauthorized', 'HTTP 401', 401)),
+    });
+    failing.manager.setFolder(folderChoice);
+    failing.manager.setTarget(ext('pw-secret'));
+    await reach(failing.manager, 'unavailable');
+    const ok = harness({ fetchInfo: () => info() });
+    ok.manager.setFolder(folderChoice);
+    ok.manager.setTarget(ext('pw-secret'));
+    await reach(ok.manager, 'running');
+    await ok.manager.stop();
+    for (const line of [...failing.messages, ...ok.messages]) {
+      expect(line).not.toContain('pw-secret');
+    }
+  });
+});
+
+describe('describeServerState / describeServerFailure of the external mode', () => {
+  const external: ServerState = {
+    kind: 'running',
+    server: {
+      url: 'http://127.0.0.1:4096',
+      password: 'pw-secret',
+      version: '2.0.32',
+      folder: '/f',
+      binaryPath: undefined,
+      pid: 7,
+      source: 'external',
+    },
+  };
+
+  it('uses its own lines, not "server ready at" (realOpencode.test.ts counts those)', () => {
+    expect(
+      describeServerState({ kind: 'connecting', folder: '/f', url: 'http://127.0.0.1:4096' }),
+    ).toEqual({
+      level: 'info',
+      message: 'connecting to the external server at http://127.0.0.1:4096 for /f',
+    });
+    const { message } = describeServerState(external);
+    expect(message).toBe(
+      'connected to the external server at http://127.0.0.1:4096 (opencode 2.0.32)',
+    );
+    expect(message).not.toContain('pw-secret');
+    expect(message).not.toContain('server ready');
+  });
+
+  it('the three new reasons are logged by name, and notify from any previous state', () => {
+    for (const reason of ['unreachable', 'unauthorized', 'invalid-url'] as const) {
+      const next: ServerState = { kind: 'unavailable', reason, message: 'm' };
+      expect(describeServerState(next).message).toBe(`server not available (${reason}): m`);
+      expect(describeServerFailure({ kind: 'idle' }, next)).toBe('m');
+      expect(describeServerFailure({ kind: 'restarting', reason: 'command' }, next)).toBe('m');
+    }
+    expect(
+      describeServerState({ kind: 'unavailable', reason: 'unreachable', message: 'm' }).level,
+    ).toBe('error');
+  });
+
+  it('a 1.x or crashing failure still notifies only after an attempt, now also from connecting', () => {
+    const connecting: ServerState = { kind: 'connecting', folder: '/f', url: 'http://127.0.0.1:1' };
+    const unsupportedState: ServerState = {
+      kind: 'unavailable',
+      reason: 'unsupported-version',
+      message: 'v1',
+    };
+    expect(describeServerFailure(connecting, unsupportedState)).toBe('v1');
+    expect(describeServerFailure({ kind: 'idle' }, unsupportedState)).toBeUndefined();
+  });
+});
+
 describe('describeServerState / describeServerFailure', () => {
   const running: ServerState = {
     kind: 'running',
@@ -840,6 +1208,7 @@ describe('describeServerState / describeServerFailure', () => {
       folder: '/f',
       binaryPath: '/b',
       pid: 7,
+      source: 'spawned',
     },
   };
 
