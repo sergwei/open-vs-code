@@ -1427,3 +1427,191 @@ describe('model and agent selectors (issues #23/#24)', () => {
     expect(h.container.querySelector('.prompt-actions .agent-toggle')).not.toBeNull();
   });
 });
+
+// E5 / issue #61: the reasoning-variant control in the prompt row and what `prompt.send` carries.
+// FABRICATED catalog and snapshots (variants low/high as the planner spike saw for
+// glm-5.3-flash-free in a real opencode 2.0.32); they prove the wiring and the decisions of Sergio
+// (22/10/2026, Engram #1021), not the server. A variant set from outside (the TUI) is modelled as
+// a session row that carries it, which is the shape `toModelRef` gives it on the host.
+describe('reasoning variant selector (issue #61)', () => {
+  const PICKLE = { providerID: 'opencode', id: 'big-pickle' };
+  const GLM = { providerID: 'opencode', id: 'glm-5.3-flash-free' };
+  const option = (id: string, name: string, variants: string[]) => ({
+    providerID: 'opencode',
+    id,
+    name,
+    status: 'active' as const,
+    contextLimit: 200000,
+    free: true,
+    variants,
+  });
+  const catalog: HostToWebview = {
+    type: 'catalog',
+    catalog: {
+      models: [
+        option('big-pickle', 'Big Pickle', []),
+        option('glm-5.3-flash-free', 'GLM-5.3-Flash Free', ['low', 'high']),
+      ],
+      providers: [{ id: 'opencode', name: 'OpenCode' }],
+      agents: [{ id: 'build', name: 'Build' }],
+      serverDefault: PICKLE,
+      defaultAgent: 'build',
+    },
+  };
+  const withRow = (model?: { providerID: string; id: string; variant?: string }, id = SES) =>
+    [
+      connected,
+      {
+        type: 'snapshot',
+        snapshot: {
+          sessions: [
+            { id, title: 'Work', createdAt: 1, updatedAt: 2, ...(model ? { model } : {}) },
+          ],
+          statuses: { [id]: { type: 'idle' } },
+          open: { sessionID: id, messages: [user('m1', 'hi')], parts: {} },
+          requests: { permissions: [], forms: [] },
+          resolutions: [],
+        },
+      },
+    ] satisfies HostToWebview[];
+  const variantTrigger = (h: Harness) =>
+    h.container.querySelector<HTMLButtonElement>('button.variant-trigger');
+  const entry = (h: Harness, id: string) =>
+    must<HTMLButtonElement>(h.container, `button.model-option[data-variant="${id}"]`);
+  const lastSent = (h: Harness) => {
+    const message = h.sent.at(-1);
+    if (message?.type !== 'prompt.send') throw new Error('the last message is not a prompt.send');
+    return message;
+  };
+  const pickVariant = (h: Harness, id: string) => {
+    must<HTMLButtonElement>(h.container, 'button.variant-trigger').click();
+    entry(h, id).click();
+  };
+
+  it('is not there for a model without variants, and appears after the model button for one with', () => {
+    const h = start();
+    h.apply(...withRow(PICKLE), catalog);
+    expect(variantTrigger(h)).toBeNull();
+    h.apply(...withRow(GLM));
+    const row = must(h.container, '.prompt-selectors');
+    const classes = [...row.querySelectorAll('button')].map((b) => b.className.split(' ')[1]);
+    expect(classes.indexOf('variant-trigger')).toBe(classes.indexOf('model-trigger') + 1);
+    expect(variantTrigger(h)?.textContent).toBe('Reasoning: Default');
+  });
+
+  it('picking a variant sends nothing yet; the next prompt carries it, and it survives structuredClone', () => {
+    const h = start();
+    h.apply(...withRow(GLM), catalog);
+    pickVariant(h, 'high');
+    expect(h.sent).toEqual([]);
+    expect(variantTrigger(h)?.textContent).toBe('Reasoning: high');
+    h.type('go');
+    h.button('Send').click();
+    expect(lastSent(h).model).toEqual({ ...GLM, variant: 'high' });
+    expect(() => structuredClone(lastSent(h))).not.toThrow();
+  });
+
+  it('Default removes the variant: the model goes without the field, never "default"', () => {
+    const h = start();
+    h.apply(...withRow({ ...GLM, variant: 'low' }), catalog);
+    expect(variantTrigger(h)?.textContent).toBe('Reasoning: low');
+    pickVariant(h, 'default');
+    expect(variantTrigger(h)?.textContent).toBe('Reasoning: Default');
+    h.type('go');
+    h.button('Send').click();
+    const model = lastSent(h).model;
+    expect(model).toEqual(GLM);
+    expect('variant' in (model ?? {})).toBe(false);
+  });
+
+  it('a variant set from outside (the TUI) is shown and kept by the next send', () => {
+    const h = start();
+    h.apply(...withRow({ ...GLM, variant: 'low' }), catalog);
+    expect(variantTrigger(h)?.textContent).toBe('Reasoning: low');
+    h.type('go');
+    h.button('Send').click();
+    expect(lastSent(h).model).toEqual({ ...GLM, variant: 'low' });
+  });
+
+  it('a variant that arrives live changes the control while there is no draft', () => {
+    const h = start();
+    h.apply(...withRow(GLM), catalog);
+    expect(variantTrigger(h)?.textContent).toBe('Reasoning: Default');
+    h.apply({
+      type: 'session.upserted',
+      session: {
+        id: SES,
+        title: 'Work',
+        createdAt: 1,
+        updatedAt: 3,
+        model: { ...GLM, variant: 'high' },
+      },
+    });
+    expect(variantTrigger(h)?.textContent).toBe('Reasoning: high');
+  });
+
+  it('a variant the catalog does not list shows as unavailable', () => {
+    const h = start();
+    h.apply(...withRow({ ...GLM, variant: 'ultra' }), catalog);
+    expect(variantTrigger(h)?.textContent).toBe('Reasoning: ultra (unavailable)');
+  });
+
+  it('choosing another model resets to Default; choosing the same one again keeps the variant', () => {
+    const h = start();
+    h.apply(...withRow(GLM), catalog);
+    pickVariant(h, 'high');
+    const modelButton = () => must<HTMLButtonElement>(h.container, 'button.model-trigger');
+    const pickModel = (name: string) => {
+      modelButton().click();
+      [...h.container.querySelectorAll<HTMLButtonElement>('button.model-option')]
+        .find((b) => b.textContent.startsWith(name))
+        ?.click();
+    };
+    pickModel('GLM-5.3-Flash Free');
+    expect(variantTrigger(h)?.textContent).toBe('Reasoning: high');
+    pickModel('Big Pickle');
+    expect(variantTrigger(h)).toBeNull();
+    pickModel('GLM-5.3-Flash Free');
+    expect(variantTrigger(h)?.textContent).toBe('Reasoning: Default');
+  });
+
+  it('Retry carries the variant and survives structuredClone', () => {
+    const h = start();
+    h.apply(
+      connected,
+      {
+        type: 'snapshot',
+        snapshot: {
+          sessions: [
+            {
+              id: SES,
+              createdAt: 1,
+              updatedAt: 2,
+              model: { ...GLM, variant: 'low' },
+            },
+          ],
+          statuses: {
+            [SES]: { type: 'error', error: { code: 'provider.no-route', message: 'x' } },
+          },
+          open: { sessionID: SES, messages: [user('m1', 'hi')], parts: {} },
+          requests: { permissions: [], forms: [] },
+          resolutions: [],
+        },
+      },
+      catalog,
+    );
+    h.button('Retry').click();
+    expect(lastSent(h).model).toEqual({ ...GLM, variant: 'low' });
+    expect(() => structuredClone(lastSent(h))).not.toThrow();
+  });
+
+  it('is aria-disabled while disconnected and keeps its place in the prompt row', () => {
+    const h = start();
+    h.apply(...withRow(GLM), catalog, {
+      type: 'connection.state',
+      connection: { state: 'reconnecting', attempt: 1 },
+    });
+    expect(variantTrigger(h)?.getAttribute('aria-disabled')).toBe('true');
+    expect(h.container.querySelector('.prompt-actions .variant-trigger')).not.toBeNull();
+  });
+});

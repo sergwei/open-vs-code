@@ -1,7 +1,8 @@
 /**
- * Pure logic of the model and agent selectors (issues #23/#24): which model and agent the prompt
- * box shows and sends, how the catalog is grouped and searched, and the one-line texts. No DOM, no
- * Solid: `selection.test.ts` drives it with plain objects.
+ * Pure logic of the model, agent and reasoning-variant selectors (issues #23/#24/#61): which model,
+ * variant and agent the prompt box shows and sends, how the catalog is grouped and searched, and
+ * the one-line texts. The variant lives in the draft MODEL reference (`ModelRef.variant`), not in a
+ * field of its own. No DOM, no Solid: `selection.test.ts` drives it with plain objects.
  *
  * The user's choice is a DRAFT held by the webview (decision of 21/10/2026, Engram #1012): the
  * server only hears it when a prompt is sent, and the host validates it first. So everything here
@@ -62,6 +63,63 @@ function plainModel(ref: ModelRef): ModelRef {
   const copy: ModelRef = { providerID: ref.providerID, id: ref.id };
   if (ref.variant !== undefined) copy.variant = ref.variant;
   return copy;
+}
+
+/**
+ * `ref` with its reasoning variant replaced by `variant` (issue #61); `undefined` is "Default" and
+ * leaves the reference WITHOUT a `variant` (the string `"default"` is never built here). A fresh
+ * plain copy like {@link plainModel}, so the result can go to the store and to `postMessage`.
+ */
+export function withVariant(ref: ModelRef, variant: string | undefined): ModelRef {
+  const copy: ModelRef = { providerID: ref.providerID, id: ref.id };
+  if (variant !== undefined) copy.variant = variant;
+  return copy;
+}
+
+/**
+ * The reference to store when the user picks `option` in the model panel (issue #61, decision of
+ * Sergio, 22/10/2026, Engram #1021): the SAME model as the one in use keeps its variant (picking it
+ * again must not wipe a reasoning level), any other model starts on Default, because variant ids do
+ * not mean the same across models or providers (`core/variant.ts@843a6c51`). Without an effective
+ * model there is nothing to keep.
+ */
+export function pickModel(
+  effective: EffectiveModel | undefined,
+  option: { providerID: string; id: string },
+): ModelRef {
+  const keep =
+    effective !== undefined &&
+    effective.ref.providerID === option.providerID &&
+    effective.ref.id === option.id;
+  return withVariant(option, keep ? effective.ref.variant : undefined);
+}
+
+/**
+ * What the reasoning-variant control shows (issue #61). `options` are the ids the catalog lists for
+ * the effective model, in its order, WITHOUT "Default" (the control adds it); `current` is the
+ * variant of the effective model (absent = Default); `missing` is that variant when the catalog
+ * does not list it (set outside, e.g. from the TUI, or retired since), so the control can show it
+ * as unavailable instead of hiding it. `visible` is true when there is anything to choose or show.
+ */
+export type VariantChoices = {
+  options: string[];
+  current?: string;
+  missing?: string;
+  visible: boolean;
+};
+
+/** Builds the {@link VariantChoices} of the effective model; nothing without one. */
+export function variantChoices(effective: EffectiveModel | undefined): VariantChoices {
+  if (effective === undefined) return { options: [], visible: false };
+  const options = effective.option?.variants ?? [];
+  const current = effective.ref.variant;
+  const result: VariantChoices = { options: [...options], visible: false };
+  if (current !== undefined) {
+    result.current = current;
+    if (!options.includes(current)) result.missing = current;
+  }
+  result.visible = options.length > 0 || result.missing !== undefined;
+  return result;
 }
 
 /** The user's unsent choices; either may be absent (nothing chosen yet). */

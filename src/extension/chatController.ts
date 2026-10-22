@@ -194,6 +194,30 @@ export interface ModelPreferences {
   setLastModel(ref: ModelRef): Promise<void>;
 }
 
+/**
+ * Human-readable suffix for the log line of a model choice: ` (variant high)`, or empty when the
+ * reference has none. The variant is a catalog id (checked against the catalog before any log),
+ * never user text. Appended at the END of the line so older exact-match lines keep their prefix.
+ */
+function variantSuffix(model: ModelRef): string {
+  return model.variant === undefined ? '' : ` (variant ${model.variant})`;
+}
+
+/**
+ * Rebuilds a model reference coming from the webview as a plain `{ providerID, id, variant? }`,
+ * dropping the `"default"` spelling of "no variant" (issue #61). The webview never sends it, but it
+ * is untrusted input and `"default"` is not in a model's `variants` (opencode filters it out of the
+ * catalog, `core/variant.ts@843a6c51`), so it would be refused as unavailable. The copy is always
+ * new on purpose: `isModelRef` does not reject extra keys, and a foreign key must not travel on to
+ * `switchModel`, `session.create` or the persisted last model.
+ */
+function withoutDefaultVariant(model: ModelRef): ModelRef {
+  const plain = { providerID: model.providerID, id: model.id };
+  return model.variant === undefined || model.variant === 'default'
+    ? plain
+    : { ...plain, variant: model.variant };
+}
+
 /** True when two references name the same model and variant; an absent variant is "default". */
 function sameModel(a: ModelRef, b: ModelRef): boolean {
   return a.providerID === b.providerID && a.id === b.id && (a.variant ?? '') === (b.variant ?? '');
@@ -1162,8 +1186,11 @@ export class ChatController {
   /**
    * Checks the model and agent of a `prompt.send` against `catalog`. Returns the error body to
    * answer with, or `undefined` when both are offered (or absent). A variant must be one the
-   * catalog lists for that model. The webview is untrusted input, and the server would accept
-   * anything here and fail the NEXT turn instead (VERIFIED, planner spike, opencode 2.0.32).
+   * catalog lists for that model, else the answer is `VariantUnavailable` (issue #61), told apart
+   * from `ModelUnavailable` because the model is still fine and only the reasoning level must be
+   * chosen again. The webview is untrusted input, and the server would accept anything here and
+   * fail the NEXT turn instead (VERIFIED, planner spike, opencode 2.0.32; the variant case is read
+   * in `model-resolver.ts@843a6c51`, `VariantUnavailableError` raised when the turn runs, not run).
    */
   private checkSelection(
     catalog: Catalog,
@@ -1174,13 +1201,17 @@ export class ChatController {
       const option = catalog.models.find(
         (candidate) => candidate.providerID === model.providerID && candidate.id === model.id,
       );
-      if (
-        option === undefined ||
-        (model.variant !== undefined && !option.variants.includes(model.variant))
-      ) {
+      if (option === undefined) {
         return {
           _tag: 'ModelUnavailable',
           message: 'That model is not offered by the server any more. Choose another one.',
+        };
+      }
+      if (model.variant !== undefined && !option.variants.includes(model.variant)) {
+        return {
+          _tag: 'VariantUnavailable',
+          message:
+            'That reasoning level is not offered for this model any more. Choose another one.',
         };
       }
     }
@@ -1198,11 +1229,14 @@ export class ChatController {
    *
    * Reads the session (`session.get`) and compares ONLY with what the session has stored: it calls
    * `switchAgent` when `agent !== info.agent` and `switchModel` when the model differs from
-   * `info.model`, and a session that stores nothing always gets the switch. So a model or agent the
-   * user chose is PINNED on the session, even when it equals the server default of today (decision
-   * of Sergio, 21/10/2026, review #1015 W1): leaving it unpinned would let a later credential,
-   * provider or config change move the session to another model. The price is one `model-switched`
-   * (or `agent-switched`) message the first time a session without a stored value gets a choice.
+   * `info.model` (variant included, issue #61: the same model with another reasoning level, or with
+   * none, is a switch; "Default" is a model reference WITHOUT `variant`, and the server dedupes
+   * with `variant ?? "default"`), and a session that stores nothing always gets the switch. So a
+   * model or agent the user chose is PINNED on the session, even when it equals the server default
+   * of today (decision of Sergio, 21/10/2026, review #1015 W1): leaving it unpinned would let a
+   * later credential, provider or config change move the session to another model. The price is one
+   * `model-switched` (or `agent-switched`) message the first time a session without a stored value
+   * gets a choice.
    * The server does NOT deduplicate `switchAgent` (it publishes an `agent-switched` message every
    * time; going to or from `plan` also queues a reminder), and does deduplicate `switchModel`
    * against the stored model. Agent first, then model. Throws what the client throws; the caller
@@ -1227,7 +1261,9 @@ export class ChatController {
     const current = info.model === undefined ? undefined : toModelRef(info.model);
     if (model !== undefined && (current === undefined || !sameModel(model, current))) {
       await client.session.switchModel({ sessionID, model });
-      this.log.info(`model selected ${model.providerID}/${model.id} for ${sessionID}`);
+      this.log.info(
+        `model selected ${model.providerID}/${model.id} for ${sessionID}${variantSuffix(model)}`,
+      );
     }
   }
 
@@ -1902,14 +1938,26 @@ export class ChatController {
    *
    * Issues #23/#24: when the message carries a `model` and/or an `agent`, they are checked against
    * the catalog FIRST (loading it if the host has none; a catalog that cannot be read is
-   * `CatalogUnavailable`). One that is not offered answers `ModelUnavailable` / `AgentUnavailable`
-   * with no call to the server and reloads the catalog, because the webview is behind it. Then the
-   * choice is applied: a NEW session is created with it (`session.create({ agent, model })`), an
-   * existing one is switched by {@link applySelection}; a failure there answers the error and sends
-   * NO prompt (a prompt sent to a session on a bad model would be redelivered later, VERIFIED in
-   * the planner spike). After the prompt is accepted the model becomes the last one used
-   * (`preferences.setLastModel`; a failure is a `warn` line, the send stands) and the catalog is
-   * published again so a new session proposes it. The model's own variant, if any, is kept.
+   * `CatalogUnavailable`). One that is not offered answers `ModelUnavailable` /
+   * `VariantUnavailable` (a variant the model does not list, issue #61) / `AgentUnavailable` with
+   * no call to the server and reloads the catalog, because the webview is behind it. The model is
+   * first rebuilt as a plain reference, a `variant: "default"` counting as absent
+   * ({@link withoutDefaultVariant}). Then the choice is applied: a NEW session is created with it
+   * (`session.create({ agent, model })`), an existing one is switched by {@link applySelection}; a
+   * failure there answers the error and sends NO prompt (a prompt sent to a session on a bad
+   * model would be redelivered later, VERIFIED in the planner spike). After the prompt is
+   * accepted the model becomes the last one used (`preferences.setLastModel`; a failure is a
+   * `warn` line, the send stands) and the catalog is published again so a new session proposes
+   * it. The model's own variant, if any, is kept, and the `model selected` log lines end in
+   * ` (variant <id>)` when there is one. VERIFIED by unit tests with a fake client. VERIFIED
+   * against a real opencode 2.0.32 on Windows 11 (22/10/2026), on the final tree: the opt-in
+   * `real-opencode` case "applies a chosen reasoning variant before the prompt" logged
+   * `model selected opencode/glm-5.3-flash-free … (variant low)` at 09:50:12.869, `prompt
+   * accepted` at 09:50:12.874 and `turn finished: succeeded` at 09:50:28.212
+   * (`.vscode-test/user-data/logs/20261022T094935`, OpenCode.log); `test:visual` step 14 repeated
+   * it with the real UI at 09:56:55.960 / 09:56:55.989 / 09:56:58.038
+   * (`.vscode-test/visual/user-data/logs/20261022T095051`). NOT observed: the host refusing an
+   * unlisted variant against a real server, macOS and Linux (UNVERIFIED).
    */
   private async sendPrompt(
     message: Extract<WebviewToHost, { type: 'prompt.send' }>,
@@ -1925,7 +1973,8 @@ export class ChatController {
       });
     }
     try {
-      const { model, agent } = message;
+      const { agent } = message;
+      const model = message.model === undefined ? undefined : withoutDefaultVariant(message.model);
       let catalog: Catalog | undefined;
       if (model !== undefined || agent !== undefined) {
         catalog = await this.ensureCatalog();
@@ -1954,7 +2003,9 @@ export class ChatController {
         ).id;
         if (agent !== undefined) this.log.info(`agent selected ${agent} for ${sessionID}`);
         if (model !== undefined) {
-          this.log.info(`model selected ${model.providerID}/${model.id} for ${sessionID}`);
+          this.log.info(
+            `model selected ${model.providerID}/${model.id} for ${sessionID}${variantSuffix(model)}`,
+          );
         }
         await this.openSession(sessionID);
       } else {

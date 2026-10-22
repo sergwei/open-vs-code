@@ -1,7 +1,8 @@
-// Pure rules for which model a NEW session proposes (issues #23): the `openVsCode.defaultModel`
-// setting, the last model a prompt was sent with, and the catalog both are checked against. No
-// `vscode` import, so Vitest runs it directly; `chatLifecycle.ts` reads the setting and the
-// `globalState` and `chatController.ts` calls {@link resolvePreferredModel}.
+// Pure rules for which model (and reasoning variant, issue #61) a NEW session proposes (issue
+// #23): the `openVsCode.defaultModel` setting, the last model a prompt was sent with, and the
+// catalog both are checked against. No `vscode` import, so Vitest runs it directly;
+// `chatLifecycle.ts` reads the setting and the `globalState` and `chatController.ts` calls
+// {@link resolvePreferredModel}.
 
 import type { ModelRef } from '../shared/model';
 
@@ -44,23 +45,46 @@ export function isAvailable(
 }
 
 /**
- * Chooses the model a new session proposes. Precedence (decision of Sergio, 21/10/2026, Engram
- * #1012): the setting, then the last model used, then nothing (the webview then falls back to the
- * server default). A candidate that is not in `available` is skipped, and a setting that was
- * written but skipped is reported in `ignored` so the controller can tell the user once. The
- * returned model is the CATALOG's own reference (no variant), never the stored one. A `last` that
- * is gone is silently skipped: it is a convenience, not something the user wrote.
- * VERIFIED by unit tests with fabricated data; the catalog comes from `model.list()`.
+ * Chooses the model (and reasoning variant, issue #61) a new session proposes. Precedence
+ * (decision of Sergio, 21/10/2026, Engram #1012): the setting, then the last model used, then
+ * nothing (the webview then falls back to the server default). A candidate that is not in
+ * `available` is skipped, and a setting that was written but skipped is reported in `ignored` so
+ * the controller can tell the user once. A `last` that is gone is silently skipped: it is a
+ * convenience, not something the user wrote.
+ *
+ * The variant travels with the last model (decision of Sergio, 22/10/2026, Engram #1021): it is
+ * kept only when the catalog entry still lists it, otherwise the model comes back without one. The
+ * setting names no variant, so a setting that names the SAME model as `last` inherits its variant
+ * (the user picked the model and then the effort); a setting naming another model gets none.
+ * Ids are never carried across models. VERIFIED by unit tests with fabricated data only; the
+ * catalog comes from `model.list()`.
  */
 export function resolvePreferredModel(input: {
   setting: string | undefined;
   last: ModelRef | undefined;
-  available: readonly { providerID: string; id: string }[];
+  available: readonly { providerID: string; id: string; variants: readonly string[] }[];
 }): { model?: ModelRef; ignored?: IgnoredSetting } {
   const parsed = parseModelSetting(input.setting ?? '');
+  const withLastVariant = (ref: ModelRef): ModelRef => {
+    const last = input.last;
+    const entry = input.available.find(
+      (model) => model.providerID === ref.providerID && model.id === ref.id,
+    );
+    if (
+      last?.variant !== undefined &&
+      last.providerID === ref.providerID &&
+      last.id === ref.id &&
+      entry?.variants.includes(last.variant) === true
+    ) {
+      return { providerID: ref.providerID, id: ref.id, variant: last.variant };
+    }
+    return { providerID: ref.providerID, id: ref.id };
+  };
   let ignored: IgnoredSetting | undefined;
   if (parsed.kind === 'model') {
-    if (isAvailable(parsed.model, input.available)) return { model: parsed.model };
+    if (isAvailable(parsed.model, input.available)) {
+      return { model: withLastVariant(parsed.model) };
+    }
     ignored = { value: (input.setting ?? '').trim(), reason: 'unavailable' };
   } else if (parsed.kind === 'invalid') {
     ignored = { value: (input.setting ?? '').trim(), reason: 'invalid' };
@@ -69,7 +93,7 @@ export function resolvePreferredModel(input: {
   if (ignored !== undefined) result.ignored = ignored;
   const last = input.last;
   if (last !== undefined && isAvailable(last, input.available)) {
-    result.model = { providerID: last.providerID, id: last.id };
+    result.model = withLastVariant(last);
   }
   return result;
 }

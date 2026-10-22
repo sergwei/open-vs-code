@@ -1069,6 +1069,67 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     expect(after.data).toHaveLength(before.data.length);
   }, 20_000);
 
+  // E5 / issue #61. Same fixture caveat as above: it copies the shapes the spike saw (variant
+  // "default" echoed, switchModel deduplicated on `variant ?? "default"`); a pass proves our wiring
+  // with the real client, not that a real server runs a turn with a variant (see
+  // realOpencode.test.ts).
+  it('E5 #61: a new session is created with the variant, and the reply and the row carry it', async () => {
+    const { controller, posted } = await bootSessions();
+    const HIGH = { ...GLM, variant: 'high' };
+    await turnWith(controller, posted, 1, { model: HIGH });
+    const sessionID = lastSnapshot(posted).open?.sessionID ?? '';
+    const assistant = posted.find(
+      (m) => m.type === 'message.upserted' && m.message.kind === 'assistant',
+    );
+    expect(assistant).toMatchObject({ message: { model: HIGH } });
+    expect(lastSnapshot(posted).sessions.find((row) => row.id === sessionID)).toMatchObject({
+      model: HIGH,
+    });
+  }, 30_000);
+
+  it('E5 #61: another variant of the same model switches it, and Default (no variant) goes back', async () => {
+    const { controller, posted, other } = await bootSessions();
+    await turnWith(controller, posted, 1, { model: { ...GLM, variant: 'high' } });
+    const sessionID = lastSnapshot(posted).open?.sessionID ?? '';
+
+    await turnWith(controller, posted, 2, { model: { ...GLM, variant: 'low' }, sessionID });
+    const rowOf = () =>
+      posted
+        .flatMap((m) =>
+          m.type === 'session.upserted' && m.session.id === sessionID ? [m.session] : [],
+        )
+        .at(-1);
+    expect(rowOf()).toMatchObject({ model: { ...GLM, variant: 'low' } });
+
+    await turnWith(controller, posted, 3, { model: GLM, sessionID });
+    expect(rowOf()?.model).toEqual(GLM);
+    const assistants = posted.flatMap((m) =>
+      m.type === 'message.upserted' && m.message.kind === 'assistant' ? [m.message] : [],
+    );
+    expect(assistants.at(-1)).toMatchObject({ model: GLM });
+    const history = await other.message.list({ sessionID, order: 'desc', limit: 50 });
+    expect(history.data.filter((m) => m.type === 'model-switched')).toHaveLength(2);
+  }, 40_000);
+
+  it('E5 #61: a variant the model does not list is refused with VariantUnavailable and the server is not touched', async () => {
+    const { controller, posted, other } = await bootSessions();
+    const before = await other.session.list({});
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'ultra',
+      text: 'hello',
+      delivery: 'queue',
+      files: [],
+      model: { ...GLM, variant: 'ultra' },
+    });
+    expect(posted.filter((m) => m.type === 'request.result').at(-1)).toMatchObject({
+      requestId: 'ultra',
+      error: { code: 'VariantUnavailable' },
+    });
+    const after = await other.session.list({});
+    expect(after.data).toHaveLength(before.data.length);
+  }, 20_000);
+
   it('reconnects and sends a second snapshot when the stream is cut', async () => {
     const { controller, posted, state } = await boot('sse-drop');
     controller.onServerState(state);

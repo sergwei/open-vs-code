@@ -1154,7 +1154,8 @@ button.secondary[aria-disabled='true'] {
   cursor: default;
 }
 
-.model-trigger {
+.model-trigger,
+.variant-trigger {
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
