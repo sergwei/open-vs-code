@@ -37,6 +37,9 @@ affiliated with opencode or with Microsoft.
 - **Collapsible tool cards** for shell, read, grep and edit calls, with diffs for edits.
 - **`@` mentions** to add files to the prompt, and an "Add selection" button that attaches the
   editor selection.
+- **Context and cost:** a line under the session title shows how much of the model's context the
+  last step used and, when the model is not free, what the session cost so far, direct subagents
+  included.
 - **Themes and accessibility:** light, dark and high-contrast, keyboard navigation and screen
   reader labels. Colors come from your VS Code theme.
 
@@ -108,9 +111,8 @@ always `opencode`.
   (`opencode.exe` on Windows).
 - "Allowed once" lines in the history do not survive **Developer: Reload Window**: opencode keeps no
   trace of a permission that was allowed once.
-- Not yet: context and token usage (issue #25), dragging images into the prompt (issue #30), a
-  diff of the session changes (issue #31), reverting changes (issue #32) and slash commands
-  (issue #33).
+- Not yet: dragging images into the prompt (issue #30), a diff of the session changes
+  (issue #31), reverting changes (issue #32) and slash commands (issue #33).
 - Mostly tested on Windows; CI builds and tests on Windows, macOS and Linux.
 
 ## Privacy and security
