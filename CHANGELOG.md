@@ -37,6 +37,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Collapsible tool cards for shell, read, grep and edit, with diffs for edits (issue #26).
 - `@` file mentions in the prompt and an "Add selection" button that attaches the editor
   selection (issues #28, #29).
+- A line under the session title with the context used by the last step and, for paid models,
+  the session cost including direct subagents (issue #25).
 - Continuous integration on Windows, macOS and Linux, with a check of the packaged file list
   (issue #5).
 - Marketplace packaging: icon, README, changelog and MIT license (issue #42).
