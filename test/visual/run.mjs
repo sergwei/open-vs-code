@@ -91,6 +91,39 @@
 // reopened one) were written in that run (09:56:22-09:57:00). NOT observed: a screen reader,
 // macOS and Linux, a catalog whose models list no variants (the step SKIPS then), and the host
 // refusing an unlisted variant against a real server.
+//
+// Step 15 (issue #26, tool cards) VERIFIED on Windows 11, VS Code 1.143.0, opencode 2.0.32, model
+// `opencode/glm-5.3-flash-free`, on 22/10/2026 in the final run (13:59:27-14:05; "all visual checks
+// passed", exit 0, 326 ok lines, 0 FAIL; its console output is kept in `.vscode-test/visual/
+// run-output.txt`, the line numbers below are that file's). The model completed shell, read, grep
+// and edit from ONE combined prompt (no retry prompt was needed): line 304 `cards:
+// ["shell:completed","read:completed","grep:completed","edit:completed"]`, so shell, read and edit
+// were NOT skipped. The log (`.vscode-test/visual/user-data/logs/20261022T135923/window1/exthost/
+// sergwei.open-vs-code/OpenCode.log`) has the combined prompt as `prompt accepted` 14:04:11.728 to
+// `turn finished: succeeded` 14:04:17.265, and the failing read asked ONCE (no retry) as 14:04:37.157
+// to 14:04:38.484; screenshots `15a`-`15e` were written 14:04:17-14:04:50. Real headers (lines
+// 308-311): "Shell node --version · done · exit 0", "Read src/sample.ts · done · lines 1-30", "Grep
+// greet in src · done · 1 match", "Edit src/sample.ts · done · +1 −1". Per tool (lines 314-346):
+// Shift+Tab from the prompt box reached the toggle with a visible ring, Enter opened it, the body
+// was right (shell "v24.22.0"; read the file; grep the match; edit 1 hunk line, 1 added, 1
+// deleted), Space closed it. Diff text contrast >= 4.5 in the four themes, header words too
+// (lowest 5.47, lines 349-374). Last card: line 375 `the header of the last card
+// (data-tool="edit") is still in view after unfolding it (true)`: `tagCard` now really marks the
+// LAST card (an earlier version passed two arguments to `inDoc`, which forwards one, and silently
+// tagged the first card, so the older "last card" claims were about the shell card; Engram #1041
+// C1), and it prints the `data-tool` it marked. It proves the header was in view, NOT that the
+// deferred `scrollIntoView` of `ToolCard` moved anything. Failed (lines 376-390): the model called
+// read on the missing `src/does-not-exist.ts` at the first ask; the card said "Read
+// src/does-not-exist.ts · failed · File not found: src/does-not-exist.ts", folded, error tone, the
+// unfolded body held the same line, the header fitted its toggle, and the chip text contrast was
+// 8.68 / 8.03 / 21.00 / 14.55 in light / dark / hc-dark / hc-light. If the model never calls the
+// tool the failed part is SKIPPED with an explicit `warn` (not in this run). The check found two
+// real defects in earlier runs of this round (bare errorForeground 3.16 in light; an error line
+// running over the "Open" link in the side bar), both fixed in `index.css`; the overflow check is
+// a regression check added after the fix and was not run against the broken CSS. NOT observed:
+// tools other than shell, read, grep and edit (write, patch, glob, webfetch, websearch, skill,
+// question, MCP), a running/rejected/stopped/awaiting card, Copy and "Open in editor" pressed, a
+// clipped output, macOS and Linux, a screen reader.
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -505,6 +538,90 @@ function measureCode(doc) {
     spans: spans.length,
     inline: inline ? textRatio(inline) : null,
     codeBackground: win.getComputedStyle(code).backgroundColor,
+  };
+}
+
+/**
+ * Text/background contrast of the first added and the first deleted line of the OPEN tool card
+ * (issue #26, `.diff-line[data-kind=add|del]`), of the header words of the first card (title,
+ * argument, status, result), and the border-left width of each (high contrast marks a diff line
+ * with a border instead of a tint). Self-contained, because it is serialized into the
+ * page; the colour maths is a copy of {@link measureCode} for the same reason. The base is the
+ * side bar background (the webview body is transparent); lines are painted over their ancestors.
+ */
+function measureDiffLines(doc) {
+  const parse = (value) => {
+    const text = String(value).trim();
+    let match = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+%?))?\s*\)$/i.exec(
+      text,
+    );
+    if (match) {
+      let alpha = match[4] === undefined ? 1 : Number.parseFloat(match[4]);
+      if (match[4]?.endsWith('%')) alpha /= 100;
+      return [Number(match[1]), Number(match[2]), Number(match[3]), alpha];
+    }
+    // The `--vscode-*` variables come as hex (`#rrggbb[aa]`), computed styles as `rgb()`.
+    match = /^#([0-9a-f]{3,8})$/i.exec(text);
+    if (match) {
+      let hex = match[1];
+      if (hex.length === 3 || hex.length === 4) hex = [...hex].map((c) => c + c).join('');
+      const alpha = hex.length === 8 ? Number.parseInt(hex.slice(6, 8), 16) / 255 : 1;
+      return [
+        Number.parseInt(hex.slice(0, 2), 16),
+        Number.parseInt(hex.slice(2, 4), 16),
+        Number.parseInt(hex.slice(4, 6), 16),
+        alpha,
+      ];
+    }
+    return null;
+  };
+  const over = (front, back) =>
+    [0, 1, 2].map((i) => front[i] * front[3] + back[i] * (1 - front[3])).concat([1]);
+  const luminance = (color) => {
+    const [r, g, b] = color.map((channel) => {
+      const value = channel / 255;
+      return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const win = doc.defaultView;
+  const root = win.getComputedStyle(doc.documentElement);
+  const base =
+    parse(root.getPropertyValue('--vscode-sideBar-background')) ??
+    parse(root.getPropertyValue('--vscode-editor-background'));
+  if (!base) return { error: 'no base background variable' };
+  const measure = (selector) => {
+    const line = doc.querySelector(selector);
+    if (!line) return null;
+    const chain = [];
+    for (let node = line; node; node = node.parentElement) chain.unshift(node);
+    let background = [base[0], base[1], base[2], 1];
+    for (const node of chain) {
+      const own = parse(win.getComputedStyle(node).backgroundColor);
+      if (own && own[3] > 0) background = over(own, background);
+    }
+    const style = win.getComputedStyle(line);
+    const color = parse(style.color);
+    const [high, low] = [luminance(over(color, background)), luminance(background)].sort(
+      (x, y) => y - x,
+    );
+    return {
+      ratio: (high + 0.05) / (low + 0.05),
+      border: style.borderLeftWidth,
+      background: style.backgroundColor,
+    };
+  };
+  return {
+    add: measure('.tool-card .diff-line[data-kind="add"]'),
+    del: measure('.tool-card .diff-line[data-kind="del"]'),
+    // The header words of the card: the argument once vanished in "High Contrast Light" (it was
+    // painted with textPreformat-foreground), which only a measurement of it can catch.
+    title: measure('.tool-card .tool-title'),
+    arg: measure('.tool-card .tool-arg'),
+    status: measure('.tool-card .tool-status'),
+    result: measure('.tool-card .tool-result'),
+    // The error tone of a real failed call (step 15, the read of a missing file).
+    failedStatus: measure('.tool-card .tool-status[data-tone="error"]'),
   };
 }
 
@@ -1338,7 +1455,9 @@ try {
             visible: active?.matches?.(':focus-visible') ?? false,
           },
           subagentLinks: doc.querySelectorAll('.subagent-link').length,
-          subagentLine: doc.querySelector('.part-subagent span')?.textContent ?? '',
+          // Issue #26: the line is the accessible name of the card's toggle ("Subagent Say hello (general) · done").
+          subagentLine:
+            doc.querySelector('.part-subagent .tool-toggle')?.getAttribute('aria-label') ?? '',
           alerts: doc.querySelectorAll('[role="alert"]').length,
         };
       });
@@ -2290,6 +2409,398 @@ try {
     );
     await shot('14h-variant-reopened');
     assertNoWebviewErrors('variant');
+  });
+
+  // Issue #26 (E6-tool-call-views). The tool cards against a REAL opencode: the free model is asked
+  // to call shell, read, grep and edit on the sample workspace, and each card that appears is
+  // judged folded-by-default, reachable with Tab with a visible ring, opened with Enter, closed
+  // with Space, with the body the tool should give (shell output, file contents, matches, a diff
+  // with added AND deleted lines). A tool the model never called is SKIPPED with a warning, never
+  // failed: the report of the run says which ones were seen.
+  await step('15 tool cards (issue #26)', async () => {
+    /** Every tool card of the log, in order. Self-contained (it is serialized). */
+    const cards = () =>
+      web.inDoc((doc) =>
+        [...doc.querySelectorAll('.tool-card')].map((card) => {
+          const toggle = card.querySelector('.tool-toggle');
+          return {
+            tool: card.getAttribute('data-tool') ?? '',
+            status: card.getAttribute('data-status') ?? '',
+            expanded: toggle?.getAttribute('aria-expanded') ?? '',
+            body: card.querySelector('.tool-body') !== null,
+            name: toggle?.getAttribute('aria-label') ?? '',
+            styled: card.querySelectorAll('[style]').length,
+          };
+        }),
+      );
+    /**
+     * Marks the first (or last) card of `tool` (any tool when null) for the helpers below and
+     * returns the `data-tool` of the card it marked, or null when there is none. `inDoc` forwards
+     * ONE argument (`webviewCdp.mjs`), so both options travel in a single object: passing them as
+     * two arguments once made `fromEnd` always undefined and tagged the FIRST card (review
+     * Engram #1041, C1).
+     */
+    const tagCard = (tool, last = false) =>
+      web.inDoc(
+        (doc, { wanted, fromEnd }) => {
+          for (const old of doc.querySelectorAll('[data-visual-card]')) {
+            old.removeAttribute('data-visual-card');
+          }
+          const all = [...doc.querySelectorAll('.tool-card')].filter(
+            (card) => wanted === null || card.getAttribute('data-tool') === wanted,
+          );
+          const card = fromEnd ? all.at(-1) : all[0];
+          card?.setAttribute('data-visual-card', 'true');
+          return card === undefined ? null : (card.getAttribute('data-tool') ?? '');
+        },
+        { wanted: tool, fromEnd: last },
+      );
+    /** State of the tagged card: toggle, focus, body text, diff line kinds, outputs. */
+    const tagged = () =>
+      web.inDoc((doc) => {
+        const card = doc.querySelector('[data-visual-card]');
+        if (!card) return null;
+        const toggle = card.querySelector('.tool-toggle');
+        const active = doc.activeElement;
+        const lines = [...card.querySelectorAll('.diff-line')];
+        const style = active ? doc.defaultView.getComputedStyle(active) : null;
+        return {
+          expanded: toggle?.getAttribute('aria-expanded') ?? '',
+          body: card.querySelector('.tool-body') !== null,
+          text: card.querySelector('.tool-body')?.innerText ?? '',
+          outputs: [...card.querySelectorAll('.tool-output')].map((pre) => pre.innerText),
+          add: lines.filter((line) => line.getAttribute('data-kind') === 'add').length,
+          del: lines.filter((line) => line.getAttribute('data-kind') === 'del').length,
+          hunk: lines.filter((line) => line.getAttribute('data-kind') === 'hunk').length,
+          matches: card.querySelectorAll('.tool-match').length,
+          pathButtons: card.querySelectorAll('button.tool-path').length,
+          name: toggle?.getAttribute('aria-label') ?? '',
+          focusOnToggle: Boolean(active?.matches?.('[data-visual-card] .tool-toggle')),
+          focusVisible: active?.matches?.(':focus-visible') ?? false,
+          outline: style ? `${style.outlineStyle} ${style.outlineWidth}` : '',
+          headerVisible: (() => {
+            const list = doc.querySelector('.message-list');
+            if (!toggle || !list) return false;
+            const t = toggle.getBoundingClientRect();
+            const l = list.getBoundingClientRect();
+            return t.top >= l.top - 1 && t.bottom <= l.bottom + 1;
+          })(),
+          logChildren: doc.querySelectorAll('[role="log"] > *').length,
+          styled: [...doc.querySelectorAll('body [style], body[style]')]
+            .filter((e) => (e.getAttribute('style') ?? '').trim() !== '')
+            .map((e) => `${e.tagName}.${e.className}: ${e.getAttribute('style')}`),
+        };
+      });
+    /** Real Shift+Tab from the prompt box until the tagged card's toggle has the focus. */
+    const tabToTagged = async () => {
+      await clickIn('textarea');
+      for (let i = 0; i < 120; i += 1) {
+        await page.keyboard.press('Shift+Tab');
+        await sleep(40);
+        if ((await tagged())?.focusOnToggle) return true;
+      }
+      return false;
+    };
+    const setTheme = async (theme) => {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+    };
+    const THEMES = [
+      ['light', 'Default Light Modern'],
+      ['dark', 'Default Dark Modern'],
+      ['hc-dark', 'Default High Contrast'],
+      ['hc-light', 'Default High Contrast Light'],
+    ];
+    const seen = async (tool) =>
+      (await cards()).some((card) => card.tool === tool && card.status === 'completed');
+
+    assertNoWebviewErrors('before the tool cards step');
+    check(await clickButton('New session'), 'New session is pressed');
+    await page.waitForTimeout(1500);
+
+    // --- Ask the model for the tools: one combined prompt, then one prompt per missing tool ----
+    await send(
+      'Use the tools, do not guess. In this order: 1) call the shell tool with the command ' +
+        '`node --version`; 2) call the read tool on src/sample.ts; 3) call the grep tool with the ' +
+        'pattern greet in the src folder; 4) call the edit tool on src/sample.ts replacing the text ' +
+        '`value2 = 2;` with `value2 = 22;`. Then reply with exactly: DONE.',
+    );
+    if (!(await waitIdle(180_000))) warn('the tools turn did not finish in 180 s; going on');
+    const ASKS = {
+      shell:
+        'Call the shell tool exactly once with the command `node --version`. Then reply with exactly: DONE.',
+      read: 'Call the read tool exactly once on src/sample.ts. Then reply with exactly: DONE.',
+      grep: 'Call the grep tool exactly once with the pattern greet in the src folder. Then reply with exactly: DONE.',
+      edit: 'Call the edit tool exactly once on src/sample.ts replacing the text `value3 = 3;` with `value3 = 33;`. Then reply with exactly: DONE.',
+    };
+    for (const tool of ['shell', 'read', 'edit', 'grep']) {
+      for (let attempt = 1; attempt <= 3 && !(await seen(tool)); attempt += 1) {
+        warn(
+          `the model has not completed a "${tool}" call yet; asking for it (attempt ${String(attempt)})`,
+        );
+        await send(ASKS[tool]);
+        await waitIdle(120_000);
+      }
+    }
+    const all = await cards();
+    console.log(`  cards: ${JSON.stringify(all.map((c) => `${c.tool}:${c.status}`))}`);
+    await shot('15a-tool-cards-folded');
+
+    // --- Every card is folded by default, with no body in the DOM and no style attribute ------
+    check(all.length > 0, `the conversation has tool cards (${String(all.length)})`);
+    check(
+      all.every((card) => card.expanded === 'false' && !card.body),
+      'every tool card is folded by default (aria-expanded=false, no .tool-body in the DOM)',
+    );
+    check(
+      all.every((card) => card.styled === 0),
+      'no tool card carries a style attribute',
+    );
+    for (const card of all) console.log(`  header: "${card.name}"`);
+    check(
+      all.every((card) => card.name.includes(' · ') && card.name.length > 0),
+      'every toggle has an accessible name with its status',
+    );
+
+    // --- Each kind: Tab, ring, Enter opens, content, Space closes -----------------------------
+    const judged = [];
+    for (const tool of ['shell', 'read', 'edit', 'grep']) {
+      if (!(await seen(tool))) {
+        warn(
+          `SKIPPED: the model never completed a "${tool}" call, so its card body was not judged`,
+        );
+        continue;
+      }
+      judged.push(tool);
+      check(await tagCard(tool), `the first ${tool} card is tagged`);
+      const reached = await tabToTagged();
+      let state = await tagged();
+      check(reached === true, `Shift+Tab from the prompt box reaches the ${tool} toggle`);
+      check(
+        state?.focusVisible === true && state.outline !== '' && !state.outline.startsWith('none'),
+        `...with a visible focus ring (${JSON.stringify(state?.outline)})`,
+      );
+      const before = state?.logChildren ?? 0;
+      await page.keyboard.press('Enter');
+      await sleep(400);
+      state = await tagged();
+      check(
+        state?.expanded === 'true' && state.body,
+        `Enter opens the ${tool} card and its body appears`,
+      );
+      check(
+        state?.logChildren === before,
+        `opening the card adds no child to the log (${String(before)} -> ${String(state?.logChildren)})`,
+      );
+      console.log(`  ${tool} body: ${JSON.stringify((state?.text ?? '').slice(0, 300))}`);
+      if (tool === 'shell') {
+        check(
+          (state?.outputs ?? []).some((text) => /v\d+\.\d+\.\d+/.test(text)),
+          `the shell body shows the output of node --version (${JSON.stringify(state?.outputs)})`,
+        );
+      } else if (tool === 'read') {
+        check(
+          (state?.outputs ?? []).some((text) => /value2|Sample file/.test(text)),
+          'the read body shows the contents of src/sample.ts',
+        );
+      } else if (tool === 'edit') {
+        check(
+          (state?.add ?? 0) >= 1 && (state?.del ?? 0) >= 1,
+          `the edit body is a diff with added (${String(state?.add)}) and deleted (${String(state?.del)}) lines`,
+        );
+        console.log(`  edit hunk lines: ${String(state?.hunk)}`);
+      } else {
+        check(/greet/.test(state?.text ?? ''), 'the grep body mentions the pattern');
+        console.log(
+          `  grep matches: ${String(state?.matches)} grouped, ${String(state?.pathButtons)} path buttons`,
+        );
+      }
+      await shot(`15b-tool-${tool}-open`);
+      await page.keyboard.press('Space');
+      await sleep(400);
+      state = await tagged();
+      check(
+        state?.expanded === 'false' && !state.body,
+        `Space closes the ${tool} card and removes its body`,
+      );
+    }
+
+    // --- The diff in the four themes: contrast of the added and deleted lines -----------------
+    if (judged.includes('edit')) {
+      await tagCard('edit');
+      await tabToTagged();
+      await page.keyboard.press('Enter');
+      await sleep(400);
+      for (const [name, theme] of THEMES) {
+        await setTheme(theme);
+        const diff = await web.inDoc(measureDiffLines);
+        console.log(`  diff contrast ${name}: ${JSON.stringify(diff)}`);
+        check(
+          diff.add !== null && diff.del !== null && !diff.error,
+          `the diff has an added and a deleted line in ${name}`,
+        );
+        if (diff.add && diff.del) {
+          check(
+            diff.add.ratio >= 4.5 && diff.del.ratio >= 4.5,
+            `diff text contrast >= 4.5 in ${name} (add ${diff.add.ratio.toFixed(2)}, del ${diff.del.ratio.toFixed(2)})`,
+          );
+        }
+        for (const word of ['title', 'arg', 'status', 'result']) {
+          if (diff[word]) {
+            check(
+              diff[word].ratio >= 4.5,
+              `the card header ${word} has text contrast >= 4.5 in ${name} (${diff[word].ratio.toFixed(2)})`,
+            );
+          }
+        }
+        await shot(`15c-diff-${name}`);
+      }
+      await setTheme('Default Dark Modern');
+      await page.keyboard.press('Space');
+      await sleep(300);
+    }
+
+    // --- The header of the LAST card stays in view after unfolding it (auto-scroll risk) ------
+    const lastTool = await tagCard(null, true);
+    if (lastTool !== null && (await tabToTagged())) {
+      await page.keyboard.press('Enter');
+      await sleep(600);
+      const state = await tagged();
+      check(
+        state?.expanded === 'true' && state.headerVisible,
+        `the header of the last card (data-tool="${String(lastTool)}") is still in view after unfolding it (${JSON.stringify(state?.headerVisible)})`,
+      );
+      await shot('15d-last-card-open');
+      await page.keyboard.press('Space');
+      await sleep(300);
+    } else {
+      warn(
+        `SKIPPED: Shift+Tab did not reach the last card (data-tool=${JSON.stringify(lastTool)}); the auto-scroll check was not made`,
+      );
+    }
+
+    // --- A REAL failed call: a read of a file that does not exist (decision of Sergio, #1042) ---
+    // The model is asked once and, if it never makes the call, once more; if there is still no
+    // failed read card the check is SKIPPED with a warning (never silently, never a failure).
+    const FAILED_ASK =
+      'Call the read tool exactly once on the file src/does-not-exist.ts. It does not exist: call the ' +
+      'tool anyway, do not check first. Then reply with exactly: DONE.';
+    const failedSeen = async () =>
+      (await cards()).some((card) => card.tool === 'read' && card.status === 'failed');
+    for (let attempt = 1; attempt <= 2 && !(await failedSeen()); attempt += 1) {
+      if (attempt > 1) warn('the model has not made the failing read call yet; asking once more');
+      await send(FAILED_ASK);
+      await waitIdle(120_000);
+    }
+    if (!(await failedSeen())) {
+      warn(
+        'SKIPPED: the model never made a read call that failed (asked twice for src/does-not-exist.ts); ' +
+          'the real "failed" state was NOT judged in this run',
+      );
+    } else {
+      const failedCard = await web.inDoc((doc) => {
+        for (const old of doc.querySelectorAll('[data-visual-card]')) {
+          old.removeAttribute('data-visual-card');
+        }
+        const card = doc.querySelector('.tool-card[data-tool="read"][data-status="failed"]');
+        if (!card) return null;
+        card.setAttribute('data-visual-card', 'true');
+        const toggle = card.querySelector('.tool-toggle');
+        return {
+          name: toggle?.getAttribute('aria-label') ?? '',
+          expanded: toggle?.getAttribute('aria-expanded') ?? '',
+          body: card.querySelector('.tool-body') !== null,
+          visible: toggle?.innerText ?? '',
+          status: card.querySelector('.tool-status')?.textContent ?? '',
+          tone: card.querySelector('.tool-status')?.getAttribute('data-tone') ?? '',
+          result: card.querySelector('.tool-result')?.textContent ?? '',
+          // The toggle must contain its own content: a long error line once ran over the "Open" link.
+          overflowPx: toggle ? toggle.scrollWidth - toggle.clientWidth : -1,
+        };
+      });
+      console.log(`  failed header: ${JSON.stringify(failedCard?.name)}`);
+      console.log(`  failed visible text: ${JSON.stringify(failedCard?.visible)}`);
+      await shot('15e-tool-failed-folded');
+      check(
+        failedCard !== null && failedCard.status === 'failed' && failedCard.tone === 'error',
+        `the failed read card says "failed" with the error tone (${JSON.stringify(failedCard?.status)}, ${JSON.stringify(failedCard?.tone)})`,
+      );
+      check(
+        failedCard !== null && failedCard.result.trim() !== '',
+        `the failed card shows the first line of the error in its header (${JSON.stringify(failedCard?.result)})`,
+      );
+      check(
+        failedCard !== null && failedCard.name.includes(' · failed · '),
+        `the failed header reads "... · failed · <error>" (${JSON.stringify(failedCard?.name)})`,
+      );
+      check(
+        failedCard !== null && failedCard.overflowPx <= 1,
+        `the failed header fits inside its toggle, nothing runs over the Open link (overflow ${String(failedCard?.overflowPx)} px)`,
+      );
+      check(
+        failedCard !== null && failedCard.expanded === 'false' && !failedCard.body,
+        'the failed card is folded by default (aria-expanded=false, no .tool-body)',
+      );
+      // Unfolded, the body ends with the error section and starts with the same first line.
+      if (await tabToTagged()) {
+        await page.keyboard.press('Enter');
+        await sleep(400);
+        const opened = await tagged();
+        const firstLine = (failedCard?.result ?? '').replace(/…$/, '');
+        check(
+          opened?.expanded === 'true' && opened.body && (opened.text ?? '').includes(firstLine),
+          `unfolded, the failed body contains the header's error line (${JSON.stringify((opened?.text ?? '').slice(0, 200))})`,
+        );
+        await page.keyboard.press('Space');
+        await sleep(300);
+      } else {
+        warn('SKIPPED: Shift+Tab did not reach the failed card; its body was not opened');
+      }
+      for (const [name, theme] of THEMES) {
+        await setTheme(theme);
+        const measured = await web.inDoc(measureDiffLines);
+        const failedLook = measured.failedStatus;
+        console.log(`  failed contrast ${name}: ${JSON.stringify(failedLook)}`);
+        check(
+          failedLook !== null && failedLook !== undefined && failedLook.ratio >= 4.5,
+          `the error-toned "failed" word has text contrast >= 4.5 in ${name} (${failedLook ? failedLook.ratio.toFixed(2) : 'not found'})`,
+        );
+        await shot(`15e-tool-failed-${name}`);
+      }
+      await setTheme('Default Dark Modern');
+    }
+
+    // --- A path of a card opens the file in the editor ----------------------------------------
+    if (judged.includes('read')) {
+      await command('View: Close All Editors');
+      await tagCard('read');
+      check(
+        await web.inDoc((doc) => {
+          const button = doc.querySelector('[data-visual-card] .tool-header button.tool-path');
+          if (!button) return false;
+          button.setAttribute('data-visual-click', 'true');
+          return true;
+        }),
+        'the read card has an "Open" path button in its header',
+      );
+      check(await clickIn('[data-visual-click="true"]'), 'the path button is pressed');
+      await page.waitForTimeout(1500);
+      const tabs = await page.locator('.tab[aria-label*="sample.ts"]').count();
+      check(tabs > 0, `pressing the path opens src/sample.ts in the editor (${String(tabs)} tab)`);
+      await web.inDoc((doc) => {
+        for (const element of doc.querySelectorAll('[data-visual-click]')) {
+          element.removeAttribute('data-visual-click');
+        }
+      });
+    }
+
+    const final = await tagged();
+    check(
+      (final?.styled ?? []).length === 0,
+      `no inline style attribute in the webview body (${(final?.styled ?? []).join(' | ')})`,
+    );
+    console.log(`  tools judged: ${JSON.stringify(judged)}`);
+    assertNoWebviewErrors('tool cards');
   });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
