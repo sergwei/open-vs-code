@@ -243,6 +243,74 @@ describe('real opencode', function () {
   });
 
   /**
+   * Reasoning variant (issue #61) against a REAL opencode: a prompt that carries
+   * `opencode/glm-5.3-flash-free` with variant `low` switches the session through the real
+   * `switchModel` route (the model is already the session's, so only the variant changes), and the
+   * turn runs with it and ends `succeeded`.
+   *
+   * Protects: the variant reaching `switchModel` (the host logs `model selected … (variant low)`
+   * only after the call returned) BEFORE the prompt, and the turn not dying with the server's
+   * `VariantUnavailableError` ("Variant unavailable for p/m: x", raised when the turn runs, read in
+   * `model-resolver.ts@843a6c51`, never seen here before). The model and its variants come from
+   * the planner spike (glm-5.3-flash-free: low/high/max, opencode 2.0.32, Windows 11,
+   * 21/10/2026); free models change over time, so when the host REFUSES it (`ModelUnavailable` or
+   * `VariantUnavailable`) the case is skipped with the reason, not failed. Runs in the session
+   * the previous cases left open. The reply text is not asserted; the visible proof ("· low"
+   * under the reply) is `test:visual` step 14. Needs network and the free model.
+   *
+   * VERIFIED on Windows 11, VS Code 1.143.0, opencode 2.0.32, on 22/10/2026 ~09:50 (run of the
+   * `real-opencode` label on the final tree, 11 passing; OpenCode.log read afterwards, in
+   * `.vscode-test/user-data/logs/20261022T094935`): `model selected
+   * opencode/glm-5.3-flash-free for ses_… (variant low)` at 09:50:12.869, then `prompt accepted`
+   * at 09:50:12.874 and `turn finished: succeeded` at 09:50:28.212, so the real server took the
+   * variant and `VariantUnavailableError` did not show up. NOT observed: that error itself (no
+   * unlisted variant was sent to a real server), macOS and Linux (UNVERIFIED).
+   */
+  it('applies a chosen reasoning variant before the prompt', async function () {
+    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'integration-variant-1',
+      text: 'Reply with exactly: hello there',
+      delivery: 'queue',
+      files: [],
+      model: { providerID: 'opencode', id: 'glm-5.3-flash-free', variant: 'low' },
+    });
+    const deadline = Date.now() + 15_000;
+    while (
+      !log.added().includes('prompt accepted for ses_') &&
+      !log.added().includes('prompt integration-variant-1 rejected: ') &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const refused =
+      /prompt integration-variant-1 rejected: (ModelUnavailable|VariantUnavailable)/.exec(
+        log.added(),
+      );
+    if (refused !== null) {
+      console.log(
+        `SKIP: the real catalog does not offer glm-5.3-flash-free@low (${refused[1] ?? ''})`,
+      );
+      this.skip();
+    }
+    await log.waitFor('prompt accepted for ses_', 1_000);
+    await log.waitFor('turn finished: ', TURN_WAIT_MS);
+    const text = log.added();
+    assert.ok(
+      text.includes('model selected opencode/glm-5.3-flash-free for ses_'),
+      `the model was not switched; log:\n${text}`,
+    );
+    assert.ok(text.includes('(variant low)'), `the variant was not applied; log:\n${text}`);
+    assert.ok(
+      text.indexOf('(variant low)') < text.indexOf('prompt accepted'),
+      `the variant must be applied BEFORE the prompt; log:\n${text}`,
+    );
+    assert.ok(text.includes('turn finished: succeeded'), `the turn did not succeed; log:\n${text}`);
+  });
+
+  /**
    * Stop (issue #16) against a REAL opencode: a long prompt is interrupted mid-turn through the
    * same `session.abort` message the Stop button sends, and the server confirms it.
    *

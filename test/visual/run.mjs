@@ -44,9 +44,16 @@
 // file dialog is VS Code's own quick input, `files.simpleDialog.enable` in `vscodeProcess.mjs`),
 // sends, and asserts the message leaves with its attachment and the webview logs no exception: a
 // prompt with an attachment used to throw DataCloneError (VERIFIED by running this step against the
-// old code on 21/10/2026: the exception was logged and the message never left). Things that depend on
-// what the model happens to write (a file reference in the reply, say) are SKIPPED with a
-// warning when absent, never failed.
+// old code on 21/10/2026: the exception was logged and the message never left). Since
+// E5-model-variant (issue #61) step 14, the last one, drives the reasoning-variant control: it
+// picks (dynamically) a model that lists variants, checks the control sits right after the model
+// button, opens its panel with the real mouse (four themes), chooses a variant, Tab / Enter /
+// arrows / Escape, an outside press, that the same model keeps the variant and another starts on
+// Default, a real prompt whose reply line must end in the variant, that a new session proposes the
+// last model with its variant, and that reopening the session shows the variant the server
+// stored. SKIPPED with a warning when no model of the real catalog lists variants. Things that
+// depend on what the model happens to write (a file reference in the reply, say) are SKIPPED with
+// a warning when absent, never failed.
 //
 // "Always allow": the script only opens that panel (the "Always allow…" toggle), checks it, goes
 // Back and presses "Allow once". It never asks for "Yes, always allow" (`clickButton` throws on
@@ -70,6 +77,20 @@
 // of the same day failed in step 9 (a rename left in edit mode, then no delete modal) and passed on
 // the next, with no code change in between: HYPOTHESIS that step 9 has a timing flake.
 // macOS and Linux UNVERIFIED.
+//
+// Step 14 (issue #61) VERIFIED on Windows 11, VS Code 1.143.0, opencode 2.0.32, on 22/10/2026
+// ~09:56-09:57, on the final tree: the whole run passed ("all visual checks passed", exit 0) and
+// step 14 used `opencode/glm-5.3-flash-free` (variants low/high/max). Both halves of "the control
+// appears only for a model with variants" RAN in that run (not skipped): `opencode/big-pickle`
+// showed no control, and "another model starts on Default or shows no control" held. The log
+// (`.vscode-test/visual/user-data/logs/20261022T095051/window1/exthost/sergwei.open-vs-code/
+// OpenCode.log`) shows `model selected opencode/glm-5.3-flash-free for ses_… (variant low)` at
+// 09:56:55.960, `prompt accepted` at 09:56:55.989 and `turn finished: succeeded` at 09:56:58.038;
+// the screenshots `14a`-`14h` in `.vscode-test/visual/shots/` (four themes for the panel and the
+// chosen state, the focus ring, the reply line ending in "· low", the new session and the
+// reopened one) were written in that run (09:56:22-09:57:00). NOT observed: a screen reader,
+// macOS and Linux, a catalog whose models list no variants (the step SKIPS then), and the host
+// refusing an unlisted variant against a real server.
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -1950,6 +1971,325 @@ try {
       warn('SKIPPED: the free model did not finish the attachment turn in 120 s');
     }
     await shot('13c-attachment-reply');
+  });
+
+  // Issue #61 (decisions of Sergio, 22/10/2026, Engram #1021): the reasoning-variant control, a
+  // button + panel after the model button, shown only for a model that lists variants. It is the
+  // LAST step on purpose: it leaves a remembered "model + variant" behind, which would change what
+  // steps 11 and 13 expect a new session to propose. The model with variants is chosen
+  // dynamically (the free catalog changes over time); with none, the step is SKIPPED with a
+  // warning.
+  await step('14 reasoning variant (issue #61)', async () => {
+    /** What the prompt row, the variant control and its panel show. Self-contained (serialized). */
+    const ui = () =>
+      web.inDoc((doc) => {
+        const model = doc.querySelector('button.model-trigger');
+        const trigger = doc.querySelector('button.variant-trigger');
+        const panel = doc.querySelector('#variant-panel');
+        const active = doc.activeElement;
+        const metas = [...doc.querySelectorAll('.message-assistant .message-meta')];
+        const row = [...doc.querySelectorAll('.prompt-selectors button')].map(
+          (b) => b.className.split(' ').find((c) => c !== 'secondary') ?? '',
+        );
+        const style = active ? doc.defaultView.getComputedStyle(active) : null;
+        return {
+          model: model?.textContent ?? '',
+          trigger: trigger?.textContent ?? null,
+          expanded: trigger?.getAttribute('aria-expanded') ?? '',
+          disabled: trigger?.getAttribute('aria-disabled') ?? '',
+          panel: panel !== null,
+          entries: [...doc.querySelectorAll('#variant-panel button.model-option')].map((b) => ({
+            id: b.getAttribute('data-variant') ?? '',
+            current: b.getAttribute('aria-current') === 'true',
+          })),
+          modelIds: [...doc.querySelectorAll('.model-panel button[data-model]')].map(
+            (b) => b.getAttribute('data-model') ?? '',
+          ),
+          afterModel: row.indexOf('variant-trigger') === row.indexOf('model-trigger') + 1,
+          inRow: row.includes('variant-trigger'),
+          focus: {
+            cls: active?.className ?? '',
+            variant: active?.getAttribute?.('data-variant') ?? '',
+            visible: active?.matches?.(':focus-visible') ?? false,
+            outline: style ? `${style.outlineStyle} ${style.outlineWidth}` : '',
+          },
+          // Same filter as step 2: not `<html>` (VS Code sets theme variables there) and only
+          // NON-EMPTY attributes (Chromium leaves `style=""` on a textarea it has resized).
+          styled: [...doc.querySelectorAll('body [style], body[style]')]
+            .filter((e) => (e.getAttribute('style') ?? '').trim() !== '')
+            .map((e) => `${e.tagName}.${e.className}: ${e.getAttribute('style')}`),
+          lastMeta: metas.at(-1)?.textContent ?? '',
+          metas: metas.length,
+          alerts: doc.querySelectorAll('[role="alert"]').length,
+        };
+      });
+    const setTheme = async (theme) => {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+    };
+    const press = async (key) => {
+      await page.keyboard.press(key);
+      await sleep(250);
+    };
+    const THEMES = [
+      ['light', 'Default Light Modern'],
+      ['dark', 'Default Dark Modern'],
+      ['hc-dark', 'Default High Contrast'],
+      ['hc-light', 'Default High Contrast Light'],
+    ];
+    /** Opens the model panel with the real mouse and presses model `id`; false if not listed. */
+    const pickModel = async (id) => {
+      if (!(await clickIn('button.model-trigger'))) return false;
+      await sleep(400);
+      const pressed = await clickIn(`.model-panel button.model-option[data-model="${id}"]`);
+      await sleep(500);
+      return pressed;
+    };
+
+    assertNoWebviewErrors('before the variant step');
+    check(await clickButton('New session'), 'New session is pressed');
+    await page.waitForTimeout(1500);
+
+    // --- Find a model that lists variants (glm-5.3-flash-free first), else SKIP -----------------
+    check(await clickIn('button.model-trigger'), 'the model button is pressed');
+    await sleep(400);
+    const ids = (await ui()).modelIds;
+    await press('Escape');
+    const GLM = 'opencode/glm-5.3-flash-free';
+    const candidates = [...ids.filter((id) => id === GLM), ...ids.filter((id) => id !== GLM)];
+    let withVariants;
+    let withoutVariants;
+    for (const id of candidates) {
+      if (!(await pickModel(id))) continue;
+      const has = (await ui()).trigger !== null;
+      if (has && withVariants === undefined) withVariants = id;
+      if (!has && withoutVariants === undefined) withoutVariants = id;
+      if (withVariants !== undefined && withoutVariants !== undefined) break;
+    }
+    if (withVariants === undefined) {
+      warn(
+        'SKIPPED: no model of the real catalog lists variants, so the variant control was not exercised',
+      );
+      return;
+    }
+    if (withoutVariants === undefined) {
+      warn('SKIPPED: every model lists variants, so "the control disappears" was not exercised');
+    }
+
+    // --- A model without variants shows no control -------------------------------------------
+    if (withoutVariants !== undefined) {
+      await pickModel(withoutVariants);
+      const state = await ui();
+      check(
+        state.trigger === null && !state.inRow,
+        `a model without variants (${withoutVariants}) shows no variant control`,
+      );
+    }
+
+    // --- A model with variants: the control, closed and open, in the four themes -------------
+    check(await pickModel(withVariants), `the model with variants (${withVariants}) is chosen`);
+    let state = await ui();
+    check(
+      state.trigger === 'Reasoning: Default',
+      `the control appears reading "Reasoning: Default" ("${String(state.trigger)}")`,
+    );
+    check(state.afterModel, 'the control sits right after the model button in the prompt row');
+    await shot('14a-variant-closed');
+    check(
+      await clickIn('button.variant-trigger'),
+      'the variant button is pressed with the real mouse',
+    );
+    await sleep(400);
+    state = await ui();
+    check(state.panel && state.expanded === 'true', 'the variant panel opened');
+    check(
+      state.entries[0]?.id === 'default' &&
+        state.entries.length >= 2 &&
+        state.entries.filter((e) => e.current).length === 1 &&
+        state.entries[0].current,
+      `the panel lists Default (current) and the catalog variants (${JSON.stringify(state.entries)})`,
+    );
+    check(
+      state.focus.variant === 'default',
+      `the focus is on the current entry (${JSON.stringify(state.focus)})`,
+    );
+    for (const [name, theme] of THEMES) {
+      await setTheme(theme);
+      await shot(`14b-variant-panel-${name}`);
+    }
+    await setTheme('Default Dark Modern');
+
+    // --- Choose a variant with the real mouse ------------------------------------------------
+    const variant = state.entries.find((e) => e.id === 'low')?.id ?? state.entries[1]?.id;
+    check(
+      await clickIn(`#variant-panel button[data-variant="${String(variant)}"]`),
+      `the variant "${String(variant)}" is pressed`,
+    );
+    await sleep(400);
+    state = await ui();
+    check(
+      !state.panel && state.trigger === `Reasoning: ${String(variant)}`,
+      `choosing closes the panel and the control reads "Reasoning: ${String(variant)}" ("${String(state.trigger)}")`,
+    );
+    check(
+      state.focus.cls.includes('variant-trigger'),
+      `the focus returns to the variant button (${JSON.stringify(state.focus)})`,
+    );
+    await shot('14c-variant-chosen');
+    for (const [name, theme] of THEMES) {
+      await setTheme(theme);
+      await shot(`14d-variant-chosen-${name}`);
+    }
+    await setTheme('Default Dark Modern');
+
+    // --- Keyboard: Tab from the model button, Enter opens, arrows, Escape ---------------------
+    await clickIn('textarea');
+    const visited = [];
+    for (let i = 0; i < 12; i += 1) {
+      await press('Tab');
+      const focus = (await ui()).focus;
+      visited.push(focus.cls);
+      if (focus.cls.includes('variant-trigger')) break;
+    }
+    state = await ui();
+    check(
+      state.focus.cls.includes('variant-trigger') &&
+        (visited.at(-2) ?? '').includes('model-trigger'),
+      `Tab from the model button reaches the variant button (${JSON.stringify(visited)})`,
+    );
+    check(
+      state.focus.visible && state.focus.outline !== '' && !state.focus.outline.startsWith('none'),
+      `...with a visible focus ring (${JSON.stringify(state.focus)})`,
+    );
+    await shot('14e-variant-focus');
+    await press('Enter');
+    state = await ui();
+    check(
+      state.panel && state.focus.variant === String(variant),
+      `Enter opens the panel with the focus on the current variant (${JSON.stringify(state.focus)})`,
+    );
+    await press('ArrowUp');
+    state = await ui();
+    check(
+      state.focus.cls.includes('model-option') && state.focus.variant !== String(variant),
+      `ArrowUp moves to the previous entry (${JSON.stringify(state.focus)})`,
+    );
+    await press('Escape');
+    state = await ui();
+    check(
+      !state.panel &&
+        state.trigger === `Reasoning: ${String(variant)}` &&
+        state.focus.cls.includes('variant-trigger'),
+      `Escape closes it, keeps the variant and returns the focus (${JSON.stringify(state.focus)})`,
+    );
+
+    // --- A press outside closes the panel (dismissOutside) -----------------------------------
+    check(
+      await clickIn('button.variant-trigger'),
+      'the variant button is pressed to test an outside click',
+    );
+    await sleep(400);
+    check((await ui()).panel, 'the variant panel is open before the outside click');
+    check(await clickIn('textarea'), 'the prompt box is pressed (outside the panel)');
+    await sleep(400);
+    state = await ui();
+    check(
+      !state.panel && state.trigger === `Reasoning: ${String(variant)}`,
+      'a press outside closes the variant panel and keeps the variant',
+    );
+
+    // --- Decision (c): the same model keeps the variant, another model starts on Default ------
+    check(await pickModel(withVariants), 'the SAME model is chosen again');
+    state = await ui();
+    check(
+      state.trigger === `Reasoning: ${String(variant)}`,
+      `re-choosing the same model keeps the variant ("${String(state.trigger)}")`,
+    );
+    const another = candidates.find((id) => id !== withVariants);
+    if (another === undefined) {
+      warn(
+        'SKIPPED: the server lists a single model, so "another model starts on Default" was not exercised',
+      );
+    } else {
+      check(await pickModel(another), `another model (${another}) is chosen`);
+      state = await ui();
+      check(
+        state.trigger === null || state.trigger === 'Reasoning: Default',
+        `another model starts on Default or shows no control ("${String(state.trigger)}")`,
+      );
+      check(await pickModel(withVariants), `the first model is chosen again`);
+      state = await ui();
+      check(
+        state.trigger === 'Reasoning: Default',
+        `...and its variant was NOT remembered across the change ("${String(state.trigger)}")`,
+      );
+      check(await clickIn('button.variant-trigger'), 'the variant button is pressed again');
+      await sleep(400);
+      check(
+        await clickIn(`#variant-panel button[data-variant="${String(variant)}"]`),
+        `the variant "${String(variant)}" is chosen again`,
+      );
+      await sleep(400);
+    }
+
+    // --- The prompt carries it, and the reply says so -----------------------------------------
+    await send('Reply with exactly: OK. Do not use any tools.');
+    const finished = await waitIdle(120_000);
+    state = await ui();
+    if (!finished) {
+      warn(
+        'SKIPPED: the free model did not finish the turn in 120 s; the reply line was not judged',
+      );
+    } else if (state.metas === 0 || state.alerts > 0) {
+      warn(
+        `SKIPPED: the free model gave no usable reply (${String(state.metas)} replies, ${String(state.alerts)} alerts); ` +
+          'the "· variant" line was not judged',
+      );
+    } else {
+      check(
+        state.lastMeta.endsWith(` · ${String(variant)}`),
+        `the reply line ends in the variant ("${state.lastMeta}", expected "… · ${String(variant)}")`,
+      );
+    }
+    check(
+      state.trigger === `Reasoning: ${String(variant)}`,
+      `the open session holds the variant ("${String(state.trigger)}")`,
+    );
+    await shot('14f-variant-reply');
+
+    // --- A NEW session proposes the last model WITH its variant; reopening shows the stored one
+    check(await clickButton('New session'), 'New session is pressed after the reply');
+    await page.waitForTimeout(1500);
+    state = await ui();
+    check(
+      state.trigger === `Reasoning: ${String(variant)}`,
+      `a new session proposes the last used variant ("${String(state.trigger)}")`,
+    );
+    await shot('14g-variant-new-session');
+    check(await clickButton('Sessions'), 'Sessions is pressed');
+    const rows = await waitFor(
+      () => web.inDoc((doc) => doc.querySelectorAll('button.session-main').length > 0),
+      20_000,
+      300,
+    );
+    check(rows === true, 'the session list has rows');
+    check(await clickIn('button.session-main'), 'the newest session is pressed');
+    const reopened = await waitFor(
+      async () => (await ui()).trigger === `Reasoning: ${String(variant)}`,
+      20_000,
+      300,
+    );
+    state = await ui();
+    check(
+      reopened === true,
+      `the reopened session shows the variant the SERVER stored ("${String(state.trigger)}")`,
+    );
+    check(
+      state.styled.length === 0,
+      `no inline style attribute in the webview body (${state.styled.join(' | ')})`,
+    );
+    await shot('14h-variant-reopened');
+    assertNoWebviewErrors('variant');
   });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
