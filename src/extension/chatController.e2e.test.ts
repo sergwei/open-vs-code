@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ModelRef } from '../shared/model';
+import type { ModelRef, Part } from '../shared/model';
 import type { HostToWebview } from '../shared/protocol';
 import { ChatController } from './chatController';
 import { createOpencodeClient } from './opencodeClient';
@@ -939,6 +939,52 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     expect(lastSnapshot(posted).sessions.find((row) => row.id === childID)).toMatchObject({
       parentID,
     });
+  }, 20_000);
+
+  // Issue #26. Protects the wiring of tool cards: every tool of a turn reaches the webview as a
+  // completed block with its input, text output and metadata (the edit one with its unified patch),
+  // and a snapshot read afterwards carries the same blocks. SYNTHETIC: the fixture's `TOOLS` turn
+  // is written from the tool sources read in the 2.0.32 tag, so this proves our mapping and
+  // transport, NOT that a real opencode sends these shapes (that is `test:visual` step 15).
+  it('a TOOLS turn: nine tool blocks arrive by stream with their metadata and the snapshot agrees', async () => {
+    const { controller, posted } = await bootSessions();
+    await turn(controller, posted, 'TOOLS please', 1);
+    const streamed = new Map<string, Extract<Part, { type: 'tool' }>>();
+    for (const message of posted) {
+      if (message.type === 'part.upserted' && message.part.type === 'tool') {
+        streamed.set(message.part.id, message.part);
+      }
+    }
+    const blocks = [...streamed.values()];
+    expect(blocks.map((block) => block.name)).toEqual([
+      'shell',
+      'shell',
+      'read',
+      'edit',
+      'write',
+      'grep',
+      'glob',
+      'webfetch',
+      'mcp_echo',
+    ]);
+    expect(blocks.every((block) => block.state.status === 'completed')).toBe(true);
+    expect(blocks[1]?.state).toMatchObject({
+      output: [
+        { type: 'text', text: 'FAIL src/a.test.ts\n' },
+        { type: 'text', text: 'Exited with code 1' },
+      ],
+      metadata: { exit: 1 },
+    });
+    const edit = blocks[3]?.state;
+    const files = edit?.status === 'completed' ? edit.metadata?.['files'] : undefined;
+    expect(files).toMatchObject([{ file: 'src/sample.ts', additions: 1, deletions: 1 }]);
+
+    await controller.handle({ type: 'ready' });
+    const open = lastSnapshot(posted).open;
+    const fromSnapshot = Object.values(open?.parts ?? {})
+      .flat()
+      .filter((part) => part.type === 'tool');
+    expect(fromSnapshot).toEqual(blocks);
   }, 20_000);
 
   // E5 / issues #23 and #24. The fixture copies what the planner spike saw in a real opencode 2.0.32

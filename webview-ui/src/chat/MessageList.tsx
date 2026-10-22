@@ -9,7 +9,14 @@ import {
   Show,
   Switch,
 } from 'solid-js';
-import type { Catalog, MessageInfo, Part, RequestResolution } from '../../../src/shared/model';
+import type {
+  Catalog,
+  FormAsk,
+  MessageInfo,
+  Part,
+  PermissionAsk,
+  RequestResolution,
+} from '../../../src/shared/model';
 import { RequestOutcome } from '../requests/RequestOutcome';
 import {
   byToolPart,
@@ -109,6 +116,11 @@ function prefersReducedMotion(): boolean {
  * the button is `aria-disabled` and the click is ignored, never `disabled`, so the focus stays on
  * it. `onOpenSession` is for the subagent links of the tool blocks.
  *
+ * Issue #26: each tool block is a collapsible card (`ToolCard`). `requests` is the store's pending
+ * permissions and forms; the tool a request names (`tool.partID`) is told it is waiting for
+ * approval. Cards stay folded: a card that opens, or a request that appears, adds no child to the
+ * log and never moves the focus.
+ *
  * Issues #23/#24: every ASSISTANT message starts with a muted line "Agent · model" ("Plan · GLM-5.3
  * Flash Free", from `session.step.started`, named through `catalog`). It took over what the header
  * marker used to show and is the visible proof of what actually answered (decision of 21/10/2026,
@@ -119,6 +131,8 @@ export function MessageList(props: {
   /** Names the agent and model of each reply; ids are shown for the ones it does not know. */
   catalog: Catalog | undefined;
   resolutions: { readonly [requestId: string]: RequestResolution };
+  /** Pending permissions and forms; the tool each one names shows "waiting for approval". */
+  requests: { readonly permissions: readonly PermissionAsk[]; readonly forms: readonly FormAsk[] };
   busy: boolean;
   canRetry: boolean;
   forkDisabled: boolean;
@@ -134,6 +148,17 @@ export function MessageList(props: {
   const unanchored = createMemo(() =>
     unanchoredByMessage(props.open.messages, props.open.parts, records()),
   );
+  /** Ids of the tool blocks that a pending permission or form points at (`tool.partID`). */
+  const awaitingTools = createMemo(() => {
+    const ids = new Set<string>();
+    for (const ask of props.requests.permissions) {
+      if (ask.tool !== undefined) ids.add(ask.tool.partID);
+    }
+    for (const ask of props.requests.forms) {
+      if (ask.tool !== undefined) ids.add(ask.tool.partID);
+    }
+    return ids;
+  });
   /** Lines under a tool block; none for text and reasoning. */
   const outcomesOf = (part: Part): OutcomeView[] =>
     part.type === 'tool' ? toolOutcomeViews(part, byTool().get(part.id) ?? []) : [];
@@ -271,6 +296,7 @@ export function MessageList(props: {
                             part={part}
                             live={isLive(assistant())}
                             outcomes={outcomesOf(part)}
+                            awaiting={awaitingTools().has(part.id)}
                             onOpenSession={(sessionID) => {
                               props.onOpenSession(sessionID);
                             }}

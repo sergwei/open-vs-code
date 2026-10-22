@@ -152,13 +152,21 @@ export type MessageInfo =
     }
   | { kind: 'notice'; id: string; createdAt: number; text: string };
 
-/** Output item of a finished tool call. */
+/**
+ * Output item of a finished tool call. A `file` item never carries base64, like
+ * {@link AttachmentInfo}: the host drops a `data:` URI, so `uri` is present only for a real
+ * location (`file://`).
+ */
 export type ToolOutput =
-  { type: 'text'; text: string } | { type: 'file'; uri: string; mime: string; name?: string };
+  { type: 'text'; text: string } | { type: 'file'; uri?: string; mime: string; name?: string };
 
 /**
  * Lifecycle of a tool call. While `streaming`, `input` is the raw JSON text still arriving
  * (`part.delta` with `field: "input"` appends to it); afterwards it is the parsed object.
+ *
+ * Tool names in opencode 2.0.32 (`plugin/internal.ts@843a6c51`, read): `shell`, `read`, `edit`,
+ * `write`, `patch`, `grep`, `glob`, `webfetch`, `websearch`, `skill`, `question`, `subagent`, plus
+ * MCP tools with free names. (v1 called them `bash` and `task`; `list` and `todowrite` are gone.)
  */
 export type ToolState =
   | { status: 'streaming'; input: string }

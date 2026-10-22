@@ -1,8 +1,8 @@
-import { For, Match, Show, Switch } from 'solid-js';
+import { For, Match, Switch } from 'solid-js';
 import type { Part } from '../../../src/shared/model';
 import { RequestOutcome } from '../requests/RequestOutcome';
 import type { OutcomeView } from '../requests/resolutionPlacement';
-import { subagentOf, type SubagentLink } from '../sessions/lineage';
+import { ToolCard } from '../tools/ToolCard';
 import { Markdown } from './Markdown';
 
 type TextPart = Extract<Part, { type: 'text' }>;
@@ -16,41 +16,32 @@ const asReasoning = (part: Part): ReasoningPart | undefined =>
 const asTool = (part: Part): ToolPart | undefined => (part.type === 'tool' ? part : undefined);
 
 /**
- * The one-line text of a `subagent` tool block, built as ONE string (JSX would swallow the line
- * break between `{expr}` and the next text: lesson #926). The agent and the description are
- * labels from the tool input and are left out when the input did not have them.
- */
-function subagentLine(link: SubagentLink): string {
-  const fields = ['Subagent'];
-  if (link.agent !== undefined) fields.push(link.agent);
-  if (link.description !== undefined) fields.push(link.description);
-  fields.push(link.running ? 'running' : 'done');
-  return fields.join(' · ');
-}
-
-/**
  * Renders one content block of an assistant message.
  *
  * Text is Markdown (issue #15; `live` tells it the text is still streaming so only the tail is
  * re-rendered). Reasoning stays plain pre-wrapped text inside a collapsed `<details>` titled
  * "Thinking": it is the model's scratchpad, not worth the cost or the attack surface of rendering
- * it. A tool call is a single `name · status` line (tool rendering is a later issue) followed by
- * the lines in `outcomes`, which say what the user answered when the tool asked for permission or
- * posed a question ("Allowed once · Read .env", issues #56/#18; the caller computes them, see
- * `MessageList`). The branch is a `<Switch>` and not an early `return`, because a Solid component
- * runs once and an `if` would freeze on the first `type`.
+ * it. A tool call is a collapsible {@link ToolCard} (issue #26) followed by the lines in
+ * `outcomes`, which say what the user answered when the tool asked for permission or posed a
+ * question ("Allowed once · Read .env", issues #56/#18; the caller computes them, see
+ * `MessageList`); `awaiting` tells the card that one of those requests is still pending. The
+ * branch is a `<Switch>` and not an early `return`, because a Solid component runs once and an
+ * `if` would freeze on the first `type`.
  *
- * Issue #21: a `subagent` tool that carries the id of its child session (see `subagentOf`) shows
- * "Subagent · agent · description · running|done" and an "Open subagent session" button that calls
- * `onOpenSession` with that id; its accessible name includes the description, because a page of
- * them would otherwise be a column of identical buttons. Without the id (a reload while it ran,
- * or a failed block) it keeps the plain line. UNVERIFIED visually (themes, high contrast) until
- * the F5; `test:visual` step 10 renders the link in a real VS Code when the model calls the tool.
+ * Issue #21: the "Open subagent session" button of a `subagent` tool now lives in the card header
+ * and calls `onOpenSession` with the child id (`ToolCard` documents it). VERIFIED by
+ * `App.test.tsx` (jsdom, fabricated blocks). VERIFIED in a real VS Code: `test:visual` step 10
+ * (22/10/2026, final run 13:59:27-14:05, Windows 11, output in `.vscode-test/visual/run-output.txt`)
+ * printed, at lines 186, 187 and 193, `ok the tool block reads as a subagent line ("Subagent Say
+ * hello (general) · done")`, `ok "Open subagent session" is pressed` and `ok the parent lists its
+ * subagent session ("Subagent sessions (1)")`. NOT observed: the
+ * `running` header of a subagent card in a real run, and a subagent card without a child id.
  */
 export function PartView(props: {
   part: Part;
   live: boolean;
   outcomes?: OutcomeView[];
+  awaiting?: boolean;
   onOpenSession(sessionID: string): void;
 }) {
   return (
@@ -69,30 +60,13 @@ export function PartView(props: {
       <Match when={asTool(props.part)}>
         {(part) => (
           <>
-            <Show
-              when={subagentOf(part())}
-              fallback={
-                <div class="part-tool">
-                  {part().name} · {part().state.status}
-                </div>
-              }
-            >
-              {(link) => (
-                <div class="part-tool part-subagent">
-                  <span>{subagentLine(link())}</span>
-                  <button
-                    type="button"
-                    class="secondary subagent-link"
-                    aria-label={`Open subagent session ${link().description ?? ''}`.trim()}
-                    onClick={() => {
-                      props.onOpenSession(link().sessionID);
-                    }}
-                  >
-                    Open subagent session
-                  </button>
-                </div>
-              )}
-            </Show>
+            <ToolCard
+              part={part()}
+              awaiting={props.awaiting ?? false}
+              onOpenSession={(sessionID) => {
+                props.onOpenSession(sessionID);
+              }}
+            />
             <For each={props.outcomes ?? []}>{(view) => <RequestOutcome view={view} />}</For>
           </>
         )}

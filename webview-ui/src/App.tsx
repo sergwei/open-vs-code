@@ -374,6 +374,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
               open={state.open}
               catalog={state.catalog}
               resolutions={state.resolutions}
+              requests={state.requests}
               busy={busy()}
               canRetry={lastUser() !== undefined}
               forkDisabled={forkDisabled()}

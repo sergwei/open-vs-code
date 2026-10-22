@@ -412,19 +412,292 @@ button.secondary:hover:not(:disabled),
   padding: 4px 0 0 12px;
 }
 
-.part-tool {
-  color: var(--vscode-descriptionForeground);
-  font-family: var(--vscode-editor-font-family);
+/*
+ * A tool call (issue #26): a card whose header is a disclosure button and whose body exists only
+ * while open. Every colour is a --vscode-* variable; the status is a WORD (colour is never the only
+ * signal), and only a real failure uses the error colour, on that word alone (lesson #934).
+ */
+.tool-card {
+  margin: 4px 0;
   font-size: 0.9em;
+  border: 1px solid var(--vscode-panel-border, transparent);
+  border-radius: 4px;
+}
+
+/* A subagent tool block keeps its class (issue #21): the header also holds the session button. */
+.part-subagent .tool-header {
+  flex-wrap: wrap;
+}
+
+.tool-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+}
+
+.tool-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 4px;
+  color: var(--vscode-descriptionForeground);
+  background: transparent;
+  border: none;
+  text-align: left;
+  font: inherit;
+  font-family: var(--vscode-editor-font-family);
+}
+
+.tool-toggle:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+/* The chevron is a CSS triangle: no icon font, nothing to load under the CSP. */
+.tool-chevron {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+}
+
+.tool-toggle[aria-expanded='true'] .tool-chevron {
+  border-left-color: transparent;
+  border-right-color: transparent;
+  border-top: 5px solid currentColor;
+  border-bottom: none;
+  border-left-width: 4px;
+  border-right: 4px solid transparent;
+}
+
+.tool-title {
+  flex: none;
+  color: var(--vscode-foreground);
+  font-weight: 600;
+}
+
+.tool-arg,
+.tool-detail,
+.tool-result {
+  min-width: 4ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * In a narrow side bar the long argument (a path, a command) gives way first, so the status word and
+ * the short result ("done", "exit 1", "+1 -1") stay readable: flex-shrink 20 for the argument, 4
+ * for the second argument, 1 for the result (also capped at 60%) and none for the status word.
+ */
+.tool-arg {
+  flex: 0 20 auto;
+}
+
+.tool-detail {
+  flex: 0 4 auto;
+}
+
+.tool-result {
+  flex: 0 1 auto;
+  max-width: 60%;
+}
+
+/*
+ * A short result ("exit 1", "+1 -1") is not cut while the argument can still give way (shrink 1
+ * against 20), but a long one (the first line of an error) must be able to shrink once the argument
+ * is at its minimum: with shrink 0 it ran over the "Open" link in the narrow side bar (seen in the
+ * capture 15e-tool-failed-light of the 22/10/2026 run). The status word never shrinks.
+ */
+.tool-status {
+  flex-shrink: 0;
+}
+
+/*
+ * Plain foreground, NOT textPreformat-foreground: in "Default High Contrast Light" that pair is
+ * made for a tinted box and the argument vanished (seen in the step 15 capture 15c-diff-hc-light).
+ */
+.tool-arg {
+  color: var(--vscode-foreground);
+}
+
+.tool-status {
+  flex: none;
+}
+
+/* The " · " between the subject, the status and the result; hidden from the accessible name. */
+.tool-sep {
+  flex: none;
+}
+
+/*
+ * A real failure is a small error chip: normal foreground text on the error background, with the
+ * error colour on the border. Bare `errorForeground` measured 3.16:1 on the side bar in "Default
+ * Light Modern" (step 15 run of 22/10/2026) and the same red on the error background 2.60:1, both
+ * under the 4.5 that Sergio asked for; the word "failed" carries the meaning, the colour only helps.
+ */
+.tool-status[data-tone='error'] {
+  padding: 0 4px;
+  border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+  border-radius: 3px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-inputValidation-errorBackground, transparent);
+}
+
+.tool-body {
+  padding: 4px 8px 8px;
+  border-top: 1px solid var(--vscode-panel-border, transparent);
+}
+
+.tool-section {
   margin: 4px 0;
 }
 
-/* A subagent tool block (issue #21): the line, and the button that opens its child session. */
-.part-subagent {
+.tool-section-header {
   display: flex;
-  align-items: center;
   flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
   gap: 6px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.tool-section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.tool-output,
+.diff-view {
+  margin: 2px 0 0;
+  padding: 4px 6px;
+  overflow-x: auto;
+  max-height: 24em;
+  overflow-y: auto;
+  background: var(--vscode-textCodeBlock-background);
+  color: var(--vscode-editor-foreground, var(--vscode-foreground));
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size);
+  border-radius: 3px;
+}
+
+/* VS Code paints every webview `code` with textPreformat colours; the block owns its colours. */
+.tool-output code {
+  font-family: inherit;
+  font-size: inherit;
+  white-space: pre;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+}
+
+.diff-line {
+  display: flex;
+  white-space: pre;
+  min-width: max-content;
+}
+
+.diff-marker {
+  flex: none;
+  width: 1.5ch;
+}
+
+.diff-line[data-kind='add'] {
+  background: var(
+    --vscode-diffEditor-insertedLineBackground,
+    var(--vscode-diffEditor-insertedTextBackground)
+  );
+}
+
+.diff-line[data-kind='del'] {
+  background: var(
+    --vscode-diffEditor-removedLineBackground,
+    var(--vscode-diffEditor-removedTextBackground)
+  );
+}
+
+.diff-line[data-kind='hunk'] {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tool-path {
+  padding: 0;
+  color: var(--vscode-textLink-foreground);
+  background: transparent;
+  border: none;
+  font: inherit;
+  font-family: var(--vscode-editor-font-family);
+  text-align: left;
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+}
+
+.tool-path:hover {
+  color: var(--vscode-textLink-activeForeground);
+}
+
+.tool-paths {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tool-match {
+  display: flex;
+  gap: 8px;
+  padding-left: 12px;
+  font-family: var(--vscode-editor-font-family);
+}
+
+.tool-match-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-note,
+.tool-notice {
+  margin: 2px 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.tool-error {
+  margin: 2px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--vscode-errorForeground);
+}
+
+[class*='vscode-high-contrast'] .tool-card,
+[class*='vscode-high-contrast'] .tool-body {
+  border-color: var(--vscode-contrastBorder);
+}
+
+[class*='vscode-high-contrast'] .tool-output,
+[class*='vscode-high-contrast'] .diff-view {
+  background: transparent;
+  border: 1px solid var(--vscode-contrastBorder);
+}
+
+/* No background tint in high contrast: the +/- marker and a border carry the meaning. */
+[class*='vscode-high-contrast'] .diff-line[data-kind='add'] {
+  background: transparent;
+  border-left: 3px solid var(--vscode-diffEditor-insertedTextBorder, var(--vscode-contrastBorder));
+}
+
+[class*='vscode-high-contrast'] .diff-line[data-kind='del'] {
+  background: transparent;
+  border-left: 3px solid var(--vscode-diffEditor-removedTextBorder, var(--vscode-contrastBorder));
+}
+
+[class*='vscode-high-contrast'] .tool-toggle:hover {
+  background: transparent;
+  outline: 1px dashed var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
 }
 
 /*

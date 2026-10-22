@@ -27,6 +27,7 @@ import {
   toModelRef,
   toPermissionAsk,
   toSessionSummary,
+  toToolOutput,
 } from './wireMapping';
 
 /** Parses a JSON literal into the wire type the test says it is. */
@@ -282,6 +283,48 @@ describe('toFormAsk', () => {
       '{"id":"f","sessionID":"s","title":"T","fields":[{"key":"k","type":"boolean"}]}',
     );
     expect(toFormAsk(form).kind).toBe('form');
+  });
+});
+
+// Issue #26. Protects the rule "no base64 travels to the webview": a `read` of an image yields a
+// `file` item whose `uri` is a `data:` URL. Provenance: FABRICATED from the shape read in
+// `read.ts@843a6c51` L175-185 (HYPOTHESIS, no real image read observed); confirms OUR mapping only.
+describe('toToolOutput files', () => {
+  it('drops a data: URI and keeps mime and name', () => {
+    const item = wire<{ type: string }>(
+      '{"type":"file","uri":"data:image/png;base64,AAAA","mime":"image/png","name":"a.png"}',
+    );
+    expect(toToolOutput(item)).toEqual({ type: 'file', mime: 'image/png', name: 'a.png' });
+  });
+
+  it('drops a data: URI with leading whitespace', () => {
+    const item = wire<{ type: string }>(
+      '{"type":"file","uri":" \\n data:text/plain,hi","mime":"x/y"}',
+    );
+    expect(toToolOutput(item)).toEqual({ type: 'file', mime: 'x/y' });
+  });
+
+  it('drops a DATA: URI whatever the case', () => {
+    const item = wire<{ type: string }>('{"type":"file","uri":"DATA:text/plain,hi","mime":"x/y"}');
+    expect(toToolOutput(item)).toEqual({ type: 'file', mime: 'x/y' });
+  });
+
+  it('keeps a file:// URI', () => {
+    const item = wire<{ type: string }>(
+      '{"type":"file","uri":"file:///tmp/a.pdf","mime":"application/pdf"}',
+    );
+    expect(toToolOutput(item)).toEqual({
+      type: 'file',
+      uri: 'file:///tmp/a.pdf',
+      mime: 'application/pdf',
+    });
+  });
+
+  it('keeps text items as they are', () => {
+    expect(toToolOutput(wire<{ type: string }>('{"type":"text","text":"hi"}'))).toEqual({
+      type: 'text',
+      text: 'hi',
+    });
   });
 });
 

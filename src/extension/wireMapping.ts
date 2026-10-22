@@ -240,15 +240,26 @@ export function toJsonObject(value: unknown): JsonObject {
   return isRecord(value) ? (value as JsonObject) : {};
 }
 
-/** Wire tool output (text or file) to the shared shape; a `null` file name becomes absent. */
+/**
+ * Wire tool output (text or file) to the shared shape; a `null` file name becomes absent.
+ *
+ * A `data:` URI is dropped (issue #26): a `read` of an image or a PDF carries the whole file as
+ * base64, which would travel through `postMessage` for nothing (the card shows only the name and
+ * the mime) and could not be painted anyway, because the CSP has no `data:` in `img-src`. Any other
+ * URI (`file://`) is kept. The check is a case-insensitive prefix test on the scheme, after trimming
+ * leading whitespace (a URI parser tolerates it, so " data:..." must not slip through).
+ * HYPOTHESIS: the `data:` shape comes from reading `read.ts@843a6c51` L175-185; no real image read
+ * was observed. `wireMapping.test.ts` covers the mapping with a fabricated block.
+ */
 export function toToolOutput(content: ToolContent | { type: string }): ToolOutput {
   const item = content as Record<string, unknown>;
   if (item['type'] === 'file') {
+    const uri = stringField(item, 'uri');
     const output: ToolOutput = {
       type: 'file',
-      uri: stringField(item, 'uri') ?? '',
       mime: stringField(item, 'mime') ?? '',
     };
+    if (uri !== undefined && !/^data:/i.test(uri.trimStart())) output.uri = uri;
     const name = stringField(item, 'name');
     if (name !== undefined) output.name = name;
     return output;
