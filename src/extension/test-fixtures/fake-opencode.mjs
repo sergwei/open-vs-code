@@ -89,6 +89,9 @@
 // ten, all free), the shape of the `*.selected` payloads beyond `{sessionID, model|agent,
 // previous?}`, and that `step.started` and the REST assistant message use the agent and model
 // stored in the session (the real server does it; the fixture copies the rule, not the code).
+// E6-tool-call-views (issue #26) adds a TOOLS switch: a prompt containing TOOLS plays a turn with
+// nine tool calls of different kinds (see `toolsTurn`), SYNTHETIC and written from the tool sources
+// read in the 2.0.32 tag, never recorded from a running server.
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running.
 
@@ -356,6 +359,127 @@ function subagentTool(a) {
   return { steps, block };
 }
 
+/**
+ * The tool calls of a `TOOLS` turn (issue #26): `shell` twice (exit 0 and exit 1 with the warning
+ * item), `read`, `edit` (with a real unified patch in `metadata.files`), `write`, `grep`, `glob`,
+ * `webfetch` and an unknown MCP-style tool, each as `tool.input.started -> tool.called ->
+ * tool.success`. SYNTHETIC / HYPOTHESIS: the shapes of `input`, `content` and `metadata` are those
+ * READ in the 2.0.32 tag (`packages/core/src/tool/plugin/*.ts@843a6c51`, plan Engram #1035 section
+ * 4), not recorded from a running server; a test that passes here proves the wiring (the block
+ * reaches the webview with its metadata, by stream and by snapshot), NOT that opencode sends these
+ * shapes. `blocks()` is the list of completed blocks that joins the REST message.
+ */
+function toolsTurn(a) {
+  const patch = [
+    'Index: src/sample.ts',
+    '===================================================================',
+    '--- src/sample.ts',
+    '+++ src/sample.ts',
+    '@@ -1,2 +1,2 @@',
+    ' export const one = 1;',
+    '-export const two = 2;',
+    '+export const two = 22;',
+    '',
+  ].join('\n');
+  const specs = [
+    {
+      name: 'shell',
+      input: { command: 'node --version' },
+      content: [{ type: 'text', text: 'v24.22.0\n' }],
+      metadata: { status: 'completed', truncated: false, exit: 0 },
+    },
+    {
+      name: 'shell',
+      input: { command: 'npm test' },
+      content: [
+        { type: 'text', text: 'FAIL src/a.test.ts\n' },
+        { type: 'text', text: 'Exited with code 1' },
+      ],
+      metadata: { status: 'completed', truncated: false, exit: 1 },
+    },
+    {
+      name: 'read',
+      input: { path: 'src/sample.ts' },
+      content: [
+        {
+          type: 'text',
+          text: 'Read file src/sample.ts, lines 1-2\n1: export const one = 1;\n2: export const two = 2;',
+        },
+      ],
+      metadata: { truncated: false },
+    },
+    {
+      name: 'edit',
+      input: { path: 'src/sample.ts', oldString: 'two = 2', newString: 'two = 22' },
+      content: [{ type: 'text', text: 'Edited src/sample.ts (1 replacement)' }],
+      metadata: {
+        files: [{ file: 'src/sample.ts', patch, additions: 1, deletions: 1, status: 'modified' }],
+        truncated: false,
+      },
+    },
+    {
+      name: 'write',
+      input: { path: 'src/new.ts', content: 'export const a = 1;\nexport const b = 2;\n' },
+      content: [{ type: 'text', text: 'Created file successfully: src/new.ts' }],
+      metadata: {},
+    },
+    {
+      name: 'grep',
+      input: { pattern: 'greet', path: 'src' },
+      content: [
+        {
+          type: 'text',
+          text: 'Found 2 matches\nsrc/sample.ts:\n  Line 1: export function greet() {}\n  Line 4: greet();',
+        },
+      ],
+      metadata: { matches: 2, truncated: false },
+    },
+    {
+      name: 'glob',
+      input: { pattern: '**/*.ts' },
+      content: [{ type: 'text', text: 'src/sample.ts\nsrc/new.ts' }],
+      metadata: { count: 2, truncated: false },
+    },
+    {
+      name: 'webfetch',
+      input: { url: 'https://example.test/page', format: 'text' },
+      content: [{ type: 'text', text: 'Example page' }],
+      metadata: { contentType: 'text/html' },
+    },
+    {
+      name: 'mcp_echo',
+      input: { message: 'hi' },
+      content: [{ type: 'text', text: 'echo: hi' }],
+      metadata: {},
+    },
+  ].map((spec) => ({ ...spec, id: nextId('call') }));
+  const steps = specs.flatMap((spec) => [
+    () => broadcast('session.tool.input.started', { ...a, id: spec.id, name: spec.name }),
+    () => broadcast('session.tool.called', { ...a, id: spec.id, input: spec.input }),
+    () =>
+      broadcast('session.tool.success', {
+        ...a,
+        id: spec.id,
+        content: spec.content,
+        metadata: spec.metadata,
+      }),
+  ]);
+  const blocks = () =>
+    specs.map((spec) => ({
+      type: 'tool',
+      id: spec.id,
+      name: spec.name,
+      state: {
+        status: 'completed',
+        input: spec.input,
+        content: spec.content,
+        metadata: spec.metadata,
+      },
+      time: { created: Date.now() },
+    }));
+  return { steps, blocks };
+}
+
 /** The model a session answers with when none was ever selected: the catalog default. */
 const DEFAULT_MODEL = { id: 'big-pickle', providerID: 'opencode' };
 
@@ -527,7 +651,7 @@ function playTurn(sessionID, inboxID, text) {
           time: { created: Date.now(), completed: Date.now() },
           finish: 'stop',
           content: [
-            ...(toolBlock === undefined ? [] : [toolBlock()]),
+            ...(toolBlock === undefined ? [] : [toolBlock()].flat()),
             { type: 'reasoning', text: 'thinking about it', time: { created: 1, completed: 2 } },
             { type: 'text', text: 'hello there' },
           ],
@@ -548,6 +672,10 @@ function playTurn(sessionID, inboxID, text) {
       const subagent = subagentTool(a);
       toolBlock = subagent.block;
       steps.push(stepStarted, ...subagent.steps, ...body);
+    } else if (text.includes('TOOLS')) {
+      const tools = toolsTurn(a);
+      toolBlock = tools.blocks;
+      steps.push(stepStarted, ...tools.steps, ...body);
     } else if (asking === undefined) {
       steps.push(stepStarted, ...body);
     } else {

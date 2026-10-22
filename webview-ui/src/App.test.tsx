@@ -673,7 +673,7 @@ describe('answered requests in the conversation', () => {
     expect(lines(h)).toEqual(['Permission: Allowed once · Read .env']);
     const article = must(h.container, '.message-assistant');
     // Right after the tool line, nested in the message so the log keeps one child per message.
-    expect(article.querySelector('.part-tool + .request-outcome')).not.toBeNull();
+    expect(article.querySelector('.tool-card + .request-outcome')).not.toBeNull();
     expect(h.container.querySelector('.request-results')).toBeNull();
     expect(h.container.querySelector('[role="alert"]')).toBeNull();
     expect(must(h.container, '.request-outcome .visually-hidden').textContent).toBe('Permission: ');
@@ -992,8 +992,8 @@ describe('subagent link in the conversation (issue #21)', () => {
   it('shows the line as one sentence and opens the child session', () => {
     const h = start();
     h.apply(...withTool(subagentTool({ sessionID: 'ses_kid', status: 'completed' })));
-    expect(must(h.container, '.part-subagent span').textContent).toBe(
-      'Subagent · general · Say hello · done',
+    expect(must(h.container, '.part-subagent .tool-toggle').getAttribute('aria-label')).toBe(
+      'Subagent Say hello (general) · done',
     );
     h.button('Open subagent session Say hello').click();
     const { rest } = splitRequestId(h.sent[0]);
@@ -1002,17 +1002,92 @@ describe('subagent link in the conversation (issue #21)', () => {
 
   it('says "running" while the child runs', () => {
     const h = start();
-    h.apply(...withTool(subagentTool({ sessionID: 'ses_kid', status: 'running' })));
-    expect(must(h.container, '.part-subagent span').textContent).toBe(
-      'Subagent · general · Say hello · running',
+    // A tool that is running while its child runs: `running` state, as the server publishes it.
+    h.apply(
+      ...withTool({
+        type: 'tool',
+        id: 'call_1',
+        name: 'subagent',
+        state: {
+          status: 'running',
+          input: { agent: 'general', description: 'Say hello' },
+          metadata: { sessionID: 'ses_kid', status: 'running' },
+        },
+      }),
+    );
+    expect(must(h.container, '.part-subagent .tool-toggle').getAttribute('aria-label')).toBe(
+      'Subagent Say hello (general) · running',
     );
   });
 
-  it('keeps the plain line, with no button, when the block has no child id', () => {
+  it('keeps the plain card, with no button, when the block has no child id', () => {
     const h = start();
     h.apply(...withTool(subagentTool()));
-    expect(must(h.container, '.part-tool').textContent).toBe('subagent · completed');
+    expect(must(h.container, '.tool-toggle').getAttribute('aria-label')).toBe(
+      'Subagent Say hello (general) · done',
+    );
     expect(h.container.querySelector('.subagent-link')).toBeNull();
+    expect(h.container.querySelector('.part-subagent')).toBeNull();
+  });
+
+  // Issue #26. With the REAL store: the card the user unfolded stays unfolded when the same block
+  // is upserted again (running to completed), because the store reconciles in place and `<For>`
+  // keeps the component. FABRICATED events; a Reject keeps its line under the card, and a pending
+  // permission of the tool turns its status into "waiting for approval".
+  it('keeps a tool card unfolded across part.upserted, and shows the pending request', () => {
+    const h = start();
+    const running: Part = {
+      type: 'tool',
+      id: 'call_9',
+      name: 'edit',
+      state: { status: 'running', input: { path: 'a.ts', oldString: 'a', newString: 'b' } },
+    };
+    h.apply(
+      ...openWith([{ id: SES }], [user('m1', 'edit it'), assistant('m2')], { m2: [running] }),
+    );
+    h.apply({
+      type: 'permission.asked',
+      permission: {
+        id: 'per_9',
+        sessionID: SES,
+        action: 'edit',
+        resources: ['a.ts'],
+        save: [],
+        tool: { messageID: 'm2', partID: 'call_9' },
+      },
+    });
+    expect(must(h.container, '.tool-status').textContent).toBe('waiting for approval');
+    must<HTMLButtonElement>(h.container, '.tool-toggle').click();
+    expect(h.container.querySelectorAll('.diff-line')).toHaveLength(2);
+    h.apply({
+      type: 'part.upserted',
+      sessionID: SES,
+      messageID: 'm2',
+      part: {
+        type: 'tool',
+        id: 'call_9',
+        name: 'edit',
+        state: {
+          status: 'completed',
+          input: { path: 'a.ts', oldString: 'a', newString: 'b' },
+          output: [],
+          metadata: { files: [{ file: 'a.ts', patch: '@@ -1 +1 @@\n-a\n+b\n' }] },
+        },
+      },
+    });
+    expect(must(h.container, '.tool-toggle').getAttribute('aria-expanded')).toBe('true');
+    expect(h.container.querySelectorAll('.tool-card')).toHaveLength(1);
+    expect(h.container.querySelectorAll('[role="log"] > *')).toHaveLength(2);
+    const lines = [...h.container.querySelectorAll('.diff-line')].map((line) => line.textContent);
+    expect(lines).toEqual(['@@ -1 +1 @@', '-a', '+b']);
+  });
+
+  it('does not unfold when the child session is opened', () => {
+    const h = start();
+    h.apply(...withTool(subagentTool({ sessionID: 'ses_kid', status: 'completed' })));
+    h.button('Open subagent session Say hello').click();
+    expect(must(h.container, '.tool-toggle').getAttribute('aria-expanded')).toBe('false');
+    expect(h.container.querySelector('.tool-body')).toBeNull();
   });
 });
 
