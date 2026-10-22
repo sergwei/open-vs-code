@@ -1,13 +1,39 @@
 {
   "name": "open-vs-code",
-  "displayName": "open-vs-code",
-  "description": "A mouse-friendly graphical interface for opencode inside VS Code.",
+  "displayName": "OpenCode GUI",
+  "description": "A mouse-friendly chat interface for opencode, an unofficial client of its local server.",
   "version": "0.0.1",
   "publisher": "sergwei",
+  "license": "MIT",
+  "author": {
+    "name": "Sergio González Carbajal"
+  },
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#0b1d33",
+    "theme": "dark"
+  },
+  "keywords": [
+    "opencode",
+    "ai",
+    "agent",
+    "coding agent",
+    "chat",
+    "assistant",
+    "llm",
+    "gui",
+    "mouse",
+    "sessions",
+    "permissions"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/sergwei/open-vs-code"
   },
+  "bugs": {
+    "url": "https://github.com/sergwei/open-vs-code/issues"
+  },
+  "homepage": "https://github.com/sergwei/open-vs-code#readme",
   "engines": {
     "vscode": "^1.105.0"
   },
@@ -118,7 +144,7 @@
     "package": "run-s check-types lint \"package:*\"",
     "package:host": "node esbuild.mjs --production",
     "vscode:prepublish": "npm run package",
-    "vsix": "vsce package --no-dependencies --skip-license",
+    "vsix": "vsce package --no-dependencies",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

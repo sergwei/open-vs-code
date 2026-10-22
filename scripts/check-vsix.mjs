@@ -1,8 +1,9 @@
 // Checks the list of files that `vsce` would put in the .vsix (issue #5).
 //
 // Protects against two regressions: (1) local-only files (CLAUDE.md, .claude/, sources, source
-// maps) leaking into a PUBLIC package, and (2) a .vsix that ships without the host bundle or
-// the webview assets. The list comes from `vsce ls --no-dependencies`; `vsce ls` and
+// maps) leaking into a PUBLIC package, and (2) a .vsix that ships without what it needs: the host
+// bundle and the webview assets (to work), and the README, CHANGELOG, LICENSE and icon (what the
+// Marketplace page asks for, #42). The list comes from `vsce ls --no-dependencies`; `vsce ls` and
 // `vsce package` share `collectFiles`, so the list equals the package content (HYPOTHESIS:
 // read in vsce v4.0.0 src/package.ts, not compared against a real zip).
 //
@@ -16,13 +17,22 @@
 
 import { readFileSync } from 'node:fs';
 
-/** Paths the extension needs to work; `assets/index.js` and `style.css` are the webview contract. */
+/**
+ * Paths a package must contain. Two reasons, mixed on purpose: `package.json`, the host bundle,
+ * the webview assets (`assets/index.js` and `style.css` are the webview contract) and the
+ * activity icon are needed for the extension to WORK; `README.md`, `CHANGELOG.md`, `LICENSE` and
+ * `media/icon.png` are needed for the Marketplace page (#42), not for running.
+ */
 const REQUIRED = [
   'package.json',
   'dist/extension.js',
   'dist/webview/assets/index.js',
   'dist/webview/assets/style.css',
   'media/activity.svg',
+  'media/icon.png',
+  'README.md',
+  'CHANGELOG.md',
+  'LICENSE',
 ];
 
 /** Directory prefixes that must never ship (compared lowercase, with `/` separators). */
