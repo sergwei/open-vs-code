@@ -87,7 +87,15 @@ export type Catalog = {
   preferredModel?: ModelRef;
 };
 
-/** Token counters of one assistant message. */
+/**
+ * Token counters of one assistant message (or of a whole session, see {@link SessionUsage}).
+ * `input` is the NON-cached input: the cached part travels in `cacheRead`/`cacheWrite`
+ * (`usage.ts` of opencode core, `input: nonCachedInputTokens`, read at tag v2.0.32), so the
+ * prompt size is the sum of the three. VERIFIED by the planner spike (opencode 2.0.32, Windows 11,
+ * 22/10/2026); not re-run here: `{input:4912, output:2, reasoning:0, cache:{read:4096, write:0}}`
+ * and `{input:48, output:2, cache.read:8960}` for the same prompt in two sessions, both summing to
+ * 9010 (plan line "Real: 4912+2+4096 = 9010 y 48+2+8960 = 9010").
+ */
 export type TokenUsage = {
   input: number;
   output: number;
@@ -95,6 +103,19 @@ export type TokenUsage = {
   cacheRead: number;
   cacheWrite: number;
 };
+
+/**
+ * Accumulated usage of a whole session (issue #25): `SessionInfo.cost`/`tokens` of the REST list
+ * and the data of `session.usage.updated`. `cost` is USD computed by the SERVER (never derived in
+ * the client). The totals include the title generation and the compaction, which no assistant
+ * message carries, so they are NOT the sum of the messages. VERIFIED by the planner spike
+ * (opencode 2.0.32, Windows 11, 22/10/2026); not re-run here: after one turn `usage.updated`,
+ * `session.get` and `session.list` held the same `{input:4951, output:4, cache.read:4608}` (plan
+ * line "tras el turno `usage.updated` = `GET` = `list` = `{input:4951, output:4,
+ * cache.read:4608}`").
+ * HYPOTHESIS: a paid model was never seen (the 9 listed models are free, `cost: 0`).
+ */
+export type SessionUsage = { cost: number; tokens: TokenUsage };
 
 /**
  * Row of the session list. Timestamps are epoch milliseconds.
@@ -114,6 +135,8 @@ export type SessionSummary = {
   createdAt: number;
   updatedAt: number;
   outcome?: 'succeeded' | 'failed' | 'interrupted';
+  /** Accumulated usage (issue #25); volatile on the wire, so a resync repairs a missed update. */
+  usage?: SessionUsage;
 };
 
 /**

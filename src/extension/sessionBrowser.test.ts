@@ -90,7 +90,17 @@ describe('hasMore', () => {
   it('maps the rows for the protocol', () => {
     const browser = createSessionBrowser({ pageSize: 2 });
     const page = browser.query('', false, 'D').accept({ data: rows(1), cursor: {} });
-    expect(page.rows).toEqual([{ id: 'ses_0', createdAt: 1, updatedAt: 2 }]);
+    expect(page.rows).toEqual([
+      {
+        id: 'ses_0',
+        createdAt: 1,
+        updatedAt: 2,
+        usage: {
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+      },
+    ]);
   });
 });
 

@@ -200,6 +200,15 @@ export function toAgentOptions(list: readonly AgentInfo[]): AgentOption[] {
  * becomes `forkOf` (issue #21); the fork boundary is dropped because nothing in the UI uses it.
  * Shape VERIFIED on a real opencode 2.0.32 (`session.list`, Windows 11, 2026-10-20); `fork`
  * VERIFIED by the issue #21 spike (`session.fork`, same version, 2026-10-21).
+ *
+ * Issue #25: `cost` and `tokens` (accumulated, server-computed) become `usage`, and only when BOTH
+ * are present. The types say they are required, but this field is cosmetic and the function also
+ * feeds resync, fork, `session.get` and the session browser: a row lacking them at runtime must
+ * not throw and fail the whole snapshot, so it simply carries no `usage` (review S4, Sergio's
+ * round of 22/10/2026). VERIFIED by the planner spike (opencode 2.0.32, Windows 11, 22/10/2026)
+ * that real rows carry both (plan line "REST: `SessionInfo.cost` y `SessionInfo.tokens` ... en
+ * `session.list` y `session.get`"); the missing-field branch is covered only by a fabricated row
+ * in `wireMapping.test.ts`, never seen from a real server.
  */
 export function toSessionSummary(info: SessionInfo): SessionSummary {
   const summary: SessionSummary = {
@@ -213,7 +222,33 @@ export function toSessionSummary(info: SessionInfo): SessionSummary {
   if (info.agent !== undefined) summary.agent = info.agent;
   if (info.model !== undefined) summary.model = toModelRef(info.model);
   if (info.outcome !== undefined) summary.outcome = info.outcome;
+  // Widened on purpose: the typed fields are required, the wire may not honour that.
+  const { cost, tokens }: { cost?: number; tokens?: SessionInfo['tokens'] } = info;
+  if (cost !== undefined && tokens !== undefined) {
+    summary.usage = { cost, tokens: toTokenUsage(tokens) };
+  }
   return summary;
+}
+
+/**
+ * `time.created` of the last COMPLETED compaction among `messages`, or `undefined` when there is
+ * none. A running or failed compaction does not move the boundary: the prompt only shrinks once it
+ * completes. "Last" is by `time.created`, not by position, so the order of the page does not matter.
+ * VERIFIED by the planner spike (opencode 2.0.32, Windows 11, 22/10/2026); not re-run here: after
+ * `session.compact`, `message.list` held `{type:"compaction", status:"completed"}` whose
+ * `time.created` equals the `created` of the `compaction.started` event (plan line "REST: `{
+ * type:"compaction", status:"completed", id = inputID, time.created = created del evento
+ * compaction.started, tokens, cost }`"). Only a MANUAL
+ * compaction was run; HYPOTHESIS that an automatic one leaves the same message (same core code,
+ * not run).
+ */
+export function lastCompactionAt(messages: readonly SessionMessageInfo[]): number | undefined {
+  let latest: number | undefined;
+  for (const info of messages) {
+    if (info.type !== 'compaction' || info.status !== 'completed') continue;
+    if (latest === undefined || info.time.created > latest) latest = info.time.created;
+  }
+  return latest;
 }
 
 /** Wire token usage (`cache.read/write`) to the flat shared counters. */

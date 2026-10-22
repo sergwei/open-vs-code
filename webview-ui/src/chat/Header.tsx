@@ -4,6 +4,7 @@ import { childrenOf } from '../sessions/lineage';
 import { SessionPicker } from '../sessions/SessionPicker';
 import { EMPTY_TITLE, sessionLabel } from '../sessions/sessionGroups';
 import type { ChatStore } from '../store/chatStore';
+import { UsageIndicator } from './UsageIndicator';
 
 /** `id` of the session list panel, referenced by the `aria-controls` of its button. */
 const PICKER_ID = 'session-picker';
@@ -33,6 +34,8 @@ const PICKER_ID = 'session-picker';
  * state for free. Every phrase is built as one string (lesson #926). The accessible names carry
  * the visible words: "Forked from <title>: open the original session" for the fork crumb, and
  * "Open subagent session <title>, <agent · Running · Needs input>" for each child.
+ * Issue #25 adds {@link UsageIndicator} right under the bar: the context and cost line of the open
+ * session (Sergio's placement choice, 22/10/2026), above the subagent list and under the title.
  * VERIFIED in jsdom (`App.test.tsx`, `SessionPicker.test.tsx`) and by `npm run test:visual`
  * (steps 1-9, Windows 11, real VS Code; step 10 for the lineage); macOS/Linux UNVERIFIED.
  */
@@ -179,6 +182,7 @@ export function Header(props: {
           New session
         </button>
       </header>
+      <UsageIndicator store={props.store} />
       <Show when={children().length > 0}>
         <details class="subagent-sessions">
           <summary>{`Subagent sessions (${String(children().length)})`}</summary>

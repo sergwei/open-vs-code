@@ -1232,6 +1232,103 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     expect(after.data).toHaveLength(before.data.length);
   }, 20_000);
 
+  // Issue #25. What can break only over HTTP: the `cost`/`tokens` of the REST rows and of the
+  // assistant message reaching the shared model through the real client, the volatile
+  // `session.usage.updated` becoming a `session.upserted`, and the snapshot agreeing with the
+  // stream. The fixture's numbers are SYNTHETIC (see `fake-opencode.mjs`).
+  it('E5 #25: a turn brings tokens on the reply and accumulated usage on the row, and a resync agrees', async () => {
+    const { controller, posted, state } = await boot('ok');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await controller.handle({ type: 'ready' });
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'u1',
+      text: 'Reply with exactly: hello there',
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn to finish',
+    );
+    // The LAST upsert: the first one (step.started) carries no tokens yet.
+    const reply = posted
+      .filter((m) => m.type === 'message.upserted' && m.message.kind === 'assistant')
+      .at(-1);
+    expect(reply).toMatchObject({
+      message: {
+        tokens: { input: 1200, output: 40, reasoning: 8, cacheRead: 3000, cacheWrite: 0 },
+      },
+    });
+    const live = posted.filter((m) => m.type === 'session.upserted').at(-1);
+    const expected = {
+      cost: 0,
+      tokens: { input: 1200, output: 40, reasoning: 8, cacheRead: 3000, cacheWrite: 0 },
+    };
+    expect(live).toMatchObject({ session: { usage: expected } });
+
+    await controller.resync();
+    const snapshot = posted.filter((m) => m.type === 'snapshot').at(-1);
+    const opened = snapshot?.type === 'snapshot' ? snapshot.snapshot : undefined;
+    expect(opened?.sessions.find((row) => row.id === opened.open?.sessionID)?.usage).toEqual(
+      expected,
+    );
+    expect(opened?.open?.compactedAt).toBeUndefined();
+    // What keeps the context line after Reload/Restart: the assistant read back through REST
+    // carries the same per-step tokens as the live reply (reconciliation W2).
+    const answered = opened?.open?.messages.filter((m) => m.kind === 'assistant').at(-1);
+    expect(answered?.kind === 'assistant' ? answered.tokens : undefined).toEqual({
+      input: 1200,
+      output: 40,
+      reasoning: 8,
+      cacheRead: 3000,
+      cacheWrite: 0,
+    });
+  }, 20_000);
+
+  it('E5 #25: a COSTLY turn puts a positive cost on the session row', async () => {
+    const { controller, posted, state } = await boot('ok');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await controller.handle({ type: 'ready' });
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'c1',
+      text: 'COSTLY please',
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn to finish',
+    );
+    expect(posted.filter((m) => m.type === 'session.upserted').at(-1)).toMatchObject({
+      session: { usage: { cost: 0.0123 } },
+    });
+  }, 20_000);
+
+  it('E5 #25: a compaction of the open session refreshes the snapshot with its boundary', async () => {
+    const { controller, posted, state } = await boot('ok');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await controller.handle({ type: 'ready' });
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'k1',
+      text: 'COMPACT after this',
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(
+      () =>
+        posted.some(
+          (m) => m.type === 'snapshot' && typeof m.snapshot.open?.compactedAt === 'number',
+        ),
+      'a snapshot with compactedAt (resync on compaction.ended)',
+    );
+  }, 20_000);
+
   it('reconnects and sends a second snapshot when the stream is cut', async () => {
     const { controller, posted, state } = await boot('sse-drop');
     controller.onServerState(state);

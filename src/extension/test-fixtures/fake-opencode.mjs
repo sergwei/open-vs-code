@@ -99,6 +99,13 @@
 // as the planner's spike against a real opencode 2.0.32 saw) and makes a prompt keep its `files`
 // (uri with its query, name, mention) in the `session.inbox.enqueued` payload and in the history,
 // the way the spike saw a real server store them. File contents are never read.
+// E5-context-usage (issue #25): every step now reports non-zero tokens (see `STEP_TOKENS`) and the
+// assistant message of the history carries them, so the REST snapshot and the stream agree; after
+// each step the session row accumulates them and a volatile `session.usage.updated` carries the
+// totals (see `addUsage`). A prompt containing COSTLY gives the step a cost of 0.0123 USD (the
+// catalog stays free, so a model-free assumption cannot hide it) and one containing COMPACT plays
+// a manual compaction after the turn (see `compactionSteps`). SYNTHETIC; the shapes copy the
+// planner's spike against a real opencode 2.0.32 (Windows 11, 22/10/2026).
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running;
 // FAKE_OPENCODE_LIFETIME_MS (positive integer, ms) overrides it for `serve` (issue #41).
@@ -590,6 +597,76 @@ function selectOnSession(session, sub, body) {
   });
 }
 
+/** Tokens every step reports (issue #25): 1200 + 40 + 8 + 3000 = 4248 in the context. SYNTHETIC. */
+const STEP_TOKENS = { input: 1200, output: 40, reasoning: 8, cache: { read: 3000, write: 0 } };
+
+/** Cost of a step whose prompt contains COSTLY, in USD. SYNTHETIC. */
+const COSTLY_STEP_COST = 0.0123;
+
+/**
+ * Adds a step's usage to the session row and publishes the accumulated totals as the volatile
+ * `session.usage.updated`, after the step like the real projector does (issue #25). The row is what
+ * `session.list` / `session.get` return, so a snapshot read later agrees with the event. SYNTHETIC;
+ * the rule "totals are accumulated and equal on the event and on the REST row" is the planner's
+ * spike against a real opencode 2.0.32 (Windows 11, 22/10/2026).
+ */
+function addUsage(sessionID, cost, tokens) {
+  const row = sessions.get(sessionID);
+  if (row === undefined) return;
+  row.cost += cost;
+  row.tokens = {
+    input: row.tokens.input + tokens.input,
+    output: row.tokens.output + tokens.output,
+    reasoning: row.tokens.reasoning + tokens.reasoning,
+    cache: {
+      read: row.tokens.cache.read + tokens.cache.read,
+      write: row.tokens.cache.write + tokens.cache.write,
+    },
+  };
+  broadcast('session.usage.updated', { sessionID, cost: row.cost, tokens: row.tokens });
+}
+
+/**
+ * The steps of a manual compaction after a turn (a prompt containing COMPACT): `compaction.started`,
+ * `usage.updated` for the summary, `compaction.ended`, and a completed `compaction` message in the
+ * history whose `time.created` is the moment of the `started` event. SYNTHETIC; the event ORDER and
+ * the message shape copy the planner's spike against a real opencode 2.0.32 (Windows 11,
+ * 22/10/2026). The earlier messages stay in the history, as the spike saw.
+ */
+function compactionSteps(sessionID) {
+  let startedAt = 0;
+  return [
+    () => {
+      startedAt = Date.now();
+      broadcast('session.compaction.started', { sessionID, reason: 'manual', recent: '' });
+    },
+    () =>
+      addUsage(sessionID, 0, {
+        input: 300,
+        output: 20,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      }),
+    () => {
+      history.get(sessionID).push({
+        id: nextId('msg'),
+        type: 'compaction',
+        status: 'completed',
+        reason: 'manual',
+        summary: 'summary',
+        recent: '',
+        time: { created: startedAt },
+      });
+      broadcast('session.compaction.ended', {
+        sessionID,
+        reason: 'manual',
+        text: 'summary',
+        recent: '',
+      });
+    },
+  ];
+}
+
 /**
  * Plays the recorded turn for a prompt, one event every few milliseconds. `files` (already in the
  * wire shape, see `toWireFiles`) travels in the `session.inbox.enqueued` payload and is kept in the
@@ -600,6 +677,8 @@ function playTurn(sessionID, inboxID, text, files = []) {
   const chosen = selectionOf(sessionID);
   const a = { sessionID, assistantMessageID };
   const fail = text.includes('FAIL');
+  // Issue #25: COSTLY makes the step cost money (the catalog stays free).
+  const stepCost = text.includes('COSTLY') ? COSTLY_STEP_COST : 0;
   const asking = text.includes('ASK_PERMISSION')
     ? 'permission'
     : text.includes('ASK_QUESTION')
@@ -670,6 +749,8 @@ function playTurn(sessionID, inboxID, text, files = []) {
           model: chosen.model,
           time: { created: Date.now(), completed: Date.now() },
           finish: 'stop',
+          cost: stepCost,
+          tokens: STEP_TOKENS,
           content: [
             ...(toolBlock === undefined ? [] : [toolBlock()].flat()),
             { type: 'reasoning', text: 'thinking about it', time: { created: 1, completed: 2 } },
@@ -679,10 +760,12 @@ function playTurn(sessionID, inboxID, text, files = []) {
         broadcast('session.step.ended', {
           ...a,
           finish: 'stop',
-          cost: 0,
-          tokens: { input: 1, output: 2, reasoning: 3, cache: { read: 0, write: 0 } },
+          cost: stepCost,
+          tokens: STEP_TOKENS,
         });
+        addUsage(sessionID, stepCost, STEP_TOKENS);
       },
+      ...(text.includes('COMPACT') ? compactionSteps(sessionID) : []),
       () => {
         running.delete(sessionID);
         broadcast('session.execution.succeeded', { sessionID });
