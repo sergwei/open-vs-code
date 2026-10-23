@@ -6,6 +6,7 @@ import { registerChatView } from './chatViewProvider';
 import { createEditorActions } from './editorActions';
 import type { ModelRef } from '../shared/model';
 import {
+  ADD_TO_CHAT_COMMAND_ID,
   CONFIG_SECTION,
   DEFAULT_MODEL_KEY,
   DEFAULT_MODEL_SETTING,
@@ -135,6 +136,11 @@ function parseReply(
  * verified: that the command is absent outside Test mode (the `if` was read, not run in a
  * production-mode host), macOS and Linux.
  *
+ * Issue #30 registers `ADD_TO_CHAT_COMMAND_ID` ("Add to OpenCode Chat", `explorer/context`, hidden
+ * from the palette because it needs the Explorer's arguments): it shows the chat and hands the
+ * selected `file:` URIs to `controller.addToChat`. UNVERIFIED in a real window: the menu entry
+ * itself (the integration suite calls the command with URIs, it cannot right-click).
+ *
  * The two internal commands (`SHOW_REQUEST_COMMAND_ID`, `REPLY_PERMISSION_COMMAND_ID`) are always
  * registered and not contributed: they are the targets of the links of an attention
  * notification. They validate their argument and refuse `always`. A rejected argument logs a
@@ -164,6 +170,7 @@ export function registerChat(
     post: (message) => {
       view.provider.post(message);
     },
+    webviewReady: () => view.provider.canDeliver,
     log,
     editor: createEditorActions(log),
     memory: {
@@ -237,6 +244,19 @@ export function registerChat(
     vscode.commands.registerCommand(MANAGE_PERMISSIONS_COMMAND_ID, async () => {
       await controller.handle({ type: 'permissions.manage' });
     }),
+    // Issue #30: the Explorer passes (clicked item, all selected items). The strings go through
+    // the same host checks as a drop (`dropFiles`), minus the `file.find` one.
+    vscode.commands.registerCommand(
+      ADD_TO_CHAT_COMMAND_ID,
+      async (clicked: unknown, selected: unknown) => {
+        const items = Array.isArray(selected) && selected.length > 0 ? selected : [clicked];
+        const uris = items
+          .filter((item): item is vscode.Uri => item instanceof vscode.Uri)
+          .map((uri) => uri.toString());
+        await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
+        await controller.addToChat(uris);
+      },
+    ),
     vscode.commands.registerCommand(SHOW_REQUEST_COMMAND_ID, async (raw: unknown) => {
       const target = parseFocusTarget(raw);
       if (target === undefined) {

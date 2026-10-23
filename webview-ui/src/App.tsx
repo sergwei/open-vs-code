@@ -1,10 +1,16 @@
 import { createEffect, createMemo, createSignal, on, onCleanup, Show, untrack } from 'solid-js';
-import type { AttachmentRef } from '../../src/shared/protocol';
+import {
+  MAX_DROPPED_ITEMS,
+  MAX_DROPPED_URI_LENGTH,
+  type AttachmentRef,
+} from '../../src/shared/protocol';
 import { RevertBanner } from './changes/RevertBanner';
 import { splitAtRevert } from './changes/revertView';
 import { EmptyState } from './chat/EmptyState';
 import { Header } from './chat/Header';
+import type { DropContent } from './chat/dropData';
 import { HostContext, type SendToHost } from './chat/hostContext';
+import { readImage } from './chat/imageFile';
 import { mentionsFor } from './chat/mentionQuery';
 import { MessageList, type UserMessage } from './chat/MessageList';
 import { nextRequestId, PromptInput } from './chat/PromptInput';
@@ -250,6 +256,12 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     if (sent === undefined || pending.includes(sent.requestId)) return;
     lastSend = undefined;
     const failure = notices.find((notice) => notice.requestId === sent.requestId);
+    // The thumbnails of the sent images are freed once the chips will not come back: after an
+    // accepted send, or when the host refused the files (a failure with other cause restores the
+    // chips, which still need their thumbnail).
+    if (failure === undefined || failure.error.code === 'AttachmentRejected') {
+      props.store.releaseThumbs(sent.files.map((file) => file.uri));
+    }
     if (failure === undefined) return;
     if (untrack(draft) === '') setDraft(sent.text);
     // An AttachmentRejected means the host refused those very files (it does not know their
@@ -451,6 +463,83 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   };
 
   /**
+   * Removes a chip, frees the thumbnail of a pasted image, if it had one, and tells the host to
+   * forget that image (`attachments.forget`, decision of 23/10/2026; the host ignores any other uri).
+   */
+  const removeFile = (uri: string): void => {
+    props.store.releaseThumbs([uri]);
+    props.store.removeDraftFile(uri);
+    if (uri.startsWith('pasted-image:')) props.send({ type: 'attachments.forget', uri });
+  };
+
+  /**
+   * Pasted images, and images dropped from the OS (issue #30). Each one is checked here (type and
+   * size, no round trip for a refusal), read as base64 and sent in its own `attachments.image`
+   * with a thumbnail waiting for the chip the host answers with (decision Q4 of Sergio). A model
+   * that does not read images gets one warning, but the images are still attached (decision Q5:
+   * the server tells the model it cannot read them). The bytes are copied into the message and
+   * not kept here.
+   */
+  const addImages = (files: File[]): void => {
+    if (!connected()) return;
+    const model = effectiveModel(selectionInput())?.option;
+    if (model !== undefined && !model.images) {
+      props.store.notify('warning', {
+        code: 'ModelCannotReadImages',
+        message: 'The selected model cannot read images: it will be told so',
+      });
+    }
+    for (const file of files) {
+      void readImage(file).then((read) => {
+        if (!read.ok) {
+          props.store.notify('warning', { code: 'ImageRefused', message: read.message });
+          return;
+        }
+        const requestId = nextRequestId();
+        props.store.begin(requestId);
+        props.store.expectThumb(requestId, URL.createObjectURL(file));
+        props.send({ type: 'attachments.image', requestId, mime: read.mime, data: read.data });
+      });
+    }
+  };
+
+  /**
+   * Something was dropped on the prompt box (issue #30). URIs from the Explorer go to the host,
+   * which decides what may be attached; files from the OS have no path in a webview, so images
+   * are treated as a paste and anything else gets the hint (decision Q6 of Sergio).
+   */
+  const dropped = (content: DropContent): void => {
+    if (!connected() || content.kind === 'none') return;
+    if (content.kind === 'uris') {
+      // The host validator drops a whole `attachments.drop` that has an empty, NUL-carrying or too
+      // long URI, or more than the cap, and a dropped message gets NO `request.result`: the request
+      // would stay pending and lock Send (review of 23/10/2026, B1). So only what it accepts goes.
+      const uris = content.uris
+        .filter((uri) => uri !== '' && uri.length <= MAX_DROPPED_URI_LENGTH && !uri.includes('\0'))
+        .slice(0, MAX_DROPPED_ITEMS);
+      if (uris.length === 0) {
+        props.store.notify('warning', {
+          code: 'DropNotSupported',
+          message: 'None of the dropped items could be attached',
+        });
+        return;
+      }
+      const requestId = nextRequestId();
+      props.store.begin(requestId);
+      props.send({ type: 'attachments.drop', requestId, uris });
+      return;
+    }
+    const images = content.files.filter((file) => file.type.startsWith('image/'));
+    if (images.length > 0) addImages(images);
+    if (images.length < content.files.length) {
+      props.store.notify('warning', {
+        code: 'DropNotSupported',
+        message: 'Drop files from the VS Code Explorer, or use Attach',
+      });
+    }
+  };
+
+  /**
    * "New session" is LAZY (issue #20, decision of 21/10/2026): the host creates nothing, it only
    * forgets the open session, and the snapshot that follows empties the view; the first prompt then
    * creates the session. The input gets the focus so the user can start typing at once.
@@ -639,7 +728,10 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
           onStop={stop}
           onAttach={attach}
           onAddSelection={addSelection}
-          onRemoveFile={props.store.removeDraftFile}
+          onRemoveFile={removeFile}
+          onDrop={dropped}
+          onPasteImages={addImages}
+          thumbs={state.thumbs}
           onFocusReady={(focus) => {
             focusInput = focus;
           }}

@@ -730,7 +730,13 @@ const CATALOG_MODELS = [
   modelID: id,
   providerID: 'opencode',
   name,
-  capabilities: { tools: true, input: ['text'], output: ['text'] },
+  // INVENTED which one reads images: only `glm-5.3-flash-free`, so the tests can show both sides
+  // of the "cannot read images" warning (issue #30). The real catalog says it per model.
+  capabilities: {
+    tools: true,
+    input: id === 'glm-5.3-flash-free' ? ['text', 'image'] : ['text'],
+    output: ['text'],
+  },
   variants: withVariants ? [{ id: 'low' }, { id: 'high' }] : [],
   time: { released: 1 },
   cost: [{ input: 0, output: 0, cache: { read: 0, write: 0 } }],
@@ -1872,16 +1878,21 @@ function walkFolder(root) {
 
 /**
  * The `files` of a prompt body as the server stores them (VERIFIED by the planner spike with
- * `resume: false`): `source.uri` keeps the URL as sent (query included), `name` and `mention` are
- * kept as sent. `data` is empty here (a real server holds the file's base64); INVENTED: the fixture
- * never reads the file, and says `text/plain` for everything.
+ * `resume: false`) for a `file:` URL: `source.uri` keeps the URL as sent (query included), `name`
+ * and `mention` are kept as sent. A `data:` URL is stored with `source: { type: 'inline' }` and no
+ * `uri` (read in `materializeAttachment`, `prompt.ts@v2.0.32`; not run here). `data` is empty (a
+ * real server holds the file's base64). INVENTED: the fixture never reads the file; the `mime` of
+ * a `data:` URL is the one in its header (the real server detects it from the bytes) and any other
+ * URL says `text/plain`.
  */
 function toWireFiles(files) {
   if (!Array.isArray(files)) return [];
   return files.map((file) => ({
     data: '',
-    mime: 'text/plain',
-    source: { type: 'uri', uri: file.uri },
+    // A `data:` URL is stored `inline` (read in `materializeAttachment`, `prompt.ts@v2.0.32`). INVENTED
+    // here: the mime comes from the URL header, while the real server detects it from the bytes.
+    mime: /^data:([^;,]+)/.exec(file.uri)?.[1] ?? 'text/plain',
+    source: file.uri.startsWith('data:') ? { type: 'inline' } : { type: 'uri', uri: file.uri },
     ...(file.name === undefined ? {} : { name: file.name }),
     ...(file.mention === undefined ? {} : { mention: file.mention }),
   }));

@@ -26,6 +26,7 @@ const catalog: Catalog = {
       contextLimit: 200_000,
       free: true,
       variants: [],
+      images: true,
     },
   ],
   providers: [],

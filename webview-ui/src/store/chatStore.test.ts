@@ -945,6 +945,7 @@ describe('catalog and selection draft (issues #23/#24)', () => {
       contextLimit: 1,
       free: true,
       variants: [],
+      images: true,
     })),
     providers: [{ id: 'opencode', name: 'OpenCode' }],
     agents: [{ id: 'build', name: 'Build' }],

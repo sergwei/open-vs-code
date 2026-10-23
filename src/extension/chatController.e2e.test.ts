@@ -94,6 +94,8 @@ async function boot(
       newFile: () => Promise.resolve(),
       copy: () => Promise.resolve(),
       pickFiles: () => Promise.resolve([]),
+      droppedFiles: () =>
+        Promise.resolve({ refs: [], skipped: { folders: 0, outside: 0, remote: 0, missing: 0 } }),
       openDiff: () => Promise.resolve('diff'),
     },
     post: (message) => posted.push(message),

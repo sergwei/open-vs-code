@@ -1234,6 +1234,7 @@ describe('model and agent selectors (issues #23/#24)', () => {
     contextLimit: 200000,
     free: true,
     variants: [],
+    images: true,
   });
   const catalog: HostToWebview = {
     type: 'catalog',
@@ -1550,6 +1551,7 @@ describe('reasoning variant selector (issue #61)', () => {
     contextLimit: 200000,
     free: true,
     variants,
+    images: true,
   });
   const catalog: HostToWebview = {
     type: 'catalog',
@@ -2358,5 +2360,229 @@ describe('revert from a message (issue #32)', () => {
     h.apply(revertAt('m3'));
     h.button('Retry').click();
     expect(h.sent.at(-1)).toMatchObject({ type: 'prompt.send', text: 'first question' });
+  });
+});
+
+// Issue #30. Fabricated drops and pastes (plain `Event`s: jsdom has no `DragEvent`), a fake
+// `URL.createObjectURL` and the fabricated host answers of a store: they pin the wiring and the
+// two local warnings, not what VS Code delivers (the stable 1.143 delivers no drop, #339036).
+describe('drop and paste (issue #30)', () => {
+  const ICON = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+  const fire = (target: Element, type: string, extra: Record<string, unknown>): Event => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    for (const [key, value] of Object.entries(extra)) Object.defineProperty(event, key, { value });
+    target.dispatchEvent(event);
+    return event;
+  };
+  const model = (id: string, images: boolean) => ({
+    providerID: 'opencode',
+    id,
+    name: id,
+    status: 'active' as const,
+    contextLimit: 1,
+    free: true,
+    variants: [],
+    images,
+  });
+  const withCatalog = (images: boolean): HostToWebview => ({
+    type: 'catalog',
+    catalog: {
+      models: [model('m', images)],
+      providers: [{ id: 'opencode', name: 'OpenCode' }],
+      agents: [{ id: 'build', name: 'Build' }],
+      serverDefault: { providerID: 'opencode', id: 'm' },
+      defaultAgent: 'build',
+    },
+  });
+  const pasteImage = (h: Harness, file: File): void => {
+    fire(h.textarea(), 'paste', {
+      clipboardData: { items: [{ kind: 'file', type: file.type, getAsFile: () => file }] },
+    });
+  };
+  // Waits for a CONDITION, not for a fixed time: jsdom's FileReader finishes when the event loop
+  // lets it, which a fixed 20 ms missed 2 of 4 full-suite runs (review of 23/10/2026, W1).
+  const until = async (condition: () => void): Promise<void> => {
+    await vi.waitFor(condition, { timeout: 3000, interval: 5 });
+  };
+  const chipFor = async (h: Harness, uri: string): Promise<string> => {
+    pasteImage(h, new File([ICON], 'a.png', { type: 'image/png' }));
+    await until(() => {
+      expect(h.sent.length).toBeGreaterThan(0);
+    });
+    const message = h.sent.at(-1);
+    const requestId = message && 'requestId' in message ? message.requestId : '';
+    h.apply(
+      { type: 'attachments.picked', requestId, files: [{ uri, name: 'Pasted image 1' }] },
+      { type: 'request.result', requestId },
+    );
+    return requestId;
+  };
+
+  it('does not lock Send when an empty image is pasted', async () => {
+    const h = start();
+    h.apply(connected, withCatalog(true));
+    pasteImage(h, new File([], 'x.png', { type: 'image/png' }));
+    await until(() => {
+      expect(h.container.textContent).toContain('That image could not be read');
+    });
+    expect(h.sent).toEqual([]);
+    expect(h.store.state.pending).toEqual([]);
+  });
+
+  it('sends only the dropped URIs the host validator accepts, and nothing when none is left', () => {
+    const h = start();
+    h.apply(connected);
+    const form = must<HTMLFormElement>(h.container, 'form.prompt');
+    const drop = (uris: string[]): Event =>
+      fire(form, 'drop', {
+        dataTransfer: { types: ['resourceurls'], files: [], getData: () => JSON.stringify(uris) },
+      });
+    drop(['file:///ws/a.ts', 'file:///ws/' + 'x'.repeat(5000), 'file:///ws/b\0.ts']);
+    expect(h.sent).toMatchObject([{ type: 'attachments.drop', uris: ['file:///ws/a.ts'] }]);
+    h.sent.length = 0;
+    const pendingBefore = h.store.state.pending.length;
+    drop(['file:///ws/' + 'x'.repeat(5000)]);
+    expect(h.sent).toEqual([]);
+    expect(h.store.state.pending.length).toBe(pendingBefore);
+  });
+
+  it('tells the host to forget a pasted image when its chip is removed, and frees the blob', async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:thumb');
+    const h = start();
+    h.apply(connected, withCatalog(true));
+    await chipFor(h, 'pasted-image:1');
+    h.sent.length = 0;
+    h.button('Remove Pasted image 1').click();
+    expect(h.sent).toEqual([{ type: 'attachments.forget', uri: 'pasted-image:1' }]);
+    expect(revoke).toHaveBeenCalledWith('blob:thumb');
+    expect(h.store.state.thumbs).toEqual({});
+    vi.restoreAllMocks();
+  });
+
+  it('frees the blob of a pasted image the host refused', async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:thumb');
+    const h = start();
+    h.apply(connected, withCatalog(true));
+    pasteImage(h, new File([ICON], 'a.png', { type: 'image/png' }));
+    await until(() => {
+      expect(h.sent.length).toBeGreaterThan(0);
+    });
+    const message = h.sent[0];
+    const requestId = message && 'requestId' in message ? message.requestId : '';
+    h.apply({
+      type: 'request.result',
+      requestId,
+      error: { code: 'UnsupportedImage', message: 'nope' },
+    });
+    expect(revoke).toHaveBeenCalledWith('blob:thumb');
+    vi.restoreAllMocks();
+  });
+
+  it('frees the blob of a pasted image once the prompt carrying it is accepted', async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:thumb');
+    const h = start();
+    h.apply(connected, withCatalog(true));
+    await chipFor(h, 'pasted-image:1');
+    h.sent.length = 0;
+    h.type('look');
+    h.button('Send').click();
+    const sent = h.sent.find((m) => m.type === 'prompt.send');
+    const requestId = sent && 'requestId' in sent ? sent.requestId : '';
+    expect(revoke).not.toHaveBeenCalled();
+    h.apply({ type: 'request.result', requestId });
+    expect(revoke).toHaveBeenCalledWith('blob:thumb');
+    vi.restoreAllMocks();
+  });
+
+  it('sends the dropped Explorer URIs to the host', () => {
+    const h = start();
+    h.apply(connected);
+    const form = must<HTMLFormElement>(h.container, 'form.prompt');
+    fire(form, 'drop', {
+      dataTransfer: {
+        types: ['resourceurls'],
+        files: [],
+        getData: () => '["file:///c%3A/ws/src/a.ts"]',
+      },
+    });
+    expect(h.sent).toMatchObject([
+      { type: 'attachments.drop', uris: ['file:///c%3A/ws/src/a.ts'] },
+    ]);
+  });
+
+  it('sends a pasted image as one clonable attachments.image and gives it a thumbnail', async () => {
+    const urls = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:thumb');
+    const h = start();
+    h.apply(connected, withCatalog(true));
+    pasteImage(h, new File([ICON], 'a.png', { type: 'image/png' }));
+    await until(() => {
+      expect(h.sent.length).toBeGreaterThan(0);
+    });
+    const message = h.sent[0];
+    expect(message).toMatchObject({
+      type: 'attachments.image',
+      mime: 'image/png',
+      data: 'iVBORw==',
+    });
+    expect(structuredClone(message)).toEqual(message);
+    const requestId = message && 'requestId' in message ? message.requestId : '';
+    h.apply(
+      {
+        type: 'attachments.picked',
+        requestId,
+        files: [{ uri: 'pasted-image:1', name: 'Pasted image 1' }],
+      },
+      { type: 'request.result', requestId },
+    );
+    expect(h.container.querySelector('img.chip-thumb')?.getAttribute('src')).toBe('blob:thumb');
+    expect(h.container.querySelector('[role="alert"]')).toBeNull();
+    urls.mockRestore();
+  });
+
+  it('warns once, locally, when the selected model cannot read images, and still attaches', async () => {
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:thumb');
+    const h = start();
+    h.apply(connected, withCatalog(false));
+    pasteImage(h, new File([ICON], 'a.png', { type: 'image/png' }));
+    await until(() => {
+      expect(h.sent.length).toBeGreaterThan(0);
+    });
+    expect(h.container.textContent).toContain(
+      'The selected model cannot read images: it will be told so',
+    );
+    expect(h.sent).toMatchObject([{ type: 'attachments.image' }]);
+    vi.restoreAllMocks();
+  });
+
+  it('refuses a bmp locally, with no message to the host', async () => {
+    const h = start();
+    h.apply(connected, withCatalog(true));
+    pasteImage(h, new File([ICON], 'a.bmp', { type: 'image/bmp' }));
+    await until(() => {
+      expect(h.container.textContent).toContain(
+        'Only PNG, JPEG, GIF and WebP images can be attached',
+      );
+    });
+    expect(h.sent).toEqual([]);
+  });
+
+  it('answers a dropped OS file that is not an image with the hint', () => {
+    const h = start();
+    h.apply(connected);
+    const form = must<HTMLFormElement>(h.container, 'form.prompt');
+    fire(form, 'drop', {
+      dataTransfer: {
+        types: ['Files'],
+        files: [new File(['x'], 'a.txt', { type: 'text/plain' })],
+        getData: () => '',
+      },
+    });
+    expect(h.sent).toEqual([]);
+    expect(h.container.textContent).toContain(
+      'Drop files from the VS Code Explorer, or use Attach',
+    );
   });
 });

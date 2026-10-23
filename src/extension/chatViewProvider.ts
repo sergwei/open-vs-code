@@ -60,6 +60,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * True while the current document has sent `ready` and the view is visible, i.e. while
+   * {@link post} would deliver. The controller asks it to keep what the Explorer command produces
+   * for a hidden chat (issue #30); same condition as `post`, so the two cannot disagree.
+   */
+  get canDeliver(): boolean {
+    return this.ready && this.view !== undefined && this.view.visible;
+  }
+
+  /**
    * Shows `count` pending requests on the view's badge (0 clears it) and remembers it for the
    * next resolution. `WebviewView.badge` is documented to surface on the container's icon in the
    * Activity Bar (vscode.d.ts 1.105, read); without a resolved view there is nothing to set, so

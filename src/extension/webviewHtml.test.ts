@@ -40,10 +40,11 @@ describe('buildWebviewHtml', () => {
     expect(csp).not.toContain('unsafe-');
     expect(csp).not.toContain('connect-src');
     // The exact policy: any relaxation (cspSource in script-src, https:/data: in img-src, a new
-    // directive) changes this string and has to be a deliberate edit of the test too.
+    // directive) changes this string and has to be a deliberate edit of the test too. `blob:` in
+    // img-src is the deliberate one of issue #30 (thumbnails of pasted images).
     const source = options().cspSource;
     expect(csp).toBe(
-      `default-src 'none'; img-src ${source}; style-src ${source}; font-src ${source}; ` +
+      `default-src 'none'; img-src ${source} blob:; style-src ${source}; font-src ${source}; ` +
         `script-src 'nonce-${nonce}'`,
     );
   });

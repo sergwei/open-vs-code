@@ -33,6 +33,7 @@ const option = (ref: { providerID: string; id: string }, free: boolean): ModelOp
   contextLimit: 200_000,
   free,
   variants: [],
+  images: true,
 });
 
 const catalog: Catalog = {

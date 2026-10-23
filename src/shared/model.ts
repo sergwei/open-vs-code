@@ -54,6 +54,12 @@ export type ModelOption = {
   contextLimit: number;
   free: boolean;
   variants: string[];
+  /**
+   * True when the model reads images: `capabilities.input` includes `"image"`, the same reading as
+   * upstream's app (`global-sync/utils.ts`). Read in the client types; a model that does not read
+   * them is told so by the server instead of failing (issue #30).
+   */
+  images: boolean;
 };
 
 /** Provider that owns some models of the catalog (`GET /api/provider`, available ones only). */

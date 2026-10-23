@@ -17,6 +17,7 @@ import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AttachmentRef } from '../../../src/shared/protocol';
 import { must, mount, type Mounted } from '../testing';
+import type { DropContent } from './dropData';
 import type { FileSearchView } from './MentionPopup';
 import { PromptInput } from './PromptInput';
 import { createHistory } from './promptHistory';
@@ -35,6 +36,7 @@ function setup(
     files?: AttachmentRef[];
     draft?: string;
     addSelectionDisabled?: boolean;
+    thumbs?: Record<string, string>;
   } = {},
 ) {
   const [draft, setDraft] = createSignal(options.draft ?? '');
@@ -53,6 +55,8 @@ function setup(
     addSelection: vi.fn(),
     mentionQuery: vi.fn<(query: string | undefined) => void>(),
     mentionPick: vi.fn<(file: AttachmentRef) => void>(),
+    drop: vi.fn<(content: DropContent) => void>(),
+    pasteImages: vi.fn<(files: File[]) => void>(),
   };
   mounted = mount(() => (
     <PromptInput
@@ -72,6 +76,9 @@ function setup(
       onAttach={calls.attach}
       onAddSelection={calls.addSelection}
       onRemoveFile={calls.remove}
+      onDrop={calls.drop}
+      onPasteImages={calls.pasteImages}
+      thumbs={options.thumbs ?? {}}
     />
   ));
   const textarea = must<HTMLTextAreaElement>(mounted.container, 'textarea');
@@ -552,5 +559,88 @@ describe('chips that open the file (issues #28/#29)', () => {
     must<HTMLButtonElement>(mounted?.container ?? document.body, '.chip-remove').click();
     expect(calls.remove).toHaveBeenCalledWith('file:///ws/b.ts');
     expect(mounted?.sent).toEqual([]);
+  });
+});
+
+// Issue #30. jsdom has neither `DragEvent` nor a `DataTransfer` constructor, so the events are plain
+// `Event`s with a hand-made `dataTransfer` / `clipboardData`: this proves OUR handlers (what they
+// cancel, what they hand to the parent), not that VS Code delivers a real drop to the webview
+// (it does not in the stable 1.143, microsoft/vscode#339036; `test:visual` step 20 says what it saw).
+describe('drop and paste (issue #30)', () => {
+  const transfer = (types: string[], data: Record<string, string> = {}, files: File[] = []) => ({
+    types,
+    files,
+    dropEffect: 'none',
+    getData: (type: string) => data[type] ?? '',
+  });
+  const fire = (target: Element, type: string, extra: Record<string, unknown>): Event => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    for (const [key, value] of Object.entries(extra)) {
+      Object.defineProperty(event, key, { value });
+    }
+    target.dispatchEvent(event);
+    return event;
+  };
+  const form = () => must<HTMLFormElement>(mounted?.container ?? document.body, 'form.prompt');
+
+  it('highlights while files are dragged over, with the hint, and clears on leave', () => {
+    setup();
+    const over = fire(form(), 'dragover', { dataTransfer: transfer(['Files']) });
+    expect(over.defaultPrevented).toBe(true);
+    expect(form().dataset.drop).toBe('active');
+    expect(form().querySelector('.drop-hint')?.textContent).toBe(
+      'Hold Shift to drop files from the Explorer',
+    );
+    fire(form(), 'dragleave', { dataTransfer: transfer(['Files']) });
+    expect(form().dataset.drop).toBeUndefined();
+  });
+
+  it('leaves a dragged text selection alone', () => {
+    setup();
+    const over = fire(form(), 'dragover', { dataTransfer: transfer(['text/plain']) });
+    expect(over.defaultPrevented).toBe(false);
+    expect(form().dataset.drop).toBeUndefined();
+  });
+
+  it('hands the Explorer URIs of a drop to the parent and clears the highlight', () => {
+    const { calls } = setup();
+    const types = ['resourceurls'];
+    fire(form(), 'dragover', { dataTransfer: transfer(types) });
+    const drop = fire(form(), 'drop', {
+      dataTransfer: transfer(types, { resourceurls: '["file:///c%3A/ws/a.ts"]' }),
+    });
+    expect(drop.defaultPrevented).toBe(true);
+    expect(calls.drop).toHaveBeenCalledWith({ kind: 'uris', uris: ['file:///c%3A/ws/a.ts'] });
+    expect(form().dataset.drop).toBeUndefined();
+  });
+
+  it('takes pasted images without writing text, and leaves a text paste native', () => {
+    const { textarea, calls } = setup();
+    const png = new File([new Uint8Array([1])], 'x.png', { type: 'image/png' });
+    const image = fire(textarea, 'paste', {
+      clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => png }] },
+    });
+    expect(image.defaultPrevented).toBe(true);
+    expect(calls.pasteImages).toHaveBeenCalledWith([png]);
+    const text = fire(textarea, 'paste', {
+      clipboardData: { items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }] },
+    });
+    expect(text.defaultPrevented).toBe(false);
+    expect(calls.pasteImages).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the thumbnail of a pasted image chip', () => {
+    setup({
+      files: [{ uri: 'pasted-image:1', name: 'Pasted image 1' }],
+      thumbs: { 'pasted-image:1': 'blob:x' },
+    });
+    expect(form().querySelector('img.chip-thumb')?.getAttribute('src')).toBe('blob:x');
+    expect(form().querySelector('.chip-open')).toBeNull();
+  });
+
+  it('puts the drop hint in the tooltip of Attach', () => {
+    setup();
+    const attach = [...form().querySelectorAll('button')].find((b) => b.textContent === 'Attach');
+    expect(attach?.title).toBe('Hold Shift to drop files from the Explorer');
   });
 });

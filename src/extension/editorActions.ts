@@ -12,6 +12,7 @@ import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
 import type { AttachmentRef } from '../shared/protocol';
 import type { EditorActions, EditorContext } from './chatController';
+import { classifyDropped } from './droppedFiles';
 import { isInServedFolder, selectionLines, toEditorRef } from './fileMentions';
 import type { ServerLog } from './opencodeServer';
 import { resolveInsideFolder, toAttachmentName } from './pathPolicy';
@@ -214,6 +215,31 @@ export function createEditorActions(log: ServerLog): EditorActions {
 
     openDiff(target) {
       return openSessionDiff(target);
+    },
+
+    async droppedFiles(folder, uris) {
+      if (folder === undefined) {
+        throw new EditorActionError(
+          'OutsideWorkspace',
+          'Only files inside the workspace folder can be added',
+        );
+      }
+      const { candidates, outside, remote } = classifyDropped(folder, uris);
+      const refs: AttachmentRef[] = [];
+      let folders = 0;
+      let missing = 0;
+      for (const candidate of candidates) {
+        try {
+          const stat = await vscode.workspace.fs.stat(vscode.Uri.file(candidate.absolute));
+          // A symlink to a file reports `File | SymbolicLink`; one to a folder `Directory | SymbolicLink`.
+          if ((stat.type & vscode.FileType.Directory) !== 0) folders += 1;
+          else if ((stat.type & vscode.FileType.File) !== 0) refs.push(candidate.ref);
+          else missing += 1;
+        } catch {
+          missing += 1;
+        }
+      }
+      return { refs, skipped: { folders, outside, remote, missing } };
     },
 
     async pickFiles() {

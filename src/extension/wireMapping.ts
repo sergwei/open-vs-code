@@ -169,9 +169,13 @@ export function toModelRef(model: { id: string; providerID: string; variant?: st
 /**
  * Catalog entry of the wire to the shared option (issue #23). `free` needs EVERY cost entry (the
  * price can be tiered by context size) to have zero input and output, and a model with NO cost
- * entries is not called free (we would be guessing). `variants` keeps only the ids.
- * VERIFIED shape against a real opencode 2.0.32 (spike, Windows 11, 21/10/2026: ten free models);
- * the tiered-cost reading is HYPOTHESIS (no tiered model was seen).
+ * entries is not called free (we would be guessing). `variants` keeps only the ids. `images` is
+ * `capabilities.input.includes('image')`, as upstream does (`global-sync/utils.ts`, opencode app).
+ * VERIFIED shape (id, name, status, limit, cost, variants) against a real opencode 2.0.32 (spike,
+ * Windows 11, 21/10/2026: ten free models); the tiered-cost reading is HYPOTHESIS (no tiered model
+ * was seen). `images` was NOT part of that spike: HYPOTHESIS read in the client types
+ * (`capabilities.input`); to check it, list `/api/provider/model` of a real server and look at
+ * `capabilities.input` of an image-capable model.
  */
 export function toModelOption(info: ModelInfo): ModelOption {
   return {
@@ -182,6 +186,7 @@ export function toModelOption(info: ModelInfo): ModelOption {
     contextLimit: info.limit.context,
     free: info.cost.length > 0 && info.cost.every((c) => c.input === 0 && c.output === 0),
     variants: info.variants.map((variant) => variant.id),
+    images: info.capabilities.input.includes('image'),
   };
 }
 
