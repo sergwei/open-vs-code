@@ -44,7 +44,9 @@
 // `tasklist /FI "PID eq <pid>"`; POSIX: `kill -0 <pid>`). The stop is VERIFIED separately under
 // plain Node (spike of 2026-10-20) but NOT through `deactivate` in VS Code.
 import * as assert from 'node:assert';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { OpenCode, type OpenCodeClient } from '@opencode/client';
 import * as vscode from 'vscode';
@@ -60,6 +62,7 @@ import {
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
 import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
+import { diffRoot } from '../../src/extension/sessionDiff';
 import {
   toAgentOptions,
   toModelOption,
@@ -590,6 +593,102 @@ describe('real opencode', function () {
           entry.type === 'file' || entry.type === 'directory',
           `type ${String(entry.type)}`,
         );
+      }
+    });
+
+    /**
+     * The reads behind "Changed files" (issue #31) on a session with NO changed file and no turn:
+     * `message.list({ type: 'user', order, limit })` is accepted and answers `{data, cursor}`;
+     * `session.diff` answers `[]` with and without `from`/`context`, even with no user message;
+     * an input admitted with `prompt({ resume: false })` (decision of Sergio, 23/10/2026, Engram
+     * #1154) is NOT a message of the history (it waits in the inbox), so it cannot be a `from`:
+     * `session.diff({ from: <that id> })` throws `MessageNotFoundError`, like an unknown id; an
+     * unknown session throws `SessionNotFoundError`. That the `type` filter really filters, and
+     * what `from`/`to` of real user messages do, needs a delivered turn and is NOT checked here.
+     * The input left in the inbox disappears with the session, which this case removes.
+     * VERIFIED (23/10/2026, Windows 11, opencode 2.0.32, `npm run test:integration -- --label
+     * real-opencode`): "reads user messages and diffs a session that changed nothing" passed.
+     * The folder of this case is not a git repository; the same answers came from a git one in a
+     * spike outside the suite.
+     */
+    it('reads user messages and diffs a session that changed nothing', async function () {
+      const created = await own.client.session.create({});
+      const sessionID = created.id;
+      try {
+        const none = await own.client.message.list({
+          sessionID,
+          type: 'user',
+          order: 'asc',
+          limit: 1,
+        });
+        assert.deepStrictEqual(none.data, []);
+        assert.ok('cursor' in none, 'message.list has no cursor');
+        assert.deepStrictEqual(await own.client.session.diff({ sessionID }), []);
+        assert.deepStrictEqual(await own.client.session.diff({ sessionID, context: 0 }), []);
+
+        const admitted = await own.client.session.prompt({
+          sessionID,
+          text: 'contract check, never delivered',
+          resume: false,
+        });
+        assert.strictEqual(typeof admitted.id, 'string');
+        const after = await own.client.message.list({ sessionID, type: 'user', order: 'desc' });
+        assert.deepStrictEqual(after.data, [], 'resume:false must leave no message in the history');
+        for (const from of [admitted.id, 'msg_does_not_exist']) {
+          await assert.rejects(own.client.session.diff({ sessionID, from }), (error: unknown) => {
+            assert.strictEqual((error as { _tag?: string })._tag, 'MessageNotFoundError');
+            return true;
+          });
+        }
+        await assert.rejects(
+          own.client.session.diff({ sessionID: 'ses_does_not_exist' }),
+          (error: unknown) => {
+            assert.strictEqual((error as { _tag?: string })._tag, 'SessionNotFoundError');
+            return true;
+          },
+        );
+      } finally {
+        await own.client.session.remove({ sessionID });
+      }
+    });
+
+    /**
+     * What a session says about WHERE it lives when the server runs in a SUBFOLDER of a git
+     * repository (issue #31), which is how the extension runs it (cwd = the served folder): the
+     * location is that subfolder and `subpath` says how deep it is below the project directory, so
+     * `diffRoot(location.directory, subpath)` gives the repository root, the base of the paths of
+     * `session.diff`. A second server of its own, started in `<repo>/src` of a temporary
+     * repository this case creates and deletes (`git` must be on the PATH).
+     * Observation behind the design: `x-opencode-directory` did NOT move a session to another
+     * folder in a spike (the location stayed the server's cwd whatever the header said), which is
+     * harmless for the extension because its cwd and its header are the same folder.
+     * VERIFIED (23/10/2026, Windows 11, opencode 2.0.32, `npm run test:integration -- --label
+     * real-opencode`): "reports the subpath of a session served from a subfolder of a repository"
+     * passed. NOT observed: a worktree, a symlinked folder, a turn that changes a file (so that
+     * the paths of `session.diff` really start at that root is still HYPOTHESIS), macOS/Linux.
+     */
+    it('reports the subpath of a session served from a subfolder of a repository', async function () {
+      this.timeout(60_000);
+      const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'ovsc-contract-repo-'));
+      const served = path.join(repo, 'src');
+      fs.mkdirSync(served);
+      fs.writeFileSync(path.join(served, 'a.ts'), 'export const a = 1;\n');
+      execFileSync('git', ['init', '-q'], { cwd: repo });
+      const sub = await startOwnServer(binary, served, 'subfolder-pw');
+      try {
+        const created = await sub.client.session.create({});
+        const row = await sub.client.session.get({ sessionID: created.id });
+        const real = (value: string): string => fs.realpathSync.native(value).toLowerCase();
+        assert.strictEqual(real(row.location.directory), real(served));
+        assert.strictEqual(row.subpath, 'src');
+        const root = diffRoot(row.location.directory, row.subpath);
+        assert.ok(root !== undefined, 'diffRoot refused the location and subpath of the server');
+        assert.strictEqual(real(root), real(repo));
+        assert.deepStrictEqual(await sub.client.session.diff({ sessionID: created.id }), []);
+        await sub.client.session.remove({ sessionID: created.id });
+      } finally {
+        await sub.stop();
+        fs.rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
       }
     });
   });

@@ -14,7 +14,13 @@
 import { createRoot } from 'solid-js';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { MessageInfo, Part, RequestResolution, SessionStatus } from '../../src/shared/model';
+import type {
+  ChangedFile,
+  MessageInfo,
+  Part,
+  RequestResolution,
+  SessionStatus,
+} from '../../src/shared/model';
 import type { HostToWebview, WebviewToHost } from '../../src/shared/protocol';
 import { App, FILE_SEARCH_DEBOUNCE_MS } from './App';
 import { createChatStore, type ChatStore } from './store/chatStore';
@@ -1972,5 +1978,102 @@ describe('@ mentions and the editor context (issues #28/#29)', () => {
       files: [SAMPLE],
     });
     expect(h.store.state.fileSearch.files).toEqual([]);
+  });
+});
+
+// Issue #31 (E7-session-diff): the "Changed files" `<details>` under the header, Sergio's choice of
+// 23/10/2026 (Engram #1153). FABRICATED host messages in jsdom: they confirm where it sits, that it
+// is closed by default and drawn only with files, and the message a click sends (no `requestId`,
+// the OPEN session's id and the exact listed path). The real keyboard path and the look are
+// `test:visual` checks "the list is closed by default" and "Enter on the deleted row opens a diff
+// editor".
+describe('changed files (issue #31)', () => {
+  const changed = (path: string, extra: Partial<ChangedFile> = {}): ChangedFile => ({
+    path,
+    status: 'modified',
+    additions: 3,
+    deletions: 1,
+    binary: false,
+    ...extra,
+  });
+
+  it('draws nothing while the open session has no changed files', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
+    expect(h.container.querySelector('.changed-files')).toBeNull();
+    h.apply({ type: 'session.diff', sessionID: SES, files: [] });
+    expect(h.container.querySelector('.changed-files')).toBeNull();
+  });
+
+  it('shows a closed "Changed files (N)" under the header with one button per file', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
+    h.apply({
+      type: 'session.diff',
+      sessionID: SES,
+      files: [changed('src/a.ts'), changed('assets/logo.png', { binary: true })],
+    });
+    const details = must<HTMLDetailsElement>(h.container, 'details.changed-files');
+    expect(details.open).toBe(false);
+    expect(must(details, 'summary').textContent).toBe('Changed files (2)');
+    expect(details.parentElement?.classList.contains('header-area')).toBe(true);
+    expect(
+      [...details.querySelectorAll('button')].map((b) => b.getAttribute('aria-label')),
+    ).toEqual([
+      'Open diff of src/a.ts, Modified, 3 added, 1 deleted',
+      'Open assets/logo.png, Binary',
+    ]);
+  });
+
+  it('sits after the "Subagent sessions" list', () => {
+    const h = start();
+    h.apply(
+      ...openWith(
+        [
+          { id: SES, title: 'Fix the build' },
+          { id: 'ses_k1', parentID: SES, agent: 'general' },
+        ],
+        [user('m1', 'hi')],
+      ),
+    );
+    h.apply({ type: 'session.diff', sessionID: SES, files: [changed('src/a.ts')] });
+    const area = must(h.container, '.header-area');
+    const classes = [...area.children].map((child) => child.className);
+    expect(classes.indexOf('subagent-sessions')).toBeGreaterThan(-1);
+    expect(classes.indexOf('changed-files')).toBe(classes.indexOf('subagent-sessions') + 1);
+  });
+
+  it('sends session.diff.open for the open session and the exact path of the pressed row', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
+    h.apply({
+      type: 'session.diff',
+      sessionID: SES,
+      files: [changed('src/a.ts'), changed('src/b.ts')],
+    });
+    h.button('Open diff of src/b.ts, Modified, 3 added, 1 deleted').click();
+    expect(h.sent).toEqual([{ type: 'session.diff.open', sessionID: SES, path: 'src/b.ts' }]);
+  });
+
+  it('never shows the list of another session', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
+    h.apply({ type: 'session.diff', sessionID: 'ses_other', files: [changed('src/a.ts')] });
+    expect(h.container.querySelector('.changed-files')).toBeNull();
+  });
+
+  it('says the list could not be refreshed, keeping the last rows', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
+    h.apply({
+      type: 'session.diff',
+      sessionID: SES,
+      files: [changed('src/a.ts')],
+      error: { code: 'Boom', message: 'it broke' },
+    });
+    expect(must(h.container, '.changed-files-error').textContent).toBe(
+      'Could not refresh the list: it broke',
+    );
+    expect(h.container.querySelectorAll('.changed-files button')).toHaveLength(1);
   });
 });

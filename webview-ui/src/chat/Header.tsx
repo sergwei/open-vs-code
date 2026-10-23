@@ -1,5 +1,7 @@
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js';
 import type { SessionSummary } from '../../../src/shared/model';
+import { changedFilesSummary } from '../changes/changedFileText';
+import { ChangedFilesList } from '../changes/ChangedFilesList';
 import { childrenOf } from '../sessions/lineage';
 import { SessionPicker } from '../sessions/SessionPicker';
 import { EMPTY_TITLE, sessionLabel } from '../sessions/sessionGroups';
@@ -36,6 +38,12 @@ const PICKER_ID = 'session-picker';
  * "Open subagent session <title>, <agent · Running · Needs input>" for each child.
  * Issue #25 adds {@link UsageIndicator} right under the bar: the context and cost line of the open
  * session (Sergio's placement choice, 22/10/2026), above the subagent list and under the title.
+ * Issue #31 adds a second `<details>` right after it: "Changed files (N)" (Sergio's choice of
+ * 23/10/2026, Engram #1153), closed by default and drawn only when the open session has changed
+ * files. It holds {@link ChangedFilesList}, the same presentational rows issue #32 will reuse; a
+ * click reports the path through `onOpenChangedFile` and the host opens the diff. When the host
+ * could not refresh the list, one line under the summary says so (`state.diff.error`) and the
+ * rows are the last list it had.
  * VERIFIED in jsdom (`App.test.tsx`, `SessionPicker.test.tsx`) and by `npm run test:visual`
  * (steps 1-9, Windows 11, real VS Code; step 10 for the lineage); macOS/Linux UNVERIFIED.
  */
@@ -43,6 +51,7 @@ export function Header(props: {
   store: ChatStore;
   onNewSession(): void;
   onOpenSession(sessionID: string): void;
+  onOpenChangedFile: (path: string) => void;
 }) {
   const state = props.store.state;
   const [pickerOpen, setPickerOpen] = createSignal(false);
@@ -208,6 +217,17 @@ export function Header(props: {
               )}
             </For>
           </ul>
+        </details>
+      </Show>
+      <Show when={state.diff.files.length > 0}>
+        <details class="changed-files">
+          <summary>{changedFilesSummary(state.diff.files.length)}</summary>
+          <Show when={state.diff.error}>
+            {(failure) => (
+              <p class="changed-files-error">{`Could not refresh the list: ${failure().message}`}</p>
+            )}
+          </Show>
+          <ChangedFilesList files={state.diff.files} onOpen={props.onOpenChangedFile} />
         </details>
       </Show>
       <Show when={pickerOpen()}>

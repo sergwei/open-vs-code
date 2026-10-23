@@ -29,6 +29,7 @@
 // against a synthetic server.
 import type {
   AgentInfo,
+  FileDiffInfo,
   FileFindInput,
   FileFindOutput,
   FormInfo,
@@ -37,6 +38,7 @@ import type {
   PermissionRequest,
   PermissionSavedInfo,
   ProviderInfo,
+  SessionDiffInput,
   SessionInfo,
   SessionListInput,
   SessionMessageInfo,
@@ -104,6 +106,15 @@ type FakeOptions = Partial<{
   /** Replaces `session.fork` (issue #21). */
   forkImpl: (input: { sessionID: string; before?: string }) => Promise<SessionInfo>;
   messageListImpl: () => Promise<{ data: SessionMessageInfo[]; cursor: object }>;
+  /**
+   * User messages `message.list({ type: 'user' })` answers with, oldest first (issue #31); the
+   * "Changed files" range is read with that filter, which the default `messages` do not model.
+   */
+  userMessages: SessionMessageInfo[];
+  /** Replaces `session.diff` (issue #31); receives the input of the call. */
+  diffImpl: (input: SessionDiffInput) => Promise<FileDiffInfo[]>;
+  /** `subpath` `session.get` adds to every row (issue #31). */
+  subpath: string;
   promptImpl: () => Promise<unknown>;
   active: Record<string, { type: 'running' }>;
   interruptImpl: () => Promise<{ interrupted: boolean }>;
@@ -224,6 +235,7 @@ function fakeApi(options: FakeOptions = {}) {
   const creates: unknown[] = [];
   const switches: string[] = [];
   const finds: FileFindInput[] = [];
+  const diffInputs: SessionDiffInput[] = [];
   /** Rejects like the real client: with the server's error BODY, an object, not an Error. */
   const failWith = (body: object): Promise<never> =>
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
@@ -269,8 +281,14 @@ function fakeApi(options: FakeOptions = {}) {
         return Promise.resolve({
           ...sessionInfo(sessionID),
           ...(title === undefined ? {} : { title }),
+          ...(options.subpath === undefined ? {} : { subpath: options.subpath }),
           ...stored,
         });
+      },
+      diff: (input) => {
+        calls.push('session.diff');
+        diffInputs.push(input);
+        return (options.diffImpl ?? (() => Promise.resolve([])))(input);
       },
       switchAgent: (input) => {
         calls.push('session.switchAgent');
@@ -345,7 +363,18 @@ function fakeApi(options: FakeOptions = {}) {
       },
     },
     message: {
-      list: () => {
+      list: (input) => {
+        if (input.type === 'user') {
+          // The range read of the "Changed files" list (issue #31), kept out of `message.list`
+          // so the snapshot tests that count history reads keep their meaning.
+          calls.push('message.list.user');
+          const users = options.userMessages ?? [];
+          const ordered = input.order === 'desc' ? [...users].reverse() : users;
+          return Promise.resolve({
+            data: ordered.slice(0, input.limit ?? ordered.length),
+            cursor: {},
+          });
+        }
         calls.push('message.list');
         return (
           options.messageListImpl ??
@@ -441,6 +470,7 @@ function fakeApi(options: FakeOptions = {}) {
     creates,
     switches,
     finds,
+    diffInputs,
   };
 }
 
@@ -450,7 +480,12 @@ function fakeApi(options: FakeOptions = {}) {
  * the editor-context button gets.
  */
 function fakeEditor(
-  options: { failWith?: Error; picked?: AttachmentRef[]; context?: EditorContext } = {},
+  options: {
+    failWith?: Error;
+    picked?: AttachmentRef[];
+    context?: EditorContext;
+    diffOutcome?: 'diff' | 'file';
+  } = {},
 ) {
   const calls: unknown[][] = [];
   const run = (name: string, ...args: unknown[]): Promise<void> => {
@@ -471,6 +506,12 @@ function fakeEditor(
       calls.push(['pickFiles']);
       return options.failWith === undefined
         ? Promise.resolve(options.picked ?? [])
+        : Promise.reject(options.failWith);
+    },
+    openDiff: (target) => {
+      calls.push(['openDiff', target]);
+      return options.failWith === undefined
+        ? Promise.resolve(options.diffOutcome ?? 'diff')
         : Promise.reject(options.failWith);
     },
   };
@@ -3724,6 +3765,275 @@ describe('catalog and selection (issues #23/#24)', () => {
       controller.onServerState(RUNNING);
       await controller.handle(send({ model: GLM, agent: 'plan', text: 'SECRET-PROMPT-TEXT' }));
       expect(logs.join('\n')).not.toContain('SECRET-PROMPT-TEXT');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// E7-session-diff (issue #31): the "Changed files" list and the native diff.
+//
+// Protects: the list reloaded on the events that can change it and on nothing else (a step of
+// another session, a step that touched no file), a burst costing at most one more load, the list
+// sent again after a snapshot, and above all the whitelist: the host opens a diff only for a path
+// IT listed for the open session, so a webview (untrusted input) cannot make it open another file.
+// Provenance: a FAKE client with hand-made `FileDiffInfo` rows and user messages; the module's
+// own logic is in `sessionDiff.test.ts`, the real client over HTTP in `chatController.e2e.test.ts`.
+// ---------------------------------------------------------------------------------------------
+describe('changed files (issue #31)', () => {
+  const STEP_TOKENS = { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } };
+  const userMessage = (id: string): SessionMessageInfo =>
+    wire<SessionMessageInfo>(
+      JSON.stringify({ id, type: 'user', text: 'hi', time: { created: 1 } }),
+    );
+  const rowFor = (file: string, status: FileDiffInfo['status'] = 'modified'): FileDiffInfo => ({
+    file,
+    status,
+    additions: 1,
+    deletions: 1,
+    patch: 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n',
+  });
+  const stepEnded = (sessionID: string, files?: string[]) => ({
+    sessionID,
+    assistantMessageID: 'msg_a',
+    finish: 'stop',
+    cost: 0,
+    tokens: STEP_TOKENS,
+    ...(files === undefined ? {} : { files }),
+  });
+  /** A running controller with `ses_1` open and the fake serving `rows` as the diff. */
+  function withOpenSession(rows: FileDiffInfo[] = [rowFor('src/a.ts')], editor?: EditorActions) {
+    const api = fakeApi({
+      sessions: ['ses_1'],
+      userMessages: [userMessage('msg_1'), userMessage('msg_2')],
+      diffImpl: () => Promise.resolve(rows),
+    });
+    const ctl = setup(api.api, 'ses_1', editor);
+    ctl.controller.onServerState(RUNNING);
+    return { ...api, ...ctl };
+  }
+  const diffLists = (posted: HostToWebview[]) =>
+    posted.flatMap((m) => (m.type === 'session.diff' ? [m] : []));
+  const absolute = (file: string): string => path.resolve(SERVER.folder, file);
+
+  it('lists the files when a step of the open session ends with changed files', async () => {
+    const { posted, streams, logs, diffInputs } = withOpenSession();
+    emit(streams, 'session.step.ended', stepEnded('ses_1', ['src/a.ts']));
+    await flush();
+    await flush();
+    expect(diffLists(posted)).toEqual([
+      {
+        type: 'session.diff',
+        sessionID: 'ses_1',
+        files: [
+          { path: 'src/a.ts', status: 'modified', additions: 1, deletions: 1, binary: false },
+        ],
+      },
+    ]);
+    expect(diffInputs).toEqual([{ sessionID: 'ses_1', from: 'msg_1', to: 'msg_2', context: 0 }]);
+    expect(logs).toContain('info: session diff: 1 files for ses_1');
+  });
+
+  it('also reloads when a step FAILS with changed files', async () => {
+    const { streams, diffInputs } = withOpenSession();
+    emit(streams, 'session.step.failed', {
+      ...stepEnded('ses_1', ['src/a.ts']),
+      error: { type: 'aborted', message: 'Step interrupted' },
+    });
+    await flush();
+    await flush();
+    expect(diffInputs).toHaveLength(1);
+  });
+
+  it('ignores a step of another session, a step with no files and a step without the field', async () => {
+    const { streams, diffInputs, calls } = withOpenSession();
+    emit(streams, 'session.step.ended', stepEnded('ses_other', ['src/a.ts']));
+    emit(streams, 'session.step.ended', stepEnded('ses_1', []));
+    emit(streams, 'session.step.ended', stepEnded('ses_1'));
+    await flush();
+    await flush();
+    expect(diffInputs).toEqual([]);
+    expect(calls).not.toContain('message.list.user');
+  });
+
+  it('reloads on any revert event of the open session, and not on those of another', async () => {
+    const { streams, diffInputs } = withOpenSession();
+    emit(streams, 'session.revert.staged', { sessionID: 'ses_other', revert: { messageID: 'm' } });
+    await flush();
+    expect(diffInputs).toEqual([]);
+    for (const [type, data] of [
+      ['session.revert.staged', { sessionID: 'ses_1', revert: { messageID: 'm' } }],
+      ['session.revert.cleared', { sessionID: 'ses_1' }],
+      ['session.revert.committed', { sessionID: 'ses_1', to: 'm' }],
+    ] as const) {
+      const before = diffInputs.length;
+      emit(streams, type, data);
+      await flush();
+      await flush();
+      expect(diffInputs.length, type).toBe(before + 1);
+    }
+  });
+
+  it('turns a burst of steps into at most two loads', async () => {
+    const { streams, diffInputs } = withOpenSession();
+    for (let i = 0; i < 5; i++) {
+      emit(streams, 'session.step.ended', stepEnded('ses_1', ['src/a.ts']));
+    }
+    await flush();
+    await flush();
+    await flush();
+    expect(diffInputs.length).toBeGreaterThanOrEqual(1);
+    expect(diffInputs.length).toBeLessThanOrEqual(2);
+  });
+
+  it('sends the held list again right after the next snapshot', async () => {
+    const { controller, posted, streams } = withOpenSession();
+    emit(streams, 'session.step.ended', stepEnded('ses_1', ['src/a.ts']));
+    await flush();
+    await flush();
+    posted.length = 0;
+    await controller.onWebviewReady();
+    const kinds = posted.map((m) => m.type);
+    expect(kinds.indexOf('session.diff')).toBeGreaterThan(kinds.indexOf('snapshot'));
+    expect(diffLists(posted)).toHaveLength(1);
+  });
+
+  it('forgets the list when the open session is deleted', async () => {
+    const { controller, streams } = withOpenSession();
+    emit(streams, 'session.step.ended', stepEnded('ses_1', ['src/a.ts']));
+    await flush();
+    await flush();
+    emit(streams, 'session.deleted', { sessionID: 'ses_1' });
+    await flush();
+    await expect(controller.diffOriginal('ses_1', 'src/a.ts')).rejects.toMatchObject({
+      name: 'DiffNotListed',
+    });
+  });
+
+  it('forgets the list when the server goes away', async () => {
+    const { controller, streams } = withOpenSession();
+    emit(streams, 'session.step.ended', stepEnded('ses_1', ['src/a.ts']));
+    await flush();
+    await flush();
+    controller.onServerState({ kind: 'stopped' });
+    await expect(controller.diffOriginal('ses_1', 'src/a.ts')).rejects.toMatchObject({
+      name: 'DiffNotListed',
+    });
+  });
+
+  describe('session.diff.open', () => {
+    const open = (path: string, sessionID = 'ses_1'): WebviewToHost => ({
+      type: 'session.diff.open',
+      sessionID,
+      path,
+    });
+    /** The notices posted, as `code`s. */
+    const noticeCodes = (posted: HostToWebview[]) =>
+      posted.flatMap((m) => (m.type === 'notice' ? [m.error.code] : []));
+
+    it('opens the diff of a listed path with the absolute path of the served folder', async () => {
+      const { editor, calls } = fakeEditor();
+      const { controller, streams, logs } = withOpenSession(
+        [rowFor('src/a.ts', 'deleted')],
+        editor,
+      );
+      emit(streams, 'session.step.ended', stepEnded('ses_1', ['src/a.ts']));
+      await flush();
+      await flush();
+      await controller.handle(open('src/a.ts'));
+      expect(calls).toEqual([
+        [
+          'openDiff',
+          {
+            sessionID: 'ses_1',
+            path: 'src/a.ts',
+            absolute: absolute('src/a.ts'),
+            status: 'deleted',
+            binary: false,
+          },
+        ],
+      ]);
+      expect(logs).toContain('info: diff opened (deleted)');
+    });
+
+    it('refuses what was not listed, with a notice and a log line that carries no path', async () => {
+      const { editor, calls } = fakeEditor();
+      const { controller, streams, logs, posted } = withOpenSession(
+        [rowFor('src/a.ts'), rowFor('../outside.ts')],
+        editor,
+      );
+      emit(streams, 'session.step.ended', stepEnded('ses_1', ['src/a.ts']));
+      await flush();
+      await flush();
+      const wanted = ['src/other.ts', '../outside.ts', 'C:\\Windows\\win.ini', '/etc/passwd'];
+      for (const target of wanted) await controller.handle(open(target));
+      expect(calls).toEqual([]);
+      expect(noticeCodes(posted)).toEqual(wanted.map(() => 'DiffNotListed'));
+      expect(logs.filter((l) => l === 'warn: diff open refused: not listed')).toHaveLength(4);
+      const everything = logs.join('\n');
+      for (const secret of ['other.ts', 'outside.ts', 'win.ini', 'passwd']) {
+        expect(everything, secret).not.toContain(secret);
+      }
+    });
+
+    it('refuses a listed path asked for another session, and any path while nothing is listed', async () => {
+      const { editor, calls } = fakeEditor();
+      const { controller, streams, logs } = withOpenSession(undefined, editor);
+      await controller.handle(open('src/a.ts'));
+      emit(streams, 'session.step.ended', stepEnded('ses_1', ['src/a.ts']));
+      await flush();
+      await flush();
+      await controller.handle(open('src/a.ts', 'ses_other'));
+      expect(calls).toEqual([]);
+      expect(logs.filter((l) => l === 'warn: diff open refused: session not open')).toHaveLength(2);
+    });
+
+    it('says so when the editor opened the file instead of a diff', async () => {
+      const { editor } = fakeEditor({ diffOutcome: 'file' });
+      const { controller, streams, posted, logs } = withOpenSession([rowFor('logo.png')], editor);
+      emit(streams, 'session.step.ended', stepEnded('ses_1', ['logo.png']));
+      await flush();
+      await flush();
+      await controller.handle(open('logo.png'));
+      expect(noticeCodes(posted)).toEqual(['NoTextDiff']);
+      expect(logs).toContain('info: diff opened (modified, file only)');
+    });
+
+    it('turns an editor failure into a warning notice', async () => {
+      const failure = Object.assign(new Error('That file is not on disk any more'), {
+        name: 'FileNotFound',
+      });
+      const { editor } = fakeEditor({ failWith: failure });
+      const { controller, streams, posted, logs } = withOpenSession(undefined, editor);
+      emit(streams, 'session.step.ended', stepEnded('ses_1', ['src/a.ts']));
+      await flush();
+      await flush();
+      await controller.handle(open('src/a.ts'));
+      expect(posted.at(-1)).toMatchObject({
+        type: 'notice',
+        level: 'warning',
+        error: { code: 'FileNotFound' },
+      });
+      expect(logs.some((l) => l.startsWith('warn: session.diff.open failed: FileNotFound'))).toBe(
+        true,
+      );
+    });
+  });
+
+  describe('diffOriginal', () => {
+    it('rebuilds the old text from the complete patch of the range', async () => {
+      const { controller, streams, diffInputs } = withOpenSession();
+      emit(streams, 'session.step.ended', stepEnded('ses_1', ['src/a.ts']));
+      await flush();
+      await flush();
+      expect(await controller.diffOriginal('ses_1', 'src/a.ts')).toBe('one\ntwo\n');
+      expect(diffInputs.at(-1)).toEqual({ sessionID: 'ses_1', from: 'msg_1', to: 'msg_2' });
+    });
+
+    it('rejects a path that is not listed', async () => {
+      const { controller } = withOpenSession();
+      await expect(controller.diffOriginal('ses_1', 'src/a.ts')).rejects.toMatchObject({
+        name: 'DiffNotListed',
+      });
     });
   });
 });

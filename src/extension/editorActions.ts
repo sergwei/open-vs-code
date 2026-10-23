@@ -16,6 +16,7 @@ import { isInServedFolder, selectionLines, toEditorRef } from './fileMentions';
 import type { ServerLog } from './opencodeServer';
 import { resolveInsideFolder, toAttachmentName } from './pathPolicy';
 import { pickWorkspaceFolder } from './serverManager';
+import { openSessionDiff } from './sessionDiffEditor';
 
 /** Longest rejected path written to the log; our own cap, so a huge string cannot flood it. */
 const LOG_PATH_MAX = 200;
@@ -120,6 +121,8 @@ function readEditorContext(folder: string | undefined): EditorContext {
  * (the folder the SERVER serves) when the controller gives it, and only otherwise against the
  * folder the host would pick (issue #28: with several workspace folders a chip of the served one
  * must open); the multi-root case itself was not run. `editorContext` is {@link readEditorContext}.
+ * `openDiff` (issue #31) is {@link openSessionDiff}: the controller has already checked the
+ * whitelist, so it opens whatever target it is given.
  * VERIFIED in a real VS Code 1.142 on Windows 11 (20/10/2026, `npm run test:integration`): `newFile`
  * (with a known and an unknown language id), `insert` (a `$1`/`${name}` text stays verbatim),
  * `copy` and the refusal of `open` without a folder, all in `test/integration/editorActions.test.ts`.
@@ -207,6 +210,10 @@ export function createEditorActions(log: ServerLog): EditorActions {
 
     async copy(text) {
       await vscode.env.clipboard.writeText(text);
+    },
+
+    openDiff(target) {
+      return openSessionDiff(target);
     },
 
     async pickFiles() {

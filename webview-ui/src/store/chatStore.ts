@@ -50,6 +50,12 @@
  *    `SessionSummary.usage` (`session.upserted` reconciles it into the same row object) and the
  *    compaction boundary in `OpenView.compactedAt` (copied by `snapshot`, cleared when a snapshot
  *    brings none). The context itself is computed from the messages by `chat/usage.ts`.
+ *  - E7-session-diff (issue #31) adds `diff`, the "Changed files" list of the OPEN session. It is
+ *    replaced whole by each `session.diff` (reconciled by `path`, so a row keeps its object while
+ *    its counts change) and only if the message is for the open session; it is emptied whenever a
+ *    snapshot or a removal changes which session is open, and when the server goes away, because
+ *    the host forgets the list then and would refuse a click on it. Nothing is sent when the list
+ *    arrives: opening a file is the component's `session.diff.open`.
  * VERIFIED by `chatStore.test.ts` with fabricated messages (confirms this logic, not the host
  * contract). UNVERIFIED in a real webview until the F5 of issue #14.
  */
@@ -57,6 +63,7 @@ import { batch } from 'solid-js';
 import { createStore, produce, reconcile } from 'solid-js/store';
 import type {
   Catalog,
+  ChangedFile,
   ErrorInfo,
   FormAsk,
   MessageInfo,
@@ -178,6 +185,17 @@ export interface SelectionDraft {
   agent: string | undefined;
 }
 
+/**
+ * The "Changed files" list (issue #31). `sessionID` is the session it belongs to (always the open
+ * one, or `undefined` when there is no list); `error` says the host could not refresh it, with
+ * `files` the last list it had.
+ */
+export interface ChangedFilesState {
+  sessionID: string | undefined;
+  files: ChangedFile[];
+  error: ErrorInfo | undefined;
+}
+
 /** Everything the UI reads. */
 export interface ChatState {
   connection: ConnectionState;
@@ -193,6 +211,8 @@ export interface ChatState {
   sessionOps: { [sessionID: string]: SessionOp };
   /** The `@` popup's results (issue #28). */
   fileSearch: FileSearchState;
+  /** The changed files of the open session (issue #31). */
+  diff: ChangedFilesState;
   open: OpenView;
   /** Pending permissions and forms of ANY session of the location, in order of arrival. */
   requests: { permissions: PermissionAsk[]; forms: FormAsk[] };
@@ -293,6 +313,11 @@ function emptyFileSearch(): FileSearchState {
   return { requestId: undefined, query: '', files: [], loading: false, error: undefined };
 }
 
+/** No list: nothing changed, or no session open. */
+function emptyDiff(): ChangedFilesState {
+  return { sessionID: undefined, files: [], error: undefined };
+}
+
 /** Empty open view: no session yet. */
 function emptyOpen(): OpenView {
   return { sessionID: undefined, messages: [], parts: {} };
@@ -319,6 +344,7 @@ export function createChatStore(): ChatStore {
     },
     sessionOps: {},
     fileSearch: emptyFileSearch(),
+    diff: emptyDiff(),
     open: emptyOpen(),
     requests: { permissions: [], forms: [] },
     resolved: [],
@@ -417,6 +443,8 @@ export function createChatStore(): ChatStore {
           setState('requests', { permissions: [], forms: [] });
           setState('replying', reconcile({}));
           setState('requestErrors', reconcile({}));
+          // The host forgot the list with the server and would refuse a click on it (issue #31).
+          setState('diff', emptyDiff());
         }
       });
     },
@@ -445,6 +473,9 @@ export function createChatStore(): ChatStore {
       );
       rebuildIndexes();
       dropForeignSelection(open?.sessionID);
+      // The list belongs to one session: another one open (or none) must not show it. The host
+      // sends it again right after a snapshot when it holds one for the new session.
+      if (state.diff.sessionID !== open?.sessionID) setState('diff', emptyDiff());
       setState(
         'resolutions',
         reconcile(Object.fromEntries(snapshot.resolutions.map((entry) => [entry.id, entry]))),
@@ -532,6 +563,7 @@ export function createChatStore(): ChatStore {
           setState('resolutions', reconcile({}));
           rebuildIndexes();
           dropForeignSelection(undefined);
+          setState('diff', emptyDiff());
         }
       });
     },
@@ -724,6 +756,19 @@ export function createChatStore(): ChatStore {
 
     'ui.focus': (m) => {
       setState('focusTarget', m.target);
+    },
+
+    'session.diff': (m) => {
+      // Only the open session's list is shown; the host sends the list of a session it just left
+      // when a load finishes late, and that must not replace the one of the session on screen.
+      if (!isOpen(m.sessionID)) return;
+      batch(() => {
+        // Another session's rows must not be reconciled into this one's, or a path both have
+        // would keep the object (and the DOM) of the other.
+        if (state.diff.sessionID !== m.sessionID) setState('diff', emptyDiff());
+        setState('diff', { sessionID: m.sessionID, error: m.error });
+        setState('diff', 'files', reconcile(m.files, { key: 'path' }));
+      });
     },
 
     notice: (m) => {

@@ -11,6 +11,10 @@
  * E4-session-management (#20): samples and bounds for `sessions.query`, `session.rename`,
  * `session.delete` and `sessions.page`.
  *
+ * E7-session-diff (#31): samples for `session.diff` and `session.diff.open`, and the bounds of the
+ * path the webview may name (non-empty, no NUL, at most `MAX_DIFF_PATH_LENGTH`); whether the host
+ * lists that path is the handler's check, tested in `chatController.test.ts`.
+ *
  * ALL DATA HERE IS FABRICATED by hand from the types. These tests prove the logic of the
  * guards; they do NOT prove that opencode emits these shapes (that needs a real `opencode
  * serve`, issues #8/#9) nor that VS Code delivers them unchanged (issue #2, F5).
@@ -24,6 +28,7 @@ import {
   HOST_TO_WEBVIEW_TYPES,
   isHostToWebview,
   isWebviewToHost,
+  MAX_DIFF_PATH_LENGTH,
   MAX_FILE_SEARCH_LENGTH,
   MAX_SESSION_SEARCH_LENGTH,
   MAX_SESSION_TITLE_LENGTH,
@@ -181,6 +186,11 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
     files: [{ uri: 'file:///ws/src/a.ts', name: 'src/a.ts' }],
   },
   'ui.focus': { type: 'ui.focus', target: { kind: 'permission', sessionID: 's1', id: 'perm1' } },
+  'session.diff': {
+    type: 'session.diff',
+    sessionID: 's1',
+    files: [{ path: 'src/a.ts', status: 'modified', additions: 2, deletions: 1, binary: false }],
+  },
   notice: { type: 'notice', level: 'warning', error },
 };
 
@@ -230,6 +240,7 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   'server.restart': { type: 'server.restart' },
   'logs.show': { type: 'logs.show' },
   'editor.open': { type: 'editor.open', path: 'src/a.ts', line: 3, column: 1 },
+  'session.diff.open': { type: 'session.diff.open', sessionID: 's1', path: 'src/a.ts' },
   'editor.insert': { type: 'editor.insert', text: 'x' },
   'editor.newFile': { type: 'editor.newFile', text: 'x', language: 'ts' },
   'clipboard.write': { type: 'clipboard.write', text: 'x' },
@@ -458,6 +469,11 @@ describe('isWebviewToHost', () => {
     expect(isWebviewToHost({ ...base, line: Number.MAX_SAFE_INTEGER, column: 1 })).toBe(true);
   });
 
+  it('accepts a session.diff.open path of exactly the maximum length', () => {
+    const base = WEBVIEW_SAMPLES['session.diff.open'];
+    expect(isWebviewToHost({ ...base, path: 'a'.repeat(MAX_DIFF_PATH_LENGTH) })).toBe(true);
+  });
+
   it('only trusts plain objects and own properties', () => {
     const reply = WEBVIEW_SAMPLES['session.open'];
     // Everything read through the prototype chain must be ignored.
@@ -533,6 +549,12 @@ describe('isWebviewToHost', () => {
       { ...WEBVIEW_SAMPLES['editor.open'], line: 1.5 },
       { ...WEBVIEW_SAMPLES['editor.open'], column: '2' },
       { ...WEBVIEW_SAMPLES['editor.open'], path: '' },
+      // Issue #31: an empty session or path, a NUL, a path over the cap and a non-string path.
+      { ...WEBVIEW_SAMPLES['session.diff.open'], sessionID: '' },
+      { ...WEBVIEW_SAMPLES['session.diff.open'], path: '' },
+      { ...WEBVIEW_SAMPLES['session.diff.open'], path: 'src/a\0.ts' },
+      { ...WEBVIEW_SAMPLES['session.diff.open'], path: 'a'.repeat(MAX_DIFF_PATH_LENGTH + 1) },
+      { ...WEBVIEW_SAMPLES['session.diff.open'], path: 3 },
       { ...WEBVIEW_SAMPLES['form.reply'], answer: { q0: { nested: 'x' } } },
       { ...WEBVIEW_SAMPLES['form.reply'], answer: { q0: [1, 2] } },
       { ...WEBVIEW_SAMPLES['form.reply'], answer: { q0: Number.NaN } },

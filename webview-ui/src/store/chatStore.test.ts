@@ -1130,3 +1130,144 @@ describe('file search (issue #28)', () => {
     });
   });
 });
+
+// E7-session-diff (issue #31): the "Changed files" list. Protects: only the open session's list is
+// kept (the host may finish a load for a session the user just left), the list belongs to ONE
+// session (a snapshot that opens another one, a removal or a stopped server empties it), and a
+// row keeps its object while its counts change (`<For>` would rebuild its DOM otherwise).
+// Provenance: messages FABRICATED by hand in the shape of the protocol.
+describe('changed files (issue #31)', () => {
+  const file = (path: string, additions = 1) => ({
+    path,
+    status: 'modified' as const,
+    additions,
+    deletions: 0,
+    binary: false,
+  });
+  const list = (sessionID: string, files: ReturnType<typeof file>[]) => ({
+    type: 'session.diff' as const,
+    sessionID,
+    files,
+  });
+
+  it('keeps the list of the open session', () => {
+    withStore((store) => {
+      store.apply(list(SES, [file('src/a.ts'), file('src/b.ts')]));
+      expect(store.state.diff.sessionID).toBe(SES);
+      expect(store.state.diff.files.map((f) => f.path)).toEqual(['src/a.ts', 'src/b.ts']);
+      expect(store.state.diff.error).toBeUndefined();
+    });
+  });
+
+  it('drops a list for a session that is not the open one', () => {
+    withStore((store) => {
+      store.apply(list('ses_other', [file('src/a.ts')]));
+      expect(store.state.diff).toEqual({ sessionID: undefined, files: [], error: undefined });
+    });
+  });
+
+  it('replaces the whole list, and keeps the row object of a path whose counts changed', () => {
+    withStore((store) => {
+      store.apply(list(SES, [file('src/a.ts'), file('src/b.ts')]));
+      const before = store.state.diff.files[0];
+      store.apply(list(SES, [file('src/a.ts', 9)]));
+      expect(store.state.diff.files).toHaveLength(1);
+      expect(store.state.diff.files[0]).toBe(before);
+      expect(store.state.diff.files[0]?.additions).toBe(9);
+    });
+  });
+
+  it('shows an empty list as empty, and keeps the last rows with an error', () => {
+    withStore((store) => {
+      store.apply(list(SES, [file('src/a.ts')]));
+      store.apply({
+        ...list(SES, [file('src/a.ts')]),
+        error: { code: 'Boom', message: 'it broke' },
+      });
+      expect(store.state.diff.error).toEqual({ code: 'Boom', message: 'it broke' });
+      store.apply(list(SES, []));
+      expect(store.state.diff.files).toEqual([]);
+      expect(store.state.diff.error).toBeUndefined();
+    });
+  });
+
+  it('keeps the list across a snapshot of the same open session', () => {
+    withStore((store) => {
+      store.apply(list(SES, [file('src/a.ts')]));
+      store.apply({ type: 'snapshot', snapshot: openSnapshot() });
+      expect(store.state.diff.files.map((f) => f.path)).toEqual(['src/a.ts']);
+    });
+  });
+
+  it('empties the list when a snapshot opens another session or none', () => {
+    withStore((store) => {
+      store.apply(list(SES, [file('src/a.ts')]));
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...openSnapshot(), open: { sessionID: 'ses_2', messages: [], parts: {} } },
+      });
+      expect(store.state.diff).toEqual({ sessionID: undefined, files: [], error: undefined });
+      store.apply(list('ses_2', [file('src/b.ts')]));
+      const { open: _none, ...withoutOpen } = openSnapshot();
+      store.apply({ type: 'snapshot', snapshot: withoutOpen });
+      expect(store.state.diff.files).toEqual([]);
+    });
+  });
+
+  it('does not mix the rows of two sessions that share a path', () => {
+    withStore((store) => {
+      store.apply(list(SES, [file('src/a.ts', 3)]));
+      const before = store.state.diff.files[0];
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...openSnapshot(), open: { sessionID: 'ses_2', messages: [], parts: {} } },
+      });
+      store.apply(list('ses_2', [file('src/a.ts', 8)]));
+      expect(store.state.diff.sessionID).toBe('ses_2');
+      expect(store.state.diff.files[0]?.additions).toBe(8);
+      expect(store.state.diff.files[0]).not.toBe(before);
+    });
+  });
+
+  it('empties the list when the open session is removed', () => {
+    withStore((store) => {
+      store.apply(list(SES, [file('src/a.ts')]));
+      store.apply({ type: 'session.removed', sessionID: SES });
+      expect(store.state.diff.files).toEqual([]);
+    });
+  });
+
+  it('keeps it when ANOTHER session is removed', () => {
+    withStore((store) => {
+      store.apply(list(SES, [file('src/a.ts')]));
+      store.apply({ type: 'session.removed', sessionID: 'ses_other' });
+      expect(store.state.diff.files).toHaveLength(1);
+    });
+  });
+
+  it('empties the list when the server is starting, unavailable or stopped', () => {
+    for (const connection of [
+      { state: 'starting' },
+      { state: 'stopped' },
+      {
+        state: 'unavailable',
+        reason: 'exited',
+        error: { code: 'exited', message: 'gone' },
+      },
+    ] as const) {
+      withStore((store) => {
+        store.apply(list(SES, [file('src/a.ts')]));
+        store.apply({ type: 'connection.state', connection });
+        expect(store.state.diff.files, connection.state).toEqual([]);
+      });
+    }
+  });
+
+  it('keeps it while reconnecting (the same server is still there)', () => {
+    withStore((store) => {
+      store.apply(list(SES, [file('src/a.ts')]));
+      store.apply({ type: 'connection.state', connection: { state: 'reconnecting', attempt: 1 } });
+      expect(store.state.diff.files).toHaveLength(1);
+    });
+  });
+});

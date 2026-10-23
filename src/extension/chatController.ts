@@ -54,6 +54,14 @@
 // `offeredUris` (search results, capped). New stable log lines, counts only: `file search: <n>
 // results`, `file search failed: <code>`, `editor context added: <n> file(s), <m> selection(s)`.
 // Neither the query nor any path is logged.
+//
+// E7-session-diff (issue #31, plan Engram #1150, decisions #1152-#1154): the "Changed files" list of
+// the open session (first user message to last) and its native diffs. The state, the whitelist and
+// the reconstruction of the original text live in `sessionDiff.ts`; this file only reloads the list
+// on the events that can change it (`watchChangedFiles`), re-sends it after a snapshot, and handles
+// `session.diff.open` (`openChangedFile`) and the originals (`diffOriginal`). New stable log lines,
+// counts and ids only, never a path: `session diff: <n> files for <sid>`, `session diff failed:
+// <code>`, `diff opened (<status>[, file only])`, `diff open refused: not listed|session not open`.
 
 import type { V2Event } from '@opencode/client';
 import type { Catalog, ErrorInfo, ModelRef, SessionStatus, SessionSummary } from '../shared/model';
@@ -80,6 +88,7 @@ import { createPendingRequests, type PendingSummary } from './pendingRequests';
 import { createRequestResolutions } from './requestResolutions';
 import type { RunningServerInfo, ServerState } from './serverManager';
 import { createSessionBrowser } from './sessionBrowser';
+import { createSessionDiffs, type DiffTarget, type SessionDiffs } from './sessionDiff';
 import {
   lastCompactionAt,
   toAgentOptions,
@@ -196,6 +205,14 @@ export interface EditorActions {
    * emitted itself).
    */
   pickFiles(): Promise<AttachmentRef[]>;
+  /**
+   * Issue #31: opens the native diff editor for a file the host listed in "Changed files" (the
+   * caller already checked the whitelist), original on the left and the file on disk on the right.
+   * Resolves `'diff'` when it did, or `'file'` when there is no text diff to show (a binary, or a
+   * patch the server cut) and the file itself was opened instead; rejects with `FileNotFound` when
+   * there is nothing to open. See {@link DiffTarget}.
+   */
+  openDiff(target: DiffTarget): Promise<'diff' | 'file'>;
 }
 
 /**
@@ -370,6 +387,9 @@ const EMPTY_SNAPSHOT: Snapshot = {
  * `pickedUris` for the dialog and the editor, whose threat model is on that field) and forwards a
  * file's `mention` only when it
  * points at the prompt text it claims. `editor.open` is resolved against the SERVED folder.
+ * Issue #31 (`E7-session-diff`, plan Engram #1150) adds the "Changed files" list: `diffs`
+ * (`sessionDiff.ts`) loads it for the OPEN session on the events of {@link watchChangedFiles} and
+ * after every snapshot, and the host opens a diff (`session.diff.open`) only for a path it listed.
  * VERIFIED with a fake client (unit tests) and against a synthetic HTTP/SSE server
  * (`chatController.e2e.test.ts`, real client and stream loop). The permission and question flows
  * against a real opencode are exercised only by the opt-in `realOpencode.test.ts` (see its
@@ -465,10 +485,27 @@ export class ChatController {
   private catalogEpoch = 0;
   /** The `defaultModel` setting value the user was last told about, so it is told once. */
   private ignoredSettingNoticed: string | undefined;
+  /** The "Changed files" list of the open session and the originals of its diffs (issue #31). */
+  private readonly diffs: SessionDiffs;
 
+  /**
+   * Wires the injected effects and the "Changed files" holder (issue #31), which reads the client,
+   * the served folder and the open session through getters, so a new server or a session change
+   * is seen by a load that is already in flight.
+   */
   constructor(private readonly deps: ChatControllerDeps) {
     this.log = safeLog(deps.log);
     this.runStream = deps.runStream ?? runEventStream;
+    this.diffs = createSessionDiffs({
+      client: () => this.client,
+      folder: () => this.server?.folder,
+      open: () => this.open,
+      post: (message) => {
+        this.post(message);
+      },
+      log: this.log,
+      describe: (error) => toErrorInfo(error, this.secrets),
+    });
   }
 
   /** URL and password of the current server, for scrubbing error texts. */
@@ -570,12 +607,15 @@ export class ChatController {
    * goes too (it described that server) and a catalog load in flight is cut off from publishing.
    * A file search in flight is aborted (its answer would describe the old server); `offeredUris`
    * stays, like `pickedUris`, so a chip pending in the webview survives Restart Server.
+   * The "Changed files" list and its originals go too (issue #31): the paths belong to the old
+   * server, and a load in flight is cut off; the next snapshot brings the list back.
    */
   private stopStream(): void {
     this.streamAbort?.abort();
     this.streamAbort = undefined;
     this.fileSearch?.abort();
     this.fileSearch = undefined;
+    this.diffs.reset();
     this.client = undefined;
     this.server = undefined;
     this.generation++; // a snapshot in flight for the old server must not be published
@@ -659,6 +699,8 @@ export class ChatController {
    * `realOpencode.test.ts` waits for. HYPOTHESIS: a resync with a turn in flight (automatic
    * compaction mid-turn) keeps the in-flight message through `mergeLive`/`mergeStatuses`, which were
    * built for that but never run with a compaction.
+   * Issue #31: {@link watchChangedFiles} looks at the events that go on to the translator (before
+   * it) and reloads the "Changed files" list when the open session's files may have changed.
    */
   private onEvent(event: V2Event): void {
     try {
@@ -688,6 +730,7 @@ export class ChatController {
           total.input + total.output + total.reasoning + total.cache.read + total.cache.write;
         this.log.info(`usage updated for ${event.data.sessionID}: ${String(count)} tokens`);
       }
+      this.watchChangedFiles(event);
       if (
         event.type === 'session.compaction.ended' &&
         this.open !== undefined &&
@@ -727,6 +770,43 @@ export class ChatController {
   }
 
   /**
+   * Reloads the "Changed files" list (issue #31) when an event says the open session's files may
+   * have changed: a step that ended or failed with a non-empty `files` (the paths that differ
+   * between the snapshot taken at its start and the one at its end; absent or empty when it
+   * touched nothing, or when there are no snapshots), or any `session.revert.*` of the open
+   * session. A committed revert also forgets the cached first message of the range, because the
+   * messages it removes can include it. Events of other sessions (a subagent's) are ignored: the
+   * list is the open session's. Does not stop the event: the caller still translates it.
+   * `filesystem.changed` is deliberately NOT used: it fires for any edit of any file.
+   * HYPOTHESIS: the field names `files` and `snapshot` of `step.ended` are as typed in
+   * `@opencode/client@2.0.32`; the synthetic server emits them on its `EDIT_FILES` turn only, and no
+   * real turn that edited files was observed.
+   */
+  private watchChangedFiles(event: V2Event): void {
+    const open = this.open;
+    if (open === undefined) return;
+    switch (event.type) {
+      case 'session.step.ended':
+      case 'session.step.failed':
+        if (event.data.sessionID === open && (event.data.files?.length ?? 0) > 0) {
+          void this.diffs.request(open);
+        }
+        return;
+      case 'session.revert.committed':
+        if (event.data.sessionID !== open) return;
+        this.diffs.forgetRange(open);
+        void this.diffs.request(open);
+        return;
+      case 'session.revert.staged':
+      case 'session.revert.cleared':
+        if (event.data.sessionID === open) void this.diffs.request(open);
+        return;
+      default:
+        return;
+    }
+  }
+
+  /**
    * Sends translated messages to the webview through the host-side bookkeeping: the registry of
    * pending requests (and `live`), the open-session check of {@link onSessionRemoved} and the memory
    * of answered requests; the attention feature is told once if the pending set changed. Used for
@@ -751,9 +831,11 @@ export class ChatController {
    * `this.open` and `workspaceState` pointed at it until a resync got a 404). The webview empties
    * its own view when it receives the same `session.removed`. An info notice says so unless the
    * delete was ours (`deleting`). Idempotent: the second report finds `open` already cleared.
+   * Whatever it was, the session's "Changed files" state is forgotten (issue #31).
    */
   private onSessionRemoved(sessionID: string): void {
     const ours = this.deleting.delete(sessionID);
+    this.diffs.forget(sessionID);
     if (sessionID !== this.open) return;
     this.log.info(`open session deleted ${sessionID}`);
     void this.forgetOpen();
@@ -949,6 +1031,9 @@ export class ChatController {
    * arrived during the reads wins over the older REST totals), and `open.compactedAt` is the
    * `time.created` of the last completed compaction among the messages read (`lastCompactionAt`).
    * The 200-message window is the only horizon: a compaction older than it is not seen.
+   * Issue #31: once the snapshot is out and a session is open, the "Changed files" list the host
+   * holds for it is sent again (the webview state was just replaced) and a reload is requested,
+   * fire and forget; it never delays or fails the snapshot.
    */
   async resync(): Promise<void> {
     const client = this.client;
@@ -1067,6 +1152,12 @@ export class ChatController {
         },
       });
       this.log.info(`snapshot sent (${String(rows.length)} sessions, open ${this.open ?? 'none'})`);
+      // Issue #31: the webview replaced its state with this snapshot, so the held list is sent
+      // again (a new document starts without one) and then refreshed.
+      if (this.open !== undefined) {
+        this.diffs.resend(this.open);
+        void this.diffs.request(this.open);
+      }
     } catch (error) {
       if (generation !== this.generation || this.disposed) return;
       const info = toErrorInfo(error, this.secrets);
@@ -1457,6 +1548,78 @@ export class ChatController {
       this.log.warn(`${type} failed: ${info.code}: ${info.message}`);
       this.post({ type: 'notice', level: 'warning', error: info });
     }
+  }
+
+  /**
+   * `session.diff.open` (issue #31): opens the native diff of one row of "Changed files".
+   *
+   * The webview is untrusted, so the host opens a file only if it LISTED that `path` for that very
+   * session and the session is the open one (`SessionDiffs.target`); the path was already checked
+   * to lie inside the served folder when the list was built. Anything else is refused with a
+   * `warning` notice and the log line `diff open refused: not listed` or `diff open refused:
+   * session not open`, which carries no path (it is a file name of the user's project, and the
+   * rejected one was chosen by the webview). A success logs `diff opened (<status>)`, or `diff
+   * opened (<status>, file only)` when the editor side had no text diff and opened the file, and
+   * the user is told so with an `info` notice. An editor failure becomes a `warning` notice like
+   * the other editor actions. Never throws.
+   * VERIFIED by `chatController.test.ts` with a fake editor (refusals call nothing, a listed path
+   * calls `openDiff` with the absolute path of the served folder) and, in a real VS Code 1.143
+   * (Windows 11, 23/10/2026, synthetic server), by the `fakeServer.test.ts` checks "lists the files
+   * an edit turn changed and opens the native diff of one" and "refuses to open a diff for a path
+   * it did not list", and by the `test:visual` check "a diff editor opens in the active tab
+   * "sample.ts"". macOS and Linux UNVERIFIED.
+   */
+  private async openChangedFile(sessionID: string, shown: string): Promise<void> {
+    const checked = this.diffs.target(sessionID, shown);
+    if (!checked.ok) {
+      this.log.warn(`diff open refused: ${checked.reason}`);
+      this.post({
+        type: 'notice',
+        level: 'warning',
+        error: {
+          code: 'DiffNotListed',
+          message: 'That file is not in the changed files of this session any more',
+        },
+      });
+      return;
+    }
+    await this.editorAction('session.diff.open', async () => {
+      const opened = await this.deps.editor.openDiff(checked.target);
+      this.log.info(
+        opened === 'diff'
+          ? `diff opened (${checked.target.status})`
+          : `diff opened (${checked.target.status}, file only)`,
+      );
+      if (opened === 'file') {
+        this.post({
+          type: 'notice',
+          level: 'info',
+          error: {
+            code: 'NoTextDiff',
+            message: 'There is no text diff for this file, so the file itself was opened',
+          },
+        });
+      }
+    });
+  }
+
+  /**
+   * The text `shown` had before the open session changed it, for the read-only document on the left
+   * of a diff (called by the content provider of `sessionDiffEditor.ts`). Rejects with
+   * `DiffNotListed` when the path is not one the host listed for the open session, and with
+   * `NoTextDiff` when the original cannot be rebuilt; VS Code then shows the message in the editor.
+   */
+  diffOriginal(sessionID: string, shown: string): Promise<string> {
+    return this.diffs.original(sessionID, shown);
+  }
+
+  /**
+   * Subscribes to "the originals of this session may have changed" (a new list or a moved range,
+   * see `SessionDiffs.onRenewed`); the content provider re-reads its open documents on it.
+   * Returns the unsubscribe function.
+   */
+  onDiffRenewed(listener: (sessionID: string) => void): () => void {
+    return this.diffs.onRenewed(listener);
   }
 
   /**
@@ -1884,6 +2047,7 @@ export class ChatController {
    * server; a failure becomes a `warning` notice (those messages carry no `requestId`).
    * Issues #28/#29: `files.search` asks the server for files (answer `files.found`) and
    * `attachments.fromEditor` takes the active file or selections from the editor.
+   * Issue #31: `session.diff.open` opens the native diff of a listed changed file.
    * Phase 3: `permission.reply`, `form.reply` and `form.cancel` call the server (a reply that fails
    * because the request is gone also resyncs, since the snapshot tells the truth);
    * `permissions.manage` runs the saved-permissions manager; `server.restart` and `logs.show` go
@@ -1957,6 +2121,9 @@ export class ChatController {
             this.deps.editor.open(m.path, m.line, m.column, this.server?.folder),
           ),
         );
+      },
+      'session.diff.open': (m) => {
+        pending.push(this.openChangedFile(m.sessionID, m.path));
       },
       'editor.insert': (m) => {
         pending.push(this.editorAction(m.type, () => this.deps.editor.insert(m.text)));

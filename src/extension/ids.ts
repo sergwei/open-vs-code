@@ -89,5 +89,12 @@ export const CLEAR_SERVER_PASSWORD_COMMAND_ID = 'openVsCode.clearServerPassword'
  */
 export const TEST_SET_SERVER_PASSWORD_COMMAND_ID = 'openVsCode.test.setServerPassword';
 
+/**
+ * URI scheme of the read-only documents that hold the ORIGINAL side of a "Changed files" diff
+ * (issue #31). Registered by `registerSessionDiffProvider` in `sessionDiffEditor.ts`. Not a
+ * contributed id, so `manifest.test.ts` neither demands nor checks it.
+ */
+export const SESSION_DIFF_SCHEME = 'openvscode-diff';
+
 /** Display name of the log output channel. */
 export const LOG_CHANNEL_NAME = 'OpenCode';
