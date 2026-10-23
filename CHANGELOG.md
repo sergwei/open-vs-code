@@ -19,6 +19,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `openVsCode.serverUrl`, with its password kept in VS Code's SecretStorage (issue #11).
 - Chat view in the Activity Bar with a prompt box, streaming replies and a status line inside the
   chat that shows the connection state (issues #12, #13, #14).
+- Attach files by right-clicking them in the Explorer (**Add to OpenCode Chat**) or by dragging
+  them onto the prompt box **while holding Shift**, and paste images (PNG, JPEG, GIF, WebP, up to
+  10 MiB) with Ctrl/Cmd+V (issue #30). An image dropped from the system's file manager is attached
+  like a pasted one; any other file from there is refused with a notice. Retry, "Fork from here"
+  and "Revert from here" do not re-attach pasted images. In VS Code 1.140 or later the Explorer drop is reported not to reach
+  extension views at all
+  ([microsoft/vscode#339036](https://github.com/microsoft/vscode/issues/339036), not reproduced
+  here); the menu command, Attach and `@` mentions keep working.
 - Markdown rendering while streaming, syntax highlighting, and code actions (copy, insert at the
   cursor, open in a new file, open `path:line` references) (issue #15).
 - Stop button and Escape to interrupt a turn, a neutral "Stopped" note, and readable error
