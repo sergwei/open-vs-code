@@ -3454,6 +3454,244 @@ try {
     await contrastInThemes('high');
     assertNoWebviewErrors('context line');
   });
+
+  // Issue #31 (E7-session-diff): the "Changed files" list under the header and the native diff.
+  // An EDIT_FILES turn of the synthetic server changes four files of the temporary workspace (in
+  // `visual` mode it really writes them): a modified `src/sample.ts` (`value2 = 2` becomes `value2 =
+  // 22`), an added `src/added.ts`, a deleted `src/removed.ts` (this step creates it first) and an
+  // added binary `assets/logo.png`. The step opens the list with the real mouse, reads the rows,
+  // measures their contrast in the four themes, opens each kind of row and looks at the workbench:
+  // the diff editor with the original on the left and the file on the right, an empty right side
+  // for the deleted one, an empty left side for the added one, and the image itself (no diff) for
+  // the binary. The deleted row is reached with the keyboard (Tab, Tab, Tab, Enter) to prove a row
+  // is a button a keyboard user can press.
+  await step('18 changed files and native diff (issue #31)', async () => {
+    const THEMES = [
+      ['light', 'Default Light Modern'],
+      ['dark', 'Default Dark Modern'],
+      ['hc-dark', 'Default High Contrast'],
+      ['hc-light', 'Default High Contrast Light'],
+    ];
+    // Side by side even in a narrow editor group: the inline view would hide the left side.
+    writeSettings(vscode.userDataDir, {
+      'diffEditor.renderSideBySide': true,
+      'diffEditor.useInlineViewWhenSpaceIsLimited': false,
+    });
+    // The file the turn deletes has to exist before the turn.
+    fs.writeFileSync(path.join(workspace, 'src', 'removed.ts'), 'export const removed = true;\n');
+    assertNoWebviewErrors('before the changed files step');
+    check(await clickButton('New session'), 'New session is pressed');
+    await page.waitForTimeout(1500);
+
+    /** The list: summary text, whether it is open, and the rows with their words and names. */
+    const list = () =>
+      web.inDoc((doc) => {
+        const details = doc.querySelector('details.changed-files');
+        if (!details) return null;
+        const area = doc.querySelector('.header-area');
+        return {
+          summary: details.querySelector('summary')?.textContent ?? '',
+          open: details.open,
+          inHeaderArea: details.parentElement === area,
+          rows: [...details.querySelectorAll('button.changed-file')].map((button) => ({
+            path: button.querySelector('.session-title')?.textContent ?? '',
+            meta: button.querySelector('.session-meta')?.textContent ?? '',
+            name: button.getAttribute('aria-label') ?? '',
+          })),
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+          overflowPx: details.scrollWidth - details.clientWidth,
+        };
+      });
+    check((await list()) === null, 'a new session shows no "Changed files"');
+
+    await send('EDIT_FILES: change a few files');
+    check(await waitIdle(30_000), 'the edit turn finished');
+    const appeared = await waitFor(async () => (await list()) !== null, 20_000);
+    check(appeared !== undefined, 'the "Changed files" list appears once the step reports files');
+    const closed = await list();
+    console.log(`  list: ${JSON.stringify(closed)}`);
+    check(
+      closed?.summary === 'Changed files (4)',
+      `the summary counts the files (${JSON.stringify(closed?.summary)})`,
+    );
+    check(closed?.open === false, 'the list is closed by default');
+    check(closed?.inHeaderArea === true, 'the list sits in the header area under the title bar');
+    check(
+      closed?.styled === 0,
+      `no inline style attribute in the body (${String(closed?.styled)})`,
+    );
+    await shot('18a-changed-files-closed');
+
+    // Open it with the real mouse on the summary.
+    check(await clickIn('details.changed-files > summary'), 'the summary is pressed');
+    const opened = await waitFor(async () => (await list())?.open === true, 5_000, 200);
+    check(opened === true, 'a press on the summary opens the list');
+    const rows = (await list())?.rows ?? [];
+    console.log(`  rows: ${JSON.stringify(rows)}`);
+    check(
+      JSON.stringify(rows.map((row) => [row.path, row.meta])) ===
+        JSON.stringify([
+          ['assets/logo.png', 'Binary'],
+          ['src/added.ts', 'Added · +1 −0'],
+          ['src/removed.ts', 'Deleted · +0 −1'],
+          ['src/sample.ts', 'Modified · +1 −1'],
+        ]),
+      `the rows say the path, the status in words and the counts (${rows.map((row) => `${row.path}: ${row.meta}`).join(' | ')})`,
+    );
+    check(
+      rows.length === 4 &&
+        rows[3]?.name === 'Open diff of src/sample.ts, Modified, 1 added, 1 deleted' &&
+        rows[0]?.name === 'Open assets/logo.png, Binary',
+      `each row is a button with a sentence for its name (${rows.map((row) => row.name).join(' | ')})`,
+    );
+    check(
+      ((await list())?.overflowPx ?? 99) <= 1,
+      `the list fits its width (overflow ${String((await list())?.overflowPx)} px)`,
+    );
+    await shot('18b-changed-files-open');
+
+    // --- Contrast of the summary, the path and the status line, four themes -------------------
+    for (const [name, theme] of THEMES) {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+      const look = await web.inDoc(measureText, {
+        summary: 'details.changed-files > summary',
+        path: 'button.changed-file .session-title',
+        meta: 'button.changed-file .session-meta',
+      });
+      console.log(`  changed files ${name}: ${JSON.stringify(look)}`);
+      for (const [part, measured] of Object.entries(look)) {
+        check(
+          measured !== null && measured !== undefined && measured.ratio >= 4.5,
+          `the ${part} text of the changed files has contrast >= 4.5 in ${name} (${measured ? measured.ratio.toFixed(2) : 'not found'})`,
+        );
+      }
+      await shot(`18c-changed-files-${name}`);
+    }
+    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
+    await page.waitForTimeout(2500);
+
+    /** The two sides of the diff editor in view, as text; `null` when no diff editor is shown. */
+    const diffSides = () =>
+      page.evaluate(() => {
+        const editor = globalThis.document.querySelector('.monaco-diff-editor');
+        if (!editor) return null;
+        const read = (side) =>
+          [...editor.querySelectorAll(`.editor.${side} .view-line`)]
+            // eslint-disable-next-line no-irregular-whitespace -- the next line strips a literal no-break space
+            .map((line) => (line.textContent ?? '').replace(/ /g, ' '))
+            .join('\n');
+        return { original: read('original'), modified: read('modified') };
+      });
+    /** Waits for the active tab named `file` with a diff editor whose left side has settled. */
+    const waitForDiff = (file) =>
+      waitFor(
+        async () => {
+          const tabs = await page.locator(`.tab.active[aria-label*="${file}"]`).count();
+          const sides = await diffSides();
+          // Monaco renders the lines a moment after the editor exists: wait for some text.
+          const drawn = sides !== null && (sides.original !== '' || sides.modified !== '');
+          return tabs > 0 && drawn ? sides : undefined;
+        },
+        15_000,
+        300,
+      );
+
+    // --- The modified file, by a real mouse press -------------------------------------------------
+    check(
+      await clickIn('button.changed-file[aria-label*="src/sample.ts"]'),
+      'the row of src/sample.ts is pressed',
+    );
+    const modified = await waitForDiff('sample.ts');
+    check(modified !== undefined, 'a diff editor opens in the active tab "sample.ts"');
+    console.log(`  modified sides: ${JSON.stringify(modified)}`);
+    check(
+      modified?.original.includes('export const value2 = 2;') === true &&
+        !modified.original.includes('value2 = 22'),
+      'the LEFT side holds the original line (value2 = 2)',
+    );
+    check(
+      modified?.modified.includes('export const value2 = 22;') === true,
+      'the RIGHT side holds the new line (value2 = 22)',
+    );
+    const title = await page.locator('.tab.active[aria-label*="sample.ts"]').first().innerText();
+    check(
+      title.includes('(OpenCode session)'),
+      `the tab is titled with the path and "(OpenCode session)" (${JSON.stringify(title)})`,
+    );
+    await shot('18d-diff-modified');
+    await command('View: Close All Editors');
+    await sleep(500);
+
+    // --- The deleted file, with the keyboard ----------------------------------------------------
+    await clickIn('details.changed-files > summary'); // focus enters the iframe, closes the list
+    await clickIn('details.changed-files > summary'); // and opens it again
+    await sleep(400);
+    for (let tabs = 0; tabs < 3; tabs++) {
+      await page.keyboard.press('Tab');
+      await sleep(150);
+    }
+    const focused = await web.inDoc((doc) => doc.activeElement?.getAttribute('aria-label') ?? '');
+    check(
+      focused === 'Open diff of src/removed.ts, Deleted, 0 added, 1 deleted',
+      `three Tabs from the summary reach the deleted row (${JSON.stringify(focused)})`,
+    );
+    await page.keyboard.press('Enter');
+    const deleted = await waitForDiff('removed.ts');
+    check(deleted !== undefined, 'Enter on the deleted row opens a diff editor');
+    console.log(`  deleted sides: ${JSON.stringify(deleted)}`);
+    check(
+      deleted?.original.includes('export const removed = true;') === true,
+      'the LEFT side holds the text the session removed',
+    );
+    check(deleted?.modified.trim() === '', 'the RIGHT side of a deleted file is empty');
+    await shot('18e-diff-deleted');
+    await command('View: Close All Editors');
+    await sleep(500);
+
+    // --- The added file ---------------------------------------------------------------------------
+    check(
+      await clickIn('button.changed-file[aria-label*="src/added.ts"]'),
+      'the row of src/added.ts is pressed',
+    );
+    const added = await waitForDiff('added.ts');
+    check(added !== undefined, 'a diff editor opens for the added file');
+    console.log(`  added sides: ${JSON.stringify(added)}`);
+    check(added?.original.trim() === '', 'the LEFT side of an added file is empty');
+    check(
+      added?.modified.includes('export const added = true;') === true,
+      'the RIGHT side holds the new file',
+    );
+    await shot('18f-diff-added');
+    await command('View: Close All Editors');
+    await sleep(500);
+
+    // --- The binary: no diff, the file itself and a notice ----------------------------------------
+    check(
+      await clickIn('button.changed-file[aria-label*="logo.png"]'),
+      'the row of assets/logo.png is pressed',
+    );
+    const logoTab = await waitFor(
+      async () => (await page.locator('.tab.active[aria-label*="logo.png"]').count()) > 0,
+      15_000,
+      300,
+    );
+    check(logoTab === true, 'the binary opens its own file in the active tab "logo.png"');
+    check((await diffSides()) === null, 'a binary opens no diff editor');
+    const told = await waitFor(
+      () => web.inDoc((doc) => (doc.body?.innerText ?? '').includes('no text diff for this file')),
+      10_000,
+      300,
+    );
+    check(told === true, 'the chat says there is no text diff for that file');
+    await shot('18g-binary-opened');
+    await command('View: Close All Editors');
+    await sleep(500);
+
+    assertNoWebviewErrors('changed files');
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
