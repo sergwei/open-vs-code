@@ -1,0 +1,46 @@
+[
+  {
+    "path": "location.*",
+    "kind": "path-only-real",
+    "reason": "envelope metadata the host ignores, on any event (0 uses of `location` or `durable` in src/extension and webview-ui/src, grep 23/10/2026)"
+  },
+  {
+    "path": "durable.*",
+    "kind": "path-only-real",
+    "reason": "envelope metadata the host ignores, on any event (0 uses of `location` or `durable` in src/extension and webview-ui/src, grep 23/10/2026)"
+  },
+  {
+    "event": "session.created",
+    "path": "data.subpath",
+    "kind": "path-only-real",
+    "reason": "the host ignores the session subpath (0 uses of `subpath` in src/extension and webview-ui/src, grep 23/10/2026)"
+  },
+  {
+    "event": "session.instructions.updated",
+    "kind": "event-only-real",
+    "reason": "the host ignores it (0 uses of `session.instructions.updated`; the translator default branch drops it); a model-less fake has no instructions to report"
+  },
+  {
+    "event": "session.step.streamed",
+    "kind": "event-only-real",
+    "reason": "the host ignores it (0 uses of `session.step.streamed`; the translator default branch drops it)"
+  },
+  {
+    "event": "session.reasoning.started",
+    "path": "data.state.*",
+    "kind": "path-only-real",
+    "reason": "provider bookkeeping the host ignores (0 uses of `reasoningField` or reasoning `data.state` in src/extension and webview-ui/src, grep 23/10/2026)"
+  },
+  {
+    "event": "session.reasoning.ended",
+    "path": "data.state.*",
+    "kind": "path-only-real",
+    "reason": "provider bookkeeping the host ignores (0 uses of `reasoningField` or reasoning `data.state` in src/extension and webview-ui/src, grep 23/10/2026)"
+  },
+  {
+    "event": "session.step.ended",
+    "path": "data.rawFinish",
+    "kind": "path-only-real",
+    "reason": "the host reads `finish`, not the provider's raw finish string (0 uses of `rawFinish`, grep 23/10/2026)"
+  }
+]
