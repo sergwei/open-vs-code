@@ -35,6 +35,7 @@ import {
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
   RESTART_SERVER_COMMAND_ID,
+  SESSION_DIFF_SCHEME,
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
 import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
@@ -69,6 +70,8 @@ function countOf(log: LogCursor, text: string): number {
 
 describe('fake server', function () {
   this.timeout(60_000);
+  // The session of the edit turn (issue #31), for the case that follows it: they share the server.
+  let editedSessionID: string | undefined;
 
   before(async function () {
     // Fails loudly (not a skip) when run through the wrong configuration: this suite is not opt-in.
@@ -449,6 +452,116 @@ describe('fake server', function () {
     assert.fail(
       `${file} did not become the active editor; active: ${vscode.window.activeTextEditor?.document.uri.fsPath ?? '(none)'}`,
     );
+  });
+
+  /**
+   * An `EDIT_FILES` turn makes the host list four changed files, and `session.diff.open` opens the
+   * native diff editor for a listed one: original on the left (a virtual document of the
+   * extension's scheme holding the text rebuilt from the complete patch), the real file on the
+   * right; a deleted file has an empty virtual document on the right (issue #31).
+   *
+   * Protects: the `files` of `session.step.ended` triggering the load, the content provider being
+   * registered (a diff tab restored after Reload Window needs it too), the choice of the two sides
+   * and the language-less virtual URI carrying only the session id. Provenance: the SYNTHETIC
+   * server (its patches and `files` are the reading of the server, not a real turn).
+   */
+  it('lists the files an edit turn changed and opens the native diff of one', async function () {
+    const file = path.join(workspaceFolderPath(), 'src', 'sample.ts');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, SAMPLE_TS);
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    const log = await openLogCursor();
+    await sendPrompt(log, 'EDIT_FILES: change a few files');
+    const listed = await matchInLog(
+      log,
+      /session diff: (\d+) files for (ses_\S+)/,
+      TURN_WAIT_MS,
+      'the changed files list',
+    );
+    assert.strictEqual(listed[1], '4', `log:\n${log.added()}`);
+    const sessionID = listed[2];
+    assert.ok(sessionID, 'session id missing from the log line');
+    editedSessionID = sessionID;
+    await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+
+    const openDiff = async (relative: string): Promise<vscode.TabInputTextDiff> => {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+        type: 'session.diff.open',
+        sessionID,
+        path: relative,
+      });
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline) {
+        const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+        if (input instanceof vscode.TabInputTextDiff) return input;
+        await sleep(100);
+      }
+      return assert.fail(`no diff tab opened for ${relative}; log:\n${log.added()}`);
+    };
+    const same = (a: string, b: string): boolean =>
+      process.platform === 'win32'
+        ? a.toLowerCase() === b.toLowerCase()
+        : path.normalize(a) === path.normalize(b);
+
+    // Modified: the original is rebuilt from the patch; the right side is the file on disk.
+    const modified = await openDiff('src/sample.ts');
+    assert.strictEqual(modified.original.scheme, SESSION_DIFF_SCHEME);
+    assert.ok(!modified.original.toString().includes('127.0.0.1'), 'the URI must not carry a port');
+    assert.strictEqual(modified.modified.scheme, 'file');
+    assert.ok(same(modified.modified.fsPath, file), `right side: ${modified.modified.fsPath}`);
+    const before = await vscode.workspace.openTextDocument(modified.original);
+    assert.strictEqual(
+      before.getText(),
+      '// Sample file for the visual test run.\nexport const value2 = 2;\n',
+    );
+    assert.ok(log.added().includes('diff opened (modified)'), `log:\n${log.added()}`);
+
+    // Deleted: the original holds the removed text and the right side is an empty virtual document.
+    const deleted = await openDiff('src/removed.ts');
+    assert.strictEqual(deleted.modified.scheme, SESSION_DIFF_SCHEME);
+    assert.strictEqual(
+      (await vscode.workspace.openTextDocument(deleted.original)).getText(),
+      'export const removed = true;\n',
+    );
+    assert.strictEqual((await vscode.workspace.openTextDocument(deleted.modified)).getText(), '');
+
+    // Added and not on disk (the synthetic server wrote nothing): empty on both sides.
+    const added = await openDiff('src/added.ts');
+    assert.strictEqual((await vscode.workspace.openTextDocument(added.original)).getText(), '');
+    assert.ok(log.added().includes('diff opened (added)'), `log:\n${log.added()}`);
+  });
+
+  /**
+   * The host opens a diff only for a path it listed: a path outside the folder, one never listed
+   * and a listed path asked for another session are refused with a log line, and no tab opens.
+   *
+   * Protects the whitelist (the webview is untrusted input). After the refusals the case waits and
+   * asserts the editor state did not change: a late open would be the failure, not a missing one.
+   */
+  it('refuses to open a diff for a path it did not list', async function () {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    const log = await openLogCursor();
+    const sessionID = editedSessionID;
+    assert.ok(sessionID, 'the previous case (the edit turn) did not run');
+    for (const target of ['../outside.txt', 'src/never-listed.ts', 'C:\\Windows\\win.ini']) {
+      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+        type: 'session.diff.open',
+        sessionID,
+        path: target,
+      });
+    }
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'session.diff.open',
+      sessionID: 'ses_not_the_open_one',
+      path: 'src/sample.ts',
+    });
+    await sleep(SETTLE_MS);
+    const text = log.added();
+    assert.strictEqual(countOf(log, 'diff open refused:'), 4, `log:\n${text}`);
+    assert.ok(!text.includes('never-listed'), 'the log must not carry the refused path');
+    assert.ok(!text.includes('win.ini'), 'the log must not carry the refused path');
+    assert.strictEqual(vscode.window.tabGroups.all.flatMap((group) => group.tabs).length, 0);
   });
 
   /**

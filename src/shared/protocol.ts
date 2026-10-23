@@ -16,6 +16,7 @@
  */
 import type {
   Catalog,
+  ChangedFile,
   ErrorInfo,
   FormAnswer,
   FormAsk,
@@ -44,6 +45,13 @@ export const MAX_SESSION_SEARCH_LENGTH = 200;
  * path fragment never needs more, and the host passes it to the server as a search string.
  */
 export const MAX_FILE_SEARCH_LENGTH = 200;
+
+/**
+ * Longest `path` `session.diff.open` accepts (issue #31). Our choice: the path is one the host
+ * listed itself, so a longer one is not a real file of the list; 4096 is the usual PATH_MAX of
+ * Linux, above any path a repository realistically holds (Windows' own limit is 32767).
+ */
+export const MAX_DIFF_PATH_LENGTH = 4096;
 
 /**
  * File the host emitted: picked in the dialog (`attachments.picked`), taken from the editor
@@ -151,6 +159,9 @@ export type Snapshot = {
  * is re-sent after every `ready`, and is absent until the first load succeeds.
  * `session.upserted` is also what carries a change of `usage` (issue #25), sent after each step that
  * ends; nothing new flows from the webview to the host for it.
+ * `session.diff` (issue #31) is the whole "Changed files" list of ONE session and REPLACES what the
+ * webview holds for it; the webview keeps it only if `sessionID` is the open session. `error` says
+ * the host could not refresh the list: `files` then is the last list it had (possibly empty).
  */
 export type HostToWebview =
   | { type: 'connection.state'; connection: ConnectionState }
@@ -204,6 +215,7 @@ export type HostToWebview =
       error?: ErrorInfo;
     }
   | { type: 'ui.focus'; target: { kind: 'permission' | 'form'; sessionID: string; id: string } }
+  | { type: 'session.diff'; sessionID: string; files: ChangedFile[]; error?: ErrorInfo }
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; error: ErrorInfo };
 
 /**
@@ -235,6 +247,10 @@ export type HostToWebview =
  * `request.result` error `OutsideWorkspace`); the answer is `attachments.picked` plus the usual
  * `request.result`. `prompt.send` files may carry a `mention` (see {@link PromptMention}).
  * The host builds every `uri` itself, so the webview can only send back what it was given.
+ * `session.diff.open` (issue #31) asks the host to open the native diff editor for one row of the
+ * "Changed files" list. It has no `requestId`, like `editor.open`: a failure is a `notice`. `path`
+ * is the `ChangedFile.path` the host sent; the host opens it only if it listed that path for that
+ * session, so the webview cannot name a file of its own.
  */
 export type WebviewToHost =
   | { type: 'ready' }
@@ -272,6 +288,7 @@ export type WebviewToHost =
   | { type: 'server.restart' }
   | { type: 'logs.show' }
   | { type: 'editor.open'; path: string; line?: number; column?: number }
+  | { type: 'session.diff.open'; sessionID: string; path: string }
   | { type: 'editor.insert'; text: string }
   | { type: 'editor.newFile'; text: string; language?: string }
   | { type: 'clipboard.write'; text: string }
@@ -565,6 +582,16 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
     isNonEmptyString(field(m, 'path')) &&
     isOptional(field(m, 'line'), isPositiveInteger) &&
     isOptional(field(m, 'column'), isPositiveInteger),
+  // Only the shape: that the path is one the host listed for that session is the handler's check.
+  'session.diff.open': (m) => {
+    const path = field(m, 'path');
+    return (
+      isNonEmptyString(field(m, 'sessionID')) &&
+      isNonEmptyString(path) &&
+      path.length <= MAX_DIFF_PATH_LENGTH &&
+      !path.includes('\0')
+    );
+  },
   'editor.insert': (m) => isString(field(m, 'text')),
   'editor.newFile': (m) => isString(field(m, 'text')) && isOptional(field(m, 'language'), isString),
   // An empty string is a legitimate clipboard write (clears it), unlike an empty prompt.
@@ -596,6 +623,7 @@ const HOST_TYPE_SET: Record<HostToWebview['type'], true> = {
   'attachments.picked': true,
   'files.found': true,
   'ui.focus': true,
+  'session.diff': true,
   notice: true,
 };
 

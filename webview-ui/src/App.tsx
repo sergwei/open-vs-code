@@ -100,6 +100,9 @@ interface LastFork {
  * the host for the active file or selection (`attachments.fromEditor`, the answer reuses
  * `attachments.picked`). The search is forgotten when a prompt is sent or the open session changes.
  *
+ * Issue #31: the header shows the "Changed files" list of the open session, and `openChangedFile`
+ * turns a click on a row into `session.diff.open` for the open session (no `requestId`).
+ *
  * Decisions: Send is disabled while the session is busy and Stop takes its place (plan decision
  * 6; `steer`/`queue` while busy is not offered); every prompt goes with `delivery: 'queue'`;
  * Retry resends the text of the last user message of the open session, with the attachments of
@@ -423,10 +426,26 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     focusInput?.();
   };
 
+  /**
+   * Asks the host to open the diff of a row of "Changed files" (issue #31). The host opens it only
+   * if it listed that path for the open session, so a stale click costs a notice, nothing more.
+   * No `requestId`: like `editor.open`, a failure comes back as a notice.
+   */
+  const openChangedFile = (path: string): void => {
+    const sessionID = state.open.sessionID;
+    if (sessionID === undefined) return;
+    props.send({ type: 'session.diff.open', sessionID, path });
+  };
+
   return (
     <HostContext.Provider value={props.send}>
       <div class="app">
-        <Header store={props.store} onNewSession={newSession} onOpenSession={openSession} />
+        <Header
+          store={props.store}
+          onNewSession={newSession}
+          onOpenSession={openSession}
+          onOpenChangedFile={openChangedFile}
+        />
         <main class="chat-main">
           <Show
             when={state.open.messages.length > 0}

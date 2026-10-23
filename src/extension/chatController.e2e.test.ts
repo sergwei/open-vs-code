@@ -94,6 +94,7 @@ async function boot(
       newFile: () => Promise.resolve(),
       copy: () => Promise.resolve(),
       pickFiles: () => Promise.resolve([]),
+      openDiff: () => Promise.resolve('diff'),
     },
     post: (message) => posted.push(message),
     log: quiet,
@@ -1506,4 +1507,55 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     ).toBe(true);
     expect(posted.at(-1)).toBeDefined();
   }, 20_000);
+
+  // E7-session-diff (#31). What can break only over HTTP: the query the real client builds for
+  // `GET /api/session/:id/diff` (`from`, `to`, `context`), the `{data}` it unwraps, and the
+  // `type`/`order`/`limit` of `message.list` that pick the first and the last user message. The
+  // fixture's patches and its range rules are SYNTHETIC (written from the reading of the server);
+  // a pass proves our wiring, not that a real server answers like this.
+  it('lists the files of the whole session and rebuilds their originals, over HTTP', async () => {
+    const { controller, posted, state } = await boot('ok');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    const send = (requestId: string, text: string) =>
+      controller.handle({ type: 'prompt.send', requestId, text, delivery: 'queue', files: [] });
+    const turnsDone = () =>
+      posted.filter((m) => m.type === 'session.status' && m.status.type === 'idle').length;
+    await send('r1', 'EDIT_FILES first turn');
+    await waitUntil(() => turnsDone() >= 1, 'the first turn');
+    const lists = () => posted.flatMap((m) => (m.type === 'session.diff' ? [m] : []));
+    await waitUntil(() => lists().length >= 1, 'the changed files');
+    expect(lists()[0]?.files).toEqual([
+      { path: 'assets/logo.png', status: 'added', additions: 0, deletions: 0, binary: true },
+      { path: 'src/added.ts', status: 'added', additions: 1, deletions: 0, binary: false },
+      { path: 'src/removed.ts', status: 'deleted', additions: 0, deletions: 1, binary: false },
+      { path: 'src/sample.ts', status: 'modified', additions: 1, deletions: 1, binary: false },
+    ]);
+
+    const sessionID = lists()[0]?.sessionID ?? '';
+    // The original comes from the COMPLETE patch the fixture serves when no `context` is sent.
+    expect(await controller.diffOriginal(sessionID, 'src/sample.ts')).toBe(
+      '// Sample file for the visual test run.\nexport const value2 = 2;\n',
+    );
+    expect(await controller.diffOriginal(sessionID, 'src/removed.ts')).toBe(
+      'export const removed = true;\n',
+    );
+    expect(await controller.diffOriginal(sessionID, 'src/added.ts')).toBe('');
+    await expect(controller.diffOriginal(sessionID, 'src/not-listed.ts')).rejects.toMatchObject({
+      name: 'DiffNotListed',
+    });
+
+    // A second turn makes the range span two user messages (`from` and `to`): the first turn's
+    // files are still listed, and nothing else is.
+    await send('r2', 'say hello');
+    await waitUntil(() => turnsDone() >= 2, 'the second turn');
+    await controller.handle({ type: 'ready' });
+    await waitUntil(
+      () => posted.filter((m) => m.type === 'snapshot').length >= 2,
+      'a snapshot after the second turn',
+    );
+    expect(await controller.diffOriginal(sessionID, 'src/sample.ts')).toBe(
+      '// Sample file for the visual test run.\nexport const value2 = 2;\n',
+    );
+  }, 30_000);
 });

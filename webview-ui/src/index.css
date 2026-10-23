@@ -150,19 +150,25 @@ button.secondary:hover:not(:disabled),
   color: var(--vscode-descriptionForeground);
 }
 
-/* The children of the open session, closed until asked for. */
-.subagent-sessions {
+/*
+ * The children of the open session and the files it changed (issue #31), closed until asked for.
+ * Same box, same rows: the changed files are one more list under the header.
+ */
+.subagent-sessions,
+.changed-files {
   margin-top: 4px;
   padding: 2px 6px;
   border: 1px solid var(--vscode-panel-border, transparent);
 }
 
-.subagent-sessions > summary {
+.subagent-sessions > summary,
+.changed-files > summary {
   cursor: pointer;
   color: var(--vscode-descriptionForeground);
 }
 
-.subagent-list {
+.subagent-list,
+.changed-files-list {
   margin: 4px 0 0;
   padding: 0;
   list-style: none;
@@ -171,13 +177,20 @@ button.secondary:hover:not(:disabled),
   gap: 2px;
 }
 
-.subagent-child {
+.subagent-child,
+.changed-file {
   width: 100%;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 1px;
   text-align: left;
+}
+
+/* The host could not refresh the list: plain text under the summary, no error colour. */
+.changed-files-error {
+  margin: 4px 0 0;
+  color: var(--vscode-foreground);
 }
 
 /* ---------- session list (issue #20) ---------- */
@@ -1690,6 +1703,7 @@ button.secondary[aria-disabled='true'] {
 [class*='vscode-high-contrast'] .agent-toggle,
 [class*='vscode-high-contrast'] .session-search,
 [class*='vscode-high-contrast'] .subagent-sessions,
+[class*='vscode-high-contrast'] .changed-files,
 [class*='vscode-high-contrast'] .code-action {
   border-color: var(--vscode-contrastBorder);
 }

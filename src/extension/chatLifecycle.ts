@@ -20,6 +20,7 @@ import { safeLog } from './opencodeServer';
 import { pickSavedPermissionsToRevoke } from './savedPermissionsUi';
 import { restartServerWithFeedback } from './serverLifecycle';
 import type { ServerManager } from './serverManager';
+import { registerSessionDiffProvider } from './sessionDiffEditor';
 import { confirmSessionDelete } from './sessionUi';
 
 /**
@@ -115,6 +116,9 @@ function parseReply(
  * synchronously (no waiting: `dispose` is not awaited by VS Code) and closes the notifications.
  * Stopping the server itself stays in `deactivate` (`extension.ts`), and the log is guarded with
  * `safeLog` because the channel is closed only after the stop.
+ *
+ * Issue #31 registers the content provider of the "Changed files" diffs
+ * (`registerSessionDiffProvider`), fed by `controller.diffOriginal`.
  *
  * The injection command runs a raw message through the SAME guard (`isWebviewToHost`) and the
  * SAME controller as a real webview message. It exists only if `context.extensionMode` is
@@ -214,6 +218,12 @@ export function registerChat(
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration(DEFAULT_MODEL_SETTING)) controller.onPreferencesChanged();
+    }),
+    // Issue #31: the original side of "Changed files" diffs. Registered now, not on first use, so
+    // a diff tab restored by Reload Window finds its provider.
+    registerSessionDiffProvider({
+      original: (sessionID, shown) => controller.diffOriginal(sessionID, shown),
+      onRenewed: (listener) => controller.onDiffRenewed(listener),
     }),
     { dispose: () => controller.dispose() },
     { dispose: () => attention.dispose() },

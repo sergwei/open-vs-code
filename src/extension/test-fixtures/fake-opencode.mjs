@@ -143,6 +143,18 @@
 // `data.metadata.truncated: false` on every `tool.success`; and no `variant` inside the `model` of
 // `session.created` (the REST row keeps it, see `selectOnSession`). The VALUES are invented: the
 // run only recorded the shape, so the title text and `executed: true` are SYNTHETIC.
+// E7-session-diff (issue #31): `GET /api/session/:id/diff?from=&to=&context=` and an EDIT_FILES
+// switch. A prompt containing EDIT_FILES ends its step with a `files` list and a `snapshot`, and
+// records four changes for the diff route: a modified `src/sample.ts` (`value2 = 2` becomes
+// `value2 = 22`), an added `src/added.ts`, a deleted `src/removed.ts` and an added binary
+// `assets/logo.png` (empty patch, zero counts). The route follows the READING of
+// `core/src/session/diff.ts`, `vcs/git.ts` and `vcs/patch.ts` @843a6c51 (a range of user messages,
+// complete files without `context`, only the changes with `context=0`, `MessageNotFoundError` for
+// an id the session lacks, 400 `InvalidRequestError` for one that is not a user message); the
+// patches are produced by a small line diff here and
+// were NEVER compared with a real server's. `GET /api/session/:id/message` now honours `type`,
+// `order` and `limit`. Only in `visual` mode do the changes also touch the served folder (see
+// `applyEdits`); elsewhere nothing is written.
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running;
 // FAKE_OPENCODE_LIFETIME_MS (positive integer, ms) overrides it for `serve` (issue #41).
@@ -196,10 +208,12 @@ function loadState() {
     const saved = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     for (const [id, row] of saved.sessions) sessions.set(id, row);
     for (const [id, messages] of saved.history) history.set(id, messages);
+    for (const [id, edits] of saved.edits ?? []) sessionEdits.set(id, edits);
     seq = saved.seq;
   } catch {
     sessions.clear();
     history.clear();
+    sessionEdits.clear();
   }
 }
 
@@ -212,7 +226,12 @@ function saveState() {
   const temporary = `${STATE_FILE}.tmp`;
   fs.writeFileSync(
     temporary,
-    JSON.stringify({ seq, sessions: [...sessions], history: [...history] }),
+    JSON.stringify({
+      seq,
+      sessions: [...sessions],
+      history: [...history],
+      edits: [...sessionEdits],
+    }),
   );
   fs.renameSync(temporary, STATE_FILE);
 }
@@ -855,7 +874,8 @@ function compactionSteps(sessionID) {
  * wire shape, see `toWireFiles`) travels in the `session.inbox.enqueued` payload and is kept in the
  * history entry of the user message, so a snapshot read later shows the attachments too. The first
  * answered turn of a session without a title ends with a `session.renamed` (the row gets the start
- * of the prompt as its title); a stopped or failed turn never reaches it.
+ * of the prompt as its title); a stopped or failed turn never reaches it. A prompt containing
+ * EDIT_FILES makes the step end with the `files` and `snapshot` of {@link applyEdits} (issue #31).
  */
 function playTurn(sessionID, inboxID, text, files = []) {
   const assistantMessageID = nextId('msg');
@@ -957,11 +977,17 @@ function playTurn(sessionID, inboxID, text, files = []) {
           ],
         });
         activeSteps.delete(sessionID);
+        // E7-session-diff: an EDIT_FILES turn changes files, and the step says which (and the
+        // snapshot that holds them), like the `files` / `snapshot` of the real `step.ended` types.
+        const changed = text.includes('EDIT_FILES')
+          ? applyEdits(sessionID, inboxID, sessions.get(sessionID)?.location?.directory ?? '')
+          : undefined;
         broadcast('session.step.ended', {
           ...a,
           finish: 'stop',
           cost: stepCost,
           tokens: STEP_TOKENS,
+          ...(changed === undefined ? {} : { snapshot: nextId('snap'), files: changed }),
         });
         addUsage(sessionID, stepCost, STEP_TOKENS);
       },
@@ -1169,6 +1195,7 @@ function removeSession(sessionID) {
   dropRequests(sessionID, false);
   sessions.delete(sessionID);
   history.delete(sessionID);
+  sessionEdits.delete(sessionID);
   broadcast('session.deleted', { sessionID });
 }
 
@@ -1245,6 +1272,223 @@ function forkSession(response, source, body) {
   );
   json(response, 200, { data: info });
   broadcast('session.forked', { sessionID: id, parentID: source.id, boundary });
+}
+
+// ---------------------------------------------------------------------------------------------
+// E7-session-diff (issue #31): the "Changed files" turn and `GET /api/session/:id/diff`.
+// ---------------------------------------------------------------------------------------------
+
+const sessionEdits = new Map(); // session id -> [{ userID, file, before, after, binary }], in order
+
+/** The text of `src/sample.ts` when the folder is not the visual run's (nothing is on disk). */
+const SAMPLE_BEFORE = '// Sample file for the visual test run.\nexport const value2 = 2;\n';
+
+/** Lines of a text: no trailing empty element for a final newline; `[]` for no text. */
+function linesOf(text) {
+  if (text === undefined || text === '') return [];
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines;
+}
+
+/** Line diff by longest common subsequence: `[' ' | '-' | '+', line]` pairs. Files are tiny. */
+function lineOps(before, after) {
+  const a = linesOf(before);
+  const b = linesOf(after);
+  const table = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      table[i][j] =
+        a[i] === b[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      ops.push([' ', a[i]]);
+      i++;
+      j++;
+    } else if (table[i + 1][j] >= table[i][j + 1]) {
+      ops.push(['-', a[i++]]);
+    } else {
+      ops.push(['+', b[j++]]);
+    }
+  }
+  while (i < a.length) ops.push(['-', a[i++]]);
+  while (j < b.length) ops.push(['+', b[j++]]);
+  return ops;
+}
+
+/**
+ * The patch of one file in the format READ in `vcs/git.ts` / `patch.ts` @843a6c51
+ * (`git diff --unified=N --no-renames`): a header, then hunks. Without `context` the only hunk is
+ * the whole file ("Omit for full-file patches"); with `context` the hunks hold that many lines
+ * around each change. SYNTHETIC: written from the reading, never compared with a real patch. A
+ * binary file has the empty patch, as read. Every file here ends in a newline.
+ */
+function patchOf(file, status, before, after, binary, context) {
+  if (binary) return { patch: '', additions: 0, deletions: 0 };
+  const ops = lineOps(before, after);
+  const additions = ops.filter((op) => op[0] === '+').length;
+  const deletions = ops.filter((op) => op[0] === '-').length;
+  const header = [
+    `diff --git a/${file} b/${file}`,
+    ...(status === 'added' ? ['new file mode 100644'] : []),
+    ...(status === 'deleted' ? ['deleted file mode 100644'] : []),
+    'index 1111111..2222222 100644',
+    `--- ${status === 'added' ? '/dev/null' : `a/${file}`}`,
+    `+++ ${status === 'deleted' ? '/dev/null' : `b/${file}`}`,
+  ];
+  const spans = [];
+  if (context === undefined) {
+    if (ops.length > 0) spans.push({ from: 0, to: ops.length });
+  } else {
+    ops.forEach((op, index) => {
+      if (op[0] === ' ') return;
+      const from = Math.max(0, index - context);
+      const to = Math.min(ops.length, index + context + 1);
+      const last = spans.at(-1);
+      if (last !== undefined && from <= last.to) last.to = Math.max(last.to, to);
+      else spans.push({ from, to });
+    });
+  }
+  const body = spans.flatMap(({ from, to }) => {
+    const slice = ops.slice(from, to);
+    const oldBefore = ops.slice(0, from).filter((op) => op[0] !== '+').length;
+    const newBefore = ops.slice(0, from).filter((op) => op[0] !== '-').length;
+    const oldCount = slice.filter((op) => op[0] !== '+').length;
+    const newCount = slice.filter((op) => op[0] !== '-').length;
+    const oldStart = oldCount === 0 ? oldBefore : oldBefore + 1;
+    const newStart = newCount === 0 ? newBefore : newBefore + 1;
+    return [
+      `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`,
+      ...slice.map((op) => `${op[0]}${op[1]}`),
+    ];
+  });
+  return { patch: [...header, ...body, ''].join('\n'), additions, deletions };
+}
+
+/**
+ * Plays the file changes of an `EDIT_FILES` turn: a `modified` `src/sample.ts` (`value2 = 2` becomes
+ * `value2 = 22`), an `added` `src/added.ts`, a `deleted` `src/removed.ts` and an `added` binary
+ * `assets/logo.png`. They are recorded for `GET .../diff` and returned as the `files` of the
+ * `session.step.ended`. Only in `visual` mode do they also touch the served folder (the run's
+ * temporary workspace, whose `src/sample.ts` is real and whose `src/removed.ts` the run created):
+ * the right side of a diff is the real file, and the visual run looks at it. In any other mode
+ * nothing is written and the "before" texts are constants. SYNTHETIC: the turn exists to give the
+ * host something to list, not to imitate how a model edits.
+ */
+function applyEdits(sessionID, userID, directory) {
+  const onDisk = has('visual') && directory !== '';
+  const target = (file) => nodePath.join(directory, ...file.split('/'));
+  const read = (file, fallback) => {
+    if (!onDisk) return fallback;
+    try {
+      return fs.readFileSync(target(file), 'utf8');
+    } catch {
+      return fallback;
+    }
+  };
+  const sample = read('src/sample.ts', SAMPLE_BEFORE);
+  const removed = read('src/removed.ts', 'export const removed = true;\n');
+  const added = 'export const added = true;\n';
+  const edits = [
+    { file: 'src/sample.ts', before: sample, after: sample.replace('value2 = 2;', 'value2 = 22;') },
+    { file: 'src/added.ts', before: undefined, after: added },
+    { file: 'src/removed.ts', before: removed, after: undefined },
+    { file: 'assets/logo.png', before: undefined, after: '', binary: true },
+  ].map((edit) => ({ userID, binary: false, ...edit }));
+  if (onDisk) {
+    for (const edit of edits) {
+      const where = target(edit.file);
+      if (edit.after === undefined) {
+        fs.rmSync(where, { force: true });
+        continue;
+      }
+      fs.mkdirSync(nodePath.dirname(where), { recursive: true });
+      // A PNG signature is enough for the editor to treat the file as an image.
+      fs.writeFileSync(
+        where,
+        edit.binary ? Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) : edit.after,
+      );
+    }
+  }
+  sessionEdits.set(sessionID, [...(sessionEdits.get(sessionID) ?? []), ...edits]);
+  return edits.map((edit) => edit.file);
+}
+
+/**
+ * `GET /api/session/:id/diff?from=&to=&context=` (issue #31), SYNTHETIC but following the reading of
+ * `core/src/session/diff.ts` @843a6c51: without `from` the turn of the LAST user message; `from` is
+ * a user message whose turn is diffed and `to` a later one that extends the range; an id the
+ * session does not hold is 404 `MessageNotFoundError` and a message that is not a user one is 400
+ * `InvalidRequestError` (see `bad` below for what was observed). Several edits of one file in the
+ * range collapse to the first "before" and the last "after" (a file added and removed again
+ * vanishes). Without `context` the patches are the whole file; `context=0` keeps only the changes.
+ * Answers `{data: FileDiffInfo[]}`, which the client unwraps.
+ */
+function sessionDiff(response, session, params) {
+  const users = history
+    .get(session.id)
+    .filter((message) => message.type === 'user')
+    .map((message) => message.id);
+  const known = new Set(history.get(session.id).map((message) => message.id));
+  // An id the session does not hold is `MessageNotFoundError` (VERIFIED: the case "reads user
+  // messages and diffs a session that changed nothing" of `realOpencode.test.ts` sent an unknown
+  // id and an admitted inbox id as `from` to a real opencode 2.0.32 on 23/10/2026 and got that
+  // `_tag`; the HTTP status was not looked at, so the 404 here is INVENTED); a message that is not
+  // a user one is `InvalidRequestError` (READ in `diff.ts`, never provoked).
+  const bad = (id) =>
+    known.has(id)
+      ? json(response, 400, {
+          _tag: 'InvalidRequestError',
+          message: `Not a user message of this session: ${id}`,
+          kind: 'turn_range',
+        })
+      : json(response, 404, {
+          _tag: 'MessageNotFoundError',
+          message: `Message not found: ${id}`,
+          sessionID: session.id,
+          messageID: id,
+        });
+  const from = params.get('from');
+  const to = params.get('to');
+  if (from !== null && !users.includes(from)) return bad(from);
+  if (to !== null && (!users.includes(to) || users.indexOf(to) < users.indexOf(from ?? to))) {
+    return bad(to);
+  }
+  const first = from === null ? users.length - 1 : users.indexOf(from);
+  const last = to === null ? first : users.indexOf(to);
+  const turns = new Set(users.slice(Math.max(first, 0), last + 1));
+  const merged = new Map();
+  for (const edit of sessionEdits.get(session.id) ?? []) {
+    if (!turns.has(edit.userID)) continue;
+    const known = merged.get(edit.file);
+    merged.set(edit.file, known === undefined ? { ...edit } : { ...known, after: edit.after });
+  }
+  const contextText = params.get('context');
+  const context = contextText === null ? undefined : Number(contextText);
+  const data = [...merged.values()].flatMap((edit) => {
+    const status =
+      edit.before === undefined
+        ? edit.after === undefined
+          ? undefined
+          : 'added'
+        : edit.after === undefined
+          ? 'deleted'
+          : 'modified';
+    if (status === undefined) return [];
+    return [
+      {
+        file: edit.file,
+        status,
+        ...patchOf(edit.file, status, edit.before, edit.after, edit.binary, context),
+      },
+    ];
+  });
+  json(response, 200, { data });
 }
 
 /**
@@ -1544,7 +1788,7 @@ function handleChat(request, response) {
   const act = /^\/api\/session\/([^/]+)\/(permission|form)\/([^/]+)(?:\/(reply))?$/.exec(path);
   if (act !== null) return handleAnswer(request, response, act);
   const match =
-    /^\/api\/session\/([^/]+)(?:\/(message|permission|form|prompt|interrupt|fork|model|agent))?$/.exec(
+    /^\/api\/session\/([^/]+)(?:\/(message|permission|form|prompt|interrupt|fork|model|agent|diff))?$/.exec(
       path,
     );
   if (match === null) return false;
@@ -1559,7 +1803,20 @@ function handleChat(request, response) {
     return true;
   }
   if (method === 'GET' && sub === 'message') {
-    json(response, 200, { data: [...history.get(session.id)].reverse(), cursor: {} });
+    // Issue #31: `type`, `order` and `limit` of `message.list` (types of 2.0.32, read), so the host
+    // can ask for the first and the last user message. Newest first by default, as before.
+    const type = url.searchParams.get('type');
+    const limit = Number(url.searchParams.get('limit') ?? '');
+    let listed = history
+      .get(session.id)
+      .filter((message) => type === null || message.type === type);
+    if (url.searchParams.get('order') !== 'asc') listed = [...listed].reverse();
+    if (Number.isInteger(limit) && limit > 0) listed = listed.slice(0, limit);
+    json(response, 200, { data: listed, cursor: {} });
+    return true;
+  }
+  if (method === 'GET' && sub === 'diff') {
+    sessionDiff(response, session, url.searchParams);
     return true;
   }
   if (method === 'GET' && (sub === 'permission' || sub === 'form')) {

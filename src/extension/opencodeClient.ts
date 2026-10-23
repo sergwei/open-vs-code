@@ -11,6 +11,7 @@ import { OpenCode } from '@opencode/client';
 import type {
   AgentListInput,
   AgentListOutput,
+  FileDiffInfo,
   FileFindInput,
   FileFindOutput,
   FormListInput,
@@ -30,6 +31,7 @@ import type {
   ProviderListOutput,
   SessionActive,
   SessionCreateInput,
+  SessionDiffInput,
   SessionFormCancelInput,
   SessionForkInput,
   SessionFormReplyInput,
@@ -123,6 +125,24 @@ export interface ChatApi {
      * bare body was read correctly. POSIX UNVERIFIED.
      */
     interrupt(input: SessionInterruptInput): Promise<SessionInterruptResponse>;
+    /**
+     * `GET /api/session/:id/diff?from=&to=&context=` (issue #31): the files changed in a RANGE OF
+     * TURNS, not "the session". The answer is the bare `FileDiffInfo[]` (the client unwraps
+     * `{data}`: `client.d.ts` of 2.0.32 types it `Promise<FileDiffInfo[]>`). Without `from` it is
+     * the turn of the LAST user message; `from` is a user message whose turn is diffed and `to` a
+     * later user message that extends the range; a non-user id is `InvalidRequestError`. Without
+     * `context` every patch is the COMPLETE file (the host rebuilds the original from it); with
+     * `context: 0` only the changed lines. A binary has `patch: ""` and zero counts. Paths are
+     * relative to the git worktree root, not to the served folder. Outside a git repository the
+     * answer is `[]`. READ in `packages/core/src/session/diff.ts` and `vcs/git.ts` at 843a6c51 and
+     * in the client types; HYPOTHESIS for every behaviour listed except these, VERIFIED against a
+     * real opencode 2.0.32 (Windows 11, 23/10/2026, no model turn) by the case "reads user messages
+     * and diffs a session that changed nothing" of `realOpencode.test.ts`: a session with no changes
+     * answers `[]` with and without `context` (even with no user message at all), an unknown or
+     * inbox-only `from` throws `MessageNotFoundError` and an unknown session `SessionNotFoundError`.
+     * No turn that edited files was observed.
+     */
+    diff(input: SessionDiffInput): Promise<FileDiffInfo[]>;
     form: {
       /** `POST /api/session/:sid/form/:fid/reply` (issue #44): 204, empty body. */
       reply(input: SessionFormReplyInput): Promise<void>;

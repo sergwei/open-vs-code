@@ -216,6 +216,28 @@ export type Part =
   | { type: 'reasoning'; id: string; text: string; completed: boolean }
   | { type: 'tool'; id: string; name: string; state: ToolState };
 
+/**
+ * One file of the "Changed files" list (issue #31): what the agent changed in the open session,
+ * from the first user message to the last one (decision of Sergio, 23/10/2026, Engram #1152).
+ *
+ * `path` is what the user sees and what the webview echoes back in `session.diff.open`: relative to
+ * the SERVED folder, with `/` separators. It is an opaque key for the webview; the host only opens
+ * a path it listed itself for that session (`sessionDiff.ts`). `binary` is true when the host has
+ * no text diff to show (a binary file, or a patch the server cut for size): the row is still
+ * listed, with its counts, but opening it shows the file instead of a diff.
+ *
+ * Provenance: the wire shape (`FileDiffInfo`: `file`, `patch`, `additions`, `deletions`, `status`)
+ * was read in `@opencode/client@2.0.32` and `core/src/session/diff.ts@843a6c51`; HYPOTHESIS that a
+ * real server answers like that, because no real turn that edits files has been observed yet.
+ */
+export type ChangedFile = {
+  path: string;
+  status: 'added' | 'modified' | 'deleted';
+  additions: number;
+  deletions: number;
+  binary: boolean;
+};
+
 /** Points at the tool block that triggered a permission or a form. */
 export type ToolRef = { messageID: string; partID: string };
 
