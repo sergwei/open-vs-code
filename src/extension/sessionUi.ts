@@ -43,7 +43,9 @@ export async function confirmSessionDelete(info: {
  * history from the boundary on (the boundary message included), for every opencode client of the
  * same database, and nothing can bring it back (read in `core/src/session/revert.ts` @843a6c51 and
  * observed on a `shell` message: after `commit` the message was gone and a later `clear` brought
- * nothing back). The files stay as the revert left them. The host shows it, not the webview, for
+ * nothing back). The files stay as the revert left them, and the copy the server kept when
+ * preparing is dropped, so edits made by hand to the restored files can no longer be recovered:
+ * the dialog says so (decision of Sergio 23/10/2026). The host shows it, not the webview, for
  * the same reason as {@link confirmSessionDelete}.
  * VERIFIED by `test:visual` (real VS Code 1.143, Windows 11, synthetic server, 23/10/2026): the
  * checks "a modal dialog of VS Code asks and says it cannot be undone (", "Cancel keeps the revert
@@ -57,7 +59,8 @@ export async function confirmRevertDiscard(): Promise<boolean> {
       modal: true,
       detail:
         'The messages from the revert point on are deleted from opencode, also for other opencode clients, ' +
-        'and Restore can no longer bring them back. The files stay as they are now. ' +
+        'and Restore can no longer bring them back. The files stay as they are now, and edits you had ' +
+        'made by hand to the files the revert restored can no longer be recovered. ' +
         'This cannot be undone.',
     },
     'Discard for good',
