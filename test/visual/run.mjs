@@ -536,6 +536,113 @@ function assertNoWebviewErrors(where) {
   );
 }
 
+/**
+ * Runs PowerShell with `-STA` and `input` on stdin; returns stdout. `System.Windows.Forms.Clipboard`
+ * requires a single-threaded apartment (HYPOTHESIS from the .NET docs; the calls here only ran
+ * with `-STA`). `maxBuffer` is ours, 64 MiB, room for the base64 of a large screenshot: beyond it
+ * Node fails with ENOBUFS, so the save throws and the step fails WITHOUT touching the clipboard.
+ */
+function powershellSta(script, input = '') {
+  return execFileSync('powershell', ['-NoProfile', '-STA', '-Command', script], {
+    windowsHide: true,
+    input,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  }).trim();
+}
+
+/**
+ * Reads what the user has on the Windows clipboard so step 20 can give it back: text (Unicode) or
+ * an image (as PNG), base64 through stdout and kept IN MEMORY only (it may be a password; nothing
+ * goes to disk or to the log). Text is checked first, so a copy from Word, Excel or a browser
+ * (text plus HTML, RTF or an image) comes back as PLAIN TEXT only, and the run warns when the
+ * clipboard held more formats than the one kept. Anything else (copied files, HTML only) is
+ * `other` and cannot be restored; the run warns about it. Throws if the clipboard cannot be read
+ * or the answer is not one of the four kinds, so the step that would overwrite it fails instead
+ * (decision of Sergio, 23/10/2026: save and restore). An image comes back as PNG: its alpha and
+ * original formats may differ.
+ * VERIFIED for an image (Windows 11, 23/10/2026): a full `npm run test:visual` printed "clipboard
+ * saved (image)" and "clipboard restored (image)", and a read-only sha256 of the clipboard was the
+ * same before and after the run. UNVERIFIED for text (the clipboard held an image that day), for
+ * `empty` and for `other`; the README says what is not kept.
+ */
+function saveClipboard() {
+  // One line for PowerShell: statements joined by `; `, but the if/elseif/else chain by spaces
+  // (`; elseif` is a parse error, seen on Windows 11 / PowerShell 5.1, 23/10/2026).
+  // The first line says how many formats the clipboard held (a number only), the second the kind.
+  const chain = [
+    'if ($c::ContainsText()) { "text:" + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($c::GetText())) }',
+    'elseif ($c::ContainsImage()) { $m = New-Object IO.MemoryStream; $c::GetImage().Save($m, [System.Drawing.Imaging.ImageFormat]::Png); "image:" + [Convert]::ToBase64String($m.ToArray()) }',
+    'elseif ($n -gt 0) { "other:" }',
+    'else { "empty:" }',
+  ].join(' ');
+  const out = powershellSta(
+    `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $c = [System.Windows.Forms.Clipboard]; $d = $c::GetDataObject(); $n = if ($d) { $d.GetFormats().Length } else { 0 }; "$n"; ${chain}`,
+  );
+  const [count = '', answer = ''] = out.split(/\r?\n/);
+  const colon = answer.indexOf(':');
+  const kind = colon < 0 ? '' : answer.slice(0, colon);
+  if (!['text', 'image', 'empty', 'other'].includes(kind)) {
+    throw new Error('the clipboard could not be read (unexpected answer); it was not touched');
+  }
+  if ((kind === 'text' || kind === 'image') && Number(count) > 1) {
+    warn(`the clipboard held ${count} formats: only its ${kind} will be given back`);
+  }
+  return { kind, data: answer.slice(colon + 1) };
+}
+
+/**
+ * Gives back what {@link saveClipboard} read: the same text or image, or an empty clipboard if it
+ * was empty. Never throws: a failure is a warning, the run goes on. Logs only the kind.
+ * VERIFIED for an image only, by the run quoted in the header of {@link saveClipboard} ("clipboard
+ * restored (image)", same sha256 before and after). UNVERIFIED for text and `empty`.
+ */
+function restoreClipboard(saved) {
+  try {
+    const read = '$b = [Convert]::FromBase64String([Console]::In.ReadToEnd())';
+    const forms = 'Add-Type -AssemblyName System.Windows.Forms,System.Drawing';
+    if (saved.kind === 'text') {
+      powershellSta(
+        `${forms}; ${read}; [System.Windows.Forms.Clipboard]::SetText([Text.Encoding]::UTF8.GetString($b))`,
+        saved.data,
+      );
+    } else if (saved.kind === 'image') {
+      powershellSta(
+        `${forms}; ${read}; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromStream((New-Object IO.MemoryStream(,$b))))`,
+        saved.data,
+      );
+    } else if (saved.kind === 'empty') {
+      powershellSta(`${forms}; [System.Windows.Forms.Clipboard]::Clear()`);
+    } else {
+      warn('the clipboard held something that is neither text nor an image: it was NOT restored');
+      return;
+    }
+    console.log(`  clipboard restored (${saved.kind})`);
+  } catch (error) {
+    warn(
+      `the clipboard could not be restored: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
+ * Wraps a step body that writes the clipboard: save first, give it back in `finally`. Outside
+ * Windows it only runs the body (there is no clipboard code there). A failed save throws BEFORE
+ * the body, so the step fails and the clipboard is never written.
+ */
+function withSavedClipboard(body) {
+  return async () => {
+    if (process.platform !== 'win32') return body();
+    const saved = saveClipboard();
+    console.log(`  clipboard saved (${saved.kind})`);
+    try {
+      await body();
+    } finally {
+      restoreClipboard(saved);
+    }
+  };
+}
+
 /** Runs a step; an exception becomes a failure plus a screenshot, and the run continues. */
 async function step(name, body) {
   console.log(`\n== ${name}`);
@@ -4110,9 +4217,10 @@ try {
   // synthetic (`isTrusted: false` events with a `DataTransfer` that carries `resourceurls`): it
   // proves our handler and the host, NOT that VS Code delivers a drag to the webview. A real drag
   // from the Explorer is not automated here (the chat and the Explorer cannot share a side bar
-  // without moving a view), so that half stays UNVERIFIED. This step OVERWRITES the system
-  // clipboard (image, then text); nothing is restored.
-  await step('20 drop and paste (issue #30)', async () => {
+  // without moving a view), so that half stays UNVERIFIED. This step writes the system clipboard
+  // (image, then text); {@link withSavedClipboard} saves the user's text or image first and gives
+  // it back at the end, also on a failure (anything else on it is lost, with a warning).
+  const dropAndPaste = async () => {
     const THEMES = [
       ['light', 'Default Light Modern'],
       ['dark', 'Default Dark Modern'],
@@ -4426,7 +4534,8 @@ try {
     await shot('20f-add-to-chat-hidden');
     await removeChips();
     assertNoWebviewErrors('drop and paste');
-  });
+  };
+  await step('20 drop and paste (issue #30)', withSavedClipboard(dropAndPaste));
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
