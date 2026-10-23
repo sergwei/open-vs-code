@@ -3580,8 +3580,7 @@ try {
         if (!editor) return null;
         const read = (side) =>
           [...editor.querySelectorAll(`.editor.${side} .view-line`)]
-            // eslint-disable-next-line no-irregular-whitespace -- the next line strips a literal no-break space
-            .map((line) => (line.textContent ?? '').replace(/ /g, ' '))
+            .map((line) => (line.textContent ?? '').replace(/\u00a0/g, ' '))
             .join('\n');
         return { original: read('original'), modified: read('modified') };
       });
@@ -3691,6 +3690,419 @@ try {
     await sleep(500);
 
     assertNoWebviewErrors('changed files');
+  });
+
+  // Issue #32 (E7-message-revert): revert from a message, in a real VS Code. The synthetic server
+  // really rewrites the workspace (visual mode), so the disk is read back. Also the pending
+  // evidence of #31: an open "Changed files" diff tab re-reads its left side after a committed
+  // revert (point 5 below).
+  await step('19 revert from a message (issue #32)', async () => {
+    const THEMES = [
+      ['light', 'Default Light Modern'],
+      ['dark', 'Default Dark Modern'],
+      ['hc-dark', 'Default High Contrast'],
+      ['hc-light', 'Default High Contrast Light'],
+    ];
+    const SAMPLE_HEADER = '// Sample file for the visual test run.\n';
+    const sampleFile = path.join(workspace, 'src', 'sample.ts');
+    const removedFile = path.join(workspace, 'src', 'removed.ts');
+    const addedFile = path.join(workspace, 'src', 'added.ts');
+    const logoFile = path.join(workspace, 'assets', 'logo.png');
+    const bigFile = path.join(workspace, 'docs', 'big.txt');
+    const readText = (file) => {
+      try {
+        return fs.readFileSync(file, 'utf8');
+      } catch {
+        return null;
+      }
+    };
+    const dialog = page.locator('.monaco-dialog-box');
+    writeSettings(vscode.userDataDir, {
+      'diffEditor.renderSideBySide': true,
+      'diffEditor.useInlineViewWhenSpaceIsLimited': false,
+      'workbench.colorTheme': 'Default Dark Modern',
+    });
+    await page.waitForTimeout(2500);
+    await command('View: Close All Editors');
+    // The turn starts from a known disk: step 18 left its own files behind.
+    fs.writeFileSync(sampleFile, `${SAMPLE_HEADER}export const value2 = 2;\n`);
+    fs.writeFileSync(removedFile, 'export const removed = true;\n');
+    for (const file of [addedFile, logoFile, bigFile]) fs.rmSync(file, { force: true });
+    assertNoWebviewErrors('before the revert step');
+    check(await clickButton('New session'), 'New session is pressed');
+    await page.waitForTimeout(1500);
+
+    /** What the page shows about the revert: the log, the block, the draft and the changed files. */
+    const view = () =>
+      web.inDoc((doc) => {
+        const log = doc.querySelector('[role="log"]');
+        const banner = doc.querySelector('.revert-banner');
+        const details = doc.querySelector('details.changed-files');
+        return {
+          messages: log?.querySelectorAll('.message').length ?? 0,
+          draft: doc.querySelector('textarea')?.value ?? '',
+          changedSummary: details?.querySelector('summary')?.textContent ?? null,
+          banner:
+            banner === null
+              ? null
+              : {
+                  title: banner.querySelector('.revert-banner-title')?.textContent ?? '',
+                  caption: banner.querySelector('.revert-banner-caption')?.textContent ?? '',
+                  insideLog: log?.contains(banner) ?? false,
+                  rows: [...banner.querySelectorAll('button.changed-file')].map((button) => ({
+                    path: button.querySelector('.session-title')?.textContent ?? '',
+                    meta: button.querySelector('.session-meta')?.textContent ?? '',
+                    name: button.getAttribute('aria-label') ?? '',
+                  })),
+                  buttons: [...banner.querySelectorAll('.revert-banner-actions button')].map(
+                    (button) => button.textContent ?? '',
+                  ),
+                },
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+        };
+      });
+    /** The two sides of the diff editor in view, as text; `null` when no diff editor is shown. */
+    const diffSides = () =>
+      page.evaluate(() => {
+        const editor = globalThis.document.querySelector('.monaco-diff-editor');
+        if (!editor) return null;
+        const read = (side) =>
+          [...editor.querySelectorAll(`.editor.${side} .view-line`)]
+            .map((line) => (line.textContent ?? '').replace(/\u00a0/g, ' '))
+            .join('\n');
+        return { original: read('original'), modified: read('modified') };
+      });
+    const waitForDiff = (file) =>
+      waitFor(
+        async () => {
+          const tabs = await page.locator(`.tab.active[aria-label*="${file}"]`).count();
+          const sides = await diffSides();
+          const drawn = sides !== null && (sides.original !== '' || sides.modified !== '');
+          return tabs > 0 && drawn ? sides : undefined;
+        },
+        15_000,
+        300,
+      );
+
+    // --- A turn that changes five files (one of them too large to diff) -----------------------
+    await send('EDIT_FILES LARGE: change a few files');
+    check(await waitIdle(30_000), 'the edit turn finished');
+    const listed = await waitFor(async () => (await view()).changedSummary !== null, 20_000);
+    check(listed !== undefined, 'the "Changed files" list appears');
+    check(
+      (await view()).changedSummary === 'Changed files (5)',
+      `the summary counts five files (${JSON.stringify((await view()).changedSummary)})`,
+    );
+    check(await clickIn('details.changed-files > summary'), 'the summary is pressed');
+    await sleep(400);
+    const largeRow = await web.inDoc((doc) => {
+      const button = doc.querySelector(
+        'details.changed-files button.changed-file[data-status="too-large"]',
+      );
+      return button === null
+        ? null
+        : {
+            path: button.querySelector('.session-title')?.textContent ?? '',
+            meta: button.querySelector('.session-meta')?.textContent ?? '',
+            name: button.getAttribute('aria-label') ?? '',
+          };
+    });
+    console.log(`  too large row: ${JSON.stringify(largeRow)}`);
+    check(
+      largeRow?.path === 'docs/big.txt' && largeRow.meta === 'Too large to diff · +1200 −0',
+      `a file whose patch was cut says "Too large to diff · +A −D" (${JSON.stringify(largeRow?.meta)})`,
+    );
+    check(
+      largeRow?.name === 'Open docs/big.txt, Too large to diff, 1200 added, 0 deleted',
+      `its accessible name is a sentence (${JSON.stringify(largeRow?.name)})`,
+    );
+    for (const [name, theme] of THEMES) {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+      const look = await web.inDoc(measureText, {
+        meta: 'button.changed-file[data-status="too-large"] .session-meta',
+        path: 'button.changed-file[data-status="too-large"] .session-title',
+      });
+      for (const [part, measured] of Object.entries(look)) {
+        check(
+          measured !== null && measured !== undefined && measured.ratio >= 4.5,
+          `the ${part} text of the too-large row has contrast >= 4.5 in ${name} (${measured ? measured.ratio.toFixed(2) : 'not found'})`,
+        );
+      }
+      await shot(`19a-too-large-${name}`);
+    }
+    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
+    await page.waitForTimeout(2500);
+
+    // --- Open the diff of sample.ts and LEAVE it open (pinned) ---------------------------------
+    check(
+      await clickIn('details.changed-files button.changed-file[aria-label*="src/sample.ts"]'),
+      'the row of src/sample.ts is pressed',
+    );
+    const first = await waitForDiff('sample.ts');
+    check(
+      first?.original.includes('export const value2 = 2;') === true,
+      'the diff opened from "Changed files" has value2 = 2 on the left',
+    );
+    await command('View: Keep Editor');
+
+    // --- Revert from the message, with the real mouse -----------------------------------------
+    check(
+      await clickIn('button.message-action[aria-label^="Revert from here"]'),
+      'Revert from here is pressed',
+    );
+    const staged = await waitFor(async () => (await view()).banner !== null, 20_000, 300);
+    check(staged !== undefined, 'the revert block appears');
+    await sleep(1500);
+    const afterStage = await view();
+    console.log(`  after stage: ${JSON.stringify(afterStage)}`);
+    check(afterStage.messages === 0, 'the reverted messages are not in the conversation');
+    check(
+      afterStage.banner?.title === '1 message reverted',
+      `the block says "1 message reverted" (${JSON.stringify(afterStage.banner?.title)})`,
+    );
+    check(afterStage.banner?.insideLog === false, 'the block is outside the log');
+    check(
+      afterStage.banner?.caption === '5 files changed on disk',
+      `the block says how many files changed on disk (${JSON.stringify(afterStage.banner?.caption)})`,
+    );
+    check(
+      JSON.stringify(afterStage.banner?.rows.map((row) => [row.path, row.meta])) ===
+        JSON.stringify([
+          ['assets/logo.png', 'Binary'],
+          ['docs/big.txt', 'Too large to diff · +1200 −0'],
+          ['src/added.ts', 'Deleted · +0 −1'],
+          ['src/removed.ts', 'Added · +1 −0'],
+          ['src/sample.ts', 'Modified · +1 −1'],
+        ]),
+      `the rows are the files the revert changed, seen from the revert (${afterStage.banner?.rows.map((row) => `${row.path}: ${row.meta}`).join(' | ')})`,
+    );
+    check(
+      afterStage.banner?.rows[4]?.name ===
+        'Show what the revert undid in src/sample.ts, Modified, 1 added, 1 deleted',
+      `a row's name says it shows what the revert undid (${JSON.stringify(afterStage.banner?.rows[4]?.name)})`,
+    );
+    check(
+      JSON.stringify(afterStage.banner?.buttons) ===
+        JSON.stringify(['Restore', 'Discard for good']),
+      'the block has Restore and Discard for good',
+    );
+    check(
+      afterStage.draft === 'EDIT_FILES LARGE: change a few files',
+      `the prompt got the text of the message back (${JSON.stringify(afterStage.draft)})`,
+    );
+    const gone = await waitFor(async () => (await view()).changedSummary === null, 10_000, 300);
+    check(gone !== undefined, '"Changed files" shows only what is visible: nothing');
+    check(afterStage.styled === 0, 'no inline style attribute in the body');
+    check(
+      readText(sampleFile) === `${SAMPLE_HEADER}export const value2 = 2;\n`,
+      'the disk was restored: src/sample.ts has value2 = 2 again',
+    );
+    check(
+      !fs.existsSync(addedFile),
+      'the disk was restored: src/added.ts (created by the turn) is gone',
+    );
+    check(
+      readText(removedFile) === 'export const removed = true;\n',
+      'the disk was restored: src/removed.ts (deleted by the turn) is back',
+    );
+    check(
+      !fs.existsSync(logoFile) && !fs.existsSync(bigFile),
+      'the files the turn created are gone',
+    );
+    await shot('19b-revert-staged');
+
+    // Contrast of the block, four themes.
+    for (const [name, theme] of THEMES) {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+      const look = await web.inDoc(measureText, {
+        title: '.revert-banner-title',
+        note: '.revert-banner-note',
+        caption: '.revert-banner-caption',
+        path: '.revert-banner button.changed-file .session-title',
+        meta: '.revert-banner button.changed-file .session-meta',
+        restore: '.revert-banner-actions button',
+      });
+      console.log(`  revert block ${name}: ${JSON.stringify(look)}`);
+      for (const [part, measured] of Object.entries(look)) {
+        check(
+          measured !== null && measured !== undefined && measured.ratio >= 4.5,
+          `the ${part} text of the revert block has contrast >= 4.5 in ${name} (${measured ? measured.ratio.toFixed(2) : 'not found'})`,
+        );
+      }
+      await shot(`19c-revert-block-${name}`);
+    }
+    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
+    await page.waitForTimeout(2500);
+
+    // --- What the revert undid, by a real press on a row --------------------------------------
+    check(
+      await clickIn('.revert-banner button.changed-file[aria-label*="src/sample.ts"]'),
+      'the row of src/sample.ts in the revert block is pressed',
+    );
+    const undone = await waitFor(
+      async () => {
+        const sides = await diffSides();
+        const title = await page
+          .locator('.tab.active[aria-label*="sample.ts"]')
+          .first()
+          .innerText()
+          .catch(() => '');
+        return sides !== null &&
+          title.includes('(before the revert)') &&
+          sides.original.includes('value2 = 22')
+          ? { sides, title }
+          : undefined;
+      },
+      15_000,
+      300,
+    );
+    check(undone !== undefined, 'a diff editor titled "(before the revert)" opens');
+    console.log(`  undone sides: ${JSON.stringify(undone)}`);
+    check(
+      undone?.sides.original.includes('export const value2 = 22;') === true,
+      'the LEFT side holds the text before the revert (value2 = 22)',
+    );
+    check(
+      undone?.sides.modified.includes('export const value2 = 2;') === true &&
+        !undone.sides.modified.includes('value2 = 22'),
+      'the RIGHT side holds the file now on disk (value2 = 2)',
+    );
+    check(
+      (await page.locator('.tab[aria-label*="(OpenCode session)"]').count()) === 1,
+      'the pinned "Changed files" diff tab is still open',
+    );
+    await shot('19d-diff-undone');
+
+    // --- Restore ---------------------------------------------------------------------------------
+    check(await clickButton('Restore'), 'Restore is pressed');
+    const restored = await waitFor(
+      async () => {
+        const state = await view();
+        return state.banner === null && state.messages === 2 ? state : undefined;
+      },
+      20_000,
+      300,
+    );
+    check(restored !== undefined, 'Restore brings the two messages back and removes the block');
+    check(
+      readText(sampleFile) === `${SAMPLE_HEADER}export const value2 = 22;\n` &&
+        fs.existsSync(addedFile) &&
+        !fs.existsSync(removedFile),
+      'Restore put the files back as the turn left them (value2 = 22, added.ts, no removed.ts)',
+    );
+    const again = await waitFor(
+      async () => (await view()).changedSummary === 'Changed files (5)',
+      15_000,
+      300,
+    );
+    check(again !== undefined, '"Changed files (5)" is back after Restore');
+    await shot('19e-restored');
+
+    // --- Revert again and Discard for good, with the native modal ------------------------------
+    check(
+      await clickIn('button.message-action[aria-label^="Revert from here"]'),
+      'Revert from here is pressed again',
+    );
+    check(
+      (await waitFor(async () => (await view()).banner !== null, 20_000, 300)) !== undefined,
+      'the block appears again',
+    );
+    check(await clickButton('Discard for good'), 'Discard for good is pressed');
+    const modal = await waitFor(
+      async () => ((await dialog.count()) ? await dialog.first().innerText() : null),
+      10_000,
+      300,
+    );
+    check(
+      modal !== undefined && modal !== null && /cannot be undone/i.test(modal),
+      `a modal dialog of VS Code asks and says it cannot be undone (${String(modal).replace(/\s+/g, ' ').slice(0, 160)})`,
+    );
+    if (modal === undefined || modal === null)
+      throw new Error('the confirmation modal never appeared');
+    await shot('19f-discard-modal');
+    // Nothing is discarded before the answer; Cancel keeps the block.
+    await dialog
+      .first()
+      .getByRole('button', { name: /^Cancel$/ })
+      .click();
+    await page.waitForTimeout(800);
+    check((await view()).banner !== null, 'Cancel keeps the revert prepared');
+    await clickIn('textarea'); // the native dialog took the keyboard focus out of the page
+    check(await clickButton('Discard for good'), 'Discard for good is pressed once more');
+    check(
+      (await waitFor(async () => ((await dialog.count()) ? true : undefined), 10_000, 300)) ===
+        true,
+      'the modal appears again',
+    );
+    await dialog
+      .first()
+      .getByRole('button', { name: /^Discard for good$/ })
+      .click();
+    const discarded = await waitFor(
+      async () => {
+        const state = await view();
+        return state.banner === null && state.messages === 0 ? state : undefined;
+      },
+      20_000,
+      300,
+    );
+    check(discarded !== undefined, 'the history is deleted and the block is gone');
+    check((await dialog.count()) === 0, 'the dialog is closed');
+    check(
+      readText(sampleFile) === `${SAMPLE_HEADER}export const value2 = 2;\n` &&
+        !fs.existsSync(addedFile),
+      'the files stay as the revert left them (a commit touches no file)',
+    );
+    await shot('19g-discarded');
+
+    // --- Point 5 of #31: an open diff tab re-reads its left side after a committed revert -------
+    // The pinned tab is brought to the front BEFORE the turn and not touched afterwards, so what
+    // it shows at the end was pushed by the provider (`onDidChange`), not re-read on activation.
+    await page.locator('.tab[aria-label*="(OpenCode session)"]').first().click();
+    await sleep(800);
+    const shownBefore = await diffSides();
+    console.log(`  pinned tab before the turn: ${JSON.stringify(shownBefore)}`);
+    check(
+      shownBefore !== null && !shownBefore.original.includes('value2 = 5'),
+      'the pinned diff tab is in front and does not show value2 = 5 yet',
+    );
+    fs.writeFileSync(sampleFile, `${SAMPLE_HEADER}export const value2 = 5;\n`);
+    // The editor has the keyboard focus now: enter the chat first, or the typing lands in the file.
+    await clickIn('textarea');
+    await sleep(600);
+    await clickIn('textarea');
+    await sleep(400);
+    await send('EDIT_FILES: again');
+    check(await waitIdle(30_000), 'the second edit turn finished');
+    const renewed = await waitFor(
+      async () => {
+        const sides = await diffSides();
+        return sides?.original.includes('export const value2 = 5;') ? sides : undefined;
+      },
+      20_000,
+      400,
+    );
+    console.log(`  renewed sides: ${JSON.stringify(renewed)}`);
+    check(
+      renewed !== undefined,
+      'the diff tab opened before the revert now shows value2 = 5 on the left, without reopening it',
+    );
+    check(
+      renewed?.modified.includes('export const value2 = 52;') === true,
+      'and the new text (value2 = 52) on the right',
+    );
+    await shot('19h-diff-renewed');
+    const toasts = await page.locator('.notification-toast').allInnerTexts();
+    check(
+      toasts.every((text) => !/DiffNotListed|not among the files|NoTextDiff|Unknown/i.test(text)),
+      `no error notification came from the provider's rejections (${JSON.stringify(toasts).slice(0, 200)})`,
+    );
+    await command('View: Close All Editors');
+    assertNoWebviewErrors('revert');
   });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
