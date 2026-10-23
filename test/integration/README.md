@@ -36,12 +36,27 @@ path and format are internal to VS Code. If a test fails with "OpenCode.log not 
 listing in the error and at that folder. Settings are written into the isolated profile, never into
 your own `settings.json`.
 
-The opt-in `real-opencode` suite sends real prompts, so `.vscode-test.mjs` points opencode's
-`XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` to `.vscode-test/real-opencode-xdg` (in the
-environment of the test VS Code, inherited by the extension host and by `opencode serve`). It does
-not add sessions to your `~/.local/share/opencode`. Checked on Windows 11 with opencode 2.0.32 (a
-new `opencode.db` appears there, the real one keeps its modification time, and the free model
-works); POSIX is unchecked.
+The opt-in `real-opencode` suite creates and removes sessions in a real opencode, so
+`.vscode-test.mjs` points opencode's `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` to
+`.vscode-test/real-opencode-xdg` (in the environment of the test VS Code, inherited by the
+extension host and by `opencode serve`). It does not add sessions to your
+`~/.local/share/opencode`. Checked on Windows 11 with opencode 2.0.32 (a new `opencode.db`
+appears there, the real one keeps its modification time); POSIX is unchecked.
+
+## The opt-in `real-opencode` suite: a contract, never a turn
+
+`realOpencode.test.ts` never sends a prompt (tooling/tests-without-model), so it spends no quota
+and passes with the free model exhausted. It checks what can break between the extension and a
+real opencode v2 without a model answering: the start path inside a real VS Code, the chat view
+reaching the stream and loading the catalog (`catalog loaded (n models, m agents)`), the `@` file
+search, restart and crash recovery, the external-server connection with its real 401, and, with a
+server of its own (`startOwnServer` in `support/serverCases.ts`) and the full client, the shapes
+of the catalog, agents, providers, the session lifecycle and its first SSE events, the pending
+lists and `file.find`. A turn (text in parts, tokens, tools, permissions raised by a model) is
+covered on the synthetic server by `fake-server` and `npm run test:visual`, and the shapes of a
+real turn are compared with the synthetic one by the opt-in `npm run test:event-shapes`
+(`src/extension/test-fixtures/eventShapes.contract.ts`), which needs a model that answers.
+Run it with `OPEN_VS_CODE_REAL_OPENCODE=<opencode.exe> npm run test:integration -- --label real-opencode`.
 
 ## The `external-server` configuration (issue #11)
 
@@ -68,8 +83,9 @@ a folder it is serving: setting -> detection -> spawn -> stream -> turn, stop, `
 context, permissions (view hidden and visible), a question, restart and crash recovery.
 
 - **Synthetic.** A pass proves our wiring, not that the real opencode answers like this. The real
-  server is checked by the opt-in `real-opencode` suite, which keeps what only it can show (model
-  and agent choice, reasoning variant, the real 401 of an external server).
+  server is checked by the opt-in `real-opencode` suite (API shapes without a turn, the real 401 of
+  an external server). Every turn case lives here, model and agent choice and the reasoning variant
+  included.
 - **How a `.mjs` becomes the server.** The profile's `settings.json` (rewritten on every start,
   before VS Code runs) sets `openVsCode.opencodePath` to the fixture. In `ExtensionMode.Test` and
   with `OPEN_VS_CODE_TEST_NODE` set (the config does), `src/extension/testLaunch.ts` makes the

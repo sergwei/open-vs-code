@@ -109,8 +109,9 @@ const main = {
 const realOpencode = {
   ...common,
   label: 'real-opencode',
-  // The real opencode keeps its database under `~/.local/share/opencode`; this suite sends real
-  // prompts, so it would add sessions and projects to the developer's own history. The XDG
+  // The real opencode keeps its database under `~/.local/share/opencode`; this suite sends no
+  // prompt but its contract cases create and remove sessions, so it would still add sessions and
+  // projects to the developer's own history. The XDG
   // variables go in the env of the test VS Code: the extension host inherits it and
   // `opencode serve` inherits the host's, so production code is untouched. VERIFIED (Windows 11,
   // opencode 2.0.32, 20/10/2026, spike): with them a fresh `opencode.db` is created under
@@ -127,10 +128,11 @@ const realOpencode = {
   launchArgs: [...common.launchArgs, '--disable-workspace-trust'],
   // A real server boots in well under a second (~280 ms to the port, spike 2026-10-20) but the
   // startup budget of the extension is 30 s (STARTUP_TIMEOUT_MS); the wait inside the test is
-  // 35 s, so this stays above it and the log diagnostic wins over Mocha's generic timeout.
-  // 100 s is the default for the chat test of issue #14 (a real prompt: up to 60 s of turn plus
-  // the waits for the view and the stream); that test sets its own `this.timeout` as well.
-  mocha: { ...common.mocha, timeout: 100000 },
+  // 35 s, so this stays above it and the log diagnostic wins over Mocha's generic timeout. The
+  // suite sends no prompt (tooling/tests-without-model), so no case waits for a turn any more:
+  // 60 s covers the longest default (a server start plus its waits), and the cases that need more
+  // (the contract with a server of its own, restart) set their own `this.timeout`.
+  mocha: { ...common.mocha, timeout: 60000 },
 };
 
 if (process.env.OPEN_VS_CODE_REAL_OPENCODE) {

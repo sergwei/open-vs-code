@@ -5,6 +5,11 @@
 // `settings.json`. Everything lives under `.vscode-test/visual/` (ignored by git) and a temporary
 // workspace folder created here.
 //
+// Since tooling/tests-without-model the opencode this instance runs is the synthetic fixture
+// (`src/extension/test-fixtures/fake-opencode.mjs`), not a real one: no model, no quota, no network.
+// The extension launches it as its OWN server through the seam of `testLaunch.ts`; see
+// {@link fakeEnv} for the variables that switch the seam on in this (Development-mode) instance.
+//
 // VERIFIED (Windows 11, VS Code 1.142.0, Node 24, 20/10/2026): this launch recipe is the one the
 // manual CDP driver of that day used (Engram #934). POSIX launch and kill paths are UNVERIFIED.
 import { downloadAndUnzipVSCode } from '@vscode/test-electron';
@@ -35,20 +40,44 @@ export function freePort() {
  * (`XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`), so the run does not write sessions and
  * projects into the developer's real `~/.local/share/opencode`. The variables go in the env of
  * VS Code, not of the extension: the extension host inherits it and `opencode serve` inherits the
- * host's (`buildServeEnv` copies `process.env`), so production code is unchanged. VERIFIED on
- * Windows 11 with opencode 2.0.32 (20/10/2026): with these variables a fresh `opencode.db`
- * appeared under `xdgRoot/data/opencode` and the modification time of the real
- * `~/.local/share/opencode/opencode.db*` did not change, and the free default model answered
- * without `XDG_CONFIG_HOME`. POSIX UNVERIFIED.
+ * host's (`buildServeEnv` copies `process.env`), so production code is unchanged. Seen on
+ * Windows 11 with a REAL opencode 2.0.32 (20/10/2026, before this run moved to the fixture, not
+ * repeated since): a fresh `opencode.db` appeared under `xdgRoot/data/opencode` and the
+ * modification time of the real `~/.local/share/opencode/opencode.db*` did not change. The
+ * fixture writes no database, so today they are only a safety net in case the extension launches
+ * something else. POSIX UNVERIFIED. `fake` is `{stateFile}`, see {@link fakeEnv}.
  */
-function cleanEnv(xdgRoot) {
+function cleanEnv(xdgRoot, fake) {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   for (const key of Object.keys(env)) if (key.startsWith('VSCODE_')) delete env[key];
   env.XDG_DATA_HOME = path.join(xdgRoot, 'data');
   env.XDG_STATE_HOME = path.join(xdgRoot, 'state');
   env.XDG_CACHE_HOME = path.join(xdgRoot, 'cache');
-  return env;
+  return { ...env, ...fakeEnv(fake) };
+}
+
+/**
+ * The variables that make this instance run the synthetic opencode as its own server.
+ *
+ * `OPEN_VS_CODE_TEST_NODE` (absolute path of the Node running this script) and
+ * `OPEN_VS_CODE_VISUAL_FAKE=1` are the two the seam of `src/extension/testLaunch.ts` needs in
+ * `ExtensionMode.Development`, which is the mode `--extensionDevelopmentPath` without
+ * `--extensionTestsPath` gives (decision of Sergio, 22/10/2026: widen the seam to Development,
+ * only with this explicit variable, never in production). The rest is read by the fixture:
+ * `FAKE_OPENCODE_MODE=visual` (bigger catalog, real `find`), `FAKE_OPENCODE_STATE_FILE` (the
+ * conversation survives Restart Server and Reload Window) and `FAKE_OPENCODE_LIFETIME_MS` (one
+ * hour: the 60 s default would end the server in the middle of the run). They go in the env of
+ * VS Code; the extension host inherits them and `buildServeEnv` copies them to the server.
+ */
+function fakeEnv(fake) {
+  return {
+    OPEN_VS_CODE_TEST_NODE: process.execPath,
+    OPEN_VS_CODE_VISUAL_FAKE: '1',
+    FAKE_OPENCODE_MODE: 'visual',
+    FAKE_OPENCODE_STATE_FILE: fake.stateFile,
+    FAKE_OPENCODE_LIFETIME_MS: '3600000',
+  };
 }
 
 /** Writes (merges into) the profile's `settings.json`; returns its path. */
@@ -92,10 +121,12 @@ export function createWorkspace() {
  * (`opencode-xdg`, see {@link cleanEnv}) are wiped at start so every run begins from the same
  * state.
  *
- * Returns `{ port, pid, stop }`; `stop()` kills the whole process tree (the server child of the
+ * `openVsCode.opencodePath` is the fixture (see {@link fakeEnv}); the fixture's state file lives in
+ * `workDir` and is deleted at start like the profile. Returns `{ port, pid, stop, userDataDir,
+ * xdgRoot, exited, stateFile }`; `stop()` kills the whole process tree (the server child of the
  * extension host included) and waits until the main process is gone.
  */
-export async function startVSCode({ repoRoot, workDir, workspace, opencodePath }) {
+export async function startVSCode({ repoRoot, workDir, workspace }) {
   const executable = await downloadAndUnzipVSCode('stable');
   const userDataDir = path.join(workDir, 'user-data');
   const extensionsDir = path.join(workDir, 'extensions');
@@ -103,8 +134,16 @@ export async function startVSCode({ repoRoot, workDir, workspace, opencodePath }
   fs.rmSync(extensionsDir, { recursive: true, force: true });
   const xdgRoot = path.join(workDir, 'opencode-xdg');
   fs.rmSync(xdgRoot, { recursive: true, force: true });
+  const stateFile = path.join(workDir, 'fake-opencode-state.json');
+  fs.rmSync(stateFile, { force: true });
   writeSettings(userDataDir, {
-    'openVsCode.opencodePath': opencodePath,
+    'openVsCode.opencodePath': path.join(
+      repoRoot,
+      'src',
+      'extension',
+      'test-fixtures',
+      'fake-opencode.mjs',
+    ),
     'workbench.startupEditor': 'none',
     'workbench.colorTheme': 'Default Dark Modern',
     'security.workspace.trust.enabled': false,
@@ -138,7 +177,7 @@ export async function startVSCode({ repoRoot, workDir, workspace, opencodePath }
       '--skip-welcome',
       `--remote-debugging-port=${String(port)}`,
     ],
-    { env: cleanEnv(xdgRoot), stdio: 'ignore', detached, shell: false },
+    { env: cleanEnv(xdgRoot, { stateFile }), stdio: 'ignore', detached, shell: false },
   );
   const exited = new Promise((resolve) => child.once('exit', resolve));
   const pid = child.pid;
@@ -162,5 +201,5 @@ export async function startVSCode({ repoRoot, workDir, workspace, opencodePath }
     }
     await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 10_000))]);
   };
-  return { port, pid, stop, userDataDir, xdgRoot, exited };
+  return { port, pid, stop, userDataDir, xdgRoot, exited, stateFile };
 }

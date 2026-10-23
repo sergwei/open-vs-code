@@ -1,11 +1,22 @@
-// Real opencode suite (opt-in, follow-up of issue #8).
+// Real opencode suite (opt-in, follow-up of issue #8): the CONTRACT between the extension and a
+// REAL opencode v2, with NO model turn.
 //
-// Protects against: the whole server start path (binary detection -> server manager -> `opencode
-// serve --stdio --port 0` -> `GET /api/info` -> version check) breaking when it runs inside a real
-// VS Code against a REAL opencode instead of the synthetic fixture. The unit tests cannot see
-// that: the fixture is ours. The same path was verified under plain Node on Windows 11 with
-// opencode 2.0.32 (spike of 2026-10-20); this suite adds the VS Code side (extension host,
-// workspace folder, log channel).
+// Since tooling/tests-without-model this suite never sends a prompt, so it spends no quota and
+// passes when the free model is exhausted, rate limited or offline. What it protects is everything
+// that can break between the extension and a real server WITHOUT a model answering: the whole
+// start path (binary detection -> server manager -> `opencode serve --stdio --port 0` -> `GET
+// /api/info` -> version check) inside a real VS Code, the chat view reaching the event stream and
+// loading the catalog, the file search, restart and crash recovery, the external-server
+// connection and its 401, and, with a server of its own and the full client, the shapes of the
+// read-only and lifecycle API (catalog, agents, providers, session create / rename / switch /
+// list / get / fork / interrupt / remove, the first SSE frames, pending-request lists, saved
+// permissions, file find). What it does NOT see is a TURN (text in parts, `session.step.*` with
+// tokens, tools, permissions and forms raised by a model): that is the job of the opt-in
+// `npm run test:event-shapes`, which compares a real turn with the synthetic one when a model
+// answers, and of `npm run test:visual` / `fake-server`, which play turns on the synthetic server.
+// The cases that used to send prompts here (stream a prompt to the end, model + agent, variant,
+// interrupt, mention + prompt, selection + prompt, permission hidden / visible, question) have
+// their twin in `fakeServer.test.ts`.
 //
 // Opt-in: it runs only when `OPEN_VS_CODE_REAL_OPENCODE` holds the absolute path to the opencode
 // v2 executable, and `.vscode-test.mjs` then adds a configuration with a workspace folder (the
@@ -16,37 +27,16 @@
 //
 // Issue #41: the cases that did not need the real server (`editor.open`, the whole-file, several
 // selections, dirty-buffer and OutsideWorkspace editor-context cases) moved to `fakeServer.test.ts`,
-// which runs the synthetic opencode in CI; their OutsideWorkspace case also stopped deleting a temp
-// folder from inside the suite (EPERM on Windows). Several flows are covered in both suites on
-// purpose: there with the fixture (deterministic, CI), here with the real server and model.
-// Helpers shared by both live in `support/serverCases.ts`.
+// which runs the synthetic opencode in CI. Helpers shared by both live in `support/serverCases.ts`.
 //
-// Phase 3 (issues #18/#44/#19/#10) cases, observed on Windows 11 with VS Code 1.142.0 and the
-// free default model on 2026-10-20 (two runs; in the first, the older case "streams a real
-// prompt" saw no turn end within 60 s; the second run passed all 9 and the same prompt finished
-// in 4 s). HYPOTHESIS that the free model was slow or stuck: the log of that first run
-// (the extension's OpenCode.log of that run, read on 20/10/2026) shows `prompt accepted` at
-// 20:54:16 and NO `turn finished` line of any kind until the
-// next case's prompt at 20:55:16, which queued behind it and was cut by the interrupt; nothing in
-// that log points at the model or rules it out. To check: rerun until it repeats and read the
-// server's own session messages for that prompt.
-//   - `read` of `.env` raises a real `permission.asked` (action `read`) with the default config;
-//   - hidden view: `attention: badge 1` and ONE `attention: notified`, then `resolved: reject`,
-//     `attention: closed ... (resolved)` and `attention: badge 0`; a bare reject ends the turn
-//     `interrupted`;
-//   - visible view: no notification, `once` ends the turn `succeeded`;
-//   - the `question` tool raised a form, the session waited, `{ q0: "A" }` was accepted;
-//   - restart: new pid, stream reconnected, old pid gone; killing the server restarts it after 1 s.
-// NEVER pressed: "Always" (it stores a rule such as `read *` in the opencode database of whoever
-// runs this). Not observed: how the toast or its links look, the badge on the icon, a REST
-// snapshot taken while a request is pending, `form.cancel`, an interrupt with a request pending.
-//
-// External server case (issue #11), the last `it`: observed on Windows 11 with VS Code 1.143.0 and
-// opencode 2.0.32 on 22/10/2026. The real server accepted the Basic credential (the extension
-// logged "connected to the external server at ... (opencode 2.0.32)" and a turn finished
-// `succeeded` through it) and answered a wrong password with HTTP 401 (the extension logged
-// "GET /api/info failed: HTTP 401" and "server not available (unauthorized)"). Not observed
-// against a real opencode: a refused connection and a timeout. Details in the header of the case.
+// Restart and crash recovery (issue #10) were observed against a real opencode 2.0.32 in VS Code
+// 1.142.0 on Windows 11 on 20/10/2026: new pid, stream reconnected, old pid gone; a killed server
+// restarts after 1 s. External server case (issue #11): observed on Windows 11 with VS Code 1.143.0
+// and opencode 2.0.32 on 22/10/2026; the real server accepted the Basic credential (the extension
+// logged "connected to the external server at ... (opencode 2.0.32)") and answered a wrong
+// password with HTTP 401 ("GET /api/info failed: HTTP 401", "server not available
+// (unauthorized)"); the turn it used to run through that server is gone. Not observed against a
+// real opencode: a refused connection and a timeout.
 //
 // Out of scope: the STOP. Nothing public in the extension stops the server before the window
 // closes (`deactivate` does it), and a test cannot observe its own host shutting down. The test
@@ -55,43 +45,105 @@
 // plain Node (spike of 2026-10-20) but NOT through `deactivate` in VS Code.
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
-import { spawn } from 'node:child_process';
 import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { OpenCode, type OpenCodeClient } from '@opencode/client';
 import * as vscode from 'vscode';
-import { toEditorRef } from '../../src/extension/fileMentions';
 import {
   CLEAR_SERVER_PASSWORD_COMMAND_ID,
   CONFIG_SECTION,
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
   OPENCODE_PATH_KEY,
   OPENCODE_PATH_SETTING,
-  REPLY_PERMISSION_COMMAND_ID,
   RESTART_SERVER_COMMAND_ID,
   SERVER_URL_KEY,
   TEST_SET_SERVER_PASSWORD_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
+import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
 import {
-  killTree,
-  PINNED_OPENCODE_VERSION,
-  readUrlLine,
-  waitForExit,
-} from '../../src/extension/opencodeServer';
-import { openLogCursor, openLogFromStart, type LogCursor } from './support/extensionLog';
+  toAgentOptions,
+  toModelOption,
+  toProviderOption,
+  toSessionSummary,
+} from '../../src/extension/wireMapping';
+import { openLogCursor, openLogFromStart } from './support/extensionLog';
 import {
   lastReadyPid,
-  matchInLog as sharedMatchInLog,
-  sendPrompt,
+  matchInLog,
+  SAMPLE_TS,
+  sleep,
+  startOwnServer,
   waitUntilGone,
+  type OwnServer,
 } from './support/serverCases';
 
 const EXTENSION_ID = 'sergwei.open-vs-code';
 // Above STARTUP_TIMEOUT_MS (30 s) of the extension, so a start that really hangs fails with the
 // extension's own error in the log, not with ours. A healthy start takes well under a second.
 const READY_WAIT_MS = 35_000;
-// Time for a real turn with the free default model (network): our own choice, see the test.
-const TURN_WAIT_MS = 60_000;
+
+/** An event of the stream, as far as these cases read it. */
+interface SeenEvent {
+  type: string;
+  data?: Record<string, unknown>;
+}
+
+/**
+ * Subscribes to `GET /api/event` and collects every event, so a case can create the session after
+ * the subscription and then wait for what the server published about it. `stop()` ends the stream.
+ * The subscription is opened by the first `next()` of the iterator, so `ready()` waits for the
+ * `server.connected` frame before the case acts.
+ */
+function watchEvents(client: OpenCodeClient): {
+  events: SeenEvent[];
+  ready(): Promise<void>;
+  waitFor(
+    match: (event: SeenEvent) => boolean,
+    what: string,
+    timeoutMs?: number,
+  ): Promise<SeenEvent>;
+  stop(): Promise<void>;
+} {
+  const abort = new AbortController();
+  const events: SeenEvent[] = [];
+  const pump = (async () => {
+    try {
+      for await (const event of client.event.subscribe({ signal: abort.signal })) {
+        events.push(event);
+      }
+    } catch {
+      // The abort in `stop()` ends the iteration; any other failure shows as a missing event.
+    }
+  })();
+  const waitFor = async (
+    match: (event: SeenEvent) => boolean,
+    what: string,
+    timeoutMs = 10_000,
+  ): Promise<SeenEvent> => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const found = events.find(match);
+      if (found) return found;
+      if (Date.now() >= deadline) {
+        assert.fail(
+          `${what} did not arrive within ${String(timeoutMs)} ms; saw: ${events.map((e) => e.type).join(', ')}`,
+        );
+      }
+      await sleep(50);
+    }
+  };
+  return {
+    events,
+    ready: async () => {
+      await waitFor((event) => event.type === 'server.connected', 'server.connected', 15_000);
+    },
+    waitFor,
+    stop: async () => {
+      abort.abort();
+      await pump;
+    },
+  };
+}
 
 describe('real opencode', function () {
   let binary: string;
@@ -180,232 +232,65 @@ describe('real opencode', function () {
   });
 
   /**
-   * End to end of issue #14 against a REAL opencode: the view loads, the event stream connects,
-   * a prompt injected as if the webview had sent it is accepted, and the turn ends `succeeded`.
+   * The chat view against a REAL server, with no prompt: the webview loads, the event stream
+   * connects (first frame `server.connected`, read by the host) and the host loads the catalog
+   * (`catalog loaded (<n> models, <m> agents)` with n >= 1 and m >= 1: the four catalog GETs and
+   * their mapping worked on the real answers).
    *
-   * The prompt goes through the internal command `openVsCode.test.injectWebviewMessage` (only
-   * registered in `ExtensionMode.Test`), because the test API cannot reach the iframe. It uses
-   * the free default model of opencode (`opencode/big-pickle`, seen working in the planner's
-   * spike on 2026-10-20), so it needs network: a failure may come from the service, and the log
-   * excerpt in the assertion includes the `execution.failed` error. The reply TEXT is not
-   * asserted (a model may word it differently); the visual result is for the F5 of Sergio.
-   * 60 s for the turn is our own choice (the spike's turn took a few seconds).
-   * Depends on the previous `it` (same window, server already running).
+   * VERIFIED on Windows 11, VS Code 1.143.0, opencode 2.0.32 (22/10/2026, the `real-opencode`
+   * label, no prompt): the log of the run showed `webview ready`, `event stream connected` and three
+   * `catalog loaded` lines, `(9 models, 0 agents)` first and `(9 models, 2 agents)` after, so the
+   * catalog can be read once with an empty agent list right after the server starts. HYPOTHESIS:
+   * the real server answers `agent.list` empty for a moment while it boots (or the first load
+   * races a restore); not investigated. Whether the webview ever shows no agents because of it
+   * was not observed.
+   *
+   * Replaces the first half of the case that used to send a prompt and wait for `turn finished`;
+   * the rest of that case (the reply streamed to the end, the usage update) is covered by the
+   * `fake-server` suite and, for shapes, by `npm run test:event-shapes`. The log is read from the
+   * start of the file: the catalog may have loaded on activation, before the view opened.
+   * Depends on the previous `it` (same window, server already running). Needs no network beyond
+   * the server's own catalog and no model quota.
    */
-  it('streams a real prompt to the end', async function () {
-    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
+  it('opens the chat: the stream connects and the catalog loads, with no prompt', async function () {
+    this.timeout(READY_WAIT_MS + 30_000);
     const log = await openLogFromStart();
     await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
     await log.waitFor('webview ready', 8_000);
     await log.waitFor('event stream connected', 10_000);
-
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'prompt.send',
-      requestId: 'integration-1',
-      text: 'Reply with exactly: hello there',
-      delivery: 'queue',
-      files: [],
-    });
-    await log.waitFor('prompt accepted for ses_', 10_000);
-    await log.waitFor('turn finished: ', TURN_WAIT_MS);
-    const text = log.added();
-    assert.ok(
-      text.includes('turn finished: succeeded'),
-      `the turn did not end succeeded; log:\n${text}`,
+    // The host loads the catalog more than once on a start, and the FIRST line of the run that
+    // recorded this case read `(9 models, 0 agents)` before `(9 models, 2 agents)` (see the header
+    // of the case), so the wait is for a line that has both: it is the final state that matters.
+    await matchInLog(
+      log,
+      /catalog loaded \([1-9]\d* models, [1-9]\d* agents\)/,
+      15_000,
+      'a catalog line with models and agents',
     );
-    // Issue #25: the real server publishes `session.usage.updated` with accumulated totals while the
-    // turn runs (before `execution.succeeded`), and the host logs ids and a token count only.
-    assert.match(
-      text,
-      /usage updated for ses_\w+: [1-9]\d* tokens/,
-      `no usage update with tokens was logged; log:\n${text}`,
-    );
+    log.assertAbsent('prompt accepted');
   });
 
   /**
-   * Model and agent selectors (issues #23/#24) against a REAL opencode: a prompt that carries
-   * `opencode/glm-5.3-flash-free` and `plan` is validated against the catalog the host loaded from
-   * `model.list` / `agent.list`, the session is switched with the real `switchAgent` and
-   * `switchModel` routes, and the turn ends `succeeded`.
-   *
-   * Protects: the four catalog GETs and the two switch routes existing in the real server with the
-   * bodies the host sends (a 4xx would fail the send and log `request ... failed`), and that the
-   * order is switch, then prompt. The model is one of the ten free ones the planner's spike listed
-   * (opencode 2.0.32, Windows 11, 21/10/2026); free models change over time, so when the host
-   * REFUSES it (`ModelUnavailable`: the real catalog no longer lists it) the case is skipped with
-   * the reason, not failed. It runs in the session the previous cases left open, so the agent
-   * really changes (`build` -> `plan`). The reply text is not asserted; the visible proof
-   * ("Plan · <model>" under the reply) is `test:visual` step 11. Needs network and the free model.
-   */
-  it('applies a chosen model and agent before the prompt', async function () {
-    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
-    const log = await openLogCursor();
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'prompt.send',
-      requestId: 'integration-model-1',
-      text: 'Reply with exactly: hello there',
-      delivery: 'queue',
-      files: [],
-      model: { providerID: 'opencode', id: 'glm-5.3-flash-free' },
-      agent: 'plan',
-    });
-    // Either the prompt is accepted, or the host refused the choice before touching the server.
-    const deadline = Date.now() + 15_000;
-    while (
-      !log.added().includes('prompt accepted for ses_') &&
-      !log.added().includes('prompt integration-model-1 rejected: ') &&
-      Date.now() < deadline
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    if (log.added().includes('prompt integration-model-1 rejected: ModelUnavailable')) {
-      console.log('SKIP: opencode/glm-5.3-flash-free is not in the real catalog any more');
-      this.skip();
-    }
-    await log.waitFor('prompt accepted for ses_', 1_000);
-    await log.waitFor('turn finished: ', TURN_WAIT_MS);
-    const text = log.added();
-    assert.ok(
-      text.includes('agent selected plan for ses_'),
-      `the agent was not switched to plan; log:\n${text}`,
-    );
-    assert.ok(
-      text.includes('model selected opencode/glm-5.3-flash-free for ses_'),
-      `the model was not switched; log:\n${text}`,
-    );
-    assert.ok(
-      text.indexOf('model selected') < text.indexOf('prompt accepted'),
-      `the choice must be applied BEFORE the prompt; log:\n${text}`,
-    );
-    assert.ok(text.includes('turn finished: succeeded'), `the turn did not succeed; log:\n${text}`);
-  });
-
-  /**
-   * Reasoning variant (issue #61) against a REAL opencode: a prompt that carries
-   * `opencode/glm-5.3-flash-free` with variant `low` switches the session through the real
-   * `switchModel` route (the model is already the session's, so only the variant changes), and the
-   * turn runs with it and ends `succeeded`.
-   *
-   * Protects: the variant reaching `switchModel` (the host logs `model selected … (variant low)`
-   * only after the call returned) BEFORE the prompt, and the turn not dying with the server's
-   * `VariantUnavailableError` ("Variant unavailable for p/m: x", raised when the turn runs, read in
-   * `model-resolver.ts@843a6c51`, never seen here before). The model and its variants come from
-   * the planner spike (glm-5.3-flash-free: low/high/max, opencode 2.0.32, Windows 11,
-   * 21/10/2026); free models change over time, so when the host REFUSES it (`ModelUnavailable` or
-   * `VariantUnavailable`) the case is skipped with the reason, not failed. Runs in the session
-   * the previous cases left open. The reply text is not asserted; the visible proof ("· low"
-   * under the reply) is `test:visual` step 14. Needs network and the free model.
-   *
-   * VERIFIED on Windows 11, VS Code 1.143.0, opencode 2.0.32, on 22/10/2026 ~09:50 (run of the
-   * `real-opencode` label on the final tree, 11 passing; OpenCode.log read afterwards): `model
-   * selected opencode/glm-5.3-flash-free for ses_… (variant low)` at 09:50:12.869, then `prompt
-   * accepted` at 09:50:12.874 and `turn finished: succeeded` at 09:50:28.212, so the real server
-   * took the variant and `VariantUnavailableError` did not show up. NOT observed: that error
-   * itself (no unlisted variant was sent to a real server), macOS and Linux (UNVERIFIED).
-   */
-  it('applies a chosen reasoning variant before the prompt', async function () {
-    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
-    const log = await openLogCursor();
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'prompt.send',
-      requestId: 'integration-variant-1',
-      text: 'Reply with exactly: hello there',
-      delivery: 'queue',
-      files: [],
-      model: { providerID: 'opencode', id: 'glm-5.3-flash-free', variant: 'low' },
-    });
-    const deadline = Date.now() + 15_000;
-    while (
-      !log.added().includes('prompt accepted for ses_') &&
-      !log.added().includes('prompt integration-variant-1 rejected: ') &&
-      Date.now() < deadline
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    const refused =
-      /prompt integration-variant-1 rejected: (ModelUnavailable|VariantUnavailable)/.exec(
-        log.added(),
-      );
-    if (refused !== null) {
-      console.log(
-        `SKIP: the real catalog does not offer glm-5.3-flash-free@low (${refused[1] ?? ''})`,
-      );
-      this.skip();
-    }
-    await log.waitFor('prompt accepted for ses_', 1_000);
-    await log.waitFor('turn finished: ', TURN_WAIT_MS);
-    const text = log.added();
-    assert.ok(
-      text.includes('model selected opencode/glm-5.3-flash-free for ses_'),
-      `the model was not switched; log:\n${text}`,
-    );
-    assert.ok(text.includes('(variant low)'), `the variant was not applied; log:\n${text}`);
-    assert.ok(
-      text.indexOf('(variant low)') < text.indexOf('prompt accepted'),
-      `the variant must be applied BEFORE the prompt; log:\n${text}`,
-    );
-    assert.ok(text.includes('turn finished: succeeded'), `the turn did not succeed; log:\n${text}`);
-  });
-
-  /**
-   * Stop (issue #16) against a REAL opencode: a long prompt is interrupted mid-turn through the
-   * same `session.abort` message the Stop button sends, and the server confirms it.
-   *
-   * Protects: the v2 route (`POST /api/session/:id/interrupt`, not the v1 `/abort` the issue
-   * cites), the BARE `{interrupted}` body (a wrapped read would give `undefined` and log
-   * `interrupted: undefined`), and the `session.execution.interrupted` event reaching the turn log.
-   * The session id is read from the `prompt accepted for ses_...` line. The 1500 ms wait lets the
-   * turn start before the interrupt; if the model were fast enough to finish a 400-number list in
-   * that time the test would see `interrupted: false` and fail (our own choice, flaky only on an
-   * absurdly fast model; not observed). Needs network and the free model, like the test above.
-   */
-  it('interrupts a long turn with session.abort', async function () {
-    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
-    const log = await openLogCursor();
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'prompt.send',
-      requestId: 'integration-abort-1',
-      text: 'Count from 1 to 400, one number per line. Do not stop early.',
-      delivery: 'queue',
-      files: [],
-    });
-    await log.waitFor('prompt accepted for ses_', 10_000);
-    const sessionID = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
-    assert.ok(sessionID, `no session id in the log:\n${log.added()}`);
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
-
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'session.abort',
-      requestId: 'integration-abort-2',
-      sessionID,
-    });
-    await log.waitFor(`abort requested for ${sessionID} (interrupted: true)`, 10_000);
-    await log.waitFor(`turn finished: interrupted for ${sessionID}`, 15_000);
-  });
-
-  /**
-   * `@` mention search (issue #28) against a REAL opencode: `files.search` reaches
+   * `@` mention search (issue #28) against a REAL opencode, no prompt: `files.search` reaches
    * `GET /api/fs/find`, the answer is mapped and the host logs `file search: N results` with N >= 1
-   * for a file that exists in the served folder; and a prompt that mentions that file (its `uri`
-   * is built here the way the host builds it, `pathToFileURL`) is accepted by the whitelist
-   * (`offeredUris`) and by the server, with a `mention`, and the turn ends `succeeded`.
+   * for a file that exists in the served folder.
    *
    * Protects: the v2 route and its `{location, data}` answer (the issue text cites the v1
-   * `/find/file`), the `type: 'file'` and `limit` query, and the real server accepting
-   * `files[].mention`. The search is retried for up to 25 s: the real server refreshes its file
-   * index every 10 s (read in `search.ts@843a6c51`), so a file written a moment ago may not be
-   * listed yet; 25 s and the 2 s pause are our own choices. Writes `src/sample.ts` into the
-   * temporary workspace folder (the fake-server suite has its own file with the same name in
-   * its fixed workspace folder). Needs network and the free model for
-   * the turn. The reply text is not asserted.
+   * `/find/file`) and the `type: 'file'` and `limit` query. The search is retried for up to 25 s:
+   * the real server refreshes its file index every 10 s (read in `search.ts@843a6c51`), so a file
+   * written a moment ago may not be listed yet; 25 s and the 2 s pause are our own choices. Writes
+   * `src/sample.ts` into the temporary workspace folder (the fake-server suite has its own file
+   * with the same name in its fixed workspace folder). The part that sent a prompt mentioning the
+   * file is gone (it needed a model); the real server taking `files[].mention` is left to the
+   * event-shape check.
    */
-  it('finds a file with files.search and sends a prompt that mentions it', async function () {
-    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
+  it('finds a file with files.search (no prompt)', async function () {
+    this.timeout(READY_WAIT_MS);
     const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     assert.ok(folder, 'no workspace folder is open');
     const file = path.join(folder, 'src', 'sample.ts');
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, 'export const a = 1;\nexport const b = 2;\nexport const c = 3;\n');
+    fs.writeFileSync(file, SAMPLE_TS);
 
     const log = await openLogCursor();
     const deadline = Date.now() + 25_000;
@@ -417,262 +302,296 @@ describe('real opencode', function () {
         requestId: `integration-find-${String(attempt)}`,
         query: 'sample',
       });
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await sleep(2_000);
     }
     assert.ok(
       /file search: [1-9]\d* results/.test(log.added()),
-      `no search returned a result for "sample" in ${attempt} attempts; log:\n${log.added()}`,
+      `no search returned a result for "sample" in ${String(attempt)} attempts; log:\n${log.added()}`,
     );
+    log.assertAbsent('prompt accepted');
+  });
 
-    const text = 'Reply with exactly: OK. Do not use any tools. See @src/sample.ts';
-    const marker = '@src/sample.ts';
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'prompt.send',
-      requestId: 'integration-mention-1',
-      text,
-      delivery: 'queue',
-      files: [
-        {
-          uri: pathToFileURL(file).href,
-          name: 'src/sample.ts',
-          mention: {
-            start: text.indexOf(marker),
-            end: text.indexOf(marker) + marker.length,
-            text: marker,
-          },
+  /**
+   * The API contract against a REAL server of the test's own (`startOwnServer`), through the
+   * full promise client and with NO prompt: nothing here reaches a model. Each case reads the
+   * answer the way the host does (`wireMapping` for the catalog and the session rows), so a
+   * change of shape in a release shows up as a failure with the field named.
+   *
+   * What the plan of tooling/tests-without-model took from the spikes of the planner against
+   * opencode 2.0.32 (Windows 11, 20-22/10/2026) and from `references/endpoints-v2.md`; the cases
+   * were then run against the real server, and the header of each says what that run showed.
+   * A server of its own, not the extension's: the extension's would be touched by the restart
+   * cases and by `session.remove`.
+   * Every VERIFIED below is the passing case of `npm run test:integration -- --label
+   * real-opencode` on Windows 11 with opencode 2.0.32 (23/10/2026, final tree of
+   * tooling/tests-without-model), the case title as the line that backs it; macOS and Linux are
+   * UNVERIFIED.
+   */
+  describe('API contract (own server, no prompt)', function () {
+    let own: OwnServer;
+    let folder: string;
+
+    before(async function () {
+      this.timeout(READY_WAIT_MS + 5_000);
+      const first = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      assert.ok(first, 'no workspace folder is open');
+      folder = first;
+      own = await startOwnServer(binary, folder, 'contract-pw');
+    });
+
+    after(async () => {
+      // `own` is unassigned when the `before` hook failed.
+      await (own as OwnServer | undefined)?.stop();
+    });
+
+    /**
+     * `GET /api/info` (what the host's version check reads) and the 401 of a wrong password with
+     * the DIRECT client: `{version, pid, urls, paths: {tmp}}`, the pinned version, and an
+     * `UnauthorizedError` body (`_tag`) for a client with a wrong password.
+     * VERIFIED (23/10/2026): "answers /api/info with the pinned version, and 401 to a wrong
+     * password" passed against the real server, so those fields and the `_tag` exist as asserted.
+     */
+    it('answers /api/info with the pinned version, and 401 to a wrong password', async function () {
+      const info = await own.client.server.info();
+      assert.strictEqual(info.version, PINNED_OPENCODE_VERSION);
+      assert.strictEqual(typeof info.pid, 'number');
+      assert.ok(Array.isArray(info.urls), 'urls is not an array');
+      assert.strictEqual(typeof info.paths.tmp, 'string');
+
+      const stranger = OpenCode.make({
+        baseUrl: own.origin,
+        headers: {
+          Authorization: `Basic ${Buffer.from('opencode:not-the-password').toString('base64')}`,
         },
-      ],
-    });
-    await log.waitFor('prompt accepted for ses_', 10_000);
-    await log.waitFor('turn finished: ', TURN_WAIT_MS);
-    const added = log.added();
-    assert.ok(!added.includes('rejected: an attachment'), `the file was refused; log:\n${added}`);
-    assert.ok(
-      added.includes('turn finished: succeeded'),
-      `the turn did not succeed; log:\n${added}`,
-    );
-  });
-
-  /**
-   * Editor context (issue #29) against a REAL opencode and a real folder: the selection of the open
-   * file becomes one reference with its line range, and a prompt that carries that reference
-   * (built with the same `toEditorRef` the host uses, `?start=1&end=2`) is accepted by the host and
-   * by the real server, and the turn ends `succeeded`.
-   *
-   * Protects: `attachments.fromEditor` inside a folder (the unit-tested name/URL logic with a real
-   * `TextEditor`), and the real server taking a `file://…?start&end` URL. What the model DID with
-   * the range is not asserted (the reply is free text); the spike of the planner saw the stored
-   * `data` hold exactly the selected lines. Depends on `src/sample.ts` from the case above.
-   */
-  it('adds the selection of the active file and sends it with its line range', async function () {
-    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
-    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    assert.ok(folder, 'no workspace folder is open');
-    const file = path.join(folder, 'src', 'sample.ts');
-    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
-    const editor = await vscode.window.showTextDocument(document);
-    editor.selection = new vscode.Selection(0, 0, 1, 5);
-
-    const log = await openLogCursor();
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'attachments.fromEditor',
-      requestId: 'integration-context-1',
-    });
-    await log.waitFor('editor context added: 0 file(s), 1 selection(s)', 8_000);
-
-    const ref = toEditorRef(folder, file, { start: 1, end: 2 });
-    assert.strictEqual(ref.name, 'src/sample.ts#1-2');
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'prompt.send',
-      requestId: 'integration-context-2',
-      text: 'Reply with exactly: OK. Do not use any tools.',
-      delivery: 'queue',
-      files: [ref],
-    });
-    await log.waitFor('prompt accepted for ses_', 10_000);
-    await log.waitFor('turn finished: ', TURN_WAIT_MS);
-    const added = log.added();
-    assert.ok(!added.includes('rejected: an attachment'), `the range was refused; log:\n${added}`);
-    assert.ok(
-      added.includes('turn finished: succeeded'),
-      `the turn did not succeed; log:\n${added}`,
-    );
-  });
-
-  // The editor-context cases that only need a served folder (whole file, several selections, dirty
-  // buffer, OutsideWorkspace) and the `editor.open` case moved to `fakeServer.test.ts` (issue #41):
-  // they never used the real server, and there they run in CI. The case above stays because it
-  // checks the real server accepting a `file://…?start&end` reference.
-
-  // ---------------------------------------------------------------------------------------------
-  // Phase 3 (issues #18, #44, #19, #10). These cases depend on the free model CHOOSING to use the
-  // `read` or `question` tool, which a prompt cannot force: a failure to see `permission asked` or
-  // `form asked` may be the model, not the extension (the assertion message carries the log so
-  // the two can be told apart). They NEVER send `always`: that writes a rule into the opencode
-  // database of whoever runs the suite (with `read` it is `read *`, which allows reading every
-  // file of the project, `.env` included, from then on).
-  // ---------------------------------------------------------------------------------------------
-
-  /** Writes the `.env` that the permission prompts ask to read (opencode asks before reading it). */
-  function writeEnvFile(): void {
-    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    assert.ok(folder, 'no workspace folder is open');
-    fs.writeFileSync(path.join(folder, '.env'), 'OPEN_VS_CODE_TEST=1\n');
-  }
-
-  const READ_ENV_PROMPT =
-    'Use the read tool to read the file .env in the current folder and reply with its first line.';
-
-  /** `matchInLog` with the hint that, against the real server, a missing line may be the model. */
-  function matchInLog(
-    log: LogCursor,
-    pattern: RegExp,
-    timeoutMs: number,
-    what: string,
-  ): Promise<RegExpExecArray> {
-    return sharedMatchInLog(
-      log,
-      pattern,
-      timeoutMs,
-      what,
-      ' (the model may not have used the tool)',
-    );
-  }
-
-  /**
-   * Hidden view (issue #19): a permission asked while the chat is not on screen raises the badge
-   * and ONE notification, and answering it from a command closes both by themselves.
-   *
-   * The Explorer is shown to hide the chat container. The prompt asks to read `.env`, the one
-   * file that opencode v2 asks permission for with its default rules (`read *.env` is `ask`, read
-   * in `packages/schema/src/agent.ts@v2.0.32`). The answer is a REJECT through the internal
-   * command of the notification link (`Allow once` would work too; reject avoids the file being
-   * read). Waits for `resolved: reject` and the closing lines; the model then goes on without the
-   * file, so the turn ends (any outcome is accepted). NOT verified here: that the toast looks
-   * right or that its links render (F5 point 4).
-   */
-  it('a permission asked with the view hidden raises the badge and one notification, and closes them on reject', async function () {
-    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
-    writeEnvFile();
-    await vscode.commands.executeCommand('workbench.view.explorer');
-    // Give VS Code a moment to report the chat view as hidden before the request arrives.
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    const log = await openLogCursor();
-    await sendPrompt(log, READ_ENV_PROMPT);
-    const asked = await matchInLog(
-      log,
-      /permission asked (per_\S+) for (ses_\S+) \(read\)/,
-      TURN_WAIT_MS,
-      'permission asked',
-    );
-    const [, permissionID, sessionID] = asked;
-    assert.ok(permissionID && sessionID, 'ids missing from the log line');
-    await log.waitFor('attention: badge 1', 5_000);
-    await log.waitFor(`attention: notified ${permissionID}`, 5_000);
-    assert.strictEqual(
-      (log.added().match(/attention: notified /g) ?? []).length,
-      1,
-      `expected exactly one notification for the request; log:\n${log.added()}`,
-    );
-
-    await vscode.commands.executeCommand(REPLY_PERMISSION_COMMAND_ID, {
-      sessionID,
-      permissionID,
-      decision: 'reject',
-    });
-    await log.waitFor(`permission ${permissionID} resolved: reject`, 10_000);
-    await log.waitFor(`attention: closed ${permissionID} (resolved)`, 5_000);
-    await log.waitFor('attention: badge 0', 5_000);
-    await log.waitFor('turn finished:', TURN_WAIT_MS);
-  });
-
-  /**
-   * Visible view: the same request raises NO notification (the card is right there), and an
-   * "allow once" sent as the webview would lets the turn finish.
-   *
-   * The container is revealed first and `webview ready` awaited, so the plan's rule "notify only
-   * when the view is not visible" is exercised against a view that really is. The reply goes
-   * through the injected `permission.reply` message (the same path as the card's button).
-   */
-  it('a permission asked with the view visible raises no notification and allow once finishes the turn', async function () {
-    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
-    writeEnvFile();
-    const log = await openLogCursor();
-    await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
-    await log.waitFor('webview ready', 8_000);
-    await sendPrompt(log, READ_ENV_PROMPT);
-    const asked = await matchInLog(
-      log,
-      /permission asked (per_\S+) for (ses_\S+) \(read\)/,
-      TURN_WAIT_MS,
-      'permission asked',
-    );
-    const [, permissionID, sessionID] = asked;
-    assert.ok(permissionID && sessionID, 'ids missing from the log line');
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    log.assertAbsent('attention: notified');
-    await log.waitFor('attention: badge 1', 5_000);
-
-    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-      type: 'permission.reply',
-      requestId: 'integration-allow-once',
-      sessionID,
-      permissionID,
-      decision: 'once',
-    });
-    await log.waitFor(`permission reply sent for ${permissionID} (once)`, 10_000);
-    await log.waitFor(`permission ${permissionID} resolved: once`, 10_000);
-    await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
-  });
-
-  /**
-   * A question (issue #44): the tool `question` creates a form and the session WAITS until it is
-   * answered; answering lets the turn finish.
-   *
-   * Confirms the HYPOTHESIS of the plan that, without an answer, no `turn finished` line appears
-   * (3 s of watching: an absence cannot be proven instantly, so the number is our own choice).
-   * The answer is `{ q0: "A" }`; if the server insists the field is a list (a multiselect), the
-   * test retries once with `["A"]`, and the log shows which one the server accepted.
-   * Depends on the free model using the `question` tool, like the cases above.
-   */
-  it('a question waits for its answer, and answering lets the turn finish', async function () {
-    this.timeout(TURN_WAIT_MS + READY_WAIT_MS);
-    const log = await openLogCursor();
-    await sendPrompt(
-      log,
-      'Use the question tool to ask me to choose between A and B, then reply with my choice.',
-    );
-    const asked = await matchInLog(
-      log,
-      /form asked (frm_\S+) for (ses_\S+)/,
-      TURN_WAIT_MS,
-      'form asked',
-    );
-    const [, formID, sessionID] = asked;
-    assert.ok(formID && sessionID, 'ids missing from the log line');
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-    log.assertAbsent('turn finished');
-
-    const answer = (value: string | string[], requestId: string) =>
-      vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-        type: 'form.reply',
-        requestId,
-        sessionID,
-        formID,
-        answer: { q0: value },
       });
-    await answer('A', 'integration-answer-1');
-    const outcome = await matchInLog(
-      log,
-      /form frm_\S+ resolved: answered|request integration-answer-1 failed: \S+/,
-      10_000,
-      'the answer to be accepted',
-    );
-    if (outcome[0].startsWith('request integration-answer-1 failed')) {
-      await answer(['A'], 'integration-answer-2');
-    }
-    await log.waitFor(`form ${formID} resolved: answered`, 10_000);
-    await log.waitFor('turn finished:', TURN_WAIT_MS);
+      await assert.rejects(stranger.server.info(), (error: unknown) => {
+        assert.strictEqual((error as { _tag?: string })._tag, 'UnauthorizedError');
+        return true;
+      });
+    });
+
+    /**
+     * `model.list()` is `{location, data}` and every model maps through `toModelOption` without
+     * throwing, with a numeric context limit above zero (the context line of issue #25 divides by
+     * it), a `cost` array (what makes a model "free") and a `variants` array.
+     * VERIFIED (23/10/2026): "lists models the host can map, with the context limit, cost and
+     * variants" passed for every model of the real catalog. Not observed: a model without
+     * `limit.context` (the case would name it).
+     */
+    it('lists models the host can map, with the context limit, cost and variants', async function () {
+      const listed = await own.client.model.list();
+      assert.ok(Array.isArray(listed.data), 'model.list().data is not an array');
+      assert.ok(listed.data.length >= 1, 'the real catalog lists no model');
+      for (const model of listed.data) {
+        assert.ok(Array.isArray(model.cost), `${model.id}: cost is not an array`);
+        assert.ok(Array.isArray(model.variants), `${model.id}: variants is not an array`);
+        assert.strictEqual(typeof model.limit.context, 'number', `${model.id}: no context limit`);
+        assert.ok(
+          model.limit.context > 0,
+          `${model.id}: context limit is ${String(model.limit.context)}`,
+        );
+        const option = toModelOption(model);
+        assert.strictEqual(option.id, model.id);
+        assert.strictEqual(option.providerID, model.providerID);
+      }
+    });
+
+    /**
+     * `model.default()` is `{data: ModelInfo | null}`, not a bare model.
+     * VERIFIED (23/10/2026): "answers model.default as {data: model | null}" passed. The case
+     * accepts both `null` and a model, so it does not say which one this server returned.
+     */
+    it('answers model.default as {data: model | null}', async function () {
+      const fallback = await own.client.model.default();
+      assert.ok('data' in fallback, 'model.default() has no `data`');
+      assert.ok(
+        fallback.data === null || typeof fallback.data.id === 'string',
+        `model.default().data is neither null nor a model: ${JSON.stringify(fallback.data)}`,
+      );
+    });
+
+    /**
+     * `agent.list()` holds `build` and `plan` as primary agents; `provider.list()` maps.
+     * VERIFIED (23/10/2026): "lists build and plan as selectable agents, and the providers"
+     * passed against the real server.
+     */
+    it('lists build and plan as selectable agents, and the providers', async function () {
+      const agents = await own.client.agent.list();
+      const selectable = toAgentOptions(agents.data).map((agent) => agent.id);
+      assert.ok(selectable.includes('build'), `no build agent among ${selectable.join(', ')}`);
+      assert.ok(selectable.includes('plan'), `no plan agent among ${selectable.join(', ')}`);
+      const providers = await own.client.provider.list();
+      assert.ok(Array.isArray(providers.data));
+      for (const provider of providers.data) {
+        assert.strictEqual(toProviderOption(provider).id, provider.id);
+      }
+    });
+
+    /**
+     * The session lifecycle and the events it publishes, in one case because each step needs the
+     * session of the one before: the stream opens with `server.connected`; `session.create` gives
+     * `session.created`; `session.update({title})` gives `session.renamed`; `switchAgent(plan)`
+     * gives `session.agent.selected`; `switchModel` (a model of the catalog, with its first
+     * variant if it lists one) gives `session.model.selected` carrying the variant;
+     * `message.list` then holds the `agent-switched` and `model-switched` messages; `session.get`
+     * and `session.list({directory, parentID: null, search})` find it (and map through
+     * `toSessionSummary`); `interrupt` on an idle session answers the BARE `{interrupted: false}`;
+     * `fork` of a session without messages (checked right after `create`, before any switch) is
+     * refused with `InvalidRequestError` / `empty_session`; the pending-request lists and the saved
+     * permissions are empty; and `session.remove` gives `session.deleted`, after which `get`
+     * throws `SessionNotFoundError`.
+     * The model switch on a session with no stored model publishes the event: the synthetic
+     * fixture INVENTED that rule; this case is where it meets a real server.
+     * Observed on the first run against opencode 2.0.32 (22/10/2026): a fork AFTER the agent and
+     * model switches was NOT refused, so those two switch messages count as messages for the
+     * "empty session" rule; that is why the refusal is checked before them.
+     * VERIFIED (23/10/2026): "creates, renames, switches, lists, forks, interrupts and removes a
+     * session, with the events" passed again on the final tree.
+     */
+    it('creates, renames, switches, lists, forks, interrupts and removes a session, with the events', async function () {
+      this.timeout(60_000);
+      const watcher = watchEvents(own.client);
+      try {
+        await watcher.ready();
+        assert.strictEqual(
+          watcher.events[0]?.type,
+          'server.connected',
+          'the first frame is not server.connected',
+        );
+
+        const created = await own.client.session.create({});
+        const sessionID = created.id;
+        await watcher.waitFor(
+          (e) => e.type === 'session.created' && e.data?.['sessionID'] === sessionID,
+          'session.created',
+        );
+
+        // A session without any message cannot be forked (the planner's spike, 21/10/2026).
+        await assert.rejects(own.client.session.fork({ sessionID }), (error: unknown) => {
+          const body = error as { _tag?: string; kind?: string };
+          assert.strictEqual(
+            body._tag,
+            'InvalidRequestError',
+            `fork error: ${JSON.stringify(body)}`,
+          );
+          assert.strictEqual(body.kind, 'empty_session');
+          return true;
+        });
+
+        await own.client.session.update({ sessionID, title: 'Contract check' });
+        await watcher.waitFor(
+          (e) => e.type === 'session.renamed' && e.data?.['sessionID'] === sessionID,
+          'session.renamed',
+        );
+
+        await own.client.session.switchAgent({ sessionID, agent: 'plan' });
+        await watcher.waitFor(
+          (e) => e.type === 'session.agent.selected' && e.data?.['sessionID'] === sessionID,
+          'session.agent.selected',
+        );
+
+        const models = (await own.client.model.list()).data;
+        const model = models[0];
+        assert.ok(model, 'the catalog lists no model to switch to');
+        const variant = model.variants[0]?.id;
+        await own.client.session.switchModel({
+          sessionID,
+          model: {
+            id: model.id,
+            providerID: model.providerID,
+            ...(variant === undefined ? {} : { variant }),
+          },
+        });
+        const selected = await watcher.waitFor(
+          (e) => e.type === 'session.model.selected' && e.data?.['sessionID'] === sessionID,
+          'session.model.selected',
+        );
+        const chosen = selected.data?.['model'] as { id?: string; variant?: string } | undefined;
+        assert.strictEqual(chosen?.id, model.id);
+        if (variant !== undefined) assert.strictEqual(chosen?.variant, variant);
+
+        const messages = await own.client.message.list({ sessionID, order: 'asc' });
+        const kinds = messages.data.map((message) => message.type);
+        assert.ok(
+          kinds.includes('agent-switched'),
+          `no agent-switched message in ${kinds.join(', ')}`,
+        );
+        assert.ok(
+          kinds.includes('model-switched'),
+          `no model-switched message in ${kinds.join(', ')}`,
+        );
+
+        const row = await own.client.session.get({ sessionID });
+        assert.strictEqual(row.id, sessionID);
+        assert.strictEqual(toSessionSummary(row).id, sessionID);
+        const listed = await own.client.session.list({
+          directory: folder,
+          parentID: null,
+          search: 'Contract check',
+          limit: 20,
+        });
+        assert.ok(
+          listed.data.some((item) => item.id === sessionID),
+          `the session is not in session.list: ${listed.data.map((item) => item.id).join(', ')}`,
+        );
+        assert.ok('cursor' in listed, 'session.list has no cursor');
+
+        const idle = await own.client.session.interrupt({ sessionID });
+        assert.deepStrictEqual(idle, { interrupted: false });
+
+        const pending = await own.client.permission.request.list();
+        assert.deepStrictEqual(pending.data, []);
+        const forms = await own.client.form.list();
+        assert.deepStrictEqual(forms.data, []);
+        const saved = await own.client.permission.saved.list();
+        assert.ok(Array.isArray(saved), 'permission.saved.list() is not an array');
+
+        await own.client.session.remove({ sessionID });
+        await watcher.waitFor(
+          (e) => e.type === 'session.deleted' && e.data?.['sessionID'] === sessionID,
+          'session.deleted',
+        );
+        await assert.rejects(own.client.session.get({ sessionID }), (error: unknown) => {
+          assert.strictEqual((error as { _tag?: string })._tag, 'SessionNotFoundError');
+          return true;
+        });
+      } finally {
+        await watcher.stop();
+      }
+    });
+
+    /**
+     * `file.find({query, type: 'file'})` answers `{location, data: [{path, type}]}`; the index is
+     * refreshed every 10 s (read in `search.ts@843a6c51`), so the file is written first and the
+     * query retried for up to 25 s. The file exists in the served folder (`src/sample.ts`).
+     * VERIFIED (23/10/2026): "finds a file with file.find" passed against the real server.
+     */
+    it('finds a file with file.find', async function () {
+      this.timeout(40_000);
+      const file = path.join(folder, 'src', 'sample.ts');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, SAMPLE_TS);
+      const deadline = Date.now() + 25_000;
+      let found = await own.client.file.find({ query: 'sample', type: 'file' });
+      while (
+        !found.data.some((entry) => entry.path.endsWith('sample.ts')) &&
+        Date.now() < deadline
+      ) {
+        await sleep(2_000);
+        found = await own.client.file.find({ query: 'sample', type: 'file' });
+      }
+      assert.ok(
+        found.data.some((entry) => entry.path.replace(/\\/g, '/').endsWith('src/sample.ts')),
+        `src/sample.ts not found: ${JSON.stringify(found.data)}`,
+      );
+      for (const entry of found.data) {
+        assert.strictEqual(typeof entry.path, 'string');
+        assert.ok(
+          entry.type === 'file' || entry.type === 'directory',
+          `type ${String(entry.type)}`,
+        );
+      }
+    });
   });
 
   /**
@@ -730,49 +649,26 @@ describe('real opencode', function () {
   });
 
   /**
-   * External server (issue #11) against a REAL opencode: the test starts a second `opencode serve
-   * --stdio` itself, with a known password, and points `openVsCode.serverUrl` at it. The
-   * extension must stop its own server, check `GET /api/info` with Basic `opencode:<password>`,
-   * report the connection with the pinned version, and run a real turn through it. A wrong
-   * password must be refused by the REAL server (a genuine 401), which the synthetic fixture of
-   * `externalServer.test.ts` cannot prove.
+   * External server (issue #11) against a REAL opencode, no prompt: the test starts a second
+   * `opencode serve --stdio` itself (`startOwnServer`), with a known password, and points
+   * `openVsCode.serverUrl` at it. The extension must stop its own server, check `GET /api/info`
+   * with Basic `opencode:<password>`, report the connection with the pinned version and connect the
+   * event stream. A wrong password must be refused by the REAL server (a genuine 401), which the
+   * synthetic fixture of `externalServer.test.ts` cannot prove.
    *
    * Last on purpose: it swaps the server the cases above share, and puts the profile back at the
    * end (the setting emptied and the password forgotten make the extension launch its own server
-   * again with the binary it already detected; that relaunch is not awaited here). Both servers
-   * use the SAME database (the redirected XDG dirs of
-   * the configuration), so the session the earlier cases left open exists on the external one too.
-   * The reply text is not asserted. Needs network and the free default model, like the cases above.
-   *
-   * VERIFIED on Windows 11, VS Code 1.143.0, real opencode 2.0.32, 22/10/2026 (suite of 12, all
-   * passing): the log showed "connected to the external server at http://127.0.0.1:<port>
-   * (opencode 2.0.32)", "prompt accepted for ses_...", "turn finished: succeeded for ses_...", and,
-   * after the wrong password, "could not connect to the external server at ...: GET /api/info
-   * failed: HTTP 401" followed by "server not available (unauthorized)". NOT covered here: a
-   * refused connection or a timeout against a real opencode (the refusal is in
-   * `externalServer.test.ts`, against the fixture), and macOS/Linux (UNVERIFIED).
+   * again with the binary it already detected; that relaunch is not awaited here). Needs no model:
+   * the turn that used to run through the external server was dropped. See the header for what
+   * was observed on 22/10/2026.
    */
   it('connects to an external real opencode, and a wrong password is refused', async function () {
-    this.timeout(READY_WAIT_MS + TURN_WAIT_MS + 30_000);
+    this.timeout(READY_WAIT_MS + 30_000);
     const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     assert.ok(folder, 'no workspace folder is open');
-    const password = 'real-external-pw';
-    const child = spawn(binary, ['serve', '--stdio', '--hostname', '127.0.0.1', '--port', '0'], {
-      cwd: folder,
-      env: { ...process.env, OPENCODE_PASSWORD: password },
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-      shell: false,
-    });
-    child.stderr.resume();
-    const quiet = {
-      info: () => undefined,
-      warn: () => undefined,
-      error: () => undefined,
-      debug: () => undefined,
-    };
+    const external = await startOwnServer(binary, folder, 'real-external-pw');
     try {
-      const origin = await readUrlLine(child.stdout, READY_WAIT_MS, quiet);
+      const { origin, password } = external;
       const log = await openLogCursor();
       await vscode.commands.executeCommand(TEST_SET_SERVER_PASSWORD_COMMAND_ID, {
         origin,
@@ -788,20 +684,7 @@ describe('real opencode', function () {
       );
       await log.waitFor('event stream connected', 10_000);
       assert.ok(!log.added().includes(password), 'the password is in the log');
-
-      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
-        type: 'prompt.send',
-        requestId: 'integration-external-1',
-        text: 'Reply with exactly: hello there',
-        delivery: 'queue',
-        files: [],
-      });
-      await log.waitFor('prompt accepted for ses_', 10_000);
-      await log.waitFor('turn finished: ', TURN_WAIT_MS);
-      assert.ok(
-        log.added().includes('turn finished: succeeded'),
-        `the turn through the external server did not succeed; log:\n${log.added()}`,
-      );
+      log.assertAbsent('prompt accepted');
 
       log.mark();
       await vscode.commands.executeCommand(TEST_SET_SERVER_PASSWORD_COMMAND_ID, {
@@ -815,12 +698,7 @@ describe('real opencode', function () {
         .getConfiguration(CONFIG_SECTION)
         .update(SERVER_URL_KEY, undefined, vscode.ConfigurationTarget.Global);
       await vscode.commands.executeCommand(CLEAR_SERVER_PASSWORD_COMMAND_ID);
-      child.stdin.end();
-      // Back-up (S5 of the review): a real opencode that ignores the EOF must not outlive the run.
-      if (!(await waitForExit(child, 10_000))) {
-        await killTree(child, quiet);
-        await waitForExit(child, 10_000);
-      }
+      await external.stop();
     }
   });
 });
