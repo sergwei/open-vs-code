@@ -153,6 +153,7 @@
     "compile:integration": "esbuild \"test/integration/**/*.test.ts\" --bundle --platform=node --format=cjs --target=node22 --sourcemap --external:vscode --outdir=out/test/integration",
     "test:integration": "run-s build:host build:webview compile:integration && vscode-test",
     "test:visual": "run-s build:host build:webview && node test/visual/run.mjs",
+    "test:event-shapes": "vitest run --config vitest.contract.config.mts",
     "build:webview": "node webview-ui/build.mjs",
     "package:webview": "node webview-ui/build.mjs --production",
     "watch:webview": "node webview-ui/build.mjs --watch",
