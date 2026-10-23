@@ -1,12 +1,22 @@
 // Helpers shared by the two suites that run the extension's OWN server in a real VS Code with a
 // workspace folder: `realOpencode.test.ts` (opt-in, real opencode) and `fakeServer.test.ts`
 // (always on, the synthetic fixture), issue #41. They only read the extension log, the folder
-// and the process table; none of them knows which server is behind.
+// and the process table; none of them knows which server is behind. `startOwnServer` is the one
+// exception: it starts a SECOND server of its own, outside the extension, for the cases that talk
+// to the API directly (the contract of `realOpencode.test.ts`, the external-server case).
 import * as assert from 'node:assert';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { OpenCode, type OpenCodeClient } from '@opencode/client';
 import * as vscode from 'vscode';
 import { INJECT_WEBVIEW_MESSAGE_COMMAND_ID } from '../../../src/extension/ids';
+import {
+  basicAuthHeader,
+  killTree,
+  readUrlLine,
+  waitForExit,
+} from '../../../src/extension/opencodeServer';
 import type { LogCursor } from './extensionLog';
 
 /** Content of `src/sample.ts` in the served folder: three lines, so a range and a line are testable. */
@@ -87,6 +97,80 @@ export async function matchInLog(
     }
     await sleep(100);
   }
+}
+
+/** A `serve --stdio` process started by a test itself, with a client already pointed at it. */
+export interface OwnServer {
+  /** `http://127.0.0.1:<port>`, as the server printed it. */
+  origin: string;
+  password: string;
+  /** The full promise client (not the narrow one of the host), authenticated and tied to the folder. */
+  client: OpenCodeClient;
+  /** Closes stdin, and kills the process tree if the server ignores it. Safe to call twice. */
+  stop(): Promise<void>;
+}
+
+/**
+ * Starts `<binary> serve --stdio --hostname 127.0.0.1 --port 0` in `folder` with `password`, reads
+ * its `{"url":…}` line and returns the server with a client for it.
+ *
+ * It is NOT the extension's server: the test owns the process and must call `stop()` (the external
+ * server case and the contract cases of `realOpencode.test.ts` do it in `finally` / `after`). The
+ * environment is the test host's, so the redirected XDG dirs of `.vscode-test.mjs` apply and the
+ * run does not touch the developer's opencode data. The extracted code is the spawn that the
+ * external-server case used to carry inline; VERIFIED there against a real opencode 2.0.32
+ * (Windows 11, 22/10/2026), and by the cases of this suite that use it now (see their headers).
+ */
+export async function startOwnServer(
+  binary: string,
+  folder: string,
+  password = 'own-server-pw',
+): Promise<OwnServer> {
+  const child: ChildProcessWithoutNullStreams = spawn(
+    binary,
+    ['serve', '--stdio', '--hostname', '127.0.0.1', '--port', '0'],
+    {
+      cwd: folder,
+      env: { ...process.env, OPENCODE_PASSWORD: password },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      shell: false,
+    },
+  );
+  child.stderr.resume();
+  const quiet = {
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    debug: () => undefined,
+  };
+  let origin: string;
+  try {
+    origin = await readUrlLine(child.stdout, 35_000, quiet);
+  } catch (error) {
+    await killTree(child, quiet);
+    throw error;
+  }
+  const client = OpenCode.make({
+    baseUrl: origin,
+    headers: {
+      Authorization: basicAuthHeader(password),
+      'x-opencode-directory': encodeURIComponent(folder),
+    },
+  });
+  let stopped: Promise<void> | undefined;
+  const stop = (): Promise<void> => {
+    stopped ??= (async () => {
+      child.stdin.end();
+      // Back-up (S5 of the review of #11): a real opencode that ignores the EOF must not outlive the run.
+      if (!(await waitForExit(child, 10_000))) {
+        await killTree(child, quiet);
+        await waitForExit(child, 10_000);
+      }
+    })();
+    return stopped;
+  };
+  return { origin, password, client, stop };
 }
 
 /** Pid of the newest `server ready` line in `text`, or `undefined` when there is none. */

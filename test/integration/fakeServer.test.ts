@@ -5,8 +5,10 @@
 // -> turn), the permission and question flows, restart and crash recovery, and the editor-context
 // cases that need a served folder. Until issue #41 those ran only in the opt-in `real-opencode`
 // suite, which needs a network and a model and never runs in CI; here they run on the three
-// operating systems without either. The cases that only make sense against the real server (model
-// and agent selection, reasoning variant, the real 401 of an external server) stay there.
+// operating systems without either. Since tooling/tests-without-model the real-opencode suite
+// sends no prompt at all, so every turn case lives here (this includes model and agent selection
+// and the reasoning variant); only what a real server alone can show (its API shapes without a
+// turn, the real 401 of an external server) stays there.
 //
 // What this is NOT: evidence about the real opencode. The server is `fake-opencode.mjs`, written
 // from what was read in opencode 2.0.32 and from spikes (see its header); the timings, ids and
@@ -125,6 +127,83 @@ describe('fake server', function () {
     assert.strictEqual(countOf(log, 'turn finished:'), 1, `log:\n${log.added()}`);
     log.assertAbsent('turn finished: interrupted');
     log.assertAbsent('turn finished: failed');
+  });
+
+  /**
+   * Model and agent selectors (issues #23/#24): a prompt that carries `opencode/glm-5.3-flash-free`
+   * and `plan` is validated against the catalog the host loaded from `model.list` / `agent.list`,
+   * the session is switched with the `switchAgent` and `switchModel` routes, and the turn ends
+   * `succeeded`.
+   *
+   * This is the twin of the case that used to run in `realOpencode.test.ts` with a real model: it
+   * moved here when that suite stopped sending prompts (tooling/tests-without-model). Protects: the
+   * order (the choice is applied BEFORE the prompt) and the host's use of the catalog against a
+   * server that answers the four GETs and the two switch routes the way the fixture copied them
+   * from the planner's spikes. It does NOT show that a real server takes these bodies: the contract
+   * cases of `realOpencode.test.ts` switch agent and model on a real server without a prompt.
+   * The catalog of the fixture lists both models, so a refusal (`ModelUnavailable`) is a failure.
+   */
+  it('applies a chosen model and agent before the prompt', async function () {
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'fake-model-1',
+      text: 'Reply with exactly: hello there',
+      delivery: 'queue',
+      files: [],
+      model: { providerID: 'opencode', id: 'glm-5.3-flash-free' },
+      agent: 'plan',
+    });
+    await log.waitFor('prompt accepted for ses_', 10_000);
+    await log.waitFor('turn finished: ', TURN_WAIT_MS);
+    const text = log.added();
+    assert.ok(text.includes('agent selected plan for ses_'), `agent not switched; log:\n${text}`);
+    assert.ok(
+      text.includes('model selected opencode/glm-5.3-flash-free for ses_'),
+      `the model was not switched; log:\n${text}`,
+    );
+    assert.ok(
+      text.indexOf('model selected') < text.indexOf('prompt accepted'),
+      `the choice must be applied BEFORE the prompt; log:\n${text}`,
+    );
+    assert.ok(text.includes('turn finished: succeeded'), `the turn did not succeed; log:\n${text}`);
+    log.assertAbsent('rejected: ');
+  });
+
+  /**
+   * Reasoning variant (issue #61): a prompt that carries `opencode/glm-5.3-flash-free` with variant
+   * `low` switches the session through `switchModel` (the model is already the session's, so only
+   * the variant changes), BEFORE the prompt, and the turn ends `succeeded`.
+   *
+   * Twin of the real-server case that moved here (see the one above). The fixture lists `low` and
+   * `high` for the model, so a `VariantUnavailable` refusal would be a regression of the host's
+   * check. The host logs `model selected … (variant low)` only after the call returned. The real
+   * server's `VariantUnavailableError` is not reproduced by the fixture.
+   */
+  it('applies a chosen reasoning variant before the prompt', async function () {
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'fake-variant-1',
+      text: 'Reply with exactly: hello there',
+      delivery: 'queue',
+      files: [],
+      model: { providerID: 'opencode', id: 'glm-5.3-flash-free', variant: 'low' },
+    });
+    await log.waitFor('prompt accepted for ses_', 10_000);
+    await log.waitFor('turn finished: ', TURN_WAIT_MS);
+    const text = log.added();
+    assert.ok(
+      text.includes('model selected opencode/glm-5.3-flash-free for ses_'),
+      `the model was not switched; log:\n${text}`,
+    );
+    assert.ok(text.includes('(variant low)'), `the variant was not applied; log:\n${text}`);
+    assert.ok(
+      text.indexOf('(variant low)') < text.indexOf('prompt accepted'),
+      `the variant must be applied BEFORE the prompt; log:\n${text}`,
+    );
+    assert.ok(text.includes('turn finished: succeeded'), `the turn did not succeed; log:\n${text}`);
+    log.assertAbsent('rejected: ');
   });
 
   /**

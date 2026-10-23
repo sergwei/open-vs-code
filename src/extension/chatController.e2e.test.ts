@@ -20,7 +20,7 @@
 // E4-fork-subsessions (#21): a fork over HTTP (only the history before the message, a ROOT row with
 // `forkOf`, the original intact), a fork made by another client, an unknown message, and a turn
 // whose `subagent` tool creates a child session that the host can open and list.
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,6 +68,7 @@ async function boot(
   mode: string,
   confirmDelete: (info: { title: string; running: boolean }) => Promise<boolean> = () =>
     Promise.resolve(true),
+  extraEnv: Record<string, string> = {},
 ) {
   const folder = await mkdtemp(path.join(os.tmpdir(), 'ovsc-chat-'));
   folders.push(folder);
@@ -77,7 +78,7 @@ async function boot(
     folder,
     port: 0,
     log: quiet,
-    baseEnv: { ...process.env, FAKE_OPENCODE_MODE: mode },
+    baseEnv: { ...process.env, FAKE_OPENCODE_MODE: mode, ...extraEnv },
   });
   servers.push(server);
   const posted: HostToWebview[] = [];
@@ -1001,7 +1002,7 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
   // completed block with its input, text output and metadata (the edit one with its unified patch),
   // and a snapshot read afterwards carries the same blocks. SYNTHETIC: the fixture's `TOOLS` turn
   // is written from the tool sources read in the 2.0.32 tag, so this proves our mapping and
-  // transport, NOT that a real opencode sends these shapes (that is `test:visual` step 15).
+  // transport, NOT that a real opencode sends these shapes (that is `npm run test:event-shapes`).
   it('a TOOLS turn: nine tool blocks arrive by stream with their metadata and the snapshot agrees', async () => {
     const { controller, posted } = await bootSessions();
     await turn(controller, posted, 'TOOLS please', 1);
@@ -1328,6 +1329,169 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
       'a snapshot with compactedAt (resync on compaction.ended)',
     );
   }, 20_000);
+
+  // tooling/tests-without-model. What `npm run test:visual` needs from the synthetic server, now that
+  // it runs on it. SYNTHETIC like everything here: the shapes are the ones of the 2.0.32 tag
+  // (the failed tool's error is READ in `read.ts` / `to-session-error.ts`, never recorded), so a
+  // pass proves our transport and mapping, not that a real server sends them.
+
+  it('a LONG turn streams the numbers in many deltas and can be interrupted, failing its step like the real server', async () => {
+    const { controller, posted, state } = await boot('ok');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'long',
+      text: 'count to 400 LONG',
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(
+      () => posted.filter((m) => m.type === 'part.delta').length >= 3,
+      'a few deltas of the long reply',
+    );
+    // Still running a second later: the reply lasts about 16 s.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    expect(posted.some((m) => m.type === 'session.status' && m.status.type === 'idle')).toBe(false);
+    const sessionID = lastSnapshot(posted).open?.sessionID ?? '';
+    await controller.handle({ type: 'session.abort', requestId: 'a1', sessionID });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'idle after the interruption',
+    );
+    // The message that was being written ends in the `aborted` error, as the real server's does.
+    await controller.handle({ type: 'ready' });
+    const assistant = lastSnapshot(posted).open?.messages.find((m) => m.kind === 'assistant');
+    expect(assistant).toMatchObject({ error: { code: 'aborted' } });
+  }, 30_000);
+
+  it('a MARKDOWN turn answers with fences, a table, a file reference and a link, and the snapshot agrees', async () => {
+    const { controller, posted, state } = await boot('ok');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await turn(controller, posted, 'show markdown MARKDOWN', 1);
+    await controller.handle({ type: 'ready' });
+    const parts = Object.values(lastSnapshot(posted).open?.parts ?? {}).flat();
+    const text = parts.find((part) => part.type === 'text');
+    const body = text?.type === 'text' ? text.text : '';
+    expect(body).toContain('```ts');
+    expect(body).toContain('```bash');
+    expect(body).toContain('| Name | Value |');
+    expect(body).toContain('`src/sample.ts:20`');
+    expect(body).toContain('](https://code.visualstudio.com)');
+    // Several deltas, not one: the first cuts the ts fence open.
+    expect(posted.filter((m) => m.type === 'part.delta').length).toBeGreaterThanOrEqual(5);
+  }, 30_000);
+
+  it('a BROKEN_READ turn ends the read tool in the error state with the message opencode gives', async () => {
+    const { controller, posted, state } = await boot('ok');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await turn(controller, posted, 'read a missing file BROKEN_READ', 1);
+    const expected = {
+      name: 'read',
+      state: {
+        status: 'error',
+        error: { code: 'tool.execution', message: 'File not found: src/does-not-exist.ts' },
+      },
+    };
+    const streamed = posted.find(
+      (m) =>
+        m.type === 'part.upserted' && m.part.type === 'tool' && m.part.state.status === 'error',
+    );
+    expect(streamed).toMatchObject({ part: expected });
+    await controller.handle({ type: 'ready' });
+    const tool = Object.values(lastSnapshot(posted).open?.parts ?? {})
+      .flat()
+      .find((part) => part.type === 'tool');
+    expect(tool).toMatchObject(expected);
+  }, 30_000);
+
+  it('a reject WITHOUT a message cuts the turn: the step fails as aborted and the execution is interrupted', async () => {
+    const { controller, posted, sessionID, id } = await askAndWait('ASK_PERMISSION', 'permission');
+    await controller.handle({
+      type: 'permission.reply',
+      requestId: 'p1',
+      sessionID,
+      permissionID: id,
+      decision: 'reject',
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'idle after the reject',
+    );
+    await controller.handle({ type: 'ready' });
+    const assistant = lastSnapshot(posted).open?.messages.find((m) => m.kind === 'assistant');
+    expect(assistant).toMatchObject({ error: { code: 'aborted', message: 'Step interrupted' } });
+    // The reply the turn would have written never came.
+    const texts = Object.values(lastSnapshot(posted).open?.parts ?? {})
+      .flat()
+      .filter((part) => part.type === 'text');
+    expect(texts).toEqual([]);
+  }, 20_000);
+
+  it('visual mode: the catalog adds a custom agent and the two models of the context line, plain mode does not', async () => {
+    const visual = await boot('visual');
+    visual.controller.onServerState(visual.state);
+    await waitUntil(() => catalogsOf(visual.posted).length > 0, 'the visual catalog');
+    const catalog = catalogsOf(visual.posted)[0];
+    expect(catalog?.models.map((m) => m.id)).toEqual([
+      'big-pickle',
+      'glm-5.3-flash-free',
+      'tiny-context',
+    ]);
+    expect(catalog?.models[2]).toMatchObject({ contextLimit: 5000, variants: [] });
+    expect(catalog?.agents.map((a) => a.id)).toEqual(['build', 'plan', 'docs']);
+  }, 20_000);
+
+  it('visual mode: file search walks the served folder and sees a file written a moment ago', async () => {
+    const { state } = await boot('visual');
+    if (state.kind !== 'running') throw new Error('the server is not running');
+    const folder = state.server.folder;
+    await mkdir(path.join(folder, 'src'), { recursive: true });
+    await mkdir(path.join(folder, 'node_modules', 'pkg'), { recursive: true });
+    await mkdir(path.join(folder, '.hidden'), { recursive: true });
+    await writeFile(path.join(folder, 'src', 'sample.ts'), 'a');
+    await writeFile(path.join(folder, 'src', 'sample-extra.ts'), 'b');
+    await writeFile(path.join(folder, 'node_modules', 'pkg', 'sample.js'), 'c');
+    await writeFile(path.join(folder, '.hidden', 'sample.txt'), 'd');
+    const client = createOpencodeClient(state.server);
+    const found = await client.file.find({ query: 'sample', type: 'file' });
+    expect(found.data.map((entry) => entry.path)).toEqual(['src/sample-extra.ts', 'src/sample.ts']);
+    expect(found.data.every((entry) => entry.type === 'file')).toBe(true);
+    // Without visual mode the fixed list answers, whatever the folder holds.
+    const plain = await boot('ok');
+    if (plain.state.kind !== 'running') throw new Error('the server is not running');
+    const fixed = await createOpencodeClient(plain.state.server).file.find({
+      query: 'sample',
+      type: 'file',
+    });
+    expect(fixed.data.map((entry) => entry.path)).toEqual(['src/sample.ts']);
+  }, 20_000);
+
+  it('FAKE_OPENCODE_STATE_FILE: a second server process lists the first one’s sessions and history, and keeps counting ids', async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'ovsc-state-'));
+    folders.push(stateDir);
+    const env = { FAKE_OPENCODE_STATE_FILE: path.join(stateDir, 'state.json') };
+    const first = await boot('ok', undefined, env);
+    if (first.state.kind !== 'running') throw new Error('the server is not running');
+    first.controller.onServerState(first.state);
+    await waitUntil(() => first.posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await turn(first.controller, first.posted, 'hello', 1);
+    const sessionID = lastSnapshot(first.posted).open?.sessionID ?? '';
+    // The state is written 25 ms after the last change; a stop writes it again on exit.
+    for (const server of servers.splice(0)) await stopServer(server.child, quiet);
+
+    const second = await boot('ok', undefined, env);
+    if (second.state.kind !== 'running') throw new Error('the server is not running');
+    const client = createOpencodeClient(second.state.server);
+    const row = await client.session.get({ sessionID });
+    expect(row.id).toBe(sessionID);
+    const history = await client.message.list({ sessionID });
+    expect(history.data.map((message) => message.type).sort()).toEqual(['assistant', 'user']);
+    const fresh = await client.session.create({});
+    expect(fresh.id > sessionID).toBe(true);
+  }, 30_000);
 
   it('reconnects and sends a second snapshot when the stream is cut', async () => {
     const { controller, posted, state } = await boot('sse-drop');

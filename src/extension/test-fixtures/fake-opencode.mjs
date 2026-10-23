@@ -1,4 +1,5 @@
-// SYNTHETIC stand-in for `opencode`, used only by the unit tests of issue #8. It is NOT opencode.
+// SYNTHETIC stand-in for `opencode`, born for the unit tests of issue #8 and since used by the e2e
+// and integration suites, `test:visual` and the event-shape check. It is NOT opencode.
 //
 // It imitates what was READ (never seen running) in opencode v2.0.32 (`server-process.ts`,
 // `env.ts`, `process.ts` of github.com/anomalyco/opencode at 843a6c51):
@@ -106,13 +107,51 @@
 // catalog stays free, so a model-free assumption cannot hide it) and one containing COMPACT plays
 // a manual compaction after the turn (see `compactionSteps`). SYNTHETIC; the shapes copy the
 // planner's spike against a real opencode 2.0.32 (Windows 11, 22/10/2026).
+// tooling/tests-without-model: `npm run test:visual` no longer needs a model, so it runs against
+// this fixture too (through the seam of `testLaunch.ts`, in `ExtensionMode.Development`). What that
+// adds is SYNTHETIC: the CONTENT (texts, ids, timing) is invented and the SHAPE of every event is
+// the one this file already emitted or the one of `references/eventos-v2.md` (opencode v2.0.32, tag
+// 843a6c51); where a shape has no source it says HYPOTHESIS next to it. Nothing here proves that a
+// real model behaves like this: `npm run test:event-shapes` is what compares the shapes with a real
+// turn when a model is available.
+//   - MARKDOWN in a prompt: the reply is a Markdown text (ts and bash fences, a table, a list, an
+//     inline file reference, a link) split in deltas 600 ms apart, one of them cutting a fence open.
+//   - LONG: the reply is the numbers 1 to 400, five per delta, 200 ms apart (about 16 s), so the
+//     turn can be stopped. BROKEN_READ (not "TOOL_FAIL": FAIL is the trigger of a failed turn and
+//     matches by substring): a `read` of `src/does-not-exist.ts` that ends in
+//     `session.tool.failed` with `error {type: "tool.execution", message: "File not found: ..."}`
+//     (the type and the message are READ in `ToolFailure` / `to-session-error.ts` / `read.ts` at
+//     843a6c51, never seen running).
+//   - A reject or a dismissal WITHOUT a message ends the turn the way the real server does (the
+//     opencode-api skill, section 6, records it from a real run of 20/10/2026; not re-checked here):
+//     `session.tool.failed` (aborted), `session.step.failed {error: {type: "aborted", message:
+//     "Step interrupted"}}` and `session.execution.interrupted {reason: "user"}`. With a message the
+//     turn goes on, as before (HYPOTHESIS that the model does).
+//   - FAKE_OPENCODE_MODE `visual` (set only by `test/visual/vscodeProcess.mjs`): a catalog with one
+//     more primary agent (`docs`), a model without variants and a model with a 5000-token context
+//     (so one `STEP_TOKENS` step is 85 %), and `GET /api/fs/find` walks the served folder. Without
+//     it the catalog is the two models and four agents the Vitest e2e expects.
+//   - FAKE_OPENCODE_STATE_FILE: sessions, history and the id counter are loaded from it on start
+//     and rewritten after every change (temporary file, then rename), so a relaunched server (the
+//     visual run's Restart Server and Reload Window) still has the conversation, as the real
+//     server's database does.
+// tooling/tests-without-model, first real `npm run test:event-shapes` (opencode 2.0.32, 23/10/2026,
+// decision in Engram `tooling/tests-without-model/decisions/event-shape-diffs`): the events now
+// carry what that run recorded and this fixture lacked. `session.renamed` with an automatic title
+// after the first turn of an untitled session; `session.tool.input.ended` (`{id, text}`) between
+// `input.started` and `tool.called`; `data.executed: true` on `tool.called` and `tool.success`;
+// `data.metadata.truncated: false` on every `tool.success`; and no `variant` inside the `model` of
+// `session.created` (the REST row keeps it, see `selectOnSession`). The VALUES are invented: the
+// run only recorded the shape, so the title text and `executed: true` are SYNTHETIC.
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running;
 // FAKE_OPENCODE_LIFETIME_MS (positive integer, ms) overrides it for `serve` (issue #41).
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
+import nodePath from 'node:path';
 
 const args = process.argv.slice(2);
 const version = process.env.FAKE_OPENCODE_VERSION ?? '2.0.32';
@@ -137,16 +176,82 @@ const pendingPermissions = new Map(); // id -> PermissionRequest, in order of ar
 const pendingForms = new Map(); // id -> FormInfo
 const settledForms = new Set(); // ids already answered or cancelled, to answer 409 to a repeat
 const gates = new Map(); // session id -> (outcome) => void that resumes a paused turn
+const activeSteps = new Map(); // session id -> {a, chosen} of the step in flight, failed by an interrupt
 let seq = 0;
 let dropped = false;
 
 /** Next synthetic id with a prefix, e.g. `msg_000001`. */
 const nextId = (prefix) => `${prefix}_${String(++seq).padStart(6, '0')}`;
 
+/** Where the conversation is kept between processes (see the header); empty = in memory only. */
+const STATE_FILE = process.env.FAKE_OPENCODE_STATE_FILE ?? '';
+
+/**
+ * Loads sessions, history and the id counter from {@link STATE_FILE} when it exists. A missing or
+ * unreadable file starts from nothing: the file is a convenience of the visual run, never required.
+ */
+function loadState() {
+  if (STATE_FILE === '' || !fs.existsSync(STATE_FILE)) return;
+  try {
+    const saved = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    for (const [id, row] of saved.sessions) sessions.set(id, row);
+    for (const [id, messages] of saved.history) history.set(id, messages);
+    seq = saved.seq;
+  } catch {
+    sessions.clear();
+    history.clear();
+  }
+}
+
+/**
+ * Writes the state to a temporary file and renames it over {@link STATE_FILE}, so a kill half way
+ * through a write leaves the previous complete file, not a truncated one.
+ */
+function saveState() {
+  if (STATE_FILE === '') return;
+  const temporary = `${STATE_FILE}.tmp`;
+  fs.writeFileSync(
+    temporary,
+    JSON.stringify({ seq, sessions: [...sessions], history: [...history] }),
+  );
+  fs.renameSync(temporary, STATE_FILE);
+}
+
+let saveTimer;
+/** Saves soon after a change (25 ms, coalescing the burst of one turn); never keeps the process alive. */
+function scheduleSave() {
+  if (STATE_FILE === '' || saveTimer !== undefined) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = undefined;
+    try {
+      saveState();
+    } catch {
+      // The state directory may be gone already (the test cleaned up first): not a crash.
+    }
+  }, 25);
+  saveTimer.unref();
+}
+
 /** Writes one SSE data frame to every open `/api/event` connection. */
 function broadcast(type, data) {
   const frame = `data: ${JSON.stringify({ id: nextId('evt'), created: Date.now(), type, data })}\n\n`;
   for (const client of sseClients) client.write(frame);
+  scheduleSave();
+}
+
+/**
+ * The two steps that open a tool call: `session.tool.input.started` and `session.tool.input.ended`.
+ *
+ * The real server sends `input.ended` with `text`, the input as a JSON string, before
+ * `tool.called` (shape recorded by `test:event-shapes` against opencode 2.0.32, 23/10/2026; the
+ * host turns it into a `streaming` tool state). No `input.delta` is played: the host does not need
+ * one and the fake never had it. `a` is `{sessionID, assistantMessageID}`.
+ */
+function toolInputSteps(a, id, name, input) {
+  return [
+    () => broadcast('session.tool.input.started', { ...a, id, name }),
+    () => broadcast('session.tool.input.ended', { ...a, id, text: JSON.stringify(input) }),
+  ];
 }
 
 /** Sends a JSON answer wrapped the way the real server wraps REST results. */
@@ -178,7 +283,9 @@ function noContent(response) {
  * tool with a form). `before` ends with the ask itself, which is also what registers the pending
  * request; `after(result)` is the tool result: `result.outcome` is `success` unless the user
  * rejected or cancelled (`denied`), `result.message` the optional text of that reject/cancel and
- * `result.answer` the form answer. SYNTHETIC, but the FINAL STATES copy the rows of a real opencode
+ * `result.answer` the form answer. `after` returns `{steps, aborted}`: `aborted` is true when the
+ * user declined WITHOUT a message, which cuts the turn (the caller plays `abortedSteps` instead of
+ * the rest of the reply). SYNTHETIC, but the FINAL STATES copy the rows of a real opencode
  * 2.0.32 database (read with `node:sqlite`, 20-21/10/2026): a rejection without a message is
  * `error {type: "aborted", message: "The user declined this tool call"}`, a dismissed question
  * `aborted` + "The user dismissed this question" (read in the source, not seen), a rejection with a
@@ -210,8 +317,8 @@ function askingTool(kind, a) {
         };
   let state = { status: 'running', input, metadata: {} };
   const before = [
-    () => broadcast('session.tool.input.started', { ...a, id: toolID, name }),
-    () => broadcast('session.tool.called', { ...a, id: toolID, input }),
+    ...toolInputSteps(a, toolID, name, input),
+    () => broadcast('session.tool.called', { ...a, id: toolID, input, executed: true }),
   ];
   if (kind === 'permission') {
     before.push(() => {
@@ -267,18 +374,25 @@ function askingTool(kind, a) {
       const answer = result.answer ?? {};
       const metadata =
         kind === 'question'
-          ? { answers: [[String(answer.q0 ?? '')], Array.isArray(answer.q1) ? answer.q1 : []] }
-          : undefined;
-      state = { status: 'completed', input, content, ...(metadata ? { metadata } : {}) };
-      return [
-        () =>
-          broadcast('session.tool.success', {
-            ...a,
-            id: toolID,
-            content,
-            ...(metadata ? { metadata } : {}),
-          }),
-      ];
+          ? {
+              answers: [[String(answer.q0 ?? '')], Array.isArray(answer.q1) ? answer.q1 : []],
+              truncated: false,
+            }
+          : { truncated: false };
+      state = { status: 'completed', input, content, metadata };
+      return {
+        aborted: false,
+        steps: [
+          () =>
+            broadcast('session.tool.success', {
+              ...a,
+              id: toolID,
+              content,
+              metadata,
+              executed: true,
+            }),
+        ],
+      };
     }
     const hasMessage = typeof result.message === 'string' && result.message !== '';
     const error = hasMessage
@@ -294,7 +408,11 @@ function askingTool(kind, a) {
               : 'The user dismissed this question',
         };
     state = { status: 'error', input, error };
-    return [() => broadcast('session.tool.failed', { ...a, id: toolID, error })];
+    return {
+      // Without a message the real turn is cut (see the header); with one, it goes on.
+      aborted: !hasMessage,
+      steps: [() => broadcast('session.tool.failed', { ...a, id: toolID, error })],
+    };
   };
   const block = () => ({ type: 'tool', id: toolID, name, state, time: { created: Date.now() } });
   return { before, after, block };
@@ -318,8 +436,8 @@ function subagentTool(a) {
     { type: 'text', text: `<subagent sessionID="${childID}" state="completed">hello</subagent>` },
   ];
   const steps = [
-    () => broadcast('session.tool.input.started', { ...a, id: toolID, name: 'subagent' }),
-    () => broadcast('session.tool.called', { ...a, id: toolID, input }),
+    ...toolInputSteps(a, toolID, 'subagent', input),
+    () => broadcast('session.tool.called', { ...a, id: toolID, input, executed: true }),
     () => {
       const now = Date.now();
       sessions.set(childID, {
@@ -362,7 +480,8 @@ function subagentTool(a) {
         id: toolID,
         metadata: { sessionID: childID, status: 'running' },
       }),
-    () => broadcast('session.tool.success', { ...a, id: toolID, content, metadata }),
+    () =>
+      broadcast('session.tool.success', { ...a, id: toolID, content, metadata, executed: true }),
   ];
   const block = () => ({
     type: 'tool',
@@ -377,8 +496,9 @@ function subagentTool(a) {
 /**
  * The tool calls of a `TOOLS` turn (issue #26): `shell` twice (exit 0 and exit 1 with the warning
  * item), `read`, `edit` (with a real unified patch in `metadata.files`), `write`, `grep`, `glob`,
- * `webfetch` and an unknown MCP-style tool, each as `tool.input.started -> tool.called ->
- * tool.success`. SYNTHETIC / HYPOTHESIS: the shapes of `input`, `content` and `metadata` are those
+ * `webfetch` and an unknown MCP-style tool, each as `tool.input.started -> tool.input.ended ->
+ * tool.called -> tool.success` (`truncated: false` in every metadata). SYNTHETIC / HYPOTHESIS:
+ * the shapes of `input`, `content` and `metadata` are those
  * READ in the 2.0.32 tag (`packages/core/src/tool/plugin/*.ts@843a6c51`, plan Engram #1035 section
  * 4), not recorded from a running server; a test that passes here proves the wiring (the block
  * reaches the webview with its metadata, by stream and by snapshot), NOT that opencode sends these
@@ -418,7 +538,7 @@ function toolsTurn(a) {
       content: [
         {
           type: 'text',
-          text: 'Read file src/sample.ts, lines 1-2\n1: export const one = 1;\n2: export const two = 2;',
+          text: 'Read file src/sample.ts, lines 1-2\n1: // Sample file for the visual test run.\n2: export const two = 2;',
         },
       ],
       metadata: { truncated: false },
@@ -436,7 +556,7 @@ function toolsTurn(a) {
       name: 'write',
       input: { path: 'src/new.ts', content: 'export const a = 1;\nexport const b = 2;\n' },
       content: [{ type: 'text', text: 'Created file successfully: src/new.ts' }],
-      metadata: {},
+      metadata: { truncated: false },
     },
     {
       name: 'grep',
@@ -459,24 +579,26 @@ function toolsTurn(a) {
       name: 'webfetch',
       input: { url: 'https://example.test/page', format: 'text' },
       content: [{ type: 'text', text: 'Example page' }],
-      metadata: { contentType: 'text/html' },
+      metadata: { contentType: 'text/html', truncated: false },
     },
     {
       name: 'mcp_echo',
       input: { message: 'hi' },
       content: [{ type: 'text', text: 'echo: hi' }],
-      metadata: {},
+      metadata: { truncated: false },
     },
   ].map((spec) => ({ ...spec, id: nextId('call') }));
   const steps = specs.flatMap((spec) => [
-    () => broadcast('session.tool.input.started', { ...a, id: spec.id, name: spec.name }),
-    () => broadcast('session.tool.called', { ...a, id: spec.id, input: spec.input }),
+    ...toolInputSteps(a, spec.id, spec.name, spec.input),
+    () =>
+      broadcast('session.tool.called', { ...a, id: spec.id, input: spec.input, executed: true }),
     () =>
       broadcast('session.tool.success', {
         ...a,
         id: spec.id,
         content: spec.content,
         metadata: spec.metadata,
+        executed: true,
       }),
   ]);
   const blocks = () =>
@@ -495,6 +617,62 @@ function toolsTurn(a) {
   return { steps, blocks };
 }
 
+/**
+ * The tool call of a `BROKEN_READ` turn: a `read` of a file that does not exist, as
+ * `tool.input.started -> tool.input.ended -> tool.called -> tool.failed`. SYNTHETIC / HYPOTHESIS for
+ * the event sequence (the same events the other tools use); the error is READ, not recorded:
+ * `ToolFailure` without an inner error becomes `{type: "tool.execution", message}` in
+ * `to-session-error.ts`, and `read.ts` builds the message `File not found: <path>` (plus a "Did you
+ * mean" list that is absent when no sibling resembles the name), both at tag v2.0.32 (843a6c51,
+ * read with `gh api` on 22/10/2026). `block()` is the failed tool block of the REST message.
+ */
+function failedReadTurn(a) {
+  const id = nextId('call');
+  const input = { path: 'src/does-not-exist.ts' };
+  const error = { type: 'tool.execution', message: 'File not found: src/does-not-exist.ts' };
+  const steps = [
+    ...toolInputSteps(a, id, 'read', input),
+    () => broadcast('session.tool.called', { ...a, id, input, executed: true }),
+    () => broadcast('session.tool.failed', { ...a, id, error }),
+  ];
+  const block = () => ({
+    type: 'tool',
+    id,
+    name: 'read',
+    state: { status: 'error', input, error },
+    time: { created: Date.now() },
+  });
+  return { steps, block };
+}
+
+/**
+ * Marks a step with the milliseconds to wait BEFORE it runs, overriding the turn's interval
+ * (`schedule` in `playTurn` adds them up). Used to pace the text deltas of the long replies.
+ */
+const paced = (ms, step) => Object.assign(step, { delay: ms });
+
+/**
+ * The Markdown a `MARKDOWN` turn answers with, in the deltas it is streamed in: a ts fence, a bash
+ * fence, a 2x2 table, a list of two, an inline file reference (`src/sample.ts:20`), inline code and
+ * a link. The first fence is left open at the end of the first delta, so a screenshot taken
+ * mid-stream sees an unclosed block. SYNTHETIC content; `text.delta` x N then `text.ended` is the
+ * order of references/eventos-v2.md.
+ */
+const MARKDOWN_DELTAS = [
+  'Here is the reply.\n\n```ts\nexport function greet(name: string): string {\n',
+  '  return `Hello, ${name}!`;\n}\n```\n\n',
+  '```bash\nnpm run build && echo done\n```\n\n',
+  '| Name | Value |\n| --- | --- |\n| alpha | 1 |\n| beta | 2 |\n\n',
+  '- first item\n- second item\n\n',
+  'The sample is at `src/sample.ts:20`, see also `greet()`. ',
+  'More: [VS Code](https://code.visualstudio.com).',
+];
+
+/** The numbers 1 to 400, one per line, in deltas of five: the reply of a `LONG` turn. */
+const LONG_DELTAS = Array.from({ length: 80 }, (_, chunk) =>
+  Array.from({ length: 5 }, (_, i) => `${String(chunk * 5 + i + 1)}\n`).join(''),
+);
+
 /** The model a session answers with when none was ever selected: the catalog default. */
 const DEFAULT_MODEL = { id: 'big-pickle', providerID: 'opencode' };
 
@@ -509,20 +687,23 @@ function selectionOf(sessionID) {
  * what the host's mapping reads (`id`, `providerID`, `name`, `status`, `limit`, `cost`, `variants`).
  */
 const CATALOG_MODELS = [
-  ['big-pickle', 'Big Pickle'],
-  ['glm-5.3-flash-free', 'GLM-5.3-Flash Free'],
-].map(([id, name]) => ({
+  ['big-pickle', 'Big Pickle', true, 200000],
+  ['glm-5.3-flash-free', 'GLM-5.3-Flash Free', true, 200000],
+  // Only in `visual` mode: no variants (the variant control disappears) and a 5000-token window,
+  // so one step of STEP_TOKENS (4248) is 85 % and the context line reaches its `high` level.
+  ...(has('visual') ? [['tiny-context', 'Tiny Context', false, 5000]] : []),
+].map(([id, name, withVariants, context]) => ({
   id,
   modelID: id,
   providerID: 'opencode',
   name,
   capabilities: { tools: true, input: ['text'], output: ['text'] },
-  variants: [{ id: 'low' }, { id: 'high' }],
+  variants: withVariants ? [{ id: 'low' }, { id: 'high' }] : [],
   time: { released: 1 },
   cost: [{ input: 0, output: 0, cache: { read: 0, write: 0 } }],
   status: 'active',
   enabled: true,
-  limit: { context: 200000, output: 32000 },
+  limit: { context, output: 32000 },
 }));
 
 const CATALOG_AGENTS = [
@@ -530,6 +711,8 @@ const CATALOG_AGENTS = [
   ['general', 'General', 'subagent', false],
   ['title', 'Title', 'primary', true],
   ['plan', 'Plan', 'primary', false],
+  // Only in `visual` mode: a custom primary agent, so "More agents" has something to show.
+  ...(has('visual') ? [['docs', 'Docs', 'primary', false]] : []),
 ].map(([id, name, mode, hidden]) => ({
   id,
   name,
@@ -670,13 +853,17 @@ function compactionSteps(sessionID) {
 /**
  * Plays the recorded turn for a prompt, one event every few milliseconds. `files` (already in the
  * wire shape, see `toWireFiles`) travels in the `session.inbox.enqueued` payload and is kept in the
- * history entry of the user message, so a snapshot read later shows the attachments too.
+ * history entry of the user message, so a snapshot read later shows the attachments too. The first
+ * answered turn of a session without a title ends with a `session.renamed` (the row gets the start
+ * of the prompt as its title); a stopped or failed turn never reaches it.
  */
 function playTurn(sessionID, inboxID, text, files = []) {
   const assistantMessageID = nextId('msg');
   const chosen = selectionOf(sessionID);
   const a = { sessionID, assistantMessageID };
   const fail = text.includes('FAIL');
+  // Taken before the turn pushes anything: the automatic title follows the FIRST answered turn.
+  const firstTurn = !history.get(sessionID).some((message) => message.type === 'assistant');
   // Issue #25: COSTLY makes the step cost money (the catalog stays free).
   const stepCost = text.includes('COSTLY') ? COSTLY_STEP_COST : 0;
   const asking = text.includes('ASK_PERMISSION')
@@ -725,22 +912,34 @@ function playTurn(sessionID, inboxID, text, files = []) {
       });
     });
   } else {
-    const stepStarted = () =>
+    const stepStarted = () => {
+      activeSteps.set(sessionID, { a, chosen });
       broadcast('session.step.started', {
         ...a,
         agent: chosen.agent,
         model: chosen.model,
         started: Date.now(),
       });
+    };
+    // The reply: two short deltas by default; the Markdown or the long numbered text on request.
+    const deltas = text.includes('MARKDOWN')
+      ? MARKDOWN_DELTAS
+      : text.includes('LONG')
+        ? LONG_DELTAS
+        : ['hello ', 'there'];
+    const pace = text.includes('MARKDOWN') ? 600 : text.includes('LONG') ? 200 : undefined;
+    const reply = deltas.join('');
     const body = [
       () => broadcast('session.reasoning.started', { ...a, ordinal: 0 }),
       () => broadcast('session.reasoning.delta', { ...a, ordinal: 0, delta: 'thinking ' }),
       () => broadcast('session.reasoning.delta', { ...a, ordinal: 0, delta: 'about it' }),
       () => broadcast('session.text.started', { ...a, ordinal: 0 }),
       () => broadcast('session.reasoning.ended', { ...a, ordinal: 0, text: 'thinking about it' }),
-      () => broadcast('session.text.delta', { ...a, ordinal: 0, delta: 'hello ' }),
-      () => broadcast('session.text.delta', { ...a, ordinal: 0, delta: 'there' }),
-      () => broadcast('session.text.ended', { ...a, ordinal: 0, text: 'hello there' }),
+      ...deltas.map((delta) => {
+        const step = () => broadcast('session.text.delta', { ...a, ordinal: 0, delta });
+        return pace === undefined ? step : paced(pace, step);
+      }),
+      () => broadcast('session.text.ended', { ...a, ordinal: 0, text: reply }),
       () => {
         history.get(sessionID).push({
           id: assistantMessageID,
@@ -754,9 +953,10 @@ function playTurn(sessionID, inboxID, text, files = []) {
           content: [
             ...(toolBlock === undefined ? [] : [toolBlock()].flat()),
             { type: 'reasoning', text: 'thinking about it', time: { created: 1, completed: 2 } },
-            { type: 'text', text: 'hello there' },
+            { type: 'text', text: reply },
           ],
         });
+        activeSteps.delete(sessionID);
         broadcast('session.step.ended', {
           ...a,
           finish: 'stop',
@@ -766,6 +966,17 @@ function playTurn(sessionID, inboxID, text, files = []) {
         addUsage(sessionID, stepCost, STEP_TOKENS);
       },
       ...(text.includes('COMPACT') ? compactionSteps(sessionID) : []),
+      () => {
+        // The automatic title of the real server, once the first turn of an untitled session is
+        // done; its text here is just the start of the prompt (SYNTHETIC).
+        const row = sessions.get(sessionID);
+        if (!firstTurn || row === undefined || row.title !== undefined) return;
+        // Trimmed: the visual run finds a row by its text and the header does not keep a trailing
+        // space, so an untrimmed 40-character cut made the two disagree (seen 23/10/2026).
+        row.title = text.slice(0, 40).trim();
+        row.time.updated = Date.now();
+        broadcast('session.renamed', { sessionID, title: row.title });
+      },
       () => {
         running.delete(sessionID);
         broadcast('session.execution.succeeded', { sessionID });
@@ -779,6 +990,10 @@ function playTurn(sessionID, inboxID, text, files = []) {
       const tools = toolsTurn(a);
       toolBlock = tools.blocks;
       steps.push(stepStarted, ...tools.steps, ...body);
+    } else if (text.includes('BROKEN_READ')) {
+      const failed = failedReadTurn(a);
+      toolBlock = failed.block;
+      steps.push(stepStarted, ...failed.steps, ...body);
     } else if (asking === undefined) {
       steps.push(stepStarted, ...body);
     } else {
@@ -786,17 +1001,54 @@ function playTurn(sessionID, inboxID, text, files = []) {
       const tool = askingTool(asking, a);
       toolBlock = tool.block;
       steps.push(stepStarted, ...tool.before);
+      /**
+       * The steps of a turn cut by a reject/dismissal without a message (see the header): the
+       * assistant message with the failed tool block and the error lands in the history, then
+       * `session.step.failed` and `session.execution.interrupted`. HYPOTHESIS for the REST message
+       * (`error` set, no `finish`, no tokens): the types allow it, no real one was read.
+       */
+      const abortedSteps = () => {
+        const error = { type: 'aborted', message: 'Step interrupted' };
+        return [
+          () => {
+            const now = Date.now();
+            activeSteps.delete(sessionID);
+            history.get(sessionID).push({
+              id: assistantMessageID,
+              type: 'assistant',
+              agent: chosen.agent,
+              model: chosen.model,
+              time: { created: now, completed: now },
+              error,
+              content: [tool.block()],
+            });
+            broadcast('session.step.failed', { ...a, error });
+          },
+          () => {
+            running.delete(sessionID);
+            broadcast('session.execution.interrupted', { sessionID, reason: 'user' });
+          },
+        ];
+      };
       gates.set(sessionID, (result) => {
         gates.delete(sessionID);
-        schedule([...tool.after(result), ...body]);
+        const outcome = tool.after(result);
+        schedule([...outcome.steps, ...(outcome.aborted ? abortedSteps() : body)]);
       });
     }
   }
   // A prompt containing SLOW plays 20x slower (about 5 s), so a test can interrupt it mid-turn.
   const interval = text.includes('SLOW') ? 300 : 15;
-  /** Plays `list` one `interval` apart; the timers are kept so an interrupt can cancel them. */
+  /**
+   * Plays `list` one `interval` apart (a step marked by `paced` waits its own time instead); the
+   * timers are kept so an interrupt can cancel them.
+   */
   function schedule(list) {
-    const timers = list.map((step, index) => setTimeout(step, interval * (index + 1)));
+    let at = 0;
+    const timers = list.map((step) => {
+      at += step.delay ?? interval;
+      return setTimeout(step, at);
+    });
     turnTimers.set(sessionID, [...(turnTimers.get(sessionID) ?? []), ...timers]);
   }
   turnTimers.delete(sessionID);
@@ -823,7 +1075,8 @@ function dropRequests(sessionID, announce) {
 /**
  * Imitates `POST /api/session/:id/interrupt`: SYNTHETIC. Answers the BARE body `{interrupted}`
  * (no `{data}` wrapper, like the real route read in the client chunk of 2.0.32) and, when a turn
- * was in flight, drops its remaining events and emits `session.execution.interrupted`.
+ * was in flight, drops its remaining events, fails the step in flight (`session.step.failed`,
+ * `aborted`) and emits `session.execution.interrupted`.
  */
 function interrupt(sessionID) {
   if (!running.has(sessionID)) return false;
@@ -832,6 +1085,26 @@ function interrupt(sessionID) {
   gates.delete(sessionID);
   // A pending request dies with the turn, and NO `permission.replied` is published for it.
   dropRequests(sessionID, false);
+  // A step in flight fails with `aborted` / "Step interrupted" before the execution is interrupted,
+  // as the real server does (recorded by the opencode-api skill, section 7, from a real spike of
+  // 20/10/2026; not re-checked here). The assistant message that reaches the history holds no
+  // content: HYPOTHESIS, the partial text the real one keeps was not inspected.
+  const step = activeSteps.get(sessionID);
+  if (step !== undefined) {
+    activeSteps.delete(sessionID);
+    const error = { type: 'aborted', message: 'Step interrupted' };
+    const now = Date.now();
+    history.get(sessionID)?.push({
+      id: step.a.assistantMessageID,
+      type: 'assistant',
+      agent: step.chosen.agent,
+      model: step.chosen.model,
+      time: { created: now, completed: now },
+      error,
+      content: [],
+    });
+    broadcast('session.step.failed', { ...step.a, error });
+  }
   running.delete(sessionID);
   broadcast('session.execution.interrupted', { sessionID, reason: 'user' });
   return true;
@@ -1075,8 +1348,10 @@ const FIND_ENTRIES = [
  * Imitates `GET /api/fs/find`: keeps the entries whose path contains the characters of `query` in
  * order, ignoring case (a subsequence match, like the fuzzy one the spike saw), then filters by
  * `type` and cuts at `limit` (default 50, read in `search.ts@843a6c51`). An empty query is `[]`.
+ * The entries are {@link FIND_ENTRIES}, or, in `visual` mode, what {@link walkFolder} finds under
+ * `directory` (the folder the request names in `x-opencode-directory`).
  */
-function findFiles(params) {
+function findFiles(params, directory) {
   const query = (params.get('query') ?? '').toLowerCase();
   if (query === '') return [];
   const type = params.get('type');
@@ -1089,9 +1364,45 @@ function findFiles(params) {
     }
     return true;
   };
-  return FIND_ENTRIES.filter(
-    (entry) => (type === null || entry.type === type) && matches(entry.path.toLowerCase()),
-  ).slice(0, limit);
+  const entries = has('visual') ? walkFolder(directory) : FIND_ENTRIES;
+  return entries
+    .filter((entry) => (type === null || entry.type === type) && matches(entry.path.toLowerCase()))
+    .slice(0, limit);
+}
+
+/**
+ * The files and folders under `root` as `{path, type}` entries, for the `visual` mode of
+ * `GET /api/fs/find`: depth first, names sorted, `node_modules` and everything whose name starts
+ * with a dot skipped, files with `/` separators and a folder with a trailing `\` (the mixed
+ * separators the planner spike saw on Windows, see {@link FIND_ENTRIES}). It reads the disk on
+ * every call, so a file written a moment ago is found at once (the real server refreshes its index
+ * every 10 s: INVENTED difference, it makes the visual run faster, not different). At most 2000
+ * entries.
+ */
+function walkFolder(root) {
+  const found = [];
+  const walk = (relative) => {
+    let names;
+    try {
+      names = fs.readdirSync(nodePath.join(root, relative), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    names.sort((x, y) => (x.name < y.name ? -1 : 1));
+    for (const entry of names) {
+      if (found.length >= 2000) return;
+      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+      const shown = relative === '' ? entry.name : `${relative}/${entry.name}`;
+      if (entry.isDirectory()) {
+        found.push({ path: `${shown}\\`, type: 'directory' });
+        walk(shown);
+      } else {
+        found.push({ path: shown, type: 'file' });
+      }
+    }
+  };
+  walk('');
+  return found;
 }
 
 /**
@@ -1183,7 +1494,11 @@ function handleChat(request, response) {
         ...(info.title === undefined ? {} : { title: info.title }),
         ...(info.parentID === undefined ? {} : { parentID: info.parentID }),
         ...(info.agent === undefined ? {} : { agent: info.agent }),
-        ...(info.model === undefined ? {} : { model: info.model }),
+        // No `variant`: the real `session.created` of 2.0.32 has none (test:event-shapes, 23/10/2026);
+        // the REST row above keeps it.
+        ...(info.model === undefined
+          ? {}
+          : { model: { id: info.model.id, providerID: info.model.providerID } }),
       });
     });
     return true;
@@ -1223,7 +1538,7 @@ function handleChat(request, response) {
     return true;
   }
   if (method === 'GET' && path === '/api/fs/find') {
-    json(response, 200, { location, data: findFiles(url.searchParams) });
+    json(response, 200, { location, data: findFiles(url.searchParams, location.directory) });
     return true;
   }
   const act = /^\/api\/session\/([^/]+)\/(permission|form)\/([^/]+)(?:\/(reply))?$/.exec(path);
@@ -1362,6 +1677,18 @@ function runServe() {
   }
 
   setTimeout(() => process.exit(0), lifetimeMs()); // hard cap, see header
+  if (STATE_FILE !== '') {
+    loadState();
+    // The last changes of a normal exit, past the 25 ms debounce. A folder that is already gone
+    // (the visual run deletes its work dir while the server shuts down) is not an error here.
+    process.on('exit', () => {
+      try {
+        saveState();
+      } catch {
+        // nothing left to save to
+      }
+    });
+  }
 
   if (has('grandchild')) {
     // detached on Windows only: there Node puts non-detached children in a job object that kills

@@ -1,8 +1,25 @@
 // Visual and behaviour check of the chat inside a REAL VS Code, driven over CDP.
 //
-// `npm run test:visual`. Opt-in, like the `real-opencode` integration suite: it needs
-// `OPEN_VS_CODE_REAL_OPENCODE` (absolute path to the opencode v2 executable), network and the
-// free default model, because it sends real prompts. Not run in CI. See `test/visual/README.md`.
+// `npm run test:visual`. Needs NO model, quota or network (tooling/tests-without-model): the
+// opencode behind the extension is the synthetic `fake-opencode.mjs`, launched as the extension's own
+// server through the seam of `testLaunch.ts` (Development mode + OPEN_VS_CODE_VISUAL_FAKE=1, set by
+// `vscodeProcess.mjs`). Prompts carry trigger words (MARKDOWN, LONG, ASK_PERMISSION, ASK_QUESTION,
+// SUBAGENT, TOOLS, BROKEN_READ, COSTLY) that the fixture reacts to. Not run in CI. See
+// `test/visual/README.md`.
+//
+// HISTORY, not current evidence: until 22/10/2026 this run used a real opencode 2.0.32 and the free
+// model, and the long notes below ("VERIFIED ... glm-5.3-flash-free", 326/385/386 ok lines, the
+// SKIPPED paths that depended on what the model did) describe those runs. Against the fixture
+// nothing is skipped: every former SKIPPED is an assertion. VERIFIED against the fixture (Windows
+// 11, VS Code 1.143.1, Node 24, 23/10/2026, final tree of tooling/tests-without-model): the run
+// of 23/10/2026 11:19:12-11:25:54 (no real opencode) ended "all visual checks passed" with exit 0
+// and 456 `ok`, 0 FAIL. Earlier, three
+// consecutive runs ended "all visual checks passed" with exit 0, 456 `ok` lines, 0 FAIL, the
+// same set of `ok` lines (identical hash of the sorted lines), and one `warn`
+// ("light: weakest highlighted token contrast is 2.89 (< 3)", independent of any model). Step 17
+// printed "the figures are those of the step: 4248 tokens of 200000", "the costly line ... Context
+// 4K / 5K (85%) · $0.01" and "85 % of the window flags the line as high (high)". NOT observed:
+// macOS, Linux, a real model, a screen reader.
 //
 // What it protects: the things no unit test can see, found by hand on 20/10/2026 (Engram #934):
 // code unreadable in "High Contrast Light", a Stop painted as a red error, notifications and
@@ -16,7 +33,7 @@
 // the view hidden, focus in the permission card, one primary button at a time, "Ln 20" after a
 // file link, the session kept after Restart Server and after Reload Window. Since
 // E3-resolved-history (issues #56/#18) it also asserts that what the user answered stays in the
-// conversation under its tool ("Allowed once", "Answered … Blue", a plain "Rejected" that is not an
+// conversation under its tool ("Allowed once", "Answered … Letter: B", a plain "Rejected" that is not an
 // alert), survives another prompt and Restart Server unchanged, and after Reload Window keeps only
 // what the tool blocks say ("Answered", "Rejected") while "Allowed once" is gone. Since
 // E4-session-management (issue #20) step 9 drives the session list with the real mouse and
@@ -28,9 +45,9 @@
 // hovers and Tabs to "Fork from here" on the second user message, forks with the real mouse and
 // asserts the new session holds only the first exchange, the "Forked from" crumb, the refilled and
 // focused prompt, the "Fork" word in the session list, and that the crumb returns to the intact
-// original; then it asks the model to call the `subagent` tool and, if it does, follows the link
-// to the child ("‹ parent" crumb), back, and through "Subagent sessions (1)". If the model does not
-// call the tool the subagent half is SKIPPED with a warning. Since E5-model-agent-selectors (issues
+// original; then it sends SUBAGENT (the fixture creates the child session) and follows the link
+// to the child ("‹ parent" crumb), back, and through "Subagent sessions (1)". Since
+// E5-model-agent-selectors (issues
 // #23/#24) step 11 drives the selectors of the prompt row with the real mouse and keyboard: the
 // model panel (focus in the search box, groups, the four themes), filtering and choosing with the
 // keyboard, Escape, the Build | Plan switch (mouse, Tab with a visible ring, arrows, and that Enter on
@@ -38,9 +55,8 @@
 // last used model proposed to the next new session, the `openVsCode.defaultModel` setting beating it
 // (and a malformed value being reported once and ignored) and reopening the session; it also presses
 // the prompt box with the real mouse while the model panel is open and asserts the panel closes (and
-// the same for "More agents" when the server has a custom agent, else SKIPPED). It runs after
-// steps 1-10, which keep the free default model. The reply half is SKIPPED with a warning when the
-// free model fails. Step 13 (review #1015 S1) attaches a real file with the real Attach button (the
+// the same for "More agents", which the fixture's catalog always has). It runs after steps 1-10,
+// which keep the fixture's default model. Step 13 (review #1015 S1) attaches a real file with the real Attach button (the
 // file dialog is VS Code's own quick input, `files.simpleDialog.enable` in `vscodeProcess.mjs`),
 // sends, and asserts the message leaves with its attachment and the webview logs no exception: a
 // prompt with an attachment used to throw DataCloneError (VERIFIED by running this step against the
@@ -51,9 +67,8 @@
 // arrows / Escape, an outside press, that the same model keeps the variant and another starts on
 // Default, a real prompt whose reply line must end in the variant, that a new session proposes the
 // last model with its variant, and that reopening the session shows the variant the server
-// stored. SKIPPED with a warning when no model of the real catalog lists variants. Things that
-// depend on what the model happens to write (a file reference in the reply, say) are SKIPPED with
-// a warning when absent, never failed.
+// stored. The fixture's catalog always has a model with variants, so the step asserts it. What a
+// reply says is written by the fixture on a trigger word, never by a model.
 //
 // "Always allow": the script only opens that panel (the "Always allow…" toggle), checks it, goes
 // Back and presses "Allow once". It never asks for "Yes, always allow" (`clickButton` throws on
@@ -69,7 +84,7 @@
 // At the end (also after an exception, and on SIGINT/SIGTERM) VS Code is closed with its whole
 // process tree and the temporary workspace is deleted. A hang inside a CDP call is cut by a
 // timeout (`webviewCdp.mjs`), so cleanup is reached. Exit codes: 0 all good, 1 an assertion
-// failed, 2 the run could not start (missing variable or build, VS Code download or launch).
+// failed, 2 the run could not start (missing build, VS Code download or launch).
 //
 // VERIFIED on Windows 11, VS Code 1.143.0 (the `stable` archive that `@vscode/test-electron`
 // resolved on 21/10/2026, read from the run's main.log; earlier runs used 1.142.0), opencode 2.0.32,
@@ -78,8 +93,8 @@
 // the next, with no code change in between: HYPOTHESIS that step 9 has a timing flake.
 // macOS and Linux UNVERIFIED.
 //
-// Step 14 (issue #61) VERIFIED on Windows 11, VS Code 1.143.0, opencode 2.0.32, on 22/10/2026
-// ~09:56-09:57, on the final tree: the whole run passed ("all visual checks passed", exit 0) and
+// HISTORY (real opencode, 22/10/2026): step 14 (issue #61) VERIFIED on Windows 11, VS Code
+// 1.143.0, opencode 2.0.32, ~09:56-09:57, on the final tree: the whole run passed ("all visual checks passed", exit 0) and
 // step 14 used `opencode/glm-5.3-flash-free` (variants low/high/max). Both halves of "the control
 // appears only for a model with variants" RAN in that run (not skipped): `opencode/big-pickle`
 // showed no control, and "another model starts on Default or shows no control" held. The
@@ -89,10 +104,11 @@
 // state, the focus ring, the reply line ending in "· low", the new session and the reopened one
 // (the check "the reopened session shows the variant the SERVER stored ("Reasoning: low")"
 // passed). NOT observed: a screen reader,
-// macOS and Linux, a catalog whose models list no variants (the step SKIPS then), and the host
+// macOS and Linux, a catalog whose models list no variants (the step skipped then), and the host
 // refusing an unlisted variant against a real server.
 //
-// Step 15 (issue #26, tool cards) VERIFIED on Windows 11, VS Code 1.143.0, opencode 2.0.32, model
+// HISTORY (real opencode, 22/10/2026): step 15 (issue #26, tool cards) VERIFIED on Windows 11,
+// VS Code 1.143.0, opencode 2.0.32, model
 // `opencode/glm-5.3-flash-free`, on 22/10/2026 in the final run of the polish round (~15:23-15:30,
 // on the final tree; "all visual checks passed", exit 0, 326 ok lines, 0 FAIL; an earlier run of
 // the same step on 22/10/2026 13:59-14:05 printed the same checks except the last one below). The
@@ -120,7 +136,8 @@
 // "the error text of the unfolded failed body has text contrast >= 4.5 in light|dark|hc-dark|
 // hc-light" with 10.55 / 11.06 / 21.00 / 14.55; it was NOT measured with the old bare
 // `errorForeground` text (its 3.16 in light is the chip's, inferred for the body). If the model
-// never calls the tool the failed part is SKIPPED with an explicit `warn` (not in this run). The
+// never called the tool the failed part was skipped with a `warn` (it was not, in that run); the
+// fixture run asserts it instead. The
 // check found two real defects in earlier runs of this round (bare errorForeground 3.16 in
 // light; an error line running over the "Open" link in the side bar), both fixed in `index.css`;
 // the overflow check is a regression check added after the fix and was not run against the
@@ -128,7 +145,8 @@
 // question, MCP), a running/rejected/stopped/awaiting card, Copy and "Open in editor" pressed, a
 // clipped output, macOS and Linux, a screen reader.
 //
-// Step 16 (issues #28/#29, the `@` popup and the editor context) VERIFIED on Windows 11, VS Code
+// HISTORY (real opencode, 22/10/2026): step 16 (issues #28/#29, the `@` popup and the editor
+// context) VERIFIED on Windows 11, VS Code
 // 1.143.0, opencode 2.0.32, model `opencode/glm-5.3-flash-free`, on 22/10/2026 (last run, after the
 // review round that added the Enter-while-pending check: "all visual checks passed", exit 0, 386
 // ok lines, 0 FAIL, with the warning "the free model did not finish the turn in 120 s; the reply
@@ -159,7 +177,6 @@
 // Linux.
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { createWorkspace, startVSCode, writeSettings } from './vscodeProcess.mjs';
 import { openWebview } from './webviewCdp.mjs';
@@ -207,14 +224,6 @@ async function waitFor(fn, ms, intervalMs = 500) {
 
 // ---------------------------------------------------------------------------------------------
 
-const opencodePath = process.env.OPEN_VS_CODE_REAL_OPENCODE;
-if (opencodePath === undefined || opencodePath === '' || !fs.existsSync(opencodePath)) {
-  console.error(
-    'test:visual needs OPEN_VS_CODE_REAL_OPENCODE pointing to the opencode v2 executable ' +
-      `(got ${JSON.stringify(opencodePath ?? '')}).`,
-  );
-  process.exit(2);
-}
 for (const required of ['dist/extension.js', 'dist/webview/assets/index.js']) {
   if (!fs.existsSync(path.join(repoRoot, required))) {
     console.error(
@@ -264,19 +273,6 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     void cleanup().finally(() => process.exit(130));
   });
 }
-
-// Real opencode data dir of the developer: the run must not write to it (see `vscodeProcess.mjs`).
-// Recorded only to WARN afterwards: the developer may be using opencode at the same time.
-const realOpencodeDir = path.join(os.homedir(), '.local', 'share', 'opencode');
-const realDbTimes = () =>
-  ['opencode.db', 'opencode.db-wal'].map((name) => {
-    try {
-      return fs.statSync(path.join(realOpencodeDir, name)).mtimeMs;
-    } catch {
-      return null;
-    }
-  });
-const realDbBefore = realDbTimes();
 
 /** Connects Playwright to the workbench, waiting for the debugging endpoint to come up. */
 async function connectWorkbench(timeoutMs = 90_000) {
@@ -347,7 +343,7 @@ fs.rmSync(readmeDir, { recursive: true, force: true });
  * waits for the element and THROWS a TimeoutError when there is no iframe at all (it returns null
  * only for an attached but invisible one), so the call carries a short timeout and a `.catch`
  * that turns both cases into the warning. The files are copied BY HAND to `docs/images/` after
- * looking at them, because what the free model writes changes on every run.
+ * looking at them, so a screenshot is only copied once someone has judged it.
  * HYPOTHESIS for the throwing case: read in playwright-core `lib/client/locator.js`
  * (`boundingBox` goes through `_withElement` with a timeout), not run without a frame; to check
  * it, call `cropWebview` while no chat view is open and expect the warning, not a failed step.
@@ -799,7 +795,7 @@ let started = false;
 let startupError;
 try {
   workspace = createWorkspace();
-  vscode = await startVSCode({ repoRoot, workDir, workspace, opencodePath });
+  vscode = await startVSCode({ repoRoot, workDir, workspace });
   console.log(
     `VS Code pid ${String(vscode.pid)}, CDP port ${String(vscode.port)}, workspace ${workspace}`,
   );
@@ -834,23 +830,17 @@ try {
   });
 
   await step('2 Markdown, code actions and file links', async () => {
-    // The free model sometimes stalls on "Working" for minutes (seen once). One turn is given
-    // 100 s; if it has not ended it is stopped and the prompt is sent once more.
-    let ended = false;
-    for (const attempt of [1, 2]) {
-      await send(
-        'Reply with: a short TypeScript function in a ts code block, a bash command in a bash code block, ' +
-          'a markdown table with 2 columns and 2 rows, a bullet list of 2 items, the inline code path `src/sample.ts:20`, ' +
-          'and a link to https://code.visualstudio.com . Do not use any tools.',
-      );
-      await page.waitForTimeout(3000);
-      if (attempt === 1) await shot('02a-streaming');
-      ended = await waitIdle(100_000);
-      if (ended) break;
-      warn(`the first turn had not ended after 100 s (attempt ${String(attempt)}); stopping it`);
-      await clickButton('Stop');
-      await waitIdle(30_000);
-    }
+    // MARKDOWN makes the synthetic server answer with a ts fence, a bash fence, a 2x2 table, a list
+    // of two, `src/sample.ts:20` and a link, streamed in deltas 600 ms apart (about 4 s), the first
+    // fence cut open: the shot 3 s after sending sees a block that is still being written.
+    await send(
+      'Reply with: a short TypeScript function in a ts code block, a bash command in a bash code block, ' +
+        'a markdown table with 2 columns and 2 rows, a bullet list of 2 items, the inline code path `src/sample.ts:20`, ' +
+        'and a link to https://code.visualstudio.com . Do not use any tools. MARKDOWN',
+    );
+    await page.waitForTimeout(3000);
+    await shot('02a-streaming');
+    const ended = await waitIdle(30_000);
     check(ended, 'the first turn ended');
     await page.waitForTimeout(800);
     await shot('02b-markdown');
@@ -878,47 +868,49 @@ try {
       dom.styleAttributes.length === 0,
       `no inline style attribute in the webview body (${dom.styleAttributes.join(' | ')})`,
     );
-    if (dom.tables === 0) warn('the model wrote no table; nothing to check');
+    check(dom.tables >= 1, `the reply renders its table (${String(dom.tables)})`);
     check(
       dom.links.every((href) => /^(https?:|mailto:)/.test(href ?? '')),
       `every link is http(s) or mailto (${dom.links.join(', ')})`,
     );
-    if (dom.fileRefs.includes('src/sample.ts:20')) {
-      await clickIn('.file-ref[data-path="src/sample.ts"][data-line="20"]');
-      await page.waitForTimeout(1500);
-      const selection = await page
-        .locator('#status\\.editor\\.selection')
-        .first()
-        .innerText()
-        .catch(() => '');
-      check(
-        /Ln 20\b/.test(selection),
-        `clicking the file reference opens the line (status bar: "${selection}")`,
-      );
-      await shot('02c-fileref');
-    } else {
-      warn(
-        `no file reference to src/sample.ts:20 in the reply (${dom.fileRefs.join(', ') || 'none'}); click not tested`,
-      );
-    }
-    if (await clickIn('button[aria-label="Open code in a new file"]')) {
-      await page.waitForTimeout(1500);
-      const language = await page
-        .locator('#status\\.editor\\.mode')
-        .first()
-        .innerText()
-        .catch(() => '');
-      check(
-        language.trim() !== '' && !/plain\s*text/i.test(language),
-        `New file opens with a language (status bar: "${language.trim()}")`,
-      );
-    }
+    check(
+      dom.fileRefs.includes('src/sample.ts:20'),
+      `the reply has a file reference to src/sample.ts:20 (${dom.fileRefs.join(', ') || 'none'})`,
+    );
+    await clickIn('.file-ref[data-path="src/sample.ts"][data-line="20"]');
+    await page.waitForTimeout(1500);
+    const selection = await page
+      .locator('#status\\.editor\\.selection')
+      .first()
+      .innerText()
+      .catch(() => '');
+    check(
+      /Ln 20\b/.test(selection),
+      `clicking the file reference opens the line (status bar: "${selection}")`,
+    );
+    await shot('02c-fileref');
+    check(
+      await clickIn('button[aria-label="Open code in a new file"]'),
+      'a code block has an "Open code in a new file" button and it is pressed',
+    );
+    await page.waitForTimeout(1500);
+    const language = await page
+      .locator('#status\\.editor\\.mode')
+      .first()
+      .innerText()
+      .catch(() => '');
+    check(
+      language.trim() !== '' && !/plain\s*text/i.test(language),
+      `New file opens with a language (status bar: "${language.trim()}")`,
+    );
     assertNoWebviewErrors('markdown');
   });
 
   await step('3 Stop is neutral, history, focus', async () => {
     await clickIn('textarea');
-    await page.keyboard.type('Count from 1 to 400, one number per line. Do not use tools.');
+    // LONG: the synthetic server answers with the numbers 1 to 400, five per delta every 200 ms
+    // (about 16 s), so the turn is still running when Escape comes.
+    await page.keyboard.type('Count from 1 to 400, one number per line. Do not use tools. LONG');
     await page.keyboard.press('Enter');
     const sawStop = await waitFor(isBusy, 30_000, 300);
     check(sawStop === true, 'Stop is visible while the turn runs');
@@ -989,14 +981,14 @@ try {
   await step(
     '5 permission: notification and badge with the view hidden, card, Always panel',
     async () => {
-      // A fresh session: in the old one step 3 said "Do not use tools", and on 21/10/2026 the
-      // real model obeyed it and declined to call `read`, so no permission was ever asked and
-      // every check of this step failed in cascade.
+      // A fresh session. ASK_PERMISSION makes the synthetic server run the turn up to a `read` of
+      // `.env` and a `permission.asked` (action read, `save: ["*"]` so the Always panel has its
+      // option), and wait for the reply.
       check(await clickButton('New session'), 'New session starts a clean conversation');
       await page.waitForTimeout(1500);
       await clickIn('textarea');
       await page.keyboard.type(
-        'Use the read tool to read the file .env in the workspace root and tell me its content.',
+        'Use the read tool to read the file .env in the workspace root and tell me its content. ASK_PERMISSION',
       );
       await page.keyboard.press('Enter');
       await page.waitForTimeout(800);
@@ -1006,7 +998,7 @@ try {
         return (await toasts.count())
           ? (await toasts.first().innerText()).replace(/\n/g, ' | ')
           : null;
-      }, 90_000);
+      }, 30_000);
       check(
         toast !== undefined && toast !== null,
         `a notification appears with the view hidden ("${String(toast).slice(0, 100)}")`,
@@ -1062,7 +1054,7 @@ try {
         'the confirmation panel is closed after Back',
       );
       check(await clickButton('Allow once'), 'Allow once is pressed (never Always)');
-      check(await waitIdle(90_000), 'the turn ends after Allow once');
+      check(await waitIdle(30_000), 'the turn ends after Allow once');
       await page.waitForTimeout(1000);
       const after = (await badge.allInnerTexts().catch(() => [])).join(',');
       check(after === '', `the badge is gone after answering ("${after}")`);
@@ -1083,30 +1075,22 @@ try {
   );
 
   await step('6 question card', async () => {
-    // Whether the model calls the `question` tool is up to the model (in one run it answered "I
-    // don't have a question tool"), so the card is tried twice and, if it never comes, the step is
-    // SKIPPED with a warning instead of failed. A card that does appear is fully asserted.
-    let form;
-    for (const attempt of [1, 2]) {
-      await waitIdle(90_000);
-      await clickIn('textarea');
-      await page.keyboard.type(
-        'Call the question tool now (do not answer in text) to ask me to pick one option: "Red" or "Blue". Then reply with the colour I picked.',
-      );
-      await page.keyboard.press('Enter');
-      form = await waitFor(
-        () => web.inDoc((doc) => doc.querySelector('.form-card')?.innerText?.slice(0, 200)),
-        attempt === 1 ? 60_000 : 90_000,
-      );
-      if (form) break;
-    }
-    if (form === undefined) {
-      await shot('07a-question-not-asked');
-      warn('the model never called the question tool (2 attempts); question card not tested');
-    } else {
+    // ASK_QUESTION makes the synthetic server call the `question` tool at once: a form with two
+    // fields (q0 "Pick A or B", q1 "Any extras?"), as the real tool builds them.
+    await waitIdle(30_000);
+    await clickIn('textarea');
+    await page.keyboard.type(
+      'Call the question tool now to ask me to pick one option: A or B. Then reply with the letter I picked. ASK_QUESTION',
+    );
+    await page.keyboard.press('Enter');
+    const form = await waitFor(
+      () => web.inDoc((doc) => doc.querySelector('.form-card')?.innerText?.slice(0, 200)),
+      30_000,
+    );
+    check(form !== undefined, 'the question card is shown');
+    if (form !== undefined) {
       const focused = await web.inDoc((doc) => doc.activeElement?.closest?.('.form-card') != null);
       check(focused === true, 'the focus is inside the question card');
-      check(true, 'the question card is shown');
       await shot('07a-question');
     }
     // A new prompt (the one of the question) does not erase the answer given in step 5.
@@ -1121,20 +1105,21 @@ try {
           ...doc.querySelectorAll(
             '.form-card input[type="radio"], .form-card input[type="checkbox"]',
           ),
-        ].find((input) => /blue/i.test(input.closest('label')?.textContent || ''));
+        ].find((input) => (input.closest('label')?.textContent ?? '').trim() === 'B');
         option?.click();
         [...doc.querySelectorAll('.form-card button')]
           .find((b) => /submit/i.test(b.textContent))
           ?.click();
       });
-      check(await waitIdle(90_000), 'the turn ends after answering');
+      check(await waitIdle(30_000), 'the turn ends after answering');
       const gone = await web.inDoc((doc) => doc.querySelector('.form-card') === null);
       check(gone === true, 'the question card is gone after the answer');
       await page.waitForTimeout(800);
       const answered = await outcomeLines();
+      console.log(`  outcome lines: ${JSON.stringify(answered.log)}`);
       check(
-        answered.log.some((line) => /Answered/.test(line) && /Blue/.test(line)),
-        `the history says what was answered ("Answered … Blue"): ${JSON.stringify(answered.log)}`,
+        answered.log.some((line) => /Answered/.test(line) && /Letter: B\b/.test(line)),
+        `the history says what was answered ("Answered … Letter: B"): ${JSON.stringify(answered.log)}`,
       );
       check(answered.dock.length === 0, 'the dock prints no result line for the open session');
       await shot('07b-answered');
@@ -1143,29 +1128,23 @@ try {
   });
 
   await step('6b a plain Reject is kept in the history, not painted as an error', async () => {
-    // Same reasoning as step 6: whether the model calls `read` is up to the model, so two tries and
-    // then SKIP with a warning.
-    let card;
-    for (const attempt of [1, 2]) {
-      await waitIdle(90_000);
-      await clickIn('textarea');
-      await page.keyboard.type(
-        'Use the read tool to read the file .env in the workspace root once more and tell me its content.',
-      );
-      await page.keyboard.press('Enter');
-      card = await waitFor(
-        () => web.inDoc((doc) => doc.querySelector('.permission-card')?.innerText?.slice(0, 200)),
-        attempt === 1 ? 60_000 : 90_000,
-      );
-      if (card) break;
-    }
+    await waitIdle(30_000);
+    await clickIn('textarea');
+    await page.keyboard.type(
+      'Use the read tool to read the file .env in the workspace root once more and tell me its content. ASK_PERMISSION',
+    );
+    await page.keyboard.press('Enter');
+    const card = await waitFor(
+      () => web.inDoc((doc) => doc.querySelector('.permission-card')?.innerText?.slice(0, 200)),
+      30_000,
+    );
+    check(card !== undefined, 'the permission card is shown for the second read');
     if (card === undefined) {
       await shot('07c-reject-not-asked');
-      warn('the model never called the read tool again (2 attempts); Reject not tested');
       return;
     }
     check(await clickButton('Reject'), 'Reject is pressed (the plain one, never Always)');
-    check(await waitIdle(90_000), 'the turn ends after Reject');
+    check(await waitIdle(30_000), 'the turn ends after Reject');
     await page.waitForTimeout(1000);
     const lines = await outcomeLines();
     check(
@@ -1258,26 +1237,25 @@ try {
     );
     // Reload Window kills the extension host and with it the memory of exact decisions (decision of
     // Sergio, 21/10/2026: nothing is persisted). What the tool blocks say survives, and it comes
-    // from REST `message.list` (that is the check of the HYPOTHESIS that REST returns the same
-    // `content[]` as the database). "Allowed once" is ASSERTED gone, so the documented limit cannot
-    // change silently.
+    // from REST `message.list`. Against the synthetic server this only proves the host's side of
+    // that path: that REST returns the same `content[]` as a real database was checked against a
+    // real opencode before this run moved to the fixture (see the header). "Allowed once" is
+    // ASSERTED gone, so the documented limit cannot change silently.
     const linesAfterReload = await outcomeLines();
     check(
       !linesAfterReload.log.some((line) => /Allowed once|Always allowed/.test(line)),
       `after Reload Window "Allowed once" is gone (the server keeps no trace): ${JSON.stringify(linesAfterReload.log)}`,
     );
-    if (hadAnswered) {
-      check(
-        linesAfterReload.log.some((line) => /Answered/.test(line) && /Blue/.test(line)),
-        `after Reload Window "Answered … Blue" is read back from the tool block: ${JSON.stringify(linesAfterReload.log)}`,
-      );
-    }
-    if (hadRejected) {
-      check(
-        linesAfterReload.log.some((line) => /Rejected/.test(line)),
-        `after Reload Window "Rejected" is read back from the tool block: ${JSON.stringify(linesAfterReload.log)}`,
-      );
-    }
+    check(hadAnswered, 'there was an "Answered" line before the reload to read back');
+    check(
+      linesAfterReload.log.some((line) => /Answered/.test(line) && /Letter: B\b/.test(line)),
+      `after Reload Window "Answered … Letter: B" is read back from the tool block: ${JSON.stringify(linesAfterReload.log)}`,
+    );
+    check(hadRejected, 'there was a "Rejected" line before the reload to read back');
+    check(
+      linesAfterReload.log.some((line) => /Rejected/.test(line)),
+      `after Reload Window "Rejected" is read back from the tool block: ${JSON.stringify(linesAfterReload.log)}`,
+    );
     await shot('09-after-reload');
     assertNoWebviewErrors('reload');
   });
@@ -1388,9 +1366,10 @@ try {
     await clickIn('input[type="search"]');
     await page.keyboard.press('ArrowDown');
     state = await picker();
+    // Not the whole `focus` object: its `text` holds the row's clock time, which differs per run.
     check(
       state.focus.cls.includes('session-main') && state.focus.visible,
-      `ArrowDown enters the list with a visible focus (${JSON.stringify(state.focus)})`,
+      `ArrowDown enters the list with a visible focus (${state.focus.tag} ${state.focus.cls}, visible ${String(state.focus.visible)})`,
     );
     await shot('10b-sessions-keyboard');
     await closeList();
@@ -1422,28 +1401,28 @@ try {
     await closeList();
 
     // The first prompt creates the session.
-    const token = `vr${String(Date.now())}`;
-    await send(`Reply with exactly: ${token}. Do not use any tools.`);
+    // A fixed token: the profile and the fixture's state are wiped at the start of every run, so
+    // it is unique anyway, and the `ok` lines that quote it read the same in every run.
+    const token = 'vrvisual';
+    // LONG: the turn lasts about 16 s, so the list opens while it is running.
+    await send(`Reply with exactly: ${token}. Do not use any tools. LONG`);
     await page.waitForTimeout(1200);
     const busyNow = await isBusy();
+    check(busyNow === true, 'the turn is still running when the session list is opened');
     await openList();
     state = await picker();
     check(
       state.rows.length === countBefore + 1,
       `the first prompt created the session (${String(countBefore)} -> ${String(state.rows.length)})`,
     );
-    if (busyNow) {
-      const running = state.rows.find((row) => row.current);
-      check(
-        running !== undefined && /Running/.test(running.badge),
-        `a running session says "Running" in text (${JSON.stringify(running?.badge)})`,
-      );
-      await shot('10c-sessions-running');
-    } else {
-      warn('the turn had already ended when the list opened; "Running" not checked');
-    }
+    const running = state.rows.find((row) => row.current);
+    check(
+      running !== undefined && /Running/.test(running.badge),
+      `a running session says "Running" in text (${JSON.stringify(running?.badge)})`,
+    );
+    await shot('10c-sessions-running');
     await closeList();
-    if (!(await waitIdle(120_000))) warn('the second session did not finish in 120 s; going on');
+    check(await waitIdle(60_000), 'the second session finished');
 
     // Rename in line, with the real mouse and keyboard.
     const renamed = `Visual ${token}`;
@@ -1656,9 +1635,9 @@ try {
     const ONE = 'Reply with exactly: ONE. Do not use any tools.';
     const TWO = 'Reply with exactly: TWO. Do not use any tools.';
     await send(ONE);
-    if (!(await waitIdle(120_000))) warn('the first turn did not finish in 120 s; going on');
+    check(await waitIdle(30_000), 'the first turn of the fork run finished');
     await send(TWO);
-    if (!(await waitIdle(120_000))) warn('the second turn did not finish in 120 s; going on');
+    check(await waitIdle(30_000), 'the second turn of the fork run finished');
     let state = await chat();
     check(
       state.users.length === 2 && state.users[1].includes('TWO'),
@@ -1806,21 +1785,22 @@ try {
     assertNoWebviewErrors('fork');
 
     // --- Subagent session ---------------------------------------------------------------------
-    // Depends on the free model calling the `subagent` tool: SKIPPED with a warning when it does not.
+    // SUBAGENT makes the synthetic server call the `subagent` tool: it creates a child session
+    // ("Say hello", agent general) and answers inside it, as the spike of #21 saw.
     check(await clickButton('New session'), 'New session is pressed for the subagent run');
     await page.waitForTimeout(1500);
     await send(
       'Call the subagent tool exactly once with agent "general", description "Say hello" and ' +
-        'prompt "Reply with exactly: HELLO". After it returns, reply with exactly: DONE.',
+        'prompt "Reply with exactly: HELLO". After it returns, reply with exactly: DONE. SUBAGENT',
     );
-    if (!(await waitIdle(150_000))) warn('the subagent turn did not finish in 150 s; going on');
+    check(await waitIdle(30_000), 'the subagent turn finished');
     state = await chat();
+    check(
+      state.subagentLinks > 0,
+      `the conversation has an "Open subagent session" link (${String(state.subagentLinks)})`,
+    );
     if (state.subagentLinks === 0) {
-      warn(
-        'SKIPPED: the model did not call the subagent tool (no "Open subagent session" in the ' +
-          'conversation), so the subagent navigation was not exercised',
-      );
-      await shot('11e-subagent-skipped');
+      await shot('11e-subagent-missing');
       return;
     }
     check(
@@ -1867,8 +1847,8 @@ try {
     assertNoWebviewErrors('subagent');
   });
 
-  // Issues #23/#24. The LAST step on purpose: steps 1-10 ran with the free default model and the
-  // default agent, because the profile (and so `globalState` and the setting) is wiped at start.
+  // Issues #23/#24. The LAST step on purpose: steps 1-10 ran with the fixture's default model and
+  // the default agent, because the profile (and so `globalState` and the setting) is wiped at start.
   await step('11 model and agent selectors (issues #23/#24)', async () => {
     /** What the prompt row and the model panel show. Self-contained (it is serialized). */
     const ui = () =>
@@ -1972,10 +1952,8 @@ try {
     // --- Filter and pick with the keyboard -----------------------------------------------------
     const options = state.options;
     const target = options.find((o) => !o.current);
+    check(target !== undefined, 'the server lists a model other than the current one to pick');
     if (target === undefined) {
-      warn(
-        'SKIPPED: the server lists a single model, so picking a different one was not exercised',
-      );
       await press('Escape');
       return;
     }
@@ -2049,6 +2027,8 @@ try {
     const moreAgents = await web.inDoc(
       (doc) => doc.querySelector('button[data-agent-more-trigger]') !== null,
     );
+    // The synthetic catalog of the visual run has one custom primary agent (`docs`).
+    check(moreAgents, 'the server has a custom agent, so "More agents" is offered');
     if (moreAgents) {
       check(await clickIn('button[data-agent-more-trigger]'), '"More agents" is pressed');
       await sleep(400);
@@ -2059,10 +2039,6 @@ try {
       check(
         !(await web.inDoc((doc) => doc.querySelector('#agent-more-panel') !== null)),
         'a press outside closes "More agents"',
-      );
-    } else {
-      warn(
-        'SKIPPED: the server has no custom agent, so "More agents" (and its outside click) was not exercised',
       );
     }
 
@@ -2105,23 +2081,17 @@ try {
 
     // --- A prompt carries the choice, and the reply says who answered --------------------------
     await send('Reply with exactly: OK. Do not use any tools.');
-    const finished = await waitIdle(120_000);
+    const finished = await waitIdle(30_000);
     state = await ui();
-    if (!finished) {
-      warn(
-        'SKIPPED: the free model did not finish the turn in 120 s; the reply line was not judged',
-      );
-    } else if (state.metas === 0 || state.alerts > 0) {
-      warn(
-        `SKIPPED: the free model gave no usable reply (${String(state.metas)} replies, ${String(state.alerts)} alerts); ` +
-          'the "Plan · model" line was not judged',
-      );
-    } else {
-      check(
-        state.lastMeta === `Plan · ${chosen.name}`,
-        `the reply says who answered ("${state.lastMeta}", expected "Plan · ${chosen.name}")`,
-      );
-    }
+    check(finished, 'the turn with the chosen agent and model finished');
+    check(
+      state.metas > 0 && state.alerts === 0,
+      `the turn left a reply and no alert (${String(state.metas)} replies, ${String(state.alerts)} alerts)`,
+    );
+    check(
+      state.lastMeta === `Plan · ${chosen.name}`,
+      `the reply says who answered ("${state.lastMeta}", expected "Plan · ${chosen.name}")`,
+    );
     check(
       state.agent === 'plan' && state.trigger.startsWith(chosen.name),
       `the session now holds Plan and the chosen model ("${state.agent}", "${state.trigger}")`,
@@ -2256,18 +2226,16 @@ try {
       `no alert after sending with an attachment (${String(state.alerts)})`,
     );
     assertNoWebviewErrors('attach');
-    if (!(await waitIdle(120_000))) {
-      warn('SKIPPED: the free model did not finish the attachment turn in 120 s');
-    }
+    check(await waitIdle(30_000), 'the turn with the attachment finished');
     await shot('13c-attachment-reply');
   });
 
   // Issue #61 (decisions of Sergio, 22/10/2026, Engram #1021): the reasoning-variant control, a
   // button + panel after the model button, shown only for a model that lists variants. It is the
   // LAST step on purpose: it leaves a remembered "model + variant" behind, which would change what
-  // steps 11 and 13 expect a new session to propose. The model with variants is chosen
-  // dynamically (the free catalog changes over time); with none, the step is SKIPPED with a
-  // warning.
+  // steps 11 and 13 expect a new session to propose. The model with variants is found in the
+  // catalog the fixture serves (`visual` mode: models with variants low/high and one without);
+  // the step ASSERTS that the catalog has one of each, it never skips.
   await step('14 reasoning variant (issue #61)', async () => {
     /** What the prompt row, the variant control and its panel show. Self-contained (serialized). */
     const ui = () =>
@@ -2339,7 +2307,7 @@ try {
     check(await clickButton('New session'), 'New session is pressed');
     await page.waitForTimeout(1500);
 
-    // --- Find a model that lists variants (glm-5.3-flash-free first), else SKIP -----------------
+    // --- Find a model that lists variants and one that lists none; assert both exist ------------
     check(await clickIn('button.model-trigger'), 'the model button is pressed');
     await sleep(400);
     const ids = (await ui()).modelIds;
@@ -2355,15 +2323,10 @@ try {
       if (!has && withoutVariants === undefined) withoutVariants = id;
       if (withVariants !== undefined && withoutVariants !== undefined) break;
     }
-    if (withVariants === undefined) {
-      warn(
-        'SKIPPED: no model of the real catalog lists variants, so the variant control was not exercised',
-      );
-      return;
-    }
-    if (withoutVariants === undefined) {
-      warn('SKIPPED: every model lists variants, so "the control disappears" was not exercised');
-    }
+    // The synthetic catalog has models with variants (low, high) and one without.
+    check(withVariants !== undefined, 'the catalog has a model that lists variants');
+    check(withoutVariants !== undefined, 'the catalog has a model that lists no variants');
+    if (withVariants === undefined) return;
 
     // --- A model without variants shows no control -------------------------------------------
     if (withoutVariants !== undefined) {
@@ -2495,11 +2458,8 @@ try {
       `re-choosing the same model keeps the variant ("${String(state.trigger)}")`,
     );
     const another = candidates.find((id) => id !== withVariants);
-    if (another === undefined) {
-      warn(
-        'SKIPPED: the server lists a single model, so "another model starts on Default" was not exercised',
-      );
-    } else {
+    check(another !== undefined, 'the catalog lists a second model');
+    if (another !== undefined) {
       check(await pickModel(another), `another model (${another}) is chosen`);
       state = await ui();
       check(
@@ -2523,23 +2483,17 @@ try {
 
     // --- The prompt carries it, and the reply says so -----------------------------------------
     await send('Reply with exactly: OK. Do not use any tools.');
-    const finished = await waitIdle(120_000);
+    const finished = await waitIdle(30_000);
     state = await ui();
-    if (!finished) {
-      warn(
-        'SKIPPED: the free model did not finish the turn in 120 s; the reply line was not judged',
-      );
-    } else if (state.metas === 0 || state.alerts > 0) {
-      warn(
-        `SKIPPED: the free model gave no usable reply (${String(state.metas)} replies, ${String(state.alerts)} alerts); ` +
-          'the "· variant" line was not judged',
-      );
-    } else {
-      check(
-        state.lastMeta.endsWith(` · ${String(variant)}`),
-        `the reply line ends in the variant ("${state.lastMeta}", expected "… · ${String(variant)}")`,
-      );
-    }
+    check(finished, 'the turn with the variant finished');
+    check(
+      state.metas > 0 && state.alerts === 0,
+      `the turn left a reply and no alert (${String(state.metas)} replies, ${String(state.alerts)} alerts)`,
+    );
+    check(
+      state.lastMeta.endsWith(` · ${String(variant)}`),
+      `the reply line ends in the variant ("${state.lastMeta}", expected "… · ${String(variant)}")`,
+    );
     check(
       state.trigger === `Reasoning: ${String(variant)}`,
       `the open session holds the variant ("${String(state.trigger)}")`,
@@ -2581,12 +2535,13 @@ try {
     assertNoWebviewErrors('variant');
   });
 
-  // Issue #26 (E6-tool-call-views). The tool cards against a REAL opencode: the free model is asked
-  // to call shell, read, grep and edit on the sample workspace, and each card that appears is
+  // Issue #26 (E6-tool-call-views). The tool cards against the fixture: one `TOOLS` prompt makes
+  // it call shell, read, grep and edit (and more) on the sample workspace, and each card is
   // judged folded-by-default, reachable with Tab with a visible ring, opened with Enter, closed
   // with Space, with the body the tool should give (shell output, file contents, matches, a diff
-  // with added AND deleted lines). A tool the model never called is SKIPPED with a warning, never
-  // failed: the report of the run says which ones were seen.
+  // with added AND deleted lines). Nothing depends on a model, so a missing card is a failed
+  // check, not a skip. That a REAL opencode sends the shapes these cards read is not judged here:
+  // it is what `npm run test:event-shapes` compares.
   await step('15 tool cards (issue #26)', async () => {
     /** Every tool card of the log, in order. Self-contained (it is serialized). */
     const cards = () =>
@@ -2688,30 +2643,15 @@ try {
     check(await clickButton('New session'), 'New session is pressed');
     await page.waitForTimeout(1500);
 
-    // --- Ask the model for the tools: one combined prompt, then one prompt per missing tool ----
+    // --- One prompt with the TOOLS trigger: the synthetic server plays nine tool calls ----------
+    // (shell twice, read, edit, write, grep, glob, webfetch and an MCP-style tool), each completed.
     await send(
       'Use the tools, do not guess. In this order: 1) call the shell tool with the command ' +
         '`node --version`; 2) call the read tool on src/sample.ts; 3) call the grep tool with the ' +
         'pattern greet in the src folder; 4) call the edit tool on src/sample.ts replacing the text ' +
-        '`value2 = 2;` with `value2 = 22;`. Then reply with exactly: DONE.',
+        '`value2 = 2;` with `value2 = 22;`. Then reply with exactly: DONE. TOOLS',
     );
-    if (!(await waitIdle(180_000))) warn('the tools turn did not finish in 180 s; going on');
-    const ASKS = {
-      shell:
-        'Call the shell tool exactly once with the command `node --version`. Then reply with exactly: DONE.',
-      read: 'Call the read tool exactly once on src/sample.ts. Then reply with exactly: DONE.',
-      grep: 'Call the grep tool exactly once with the pattern greet in the src folder. Then reply with exactly: DONE.',
-      edit: 'Call the edit tool exactly once on src/sample.ts replacing the text `value3 = 3;` with `value3 = 33;`. Then reply with exactly: DONE.',
-    };
-    for (const tool of ['shell', 'read', 'edit', 'grep']) {
-      for (let attempt = 1; attempt <= 3 && !(await seen(tool)); attempt += 1) {
-        warn(
-          `the model has not completed a "${tool}" call yet; asking for it (attempt ${String(attempt)})`,
-        );
-        await send(ASKS[tool]);
-        await waitIdle(120_000);
-      }
-    }
+    check(await waitIdle(30_000), 'the tools turn finished');
     const all = await cards();
     console.log(`  cards: ${JSON.stringify(all.map((c) => `${c.tool}:${c.status}`))}`);
     await shot('15a-tool-cards-folded');
@@ -2735,12 +2675,9 @@ try {
     // --- Each kind: Tab, ring, Enter opens, content, Space closes -----------------------------
     const judged = [];
     for (const tool of ['shell', 'read', 'edit', 'grep']) {
-      if (!(await seen(tool))) {
-        warn(
-          `SKIPPED: the model never completed a "${tool}" call, so its card body was not judged`,
-        );
-        continue;
-      }
+      const completed = await seen(tool);
+      check(completed, `a "${tool}" call completed, so its card body can be judged`);
+      if (!completed) continue;
       judged.push(tool);
       check(await tagCard(tool), `the first ${tool} card is tagged`);
       const reached = await tabToTagged();
@@ -2844,30 +2781,24 @@ try {
       await page.keyboard.press('Space');
       await sleep(300);
     } else {
-      warn(
-        `SKIPPED: Shift+Tab did not reach the last card (data-tool=${JSON.stringify(lastTool)}); the auto-scroll check was not made`,
+      check(
+        false,
+        `Shift+Tab reached the last card (data-tool=${JSON.stringify(lastTool)}) for the auto-scroll check`,
       );
     }
 
-    // --- A REAL failed call: a read of a file that does not exist (decision of Sergio, #1042) ---
-    // The model is asked once and, if it never makes the call, once more; if there is still no
-    // failed read card the check is SKIPPED with a warning (never silently, never a failure).
-    const FAILED_ASK =
+    // --- A failed call: a read of a file that does not exist (decision of Sergio, #1042) -------
+    // BROKEN_READ makes the synthetic server fail the read with the error opencode gives
+    // (`tool.execution`, "File not found: src/does-not-exist.ts").
+    await send(
       'Call the read tool exactly once on the file src/does-not-exist.ts. It does not exist: call the ' +
-      'tool anyway, do not check first. Then reply with exactly: DONE.';
+        'tool anyway, do not check first. Then reply with exactly: DONE. BROKEN_READ',
+    );
+    await waitIdle(30_000);
     const failedSeen = async () =>
       (await cards()).some((card) => card.tool === 'read' && card.status === 'failed');
-    for (let attempt = 1; attempt <= 2 && !(await failedSeen()); attempt += 1) {
-      if (attempt > 1) warn('the model has not made the failing read call yet; asking once more');
-      await send(FAILED_ASK);
-      await waitIdle(120_000);
-    }
-    if (!(await failedSeen())) {
-      warn(
-        'SKIPPED: the model never made a read call that failed (asked twice for src/does-not-exist.ts); ' +
-          'the real "failed" state was NOT judged in this run',
-      );
-    } else {
+    check(await failedSeen(), 'the conversation has a read card in the failed state');
+    if (await failedSeen()) {
       const failedCard = await web.inDoc((doc) => {
         for (const old of doc.querySelectorAll('[data-visual-card]')) {
           old.removeAttribute('data-visual-card');
@@ -2936,7 +2867,7 @@ try {
         await page.keyboard.press('Space');
         await sleep(300);
       } else {
-        warn('SKIPPED: Shift+Tab did not reach the failed card; its body was not opened');
+        check(false, 'Shift+Tab reached the failed card to open its body');
       }
       for (const [name, theme] of THEMES) {
         await setTheme(theme);
@@ -3200,8 +3131,9 @@ try {
     await clearBox();
 
     // --- Escape closes the popup and does NOT stop a running turn --------------------------------
-    await send('Count from 1 to 400, one number per line. Do not use tools.');
+    await send('Count from 1 to 400, one number per line. Do not use tools. LONG');
     const running = await waitFor(isBusy, 30_000, 300);
+    check(running === true, 'the LONG turn is running, so Escape-versus-Stop can be tested');
     if (running === true) {
       await page.keyboard.type('@sample');
       const open = await waitFor(async () => (await ui()).rows.length > 0, 20_000, 250);
@@ -3214,8 +3146,6 @@ try {
       check(state.value === '@sample', 'Escape leaves the text as it was');
       await page.keyboard.press('Escape');
       check(await waitIdle(30_000), 'a second Escape (popup closed) stops the turn');
-    } else {
-      warn('SKIPPED: the turn was not running, so Escape-versus-Stop was not tested');
     }
     await clearBox();
 
@@ -3277,9 +3207,7 @@ try {
       `the message left with both files ("${state.sent.join(', ')}")`,
     );
     check(state.chips.length === 0, 'the chips left the prompt box once sent');
-    if (!(await waitIdle(120_000))) {
-      warn('SKIPPED: the free model did not finish the mention turn in 120 s');
-    }
+    check(await waitIdle(30_000), 'the mention turn finished');
     await shot('16e-mention-sent');
 
     // --- The chip of the conversation opens the file at the start of its range --------------------
@@ -3306,10 +3234,12 @@ try {
   });
 
   // Issue #25 (decisions of Sergio, 22/10/2026, Engram #1097): the dimmed context line under the
-  // session title, after a REAL turn with the free model. The free model costs 0, so the line must
-  // show no cost; a paid/costly turn and a compaction are covered only by the synthetic e2e (this
-  // run has no credentials and no UI to compact before issue #34). Self-contained: it makes its own
-  // session. The 80 % warning level is not reachable with one short turn and is NOT judged here.
+  // session title. Part 1: after a normal turn of the synthetic server (4248 tokens of a 200K
+  // window) the line has no cost (the model is free) and the level is normal. Part 2: a COSTLY
+  // turn on the `tiny-context` model (5000 tokens: 4248 is 85 %) shows the cost and the `high`
+  // level. Both are measured for text, accessible sentence, tag, own attributes, `style`, width
+  // and contrast in the four themes. A compaction has no UI before issue #34 and stays covered by
+  // the Vitest e2e. Self-contained: it makes its own sessions.
   await step('17 context and cost line (issue #25)', async () => {
     const THEMES = [
       ['light', 'Default Light Modern'],
@@ -3419,9 +3349,10 @@ try {
     check(await clickButton('New session'), 'New session is pressed');
     await page.waitForTimeout(1500);
     check((await line()) === null, 'a session that has not answered yet shows no context line');
+    // The synthetic server reports 1200 + 40 + 8 + 3000 = 4248 tokens per step (`STEP_TOKENS`): of
+    // a 200,000 window that is 2 %, shown as "4K / 200K" (`compactTokens` floors).
     await send('Reply with exactly: DONE');
-    if (!(await waitIdle(120_000)))
-      warn('the free model did not finish the turn in 120 s; going on');
+    check(await waitIdle(30_000), 'the turn of the context line finished');
     // The usage of a step arrives with `step.ended`, a moment before the turn goes idle.
     const appeared = await waitFor(async () => (await line()) !== null, 20_000);
     check(appeared === true, 'the context line appears once a step has reported its tokens');
@@ -3430,6 +3361,11 @@ try {
     check(
       state !== null && /^Context \d+[KM]? \/ \d+[KM]? \(\d+%\)$/.test(state.text),
       `the text reads "Context <n>K / <limit>K (<p>%)" and nothing else, no cost for the free model (${JSON.stringify(state?.text)})`,
+    );
+    check(
+      state?.text === 'Context 4K / 200K (2%)' &&
+        state.label === 'Context: 4,248 tokens of 200,000 (2%).',
+      `the figures are those of the step: 4248 tokens of 200000 (${JSON.stringify(state?.text)}, ${JSON.stringify(state?.label)})`,
     );
     check(
       state !== null &&
@@ -3458,19 +3394,64 @@ try {
       `the line fits its width, nothing is cut (overflow ${String(state?.overflowPx)} px)`,
     );
 
-    for (const [name, theme] of THEMES) {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+    /** Measures the contrast of the line in the four themes; `tag` names the state and the shots. */
+    const contrastInThemes = async (tag) => {
+      for (const [name, theme] of THEMES) {
+        writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+        await page.waitForTimeout(2500);
+        const look = await contrast();
+        console.log(`  line contrast ${tag} ${name}: ${JSON.stringify(look)}`);
+        check(
+          look !== null && look.ratio >= 4.5,
+          `the ${tag} context line has text contrast >= 4.5 in ${name} (${look ? look.ratio.toFixed(2) : 'not found'})`,
+        );
+        await shot(`17-context-line-${tag}-${name}`);
+      }
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
       await page.waitForTimeout(2500);
-      const look = await contrast();
-      console.log(`  line contrast ${name}: ${JSON.stringify(look)}`);
-      check(
-        look !== null && look.ratio >= 4.5,
-        `the context line has text contrast >= 4.5 in ${name} (${look ? look.ratio.toFixed(2) : 'not found'})`,
-      );
-      await shot(`17-context-line-${name}`);
-    }
-    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
-    await page.waitForTimeout(2500);
+    };
+    await contrastInThemes('normal');
+
+    // --- Part 2: a COSTLY turn on a 5000-token window: the cost and the `high` level ---------
+    check(await clickButton('New session'), 'New session is pressed for the costly turn');
+    await page.waitForTimeout(1500);
+    check(await clickIn('button.model-trigger'), 'the model button is pressed');
+    await sleep(400);
+    check(
+      await clickIn('.model-panel button.model-option[data-model="opencode/tiny-context"]'),
+      'the model with the 5000-token window is chosen',
+    );
+    await sleep(500);
+    await send('Reply with exactly: DONE. COSTLY');
+    check(await waitIdle(30_000), 'the costly turn finished');
+    const costly = await waitFor(async () => {
+      const current = await line();
+      return current !== null && current.text.includes('$') ? current : undefined;
+    }, 20_000);
+    const high = costly ?? (await line());
+    console.log(`  costly line: ${JSON.stringify(high)}`);
+    check(
+      high?.text === 'Context 4K / 5K (85%) · $0.01',
+      `the line shows the context of the small window and the cost (${JSON.stringify(high?.text)})`,
+    );
+    check(
+      high?.label === 'Context: 4,248 tokens of 5,000 (85%). Session cost: $0.01.' &&
+        high.readable === high.label,
+      `the sentence for a screen reader holds the exact figures and the cost (${JSON.stringify(high?.readable)})`,
+    );
+    check(
+      high?.level === 'high',
+      `85 % of the window flags the line as high (${String(high?.level)})`,
+    );
+    check(
+      high?.tag === 'P' && high.ownAria.length === 0 && high.live === false && high.styled === 0,
+      `the costly line is still a plain <p> with no own attributes, no live region and no style attribute (own: ${JSON.stringify(high?.ownAria)}, style: ${String(high?.styled)})`,
+    );
+    check(
+      high !== null && high.overflowPx <= 1,
+      `the costly line fits its width (overflow ${String(high?.overflowPx)} px)`,
+    );
+    await contrastInThemes('high');
     assertNoWebviewErrors('context line');
   });
 } catch (error) {
@@ -3488,15 +3469,14 @@ if (startupError !== undefined) {
   process.exit(2);
 }
 
-// XDG isolation: opencode must have created its database inside the run's own data dir, and the
-// developer's real one should not have been touched (only a warning: they may be using opencode).
-const isolatedDb = path.join(vscode.xdgRoot, 'data', 'opencode', 'opencode.db');
-check(fs.existsSync(isolatedDb), `opencode wrote its database inside the run (${isolatedDb})`);
-if (JSON.stringify(realDbTimes()) !== JSON.stringify(realDbBefore)) {
-  warn(
-    `${realOpencodeDir} changed during the run: either XDG was not honoured or opencode was in use elsewhere`,
-  );
-}
+// The fixture keeps the conversation in a state file (the run's Restart Server and Reload Window
+// depend on it): it must exist and hold the sessions of the run. It also proves the server that
+// answered was the fixture, not some opencode found on the PATH.
+check(
+  fs.existsSync(vscode.stateFile) &&
+    (JSON.parse(fs.readFileSync(vscode.stateFile, 'utf8')).sessions?.length ?? 0) > 0,
+  'the synthetic opencode kept the conversation of the run in its state file',
+);
 
 console.log('\n== summary');
 console.log(`screenshots (${String(shots.length)}):`);
