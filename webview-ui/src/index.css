@@ -742,6 +742,7 @@ button.secondary:hover:not(:disabled),
 .message-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 4px;
   margin-top: 4px;
   opacity: 0;
 }
@@ -751,8 +752,50 @@ button.secondary:hover:not(:disabled),
   opacity: 1;
 }
 
-/* Locked while a fork is in flight, but still focusable (aria-disabled, not disabled). */
+/* Locked while a fork or a revert is in flight, but still focusable (aria-disabled, not disabled). */
 .message-action[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/*
+ * The block under the conversation while a revert is prepared (issue #32). Outside the log. The
+ * warning tone is only the border; every text keeps the foreground colours (the sidebar contrast
+ * lesson of #1043: no error colour as text).
+ */
+.revert-banner {
+  flex: none;
+  margin: 4px 8px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
+  color: var(--vscode-foreground);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 40%;
+  overflow-y: auto;
+}
+
+.revert-banner p {
+  margin: 0;
+}
+
+.revert-banner-title {
+  font-weight: 600;
+}
+
+.revert-banner-note,
+.revert-banner-caption {
+  color: var(--vscode-descriptionForeground);
+}
+
+.revert-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.revert-banner-actions button[aria-disabled='true'] {
   opacity: 0.6;
   cursor: default;
 }
@@ -1704,6 +1747,7 @@ button.secondary[aria-disabled='true'] {
 [class*='vscode-high-contrast'] .session-search,
 [class*='vscode-high-contrast'] .subagent-sessions,
 [class*='vscode-high-contrast'] .changed-files,
+[class*='vscode-high-contrast'] .revert-banner,
 [class*='vscode-high-contrast'] .code-action {
   border-color: var(--vscode-contrastBorder);
 }

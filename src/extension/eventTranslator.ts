@@ -201,6 +201,15 @@ export interface EventTranslator {
    */
   mergeStatuses(statuses: Snapshot['statuses']): Snapshot['statuses'];
   /**
+   * Forgets the live user and assistant messages whose id is `messageID` or later (issue #32): a
+   * committed revert deleted them on the server, and `mergeLive` would otherwise bring them back
+   * as "in flight" (they are newer than whatever REST still lists). Ids ascend, so "later" is a
+   * string comparison (`schema/src/session-message.ts` @843a6c51 L27, read). Call it when the
+   * `committed` event arrives, BEFORE the messages of the prompt that may follow it. Does not touch
+   * the inbox payloads that were not delivered yet.
+   */
+  forgetFrom(messageID: string): void;
+  /**
    * Changes the session whose messages and parts are forwarded, and clears message state.
    * Permissions and forms are NOT tied to it: they are forwarded for every session (phase 3), and
    * the snapshot carries them at `Snapshot.requests`, outside `OpenSession`.
@@ -411,6 +420,11 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
       if (!changed) return snapshot;
       extraMessages.sort((a, b) => a.createdAt - b.createdAt);
       return { ...snapshot, messages: [...snapshot.messages, ...extraMessages], parts };
+    },
+
+    forgetFrom(messageID) {
+      for (const id of [...assistants.keys()]) if (id >= messageID) assistants.delete(id);
+      for (const id of [...liveUsers.keys()]) if (id >= messageID) liveUsers.delete(id);
     },
 
     setOpen(sessionID) {
@@ -789,7 +803,9 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
         default:
           // Includes `session.status` / `session.idle` (not published by 2.0.32, ignored on
           // purpose), `server.connected`, `location.shutdown` and `session.forked` (the controller
-          // handles those; the last has no title, so it reads the row, issue #21).
+          // handles those; the last has no title, so it reads the row, issue #21) and the
+          // `session.revert.*` events (the controller handles them in `watchChangedFiles`: the
+          // revert travels as `session.revert` or inside the snapshot, issue #32).
           return [];
       }
     },

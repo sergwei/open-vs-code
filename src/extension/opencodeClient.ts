@@ -41,9 +41,15 @@ import type {
   SessionInterruptInput,
   SessionInterruptResponse,
   SessionListInput,
+  SessionMessageGetInput,
+  SessionMessageInfo,
   SessionMessagesResponse,
   SessionPromptInput,
   SessionRemoveInput,
+  SessionRevert,
+  SessionRevertClearInput,
+  SessionRevertCommitInput,
+  SessionRevertStageInput,
   SessionsResponse,
   SessionSwitchAgentInput,
   SessionSwitchModelInput,
@@ -143,6 +149,34 @@ export interface ChatApi {
      * No turn that edited files was observed.
      */
     diff(input: SessionDiffInput): Promise<FileDiffInfo[]>;
+    /**
+     * The revert of a session (issue #32). `stage` is `POST /api/session/:id/revert/stage` with
+     * `{ messageID, files? }`: it moves the history boundary AND, unless `files: false`, puts back
+     * on disk the files the agent touched after that message, answering the `SessionRevert`
+     * (`messageID`, `files` = the diff the move made, empty outside a git repository). `files` is a
+     * BOOLEAN in v2, not a list of paths as the issue text said (that is v1). Staging again moves
+     * the boundary. `clear` is `DELETE /api/session/:id/revert` (rewrites the files from the saved
+     * original and wakes the session, so a call right after it can be `SessionBusyError`) and
+     * `commit` is `POST /api/session/:id/revert/commit` (deletes the history from the boundary,
+     * the boundary message included; touches no file; irreversible). Both do nothing, with no
+     * event, when no revert is staged. All three throw `SessionBusyError` while a turn runs;
+     * `stage` also `MessageNotFoundError` and `UnknownError` (a failed snapshot).
+     * Read in `protocol/src/groups/session.ts` and `core/src/session/revert.ts` @843a6c51 and in
+     * the client types; observed against a real opencode 2.0.32 (Windows 11, 23/10/2026, a `shell`
+     * message, no model) by the case "stages, clears and commits a revert on a shell message" of
+     * `realOpencode.test.ts`, whose files list was always empty (no git repository snapshot).
+     */
+    revert: {
+      stage(input: SessionRevertStageInput): Promise<SessionRevert>;
+      clear(input: SessionRevertClearInput): Promise<void>;
+      commit(input: SessionRevertCommitInput): Promise<void>;
+    };
+    /**
+     * `GET /api/session/:sid/message/:mid` (issue #32): one message, to check that a revert starts
+     * at a USER message before anything is rewritten on disk. An unknown id throws
+     * `MessageNotFoundError`. Only the `type` is used here.
+     */
+    message: { get(input: SessionMessageGetInput): Promise<SessionMessageInfo> };
     form: {
       /** `POST /api/session/:sid/form/:fid/reply` (issue #44): 204, empty body. */
       reply(input: SessionFormReplyInput): Promise<void>;

@@ -33,3 +33,34 @@ export async function confirmSessionDelete(info: {
   );
   return answer === 'Delete';
 }
+
+/**
+ * Asks the user to confirm "Discard for good" on a prepared revert (issue #32, decision of Sergio
+ * 23/10/2026: the only confirmation of the feature), with a MODAL native dialog; resolves `true`
+ * only on the "Discard for good" button (Escape, the close button and clicking away are `false`).
+ *
+ * The step that cannot be undone is the commit, not the prepare: the server then deletes the
+ * history from the boundary on (the boundary message included), for every opencode client of the
+ * same database, and nothing can bring it back (read in `core/src/session/revert.ts` @843a6c51 and
+ * observed on a `shell` message: after `commit` the message was gone and a later `clear` brought
+ * nothing back). The files stay as the revert left them. The host shows it, not the webview, for
+ * the same reason as {@link confirmSessionDelete}.
+ * VERIFIED by `test:visual` (real VS Code 1.143, Windows 11, synthetic server, 23/10/2026): the
+ * checks "a modal dialog of VS Code asks and says it cannot be undone (", "Cancel keeps the revert
+ * prepared" and "the history is deleted and the block is gone" passed with real clicks on the
+ * dialog. Not observed: macOS/Linux dialogs, a screen reader reading the dialog; the text is ours.
+ */
+export async function confirmRevertDiscard(): Promise<boolean> {
+  const answer = await vscode.window.showWarningMessage(
+    'Discard the reverted messages for good?',
+    {
+      modal: true,
+      detail:
+        'The messages from the revert point on are deleted from opencode, also for other opencode clients, ' +
+        'and Restore can no longer bring them back. The files stay as they are now. ' +
+        'This cannot be undone.',
+    },
+    'Discard for good',
+  );
+  return answer === 'Discard for good';
+}

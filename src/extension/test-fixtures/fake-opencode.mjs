@@ -155,6 +155,17 @@
 // were NEVER compared with a real server's. `GET /api/session/:id/message` now honours `type`,
 // `order` and `limit`. Only in `visual` mode do the changes also touch the served folder (see
 // `applyEdits`); elsewhere nothing is written.
+// E7-message-revert (issue #32): `POST /api/session/:id/revert/stage`, `DELETE .../revert`, `POST
+// .../revert/commit` and `GET .../message/:mid`, with the `session.revert.staged|cleared|committed`
+// events and a `revert` field on the session row (so `GET /api/session[/:id]` carries it). The
+// model, from the READING of `revert.ts` / `session.ts` / `projector.ts` @843a6c51: a stage undoes
+// the recorded `EDIT_FILES` edits of the turns from the boundary on (really, on disk, in `visual`
+// mode; a prompt containing LARGE adds `docs/big.txt`, a file whose patch is a header with counts),
+// a commit deletes the history from the boundary on, and a prompt with a revert staged commits it
+// first. The ids and the error `_tag`s (`SessionBusyError`, `MessageNotFoundError`) follow a
+// spike against a real opencode 2.0.32 on a `shell` message; everything about FILES is invented
+// (the real one only ever answered `files: []` there). EDIT_FILES now turns `value2 = N` into
+// `value2 = N2` (2 -> 22, 5 -> 52), so a run can write its own value first.
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running;
 // FAKE_OPENCODE_LIFETIME_MS (positive integer, ms) overrides it for `serve` (issue #41).
@@ -209,11 +220,13 @@ function loadState() {
     for (const [id, row] of saved.sessions) sessions.set(id, row);
     for (const [id, messages] of saved.history) history.set(id, messages);
     for (const [id, edits] of saved.edits ?? []) sessionEdits.set(id, edits);
+    for (const [id, moves] of saved.reverts ?? []) revertSaved.set(id, moves);
     seq = saved.seq;
   } catch {
     sessions.clear();
     history.clear();
     sessionEdits.clear();
+    revertSaved.clear();
   }
 }
 
@@ -231,6 +244,7 @@ function saveState() {
       sessions: [...sessions],
       history: [...history],
       edits: [...sessionEdits],
+      reverts: [...revertSaved],
     }),
   );
   fs.renameSync(temporary, STATE_FILE);
@@ -980,7 +994,7 @@ function playTurn(sessionID, inboxID, text, files = []) {
         // E7-session-diff: an EDIT_FILES turn changes files, and the step says which (and the
         // snapshot that holds them), like the `files` / `snapshot` of the real `step.ended` types.
         const changed = text.includes('EDIT_FILES')
-          ? applyEdits(sessionID, inboxID, sessions.get(sessionID)?.location?.directory ?? '')
+          ? applyEdits(sessionID, inboxID, sessions.get(sessionID)?.location?.directory ?? '', text)
           : undefined;
         broadcast('session.step.ended', {
           ...a,
@@ -1196,6 +1210,7 @@ function removeSession(sessionID) {
   sessions.delete(sessionID);
   history.delete(sessionID);
   sessionEdits.delete(sessionID);
+  revertSaved.delete(sessionID);
   broadcast('session.deleted', { sessionID });
 }
 
@@ -1326,9 +1341,11 @@ function lineOps(before, after) {
  * (`git diff --unified=N --no-renames`): a header, then hunks. Without `context` the only hunk is
  * the whole file ("Omit for full-file patches"); with `context` the hunks hold that many lines
  * around each change. SYNTHETIC: written from the reading, never compared with a real patch. A
- * binary file has the empty patch, as read. Every file here ends in a newline.
+ * binary file has the empty patch, as read. `tooLarge` returns the header with no hunks and the
+ * INVENTED counts +1200 -0 (what a file cut for size looks like, issue #32), whatever the texts.
+ * Every file here ends in a newline.
  */
-function patchOf(file, status, before, after, binary, context) {
+function patchOf(file, status, before, after, binary, context, tooLarge = false) {
   if (binary) return { patch: '', additions: 0, deletions: 0 };
   const ops = lineOps(before, after);
   const additions = ops.filter((op) => op[0] === '+').length;
@@ -1341,6 +1358,12 @@ function patchOf(file, status, before, after, binary, context) {
     `--- ${status === 'added' ? '/dev/null' : `a/${file}`}`,
     `+++ ${status === 'deleted' ? '/dev/null' : `b/${file}`}`,
   ];
+  // A file the server cut for size (issue #31/#32): the header with no hunks and the REAL counts,
+  // as `emptyPatch` in `vcs/patch.ts@843a6c51` is read to produce. The counts are INVENTED: 1200
+  // added lines, so the row has something to say.
+  if (tooLarge) {
+    return { patch: [...header, ''].join('\n'), additions: 1200, deletions: 0 };
+  }
   const spans = [];
   if (context === undefined) {
     if (ops.length > 0) spans.push({ from: 0, to: ops.length });
@@ -1371,16 +1394,17 @@ function patchOf(file, status, before, after, binary, context) {
 }
 
 /**
- * Plays the file changes of an `EDIT_FILES` turn: a `modified` `src/sample.ts` (`value2 = 2` becomes
- * `value2 = 22`), an `added` `src/added.ts`, a `deleted` `src/removed.ts` and an `added` binary
- * `assets/logo.png`. They are recorded for `GET .../diff` and returned as the `files` of the
+ * Plays the file changes of an `EDIT_FILES` turn: a `modified` `src/sample.ts` (`value2 = N`
+ * becomes `value2 = N2`: 2 -> 22, 5 -> 52), an `added` `src/added.ts`, a `deleted` `src/removed.ts`
+ * and an `added` binary `assets/logo.png`; when `text` (the prompt) contains `LARGE`, a fifth file,
+ * `docs/big.txt`, `added` and `tooLarge` (its patch is cut, see {@link patchOf}). They are recorded for `GET .../diff` and returned as the `files` of the
  * `session.step.ended`. Only in `visual` mode do they also touch the served folder (the run's
  * temporary workspace, whose `src/sample.ts` is real and whose `src/removed.ts` the run created):
  * the right side of a diff is the real file, and the visual run looks at it. In any other mode
  * nothing is written and the "before" texts are constants. SYNTHETIC: the turn exists to give the
  * host something to list, not to imitate how a model edits.
  */
-function applyEdits(sessionID, userID, directory) {
+function applyEdits(sessionID, userID, directory, text = '') {
   const onDisk = has('visual') && directory !== '';
   const target = (file) => nodePath.join(directory, ...file.split('/'));
   const read = (file, fallback) => {
@@ -1395,28 +1419,48 @@ function applyEdits(sessionID, userID, directory) {
   const removed = read('src/removed.ts', 'export const removed = true;\n');
   const added = 'export const added = true;\n';
   const edits = [
-    { file: 'src/sample.ts', before: sample, after: sample.replace('value2 = 2;', 'value2 = 22;') },
+    {
+      file: 'src/sample.ts',
+      before: sample,
+      // Appends a `2` to the number (2 -> 22, 5 -> 52): the issue #32 run writes its own value by
+      // hand and needs to see the turn built on it.
+      after: sample.replace(/value2 = (\d+);/, (_match, digits) => `value2 = ${digits}2;`),
+    },
     { file: 'src/added.ts', before: undefined, after: added },
     { file: 'src/removed.ts', before: removed, after: undefined },
     { file: 'assets/logo.png', before: undefined, after: '', binary: true },
-  ].map((edit) => ({ userID, binary: false, ...edit }));
+    // A prompt containing LARGE adds a file whose patch the "server" cut for size (issue #32).
+    ...(text.includes('LARGE')
+      ? [{ file: 'docs/big.txt', before: undefined, after: 'big\n', tooLarge: true }]
+      : []),
+  ].map((edit) => ({ userID, binary: false, tooLarge: false, ...edit }));
   if (onDisk) {
-    for (const edit of edits) {
-      const where = target(edit.file);
-      if (edit.after === undefined) {
-        fs.rmSync(where, { force: true });
-        continue;
-      }
-      fs.mkdirSync(nodePath.dirname(where), { recursive: true });
-      // A PNG signature is enough for the editor to treat the file as an image.
-      fs.writeFileSync(
-        where,
-        edit.binary ? Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) : edit.after,
-      );
-    }
+    writeOnDisk(
+      directory,
+      edits.map((edit) => ({ file: edit.file, text: edit.after, binary: edit.binary })),
+    );
   }
   sessionEdits.set(sessionID, [...(sessionEdits.get(sessionID) ?? []), ...edits]);
   return edits.map((edit) => edit.file);
+}
+
+/**
+ * Writes (or, for an `undefined` text, deletes) files of the served folder; only the `visual` mode
+ * calls it. A binary becomes a PNG signature, enough for the editor to treat it as an image.
+ */
+function writeOnDisk(directory, items) {
+  for (const item of items) {
+    const where = nodePath.join(directory, ...item.file.split('/'));
+    if (item.text === undefined) {
+      fs.rmSync(where, { force: true });
+      continue;
+    }
+    fs.mkdirSync(nodePath.dirname(where), { recursive: true });
+    fs.writeFileSync(
+      where,
+      item.binary ? Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) : item.text,
+    );
+  }
 }
 
 /**
@@ -1484,11 +1528,188 @@ function sessionDiff(response, session, params) {
       {
         file: edit.file,
         status,
-        ...patchOf(edit.file, status, edit.before, edit.after, edit.binary, context),
+        ...patchOf(
+          edit.file,
+          status,
+          edit.before,
+          edit.after,
+          edit.binary,
+          context,
+          edit.tooLarge === true,
+        ),
       },
     ];
   });
   json(response, 200, { data });
+}
+
+// ---------------------------------------------------------------------------------------------
+// E7-message-revert (issue #32): `POST /api/session/:id/revert/stage`, `DELETE .../revert` and
+// `POST .../revert/commit`, plus `GET .../message/:mid`. SYNTHETIC but following the READING of
+// `core/src/session/revert.ts`, `session.ts` and `projector.ts` @843a6c51 (see `opencodeClient.ts`
+// for what each route does) and, for the ids, the errors and the three events, the spike against a
+// real opencode 2.0.32 on a `shell` message (Windows 11, 23/10/2026).
+// ---------------------------------------------------------------------------------------------
+
+/** session id -> the moves a staged revert made on disk: [{ file, current, restored, binary }]. */
+const revertSaved = new Map();
+
+/** The error body of a session that is running: stage, clear and commit all refuse it. */
+function busyError(response, session) {
+  json(response, 409, {
+    _tag: 'SessionBusyError',
+    message: `Session is busy: ${session.id}`,
+    sessionID: session.id,
+  });
+}
+
+/** Puts back on disk the state the files had BEFORE the staged revert (the "current" side). */
+function undoRevertOnDisk(session) {
+  const moves = revertSaved.get(session.id) ?? [];
+  const directory = session.location?.directory ?? '';
+  if (has('visual') && directory !== '') {
+    writeOnDisk(
+      directory,
+      moves.map((move) => ({ file: move.file, text: move.current, binary: move.binary })),
+    );
+  }
+}
+
+/**
+ * `POST /api/session/:id/revert/stage` `{ messageID, files? }`: refuses a running session (409
+ * `SessionBusyError`) and an unknown message (404 `MessageNotFoundError`, the `_tag` the real
+ * server answered to an invented id). Staging again first puts the files back as they were before
+ * the earlier revert (the real server reuses the first `original`). The files the revert changes
+ * are those the recorded edits of the turns FROM the boundary on touched, collapsed per file like
+ * the diff route; `files: false` leaves the disk alone and answers no files. The answer and the
+ * `session.revert.staged` event carry `{ messageID, files }` where each file is the diff from the
+ * disk before the revert to the disk after it (complete-file patch), so `added` = the revert
+ * recreates it and `deleted` = the revert removes it. In `visual` mode the served folder really
+ * changes. INVENTED: the order of the files and the counts of the large file.
+ */
+function stageRevert(response, session, body) {
+  if (running.has(session.id)) return busyError(response, session);
+  const messages = history.get(session.id) ?? [];
+  const at = messages.findIndex((message) => message.id === body.messageID);
+  if (at < 0) {
+    json(response, 404, {
+      _tag: 'MessageNotFoundError',
+      message: `Message not found: ${String(body.messageID)}`,
+      sessionID: session.id,
+      messageID: body.messageID,
+    });
+    return;
+  }
+  if (session.revert !== undefined) undoRevertOnDisk(session);
+  const turns = new Set(
+    messages
+      .slice(at)
+      .filter((message) => message.type === 'user')
+      .map((message) => message.id),
+  );
+  const merged = new Map();
+  for (const edit of sessionEdits.get(session.id) ?? []) {
+    if (!turns.has(edit.userID)) continue;
+    const known = merged.get(edit.file);
+    merged.set(edit.file, known === undefined ? { ...edit } : { ...known, after: edit.after });
+  }
+  const withFiles = body.files !== false;
+  const moves = withFiles
+    ? [...merged.values()].map((edit) => ({
+        file: edit.file,
+        current: edit.after,
+        restored: edit.before,
+        binary: edit.binary,
+        tooLarge: edit.tooLarge === true,
+      }))
+    : [];
+  const directory = session.location?.directory ?? '';
+  if (has('visual') && directory !== '') {
+    writeOnDisk(
+      directory,
+      moves.map((move) => ({ file: move.file, text: move.restored, binary: move.binary })),
+    );
+  }
+  revertSaved.set(session.id, moves);
+  const files = moves.flatMap((move) => {
+    const status =
+      move.current === undefined
+        ? move.restored === undefined
+          ? undefined
+          : 'added'
+        : move.restored === undefined
+          ? 'deleted'
+          : 'modified';
+    if (status === undefined) return [];
+    return [
+      {
+        file: move.file,
+        status,
+        ...patchOf(
+          move.file,
+          status,
+          move.current,
+          move.restored,
+          move.binary,
+          undefined,
+          move.tooLarge,
+        ),
+      },
+    ];
+  });
+  session.revert = { messageID: body.messageID, files };
+  session.time.updated = Date.now();
+  json(response, 200, { data: session.revert });
+  broadcast('session.revert.staged', { sessionID: session.id, revert: session.revert });
+  scheduleSave();
+}
+
+/**
+ * `DELETE /api/session/:id/revert`: with no staged revert it is a 204 and NO event (observed in the
+ * spike against a real opencode 2.0.32, Windows 11, 23/10/2026: a `clear` after a `commit` emitted
+ * no `session.revert.*`). Otherwise it puts the files back as they were before the revert, drops
+ * the revert and publishes `session.revert.cleared`. The real server also wakes the session
+ * afterwards (a stage right after can be `SessionBusyError`); this fake does not.
+ */
+function clearRevert(response, session) {
+  if (session.revert === undefined) return noContent(response);
+  if (running.has(session.id)) return busyError(response, session);
+  undoRevertOnDisk(session);
+  revertSaved.delete(session.id);
+  delete session.revert;
+  noContent(response);
+  broadcast('session.revert.cleared', { sessionID: session.id });
+  scheduleSave();
+}
+
+/**
+ * Deletes the history from the boundary on (the boundary message included) and the recorded edits
+ * of the deleted user messages, drops the revert and publishes `session.revert.committed {to}`.
+ * It touches no file, like the real projector. Returns false when no revert is staged.
+ */
+function commitStaged(session) {
+  if (session.revert === undefined) return false;
+  const messages = history.get(session.id) ?? [];
+  const at = messages.findIndex((message) => message.id === session.revert.messageID);
+  const removed = at < 0 ? [] : messages.splice(at);
+  const gone = new Set(removed.map((message) => message.id));
+  sessionEdits.set(
+    session.id,
+    (sessionEdits.get(session.id) ?? []).filter((edit) => !gone.has(edit.userID)),
+  );
+  const to = session.revert.messageID;
+  revertSaved.delete(session.id);
+  delete session.revert;
+  broadcast('session.revert.committed', { sessionID: session.id, to });
+  scheduleSave();
+  return true;
+}
+
+/** `POST /api/session/:id/revert/commit`: 204; with no staged revert nothing happens, no event. */
+function commitRevert(response, session) {
+  if (session.revert !== undefined && running.has(session.id)) return busyError(response, session);
+  commitStaged(session);
+  noContent(response);
 }
 
 /**
@@ -1788,7 +2009,7 @@ function handleChat(request, response) {
   const act = /^\/api\/session\/([^/]+)\/(permission|form)\/([^/]+)(?:\/(reply))?$/.exec(path);
   if (act !== null) return handleAnswer(request, response, act);
   const match =
-    /^\/api\/session\/([^/]+)(?:\/(message|permission|form|prompt|interrupt|fork|model|agent|diff))?$/.exec(
+    /^\/api\/session\/([^/]+)(?:\/(message\/[^/]+|message|permission|form|prompt|interrupt|fork|model|agent|diff|revert\/stage|revert\/commit|revert))?$/.exec(
       path,
     );
   if (match === null) return false;
@@ -1817,6 +2038,35 @@ function handleChat(request, response) {
   }
   if (method === 'GET' && sub === 'diff') {
     sessionDiff(response, session, url.searchParams);
+    return true;
+  }
+  if (method === 'GET' && sub?.startsWith('message/')) {
+    // Issue #32: one message, so the host can check it is a user one. Unknown id: the 404 the
+    // real `stage` answered to an invented one (observed 23/10/2026; the route itself is READ).
+    const messageID = decodeURIComponent(sub.slice('message/'.length));
+    const found = history.get(session.id).find((message) => message.id === messageID);
+    if (found === undefined) {
+      json(response, 404, {
+        _tag: 'MessageNotFoundError',
+        message: `Message not found: ${messageID}`,
+        sessionID: session.id,
+        messageID,
+      });
+    } else {
+      json(response, 200, { data: found });
+    }
+    return true;
+  }
+  if (method === 'POST' && sub === 'revert/stage') {
+    readBody(request).then((body) => stageRevert(response, session, body));
+    return true;
+  }
+  if (method === 'DELETE' && sub === 'revert') {
+    clearRevert(response, session);
+    return true;
+  }
+  if (method === 'POST' && sub === 'revert/commit') {
+    commitRevert(response, session);
     return true;
   }
   if (method === 'GET' && (sub === 'permission' || sub === 'form')) {
@@ -1860,6 +2110,8 @@ function handleChat(request, response) {
   }
   if (method === 'POST' && sub === 'prompt') {
     readBody(request).then((body) => {
+      // A prompt with a revert staged commits it first, like `session.ts@843a6c51` L164-165 (READ).
+      commitStaged(session);
       const inboxID = nextId('msg');
       running.add(session.id);
       json(response, 200, {

@@ -20,12 +20,71 @@ afterEach(() => {
 });
 
 const rows: ChangedFile[] = [
-  { path: 'src/a.ts', status: 'modified', additions: 3, deletions: 1, binary: false },
-  { path: 'src/new.ts', status: 'added', additions: 2, deletions: 0, binary: false },
-  { path: 'assets/logo.png', status: 'added', additions: 0, deletions: 0, binary: true },
+  {
+    path: 'src/a.ts',
+    status: 'modified',
+    additions: 3,
+    deletions: 1,
+    binary: false,
+    tooLarge: false,
+  },
+  {
+    path: 'src/new.ts',
+    status: 'added',
+    additions: 2,
+    deletions: 0,
+    binary: false,
+    tooLarge: false,
+  },
+  {
+    path: 'assets/logo.png',
+    status: 'added',
+    additions: 0,
+    deletions: 0,
+    binary: true,
+    tooLarge: false,
+  },
 ];
 
 describe('ChangedFilesList', () => {
+  it('names the rows with `nameOf` when the caller gives one (the revert block, issue #32)', () => {
+    mounted = mount(() => (
+      <ChangedFilesList
+        files={rows}
+        onOpen={() => undefined}
+        nameOf={(file) => `custom ${file.path}`}
+      />
+    ));
+    const names = [...mounted.container.querySelectorAll('button')].map((b) =>
+      b.getAttribute('aria-label'),
+    );
+    expect(names).toEqual(['custom src/a.ts', 'custom src/new.ts', 'custom assets/logo.png']);
+  });
+
+  it('marks a file that is too large to diff, and keeps its counts in the row', () => {
+    mounted = mount(() => (
+      <ChangedFilesList
+        files={[
+          {
+            path: 'docs/big.txt',
+            status: 'added',
+            additions: 1200,
+            deletions: 0,
+            binary: false,
+            tooLarge: true,
+          },
+        ]}
+        onOpen={() => undefined}
+      />
+    ));
+    const button = must<HTMLButtonElement>(mounted.container, 'button');
+    expect(button.getAttribute('data-status')).toBe('too-large');
+    expect(must(button, '.session-meta').textContent).toBe('Too large to diff · +1200 −0');
+    expect(button.getAttribute('aria-label')).toBe(
+      'Open docs/big.txt, Too large to diff, 1200 added, 0 deleted',
+    );
+  });
+
   it('draws nothing for an empty list', () => {
     mounted = mount(() => <ChangedFilesList files={[]} onOpen={() => undefined} />);
     expect(mounted.container.querySelector('ul')).toBeNull();
@@ -90,7 +149,16 @@ describe('ChangedFilesList', () => {
     store.apply({
       type: 'session.diff',
       sessionID: 's1',
-      files: [{ path: 'src/a.ts', status: 'modified', additions: 9, deletions: 1, binary: false }],
+      files: [
+        {
+          path: 'src/a.ts',
+          status: 'modified',
+          additions: 9,
+          deletions: 1,
+          binary: false,
+          tooLarge: false,
+        },
+      ],
     });
     const after = must<HTMLButtonElement>(mounted.container, 'button');
     expect(after).toBe(before);

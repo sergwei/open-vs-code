@@ -11,6 +11,7 @@ const file = (extra: Partial<ChangedFile> = {}): ChangedFile => ({
   additions: 3,
   deletions: 1,
   binary: false,
+  tooLarge: false,
   ...extra,
 });
 
@@ -27,6 +28,18 @@ describe('changed file text', () => {
 
   it('says Binary for a file with no text diff, whatever its status', () => {
     expect(statusWord(file({ status: 'deleted', binary: true }))).toBe('Binary');
+  });
+
+  // Pending item of #31, done in #32: a patch the server cut for size keeps its counts and says why
+  // it cannot be opened as a diff. FABRICATED rows.
+  it('says "Too large to diff" for a file whose patch was cut, and keeps its counts', () => {
+    const large = file({ status: 'added', additions: 1200, deletions: 0, tooLarge: true });
+    expect(statusWord(large)).toBe('Too large to diff');
+    expect(countsText(large)).toBe('+1200 −0');
+    expect(metaText(large)).toBe('Too large to diff · +1200 −0');
+    expect(openName({ ...large, path: 'docs/big.txt' })).toBe(
+      'Open docs/big.txt, Too large to diff, 1200 added, 0 deleted',
+    );
   });
 
   it('writes the counts with a real minus sign, and none for a binary', () => {

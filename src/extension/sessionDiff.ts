@@ -6,10 +6,13 @@
 // `vcs/git.ts` @843a6c51, never observed on a turn that edited files): `session.diff` answers the
 // files changed in a RANGE OF TURNS, each as `{ file, patch, additions, deletions, status }`, with
 // paths relative to the git worktree root (not to the served folder; see `diffRoot` for the
-// location the host places them by). Without `context` the patch
+// location the host places them by; `sessionRevert.ts` reuses `toEntries` and `rootFor` for the
+// files of a prepared revert). Without `context` the patch
 // is the complete file, so the ORIGINAL text is rebuilt from it (context and `-` lines) with no
 // second request; the list itself is asked with `context: 0` (only the changed lines), which is
-// cheap. The range is the whole session: `from` = the first user message, `to` = the last one.
+// cheap. The range is the whole session: `from` = the first user message, `to` = the last one,
+// except while a revert is prepared (issue #32): then it stops at the turn before the revert
+// boundary, so the list matches the history and the disk the user sees.
 //
 // Security (architecture rule 1 and `isWebviewToHost`): the webview names a file by the `path` this
 // module gave it, and the host opens it only if THIS module listed it for the open session and it
@@ -24,18 +27,34 @@ import type { ChatApi } from './opencodeClient';
 import type { ServerLog } from './opencodeServer';
 import { resolveInsideFolder, toAttachmentName, type PathImpl } from './pathPolicy';
 
+/**
+ * How many of the newest user messages are read to find the turn right before a revert boundary
+ * (issue #32). Our choice: a revert is made from a message the user can see, and 50 turns back is
+ * far above what a chat window of 200 messages (the host's other horizon) holds in user turns.
+ */
+const BOUNDARY_PAGE = 50;
+
 /** Matches a unified-diff hunk header: `@@ -a[,b] +c[,d] @@`. */
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 /**
- * True when the server gave no text diff for `file`: a binary (`patch: ""`, zero counts) or a file
- * the server cut for size (a header without hunks but with real counts: `emptyPatch` in
- * `vcs/patch.ts@843a6c51`, read). Such a row is listed, but it cannot be opened as a diff.
- * An added or deleted empty file keeps its header and has zero counts, so it is NOT binary.
- * HYPOTHESIS: the two server behaviours are as read; neither was observed on a real server.
+ * True when `file` is a binary: the server sent an EMPTY patch (`patch: ""`, zero counts). Such a
+ * row is listed, but it cannot be opened as a diff. An added or deleted empty file keeps its header
+ * and has zero counts, so it is NOT binary.
+ * HYPOTHESIS: the server behaviour is as read in `vcs/patch.ts@843a6c51`; not observed on a real server.
  */
-function hasNoTextDiff(file: FileDiffInfo): boolean {
-  if (file.patch === '') return true;
+function isBinary(file: Pick<FileDiffInfo, 'patch'>): boolean {
+  return file.patch === '';
+}
+
+/**
+ * True when the server cut `file` for size: a header without hunks but with real counts
+ * (`emptyPatch` in `vcs/patch.ts@843a6c51`, read). The row shows its counts and says "Too large to
+ * diff"; like a binary it opens the file, not a diff (issue #32 split it off `binary`, a pending
+ * item of #31). HYPOTHESIS: as read, never observed on a real server.
+ */
+function isTooLarge(file: FileDiffInfo): boolean {
+  if (file.patch === '') return false;
   return !file.patch.split('\n').some((line) => HUNK_HEADER.test(line)) && fileChanged(file);
 }
 
@@ -192,7 +211,8 @@ export function toEntries(
         status: row.status,
         additions: row.additions,
         deletions: row.deletions,
-        binary: hasNoTextDiff(row),
+        binary: isBinary(row),
+        tooLarge: isTooLarge(row),
       },
     });
   }
@@ -202,7 +222,12 @@ export function toEntries(
   return { entries, dropped };
 }
 
-/** What the editor side needs to open one listed file (see `EditorActions.openDiff`). */
+/**
+ * What the editor side needs to open one listed file (see `EditorActions.openDiff`). `side` says
+ * which original goes on the left: `before` = the text before the session's turns changed the file
+ * ("Changed files"), `reverted` = the text before a prepared revert undid them (issue #32).
+ * `binary` means "no text diff to show" for either reason (a binary, or a patch cut for size).
+ */
 export interface DiffTarget {
   sessionID: string;
   /** The listed path (relative to the served folder, `/` separators): the key of the original. */
@@ -211,6 +236,7 @@ export interface DiffTarget {
   absolute: string;
   status: ChangedFile['status'];
   binary: boolean;
+  side: 'before' | 'reverted';
 }
 
 /** Why {@link SessionDiffs.target} refused: the session is not the open one, or the path was not listed. */
@@ -241,6 +267,12 @@ export interface SessionDiffsDeps {
   folder(): string | undefined;
   /** The open session of the chat; only its list is loaded and published. */
   open(): string | undefined;
+  /**
+   * The id of the message a prepared revert of `sessionID` starts at, or `undefined` without one
+   * (issue #32). While it is set the list is bounded to the turns BEFORE it: what the revert undid
+   * is not "changed" any more. Read at every load, so it must be up to date synchronously.
+   */
+  boundary(sessionID: string): string | undefined;
   post(message: HostToWebview): void;
   log: ServerLog;
   /** Turns a thrown value into the scrubbed error shown to the user (`toErrorInfo`). */
@@ -269,12 +301,20 @@ export interface SessionDiffs {
   forget(sessionID: string): void;
   /** Forgets the cached first message of `sessionID` (a revert was committed: the range moved). */
   forgetRange(sessionID: string): void;
+  /**
+   * The folder the paths of the server's rows for `sessionID` are relative to (see {@link diffRoot}),
+   * or `undefined` when it cannot be trusted. Reads the session's location once and caches it, so
+   * a revert, whose rows use the same root, costs no second read. Rejects when the read fails.
+   */
+  rootFor(sessionID: string): Promise<string | undefined>;
   /** Forgets everything and cuts off the load in flight (the server went away). */
   reset(): void;
   /**
-   * Subscribes to "the originals of `sessionID` may have changed": fired after a load that replaced
-   * a list with a different one or moved the start of the range (a committed revert). Returns the
-   * unsubscribe function. The content provider re-reads its open documents on it.
+   * Subscribes to "the originals of `sessionID` may have changed": fired after a load that moved
+   * the start of the range (`from`; it appears, disappears or changes, as when a revert is
+   * committed). Returns the unsubscribe function. The content provider re-reads its open
+   * documents on it. NOT fired for a new list with the same start: the original of a file is its
+   * text at `from`, which another list does not move.
    */
   onRenewed(listener: (sessionID: string) => void): () => void;
 }
@@ -284,8 +324,11 @@ function postedKey(files: readonly ChangedFile[], error?: ErrorInfo): string {
   return JSON.stringify({ files, error });
 }
 
-/** Error with a stable `name` code, like the ones the editor side throws. */
-function codedError(code: string, message: string): Error {
+/**
+ * Error with a stable `name` code, which the controller shows as the code of a notice. The one copy
+ * of this helper: `sessionRevert.ts` and `sessionDiffEditor.ts` import it from here.
+ */
+export function codedError(code: string, message: string): Error {
   const error = new Error(message);
   error.name = code;
   return error;
@@ -364,6 +407,14 @@ export function createSessionDiffs(deps: SessionDiffsDeps): SessionDiffs {
    * First and last user message of the session as the `from`/`to` of `session.diff`; `undefined`
    * when it has no user message. `to` is left out when both are the same message. The first one is
    * cached only if the load is not stale (same reason as {@link placeOf}).
+   *
+   * With a prepared revert (`deps.boundary`, issue #32) the range stops BEFORE its boundary: no
+   * range when the first user message is the boundary or after it (everything was undone), else
+   * `to` is the newest user message whose id is smaller than the boundary's (ids ascend, so the
+   * comparison is by string, `schema/src/session-message.ts` @843a6c51 L27), looked for in the 50
+   * newest user messages. If all 50 are at or after the boundary the earlier ones are out of the
+   * page: the whole range is used and a `debug` line says so (the list may then include turns the
+   * revert undid, until the next load).
    * HYPOTHESIS: that `message.list({ type: 'user' })` filters on a real server. The contract case
    * of `realOpencode.test.ts` only shows the `type` filter is ACCEPTED and answers `{data, cursor}`
    * on a history with no user message; that it filters needs a delivered turn (a model). Also
@@ -381,8 +432,22 @@ export function createSessionDiffs(deps: SessionDiffsDeps): SessionDiffs {
       if (first === undefined) return undefined;
       if (!stale(client, sessionID, at)) firsts.set(sessionID, first);
     }
-    const newest = await client.message.list({ sessionID, type: 'user', order: 'desc', limit: 1 });
-    const last = newest.data[0]?.id ?? first;
+    const boundary = deps.boundary(sessionID);
+    if (boundary !== undefined && first >= boundary) return undefined;
+    const newest = await client.message.list({
+      sessionID,
+      type: 'user',
+      order: 'desc',
+      limit: boundary === undefined ? 1 : BOUNDARY_PAGE,
+    });
+    let last = newest.data[0]?.id ?? first;
+    if (boundary !== undefined) {
+      const before = newest.data.find((message) => message.id < boundary);
+      if (before !== undefined) last = before.id;
+      else if (newest.data.length >= BOUNDARY_PAGE) {
+        deps.log.debug('session diff: the revert boundary is older than the page; whole range');
+      } else last = first;
+    }
     return last === first ? { from: first } : { from: first, to: last };
   };
 
@@ -422,12 +487,10 @@ export function createSessionDiffs(deps: SessionDiffsDeps): SessionDiffs {
       // Another session's list never counts as "already shown": the webview empties on a switch.
       const shown = posted?.sessionID === sessionID ? posted.key : postedKey([]);
       posted = { sessionID, key };
-      // The originals may have moved when the list or the start of the range changed (a committed
-      // revert moves the start); the content provider re-reads its open documents.
-      if (
-        previous !== undefined &&
-        (previous.range?.from !== range?.from || postedKey(previous.files) !== key)
-      ) {
+      // The original of a file is its text at `range.from`: only a move of the start (a committed
+      // revert, or the range appearing or disappearing) can change it. A new list with the same
+      // start does not, so it does not re-read the open diff tabs (S1' of the review #1162).
+      if (previous !== undefined && previous.range?.from !== range?.from) {
         for (const listener of listeners) listener(sessionID);
       }
       // Nothing is said when the webview already holds this very state, error included (it keeps
@@ -502,7 +565,8 @@ export function createSessionDiffs(deps: SessionDiffsDeps): SessionDiffs {
         path: shown,
         absolute: entry.absolute,
         status: entry.file.status,
-        binary: entry.file.binary,
+        binary: entry.file.binary || entry.file.tooLarge,
+        side: 'before',
       },
     };
   };
@@ -560,6 +624,14 @@ export function createSessionDiffs(deps: SessionDiffsDeps): SessionDiffs {
 
     forgetRange(sessionID) {
       firsts.delete(sessionID);
+    },
+
+    async rootFor(sessionID) {
+      const client = deps.client();
+      const served = deps.folder();
+      if (client === undefined || served === undefined) return undefined;
+      const place = await placeOf(client, sessionID, epoch);
+      return diffRoot(place.directory, place.subpath, impl);
     },
 
     reset() {

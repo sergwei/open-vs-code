@@ -1,4 +1,5 @@
 import { createMemo, Show } from 'solid-js';
+import { splitAtRevert } from '../changes/revertView';
 import type { ChatStore } from '../store/chatStore';
 import { contextUsage, describeUsage, sessionCost } from './usage';
 
@@ -10,7 +11,9 @@ import { contextUsage, describeUsage, sessionCost } from './usage';
  * usage; without the model's limit the "/ 200K (5%)" part is omitted. All the figures come from
  * {@link describeUsage} over the store, as memos, so it updates when a step ends
  * (`message.upserted` with tokens) or the totals change (`session.upserted` with `usage`) and no
- * resync is needed.
+ * resync is needed. The context figure is measured over the messages a prepared revert leaves
+ * visible (`splitAtRevert(...).visible`, issue #32), because the hidden ones are not in the model's
+ * context any more; the cost is the session's, untouched.
  *
  * Accessibility (Sergio's decision of 22/10/2026, Engram #1115): a plain `<p>` holding two spans.
  * The visible shorthand is `aria-hidden="true"` and carries the tooltip (`title`, harmless there
@@ -31,7 +34,9 @@ export function UsageIndicator(props: { store: ChatStore }) {
   const view = createMemo(() => {
     const id = state.open.sessionID;
     if (id === undefined) return undefined;
-    const context = contextUsage(state.open.messages, state.open.compactedAt, state.catalog);
+    // Issue #32: the messages a prepared revert hides are not in the model's context any more.
+    const shown = splitAtRevert(state.open.messages, state.open.revert).visible;
+    const context = contextUsage(shown, state.open.compactedAt, state.catalog);
     return describeUsage(
       context,
       sessionCost(state.sessions, id),

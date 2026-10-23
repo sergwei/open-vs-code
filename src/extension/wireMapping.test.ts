@@ -436,6 +436,20 @@ describe('error scrubbing', () => {
     expect(info).toEqual({ code: 'SessionNotFoundError', message: 'no such session' });
   });
 
+  // Issue #32: the BODY a real opencode 2.0.32 threw for a revert on a busy session (spike of
+  // 23/10/2026, Windows 11) has a `_tag` and a `sessionID` but no `message`; it used to be read as
+  // "Unknown error". The body here is that shape copied by hand.
+  it('keeps the code of a server body with a _tag and no message, with words for the known ones', () => {
+    expect(toErrorInfo({ _tag: 'SessionBusyError', sessionID: 'ses_1' }, SECRETS)).toEqual({
+      code: 'SessionBusyError',
+      message: 'The session is busy with a turn. Try again when it has finished.',
+    });
+    expect(toErrorInfo({ _tag: 'SomethingNew' }, SECRETS)).toEqual({
+      code: 'SomethingNew',
+      message: 'SomethingNew',
+    });
+  });
+
   it('reads a SessionStructuredError { type, message } using type as the code', () => {
     const info = toErrorInfo(
       { type: 'provider.no-route', message: 'Model unavailable: nope/does-not-exist' },

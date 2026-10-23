@@ -43,15 +43,15 @@ export type UserMessage = Extract<MessageInfo, { kind: 'user' }>;
 const FORK_LABEL_CHARS = 60;
 
 /**
- * Accessible name of the fork button of `message`: "Fork from here: " plus its first
- * {@link FORK_LABEL_CHARS} characters with whitespace collapsed (an ellipsis when cut), or just
- * "Fork from here" for a message that is only attachments.
+ * Accessible name of an action button of `message` (fork, revert): `action` plus ": " and its
+ * first {@link FORK_LABEL_CHARS} characters with whitespace collapsed (an ellipsis when cut), or
+ * just `action` for a message that is only attachments.
  */
-function forkLabel(message: UserMessage): string {
+function actionLabel(action: string, message: UserMessage): string {
   const flat = message.text.replace(/\s+/g, ' ').trim();
-  if (flat === '') return 'Fork from here';
+  if (flat === '') return action;
   const cut = flat.length > FORK_LABEL_CHARS ? `${flat.slice(0, FORK_LABEL_CHARS)}…` : flat;
-  return `Fork from here: ${cut}`;
+  return `${action}: ${cut}`;
 }
 
 /** How close to the bottom (px) still counts as "at the bottom". Our own figure: about a line. */
@@ -122,6 +122,13 @@ function prefersReducedMotion(): boolean {
  * the button is `aria-disabled` and the click is ignored, never `disabled`, so the focus stays on
  * it. `onOpenSession` is for the subagent links of the tool blocks.
  *
+ * Issue #32 adds a second button to that bar, "Revert from here" (decision of Sergio, 23/10/2026),
+ * with the same rules: user messages only, a name that carries the start of the message,
+ * `aria-disabled` while `revertDisabled` (a busy session, or another revert request in flight)
+ * and the click ignored. `messages` is what is DRAWN: the caller hides the reverted ones
+ * (`splitAtRevert`), so everything here ("last message", the live message, the unanchored request
+ * lines) refers to the visible conversation.
+ *
  * Issue #26: each tool block is a collapsible card (`ToolCard`). `requests` is the store's pending
  * permissions and forms; the tool a request names (`tool.partID`) is told it is waiting for
  * approval. Cards stay folded: a card that opens, or a request that appears, adds no child to the
@@ -134,6 +141,8 @@ function prefersReducedMotion(): boolean {
  */
 export function MessageList(props: {
   open: OpenView;
+  /** The messages to draw: `open.messages` without the ones a prepared revert hides. */
+  messages: readonly MessageInfo[];
   /** Names the agent and model of each reply; ids are shown for the ones it does not know. */
   catalog: Catalog | undefined;
   resolutions: { readonly [requestId: string]: RequestResolution };
@@ -142,8 +151,10 @@ export function MessageList(props: {
   busy: boolean;
   canRetry: boolean;
   forkDisabled: boolean;
+  revertDisabled: boolean;
   onRetry(): void;
   onFork(message: UserMessage): void;
+  onRevert(message: UserMessage): void;
   onOpenSession(sessionID: string): void;
 }) {
   let list: HTMLDivElement | undefined;
@@ -152,7 +163,7 @@ export function MessageList(props: {
   const records = createMemo(() => Object.values(props.resolutions));
   const byTool = createMemo(() => byToolPart(records()));
   const unanchored = createMemo(() =>
-    unanchoredByMessage(props.open.messages, props.open.parts, records()),
+    unanchoredByMessage(props.messages, props.open.parts, records()),
   );
   /** Ids of the tool blocks that a pending permission or form points at (`tool.partID`). */
   const awaitingTools = createMemo(() => {
@@ -175,8 +186,7 @@ export function MessageList(props: {
       return view === undefined ? [] : [view];
     });
 
-  const isLast = (id: string): boolean =>
-    props.open.messages[props.open.messages.length - 1]?.id === id;
+  const isLast = (id: string): boolean => props.messages[props.messages.length - 1]?.id === id;
   const isLive = (message: AssistantMessage): boolean =>
     props.busy && isLast(message.id) && message.completedAt === undefined;
 
@@ -251,7 +261,7 @@ export function MessageList(props: {
           if (programmatic) endProgrammatic(event.currentTarget);
         }}
       >
-        <For each={props.open.messages}>
+        <For each={props.messages}>
           {(message) => (
             <ErrorBoundary
               fallback={<div class="message-error">This message could not be displayed.</div>}
@@ -282,13 +292,24 @@ export function MessageList(props: {
                         <button
                           type="button"
                           class="secondary message-action"
-                          aria-label={forkLabel(user())}
+                          aria-label={actionLabel('Fork from here', user())}
                           aria-disabled={props.forkDisabled ? 'true' : undefined}
                           onClick={() => {
                             if (!props.forkDisabled) props.onFork(user());
                           }}
                         >
                           Fork from here
+                        </button>
+                        <button
+                          type="button"
+                          class="secondary message-action"
+                          aria-label={actionLabel('Revert from here', user())}
+                          aria-disabled={props.revertDisabled ? 'true' : undefined}
+                          onClick={() => {
+                            if (!props.revertDisabled) props.onRevert(user());
+                          }}
+                        >
+                          Revert from here
                         </button>
                       </div>
                     </article>

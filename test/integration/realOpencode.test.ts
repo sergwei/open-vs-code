@@ -653,6 +653,165 @@ describe('real opencode', function () {
     });
 
     /**
+     * The revert contract (issue #32) WITHOUT a model: `session.shell` runs a command with no model
+     * and its projection leaves a message of type `shell` in the history, which is enough to stage,
+     * clear and commit a revert and see the three events. Checks: an invented message id is
+     * `MessageNotFoundError` on `stage`; `stage` answers `{ messageID, files }` with an empty
+     * `files` (this folder is not a git repository, so the server takes no snapshot), publishes
+     * `session.revert.staged` and puts the same revert on `session.get`; `message.list` keeps
+     * listing the message while the revert is staged (nothing filters it, the clients hide it);
+     * `clear` publishes `cleared` and empties the revert; `commit` publishes `committed { to }` and
+     * the message is GONE from `message.list`; after a commit `clear` resolves, emits nothing and
+     * the message does not come back (a committed revert cannot be undone). A call right after a
+     * `clear` can be `SessionBusyError` for a moment (the server wakes the session), so the calls
+     * after one retry on that error; its body is `{ _tag, sessionID, name }` with no `message`.
+     * `message.get` with the id of a message of ANOTHER session (a second `shell` session, removed
+     * at once) must not return that message under this session (review S1 of the host's check).
+     * The files of a revert from a real turn, and `files: false`, are NOT checked here (they need a
+     * model and a git repository). The session is removed at the end.
+     */
+    it('stages, clears and commits a revert on a shell message', async function () {
+      this.timeout(60_000);
+      const sessionID = (await own.client.session.create({})).id;
+      const seen: string[] = [];
+      let committedTo: string | undefined;
+      const stream = new AbortController();
+      const pump = (async () => {
+        try {
+          for await (const event of own.client.event.subscribe({ signal: stream.signal })) {
+            if (
+              event.type === 'session.revert.staged' ||
+              event.type === 'session.revert.cleared' ||
+              event.type === 'session.revert.committed'
+            ) {
+              if (event.data.sessionID !== sessionID) continue;
+              seen.push(event.type);
+              if (event.type === 'session.revert.committed') committedTo = event.data.to;
+            }
+          }
+        } catch {
+          // The stream ends when the case aborts it.
+        }
+      })();
+      const kinds = async (): Promise<string[]> =>
+        (await own.client.message.list({ sessionID, order: 'asc', limit: 50 })).data.map(
+          (message) => message.type,
+        );
+      const untilSeen = async (type: string, count: number): Promise<void> => {
+        const deadline = Date.now() + 10_000;
+        while (seen.filter((item) => item === type).length < count && Date.now() < deadline) {
+          await sleep(100);
+        }
+        assert.ok(
+          seen.filter((item) => item === type).length >= count,
+          `no ${type}: ${seen.join()}`,
+        );
+      };
+      const whenIdle = async <T>(call: () => Promise<T>): Promise<T> => {
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            return await call();
+          } catch (error) {
+            const busy = (error as { _tag?: string })._tag === 'SessionBusyError';
+            if (!busy || attempt >= 40) throw error;
+            await sleep(250);
+          }
+        }
+      };
+      try {
+        await own.client.session.shell({ sessionID, command: 'echo revert-contract' });
+        let shellID: string | undefined;
+        const deadline = Date.now() + 20_000;
+        while (shellID === undefined && Date.now() < deadline) {
+          const page = await own.client.message.list({ sessionID, order: 'asc', limit: 50 });
+          shellID = page.data.find((message) => message.type === 'shell')?.id;
+          if (shellID === undefined) await sleep(250);
+        }
+        assert.ok(shellID, 'session.shell left no shell message in the history');
+
+        // The host trusts `message.get({ sessionID, messageID })` to be scoped to the session before
+        // it stages (`stageRevert`): a message of ANOTHER session must not come back under this one.
+        const otherID = (await own.client.session.create({})).id;
+        try {
+          await own.client.session.shell({ sessionID: otherID, command: 'echo other-session' });
+          let foreignID: string | undefined;
+          const foreignDeadline = Date.now() + 20_000;
+          while (foreignID === undefined && Date.now() < foreignDeadline) {
+            const page = await own.client.message.list({
+              sessionID: otherID,
+              order: 'asc',
+              limit: 50,
+            });
+            foreignID = page.data.find((message) => message.type === 'shell')?.id;
+            if (foreignID === undefined) await sleep(250);
+          }
+          assert.ok(foreignID, 'session.shell left no shell message in the other session');
+          const foreign = await own.client.session.message
+            .get({ sessionID, messageID: foreignID })
+            .then(
+              (message) => message,
+              () => undefined,
+            );
+          assert.ok(
+            foreign === undefined || foreign.id !== foreignID,
+            'message.get returned a message of another session under this session',
+          );
+        } finally {
+          await own.client.session.remove({ sessionID: otherID });
+        }
+
+        await assert.rejects(
+          whenIdle(() =>
+            own.client.session.revert.stage({ sessionID, messageID: 'msg_does_not_exist' }),
+          ),
+          (error: unknown) => {
+            assert.strictEqual((error as { _tag?: string })._tag, 'MessageNotFoundError');
+            return true;
+          },
+        );
+
+        const staged = await whenIdle(() =>
+          own.client.session.revert.stage({ sessionID, messageID: shellID }),
+        );
+        assert.deepStrictEqual(staged, { messageID: shellID, files: [] });
+        await untilSeen('session.revert.staged', 1);
+        assert.strictEqual(
+          (await own.client.session.get({ sessionID })).revert?.messageID,
+          shellID,
+        );
+        assert.deepStrictEqual(
+          await kinds(),
+          ['shell'],
+          'a staged revert must not hide the message',
+        );
+
+        await whenIdle(() => own.client.session.revert.clear({ sessionID }));
+        await untilSeen('session.revert.cleared', 1);
+        assert.strictEqual((await own.client.session.get({ sessionID })).revert, undefined);
+
+        await whenIdle(() => own.client.session.revert.stage({ sessionID, messageID: shellID }));
+        await untilSeen('session.revert.staged', 2);
+        await whenIdle(() => own.client.session.revert.commit({ sessionID }));
+        await untilSeen('session.revert.committed', 1);
+        assert.strictEqual(committedTo, shellID);
+        assert.ok(!(await kinds()).includes('shell'), 'a committed revert must delete the message');
+
+        // A committed revert cannot be undone: `clear` resolves, says nothing, brings nothing back.
+        await whenIdle(() => own.client.session.revert.clear({ sessionID }));
+        await sleep(1_000);
+        assert.strictEqual(seen.filter((item) => item === 'session.revert.cleared').length, 1);
+        assert.ok(
+          !(await kinds()).includes('shell'),
+          'clear after commit brought the message back',
+        );
+      } finally {
+        stream.abort();
+        await pump;
+        await own.client.session.remove({ sessionID });
+      }
+    });
+
+    /**
      * What a session says about WHERE it lives when the server runs in a SUBFOLDER of a git
      * repository (issue #31), which is how the extension runs it (cwd = the served folder): the
      * location is that subfolder and `subpath` says how deep it is below the project directory, so

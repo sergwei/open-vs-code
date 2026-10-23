@@ -222,9 +222,11 @@ export type Part =
  *
  * `path` is what the user sees and what the webview echoes back in `session.diff.open`: relative to
  * the SERVED folder, with `/` separators. It is an opaque key for the webview; the host only opens
- * a path it listed itself for that session (`sessionDiff.ts`). `binary` is true when the host has
- * no text diff to show (a binary file, or a patch the server cut for size): the row is still
- * listed, with its counts, but opening it shows the file instead of a diff.
+ * a path it listed itself for that session (`sessionDiff.ts`). `binary` is true for a file the
+ * server sent with an EMPTY patch (a binary); `tooLarge` for one whose patch it cut for size (a
+ * header without hunks but with real counts, so the counts are shown). The two are exclusive and
+ * neither can be opened as a diff: the row is still listed, but opening it shows the file instead
+ * (issue #32 split `tooLarge` off `binary`, pending item of #31, so the row can say why).
  *
  * Provenance: the wire shape (`FileDiffInfo`: `file`, `patch`, `additions`, `deletions`, `status`)
  * was read in `@opencode/client@2.0.32` and `core/src/session/diff.ts@843a6c51`; HYPOTHESIS that a
@@ -236,6 +238,23 @@ export type ChangedFile = {
   additions: number;
   deletions: number;
   binary: boolean;
+  tooLarge: boolean;
+};
+
+/**
+ * A revert the user prepared in the open session (issue #32): the history from `messageID` on (that
+ * user message included) is hidden and the files the agent touched after it were put back on disk.
+ * `files` is what the revert CHANGED ON DISK, seen from the revert: `added` = the revert recreated a
+ * file the agent had deleted, `deleted` = the revert removed a file the agent had created, with the
+ * counts of that move (the opposite sign of what the agent did). Empty outside a git repository
+ * (the server takes no snapshot there) or when the revert was staged without files.
+ * Provenance: `SessionRevert` of `@opencode/client@2.0.32` (`messageID`, `files?: FileDiffInfo[]`),
+ * read and, for `messageID` and an empty `files`, observed against a real opencode 2.0.32 (Windows
+ * 11, 23/10/2026, a `shell` message, no model); HYPOTHESIS for a non-empty `files` from a real turn.
+ */
+export type RevertState = {
+  messageID: string;
+  files: ChangedFile[];
 };
 
 /** Points at the tool block that triggered a permission or a form. */

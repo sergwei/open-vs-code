@@ -189,7 +189,33 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
   'session.diff': {
     type: 'session.diff',
     sessionID: 's1',
-    files: [{ path: 'src/a.ts', status: 'modified', additions: 2, deletions: 1, binary: false }],
+    files: [
+      {
+        path: 'src/a.ts',
+        status: 'modified',
+        additions: 2,
+        deletions: 1,
+        binary: false,
+        tooLarge: false,
+      },
+    ],
+  },
+  'session.revert': {
+    type: 'session.revert',
+    sessionID: 's1',
+    revert: {
+      messageID: 'msg_1',
+      files: [
+        {
+          path: 'src/a.ts',
+          status: 'modified',
+          additions: 1,
+          deletions: 1,
+          binary: false,
+          tooLarge: false,
+        },
+      ],
+    },
   },
   notice: { type: 'notice', level: 'warning', error },
 };
@@ -241,6 +267,15 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   'logs.show': { type: 'logs.show' },
   'editor.open': { type: 'editor.open', path: 'src/a.ts', line: 3, column: 1 },
   'session.diff.open': { type: 'session.diff.open', sessionID: 's1', path: 'src/a.ts' },
+  'session.revert.stage': {
+    type: 'session.revert.stage',
+    requestId: 'r1',
+    sessionID: 's1',
+    messageID: 'msg_1',
+  },
+  'session.revert.clear': { type: 'session.revert.clear', requestId: 'r1', sessionID: 's1' },
+  'session.revert.commit': { type: 'session.revert.commit', requestId: 'r1', sessionID: 's1' },
+  'session.revert.open': { type: 'session.revert.open', sessionID: 's1', path: 'src/a.ts' },
   'editor.insert': { type: 'editor.insert', text: 'x' },
   'editor.newFile': { type: 'editor.newFile', text: 'x', language: 'ts' },
   'clipboard.write': { type: 'clipboard.write', text: 'x' },
@@ -555,6 +590,20 @@ describe('isWebviewToHost', () => {
       { ...WEBVIEW_SAMPLES['session.diff.open'], path: 'src/a\0.ts' },
       { ...WEBVIEW_SAMPLES['session.diff.open'], path: 'a'.repeat(MAX_DIFF_PATH_LENGTH + 1) },
       { ...WEBVIEW_SAMPLES['session.diff.open'], path: 3 },
+      // Issue #32: the three revert requests need a request id and a session; stage a message too;
+      // the open message has the shape rules of `session.diff.open`.
+      { ...WEBVIEW_SAMPLES['session.revert.stage'], requestId: '' },
+      { ...WEBVIEW_SAMPLES['session.revert.stage'], sessionID: '' },
+      { ...WEBVIEW_SAMPLES['session.revert.stage'], messageID: '' },
+      { ...WEBVIEW_SAMPLES['session.revert.stage'], messageID: 3 },
+      { ...WEBVIEW_SAMPLES['session.revert.clear'], requestId: '' },
+      { ...WEBVIEW_SAMPLES['session.revert.clear'], sessionID: '' },
+      { ...WEBVIEW_SAMPLES['session.revert.commit'], requestId: '' },
+      { ...WEBVIEW_SAMPLES['session.revert.commit'], sessionID: '' },
+      { ...WEBVIEW_SAMPLES['session.revert.open'], sessionID: '' },
+      { ...WEBVIEW_SAMPLES['session.revert.open'], path: '' },
+      { ...WEBVIEW_SAMPLES['session.revert.open'], path: 'src/a\0.ts' },
+      { ...WEBVIEW_SAMPLES['session.revert.open'], path: 'a'.repeat(MAX_DIFF_PATH_LENGTH + 1) },
       { ...WEBVIEW_SAMPLES['form.reply'], answer: { q0: { nested: 'x' } } },
       { ...WEBVIEW_SAMPLES['form.reply'], answer: { q0: [1, 2] } },
       { ...WEBVIEW_SAMPLES['form.reply'], answer: { q0: Number.NaN } },

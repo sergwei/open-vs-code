@@ -565,6 +565,133 @@ describe('fake server', function () {
   });
 
   /**
+   * Revert from a message (issue #32), the whole path against the synthetic server: the host
+   * checks first (an unknown message and a session that is not the open one never reach the
+   * server's `stage`), a prepared revert lists the four files it changed, the diff of what it undid
+   * has the text BEFORE the revert on the left, an unlisted path opens nothing, Restore clears it,
+   * and a prompt sent with a revert prepared commits it (the server does, the host forgets it).
+   *
+   * Protects: the `session.revert.*` messages and events through the real client and stream, the
+   * whitelist of `session.revert.open`, the provider serving the `reverted` side, and the re-read
+   * of an open "Changed files" diff tab when the start of the range moves (the log line `diff
+   * originals renewed for <sid> (<n> open)`, pending item of #31). The final state is checked
+   * with a margin and the absence of the opposite transition (lesson estado-final-no-transitorio).
+   * Provenance: the SYNTHETIC server, whose revert model is read from the server code, with
+   * invented files; the real server was only ever seen with an empty `files` (`realOpencode`).
+   */
+  it('reverts from a message, shows what it undid, restores it and commits it with a prompt', async function () {
+    const sessionID = editedSessionID;
+    assert.ok(sessionID, 'the edit-turn case did not run');
+    // The revert starts at the FIRST user message of the shared session (the one of "streams a
+    // prompt to the end"): then the start of the "Changed files" range moves, which is what makes
+    // an open diff tab re-read its left side. Its id is in the log line of its accepted prompt.
+    const everything = (await openLogFromStart()).added();
+    const inputID = [
+      ...everything.matchAll(/prompt accepted for (ses_\S+) \(input (msg_\S+)\)/g),
+    ].find((match) => match[1] === sessionID)?.[2];
+    assert.ok(inputID, `no accepted prompt of ${sessionID} in the log`);
+    const file = path.join(workspaceFolderPath(), 'src', 'sample.ts');
+    fs.writeFileSync(file, SAMPLE_TS);
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    const inject = (message: object): Thenable<unknown> =>
+      vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, message);
+    const activeDiff = async (): Promise<vscode.TabInputTextDiff> => {
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline) {
+        const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+        if (input instanceof vscode.TabInputTextDiff) return input;
+        await sleep(100);
+      }
+      return assert.fail('no diff tab opened');
+    };
+    const log = await openLogCursor();
+
+    // An "OpenCode session" diff tab stays open: its provider URI is remembered for the re-read.
+    await inject({ type: 'session.diff.open', sessionID, path: 'src/sample.ts' });
+    const changedFilesTab = await activeDiff();
+    assert.strictEqual(
+      (await vscode.workspace.openTextDocument(changedFilesTab.original)).getText(),
+      '// Sample file for the visual test run.\nexport const value2 = 2;\n',
+    );
+
+    // Refusals first: the server's stage must not be called.
+    await inject({
+      type: 'session.revert.stage',
+      requestId: 'revert-unknown',
+      sessionID,
+      messageID: 'msg_does_not_exist',
+    });
+    await log.waitFor('request revert-unknown failed: MessageNotFoundError', 8_000);
+    await inject({
+      type: 'session.revert.stage',
+      requestId: 'revert-foreign',
+      sessionID: 'ses_not_the_open_one',
+      messageID: inputID,
+    });
+    await log.waitFor('revert refused: session not open', 8_000);
+    assert.ok(!log.added().includes('revert staged'), `log:\n${log.added()}`);
+
+    // Prepare the revert from the user message of the edit turn.
+    await inject({
+      type: 'session.revert.stage',
+      requestId: 'revert-stage',
+      sessionID,
+      messageID: inputID,
+    });
+    await log.waitFor(`revert staged for ${sessionID}: 4 files`, 8_000);
+    // The range now stops before the boundary (the first user message): the start moved, so the
+    // open "Changed files" tab is told to re-read its left side.
+    await log.waitFor(`diff originals renewed for ${sessionID} (`, 8_000);
+
+    // What the revert undid: left = the text before the revert (value2 = 22), right = the file.
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    await inject({ type: 'session.revert.open', sessionID, path: 'src/sample.ts' });
+    const undone = await activeDiff();
+    assert.strictEqual(undone.original.scheme, SESSION_DIFF_SCHEME);
+    assert.ok(!undone.original.toString().includes('127.0.0.1'), 'the URI must not carry a port');
+    assert.strictEqual(
+      (await vscode.workspace.openTextDocument(undone.original)).getText(),
+      '// Sample file for the visual test run.\nexport const value2 = 22;\n',
+    );
+    assert.strictEqual(undone.modified.scheme, 'file');
+    assert.ok(log.added().includes('revert diff opened (modified)'), `log:\n${log.added()}`);
+
+    // A path the revert did not list opens nothing.
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    await inject({ type: 'session.revert.open', sessionID, path: 'src/never-listed.ts' });
+    await inject({ type: 'session.revert.open', sessionID, path: '../outside.txt' });
+    await sleep(SETTLE_MS);
+    assert.strictEqual(countOf(log, 'revert diff open refused: not listed'), 2, log.added());
+    assert.ok(!log.added().includes('never-listed'), 'the log must not carry the refused path');
+    assert.strictEqual(vscode.window.tabGroups.all.flatMap((group) => group.tabs).length, 0);
+
+    // Restore: the revert is gone.
+    await inject({ type: 'session.revert.clear', requestId: 'revert-clear', sessionID });
+    await log.waitFor(`revert cleared for ${sessionID}`, 8_000);
+
+    // Prepare it again and send a prompt: the server commits it, the host forgets it.
+    await inject({
+      type: 'session.revert.stage',
+      requestId: 'revert-stage-2',
+      sessionID,
+      messageID: inputID,
+    });
+    await log.waitFor('revert staged for', 8_000);
+    await sendPrompt(log, 'say hello after the revert');
+    await log.waitFor(`revert committed for ${sessionID}`, 8_000);
+    await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+    await sleep(SETTLE_MS);
+    await inject({ type: 'session.revert.open', sessionID, path: 'src/sample.ts' });
+    await sleep(SETTLE_MS);
+    assert.ok(
+      log.added().includes('revert diff open refused:'),
+      `a committed revert must leave nothing to open; log:\n${log.added()}`,
+    );
+    assert.strictEqual(vscode.window.tabGroups.all.flatMap((group) => group.tabs).length, 0);
+    assert.strictEqual(countOf(log, 'revert staged for'), 2, 'the commit must not stage again');
+  });
+
+  /**
    * Hidden view: a permission asked while the chat is not on screen raises the badge and ONE
    * notification, and rejecting it from the command of the notification link closes both.
    *

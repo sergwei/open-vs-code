@@ -5,8 +5,9 @@ import { metaText, openName } from './changedFileText';
 /**
  * The rows of the "Changed files" list (issue #31): one button per file with its path, its status
  * in words and, unless it is binary, its `+added −deleted` counts. PRESENTATIONAL on purpose: it
- * knows nothing about the store or the host, so issue #32 (revert by message) can show "what would
- * be undone" with the same rows; the caller decides what `onOpen` does with the path.
+ * knows nothing about the store or the host, so the revert block of issue #32 shows the files a
+ * revert changed with the same rows; the caller decides what `onOpen` does with the path and, with
+ * `nameOf`, what the accessible name of a row says (default {@link openName}).
  *
  * Each row is a real `<button>` (Tab, Enter and Space work) whose accessible name is the sentence
  * of {@link openName}; the visible path and meta stay short. `<For>` keys the rows by object
@@ -24,6 +25,8 @@ import { metaText, openName } from './changedFileText';
 export function ChangedFilesList(props: {
   files: readonly ChangedFile[];
   onOpen: (path: string) => void;
+  /** The accessible name of a row; defaults to {@link openName}. */
+  nameOf?: (file: ChangedFile) => string;
 }) {
   return (
     <Show when={props.files.length > 0}>
@@ -34,8 +37,8 @@ export function ChangedFilesList(props: {
               <button
                 type="button"
                 class="secondary changed-file"
-                data-status={file.binary ? 'binary' : file.status}
-                aria-label={openName(file)}
+                data-status={file.binary ? 'binary' : file.tooLarge ? 'too-large' : file.status}
+                aria-label={(props.nameOf ?? openName)(file)}
                 title={file.path}
                 onClick={() => {
                   props.onOpen(file.path);

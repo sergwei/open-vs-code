@@ -62,6 +62,17 @@
 // `session.diff.open` (`openChangedFile`) and the originals (`diffOriginal`). New stable log lines,
 // counts and ids only, never a path: `session diff: <n> files for <sid>`, `session diff failed:
 // <code>`, `diff opened (<status>[, file only])`, `diff open refused: not listed|session not open`.
+//
+// E7-message-revert (issue #32, plan Engram #1173, decisions #1174): revert from a user message. The
+// host validates that the message is a USER one of the open session before the server rewrites any
+// file (`session.revert.stage`), keeps the prepared revert in `sessionRevert.ts` (its boundary
+// bounds the "Changed files" range), publishes it as `session.revert` and inside the snapshot, and
+// asks for the only confirmation, a native modal, on "Discard for good" (`session.revert.commit`).
+// An accepted prompt with a revert prepared makes the server commit it, so the host forgets it and
+// resyncs (`afterCommit`). New stable log lines, ids and counts only, never a path: `revert staged
+// for <sid>: <n> files`, `revert cleared for <sid>`, `revert committed for <sid>`, `revert
+// refused: <reason>`, `revert commit cancelled <sid>`, `revert diff opened (<status>)`, `revert
+// diff open refused: not listed|session not open`; and `prompt accepted for <sid> (input <id>)`.
 
 import type { V2Event } from '@opencode/client';
 import type { Catalog, ErrorInfo, ModelRef, SessionStatus, SessionSummary } from '../shared/model';
@@ -89,6 +100,7 @@ import { createRequestResolutions } from './requestResolutions';
 import type { RunningServerInfo, ServerState } from './serverManager';
 import { createSessionBrowser } from './sessionBrowser';
 import { createSessionDiffs, type DiffTarget, type SessionDiffs } from './sessionDiff';
+import { createSessionReverts, type SessionReverts } from './sessionRevert';
 import {
   lastCompactionAt,
   toAgentOptions,
@@ -242,7 +254,11 @@ export interface ChatControllerDeps {
    * The native modal that confirms deleting a session (issue #20); resolves `true` only on
    * "Delete". `title` comes from the server (`session.get`), `running` from `session.active()`.
    */
-  sessions: { confirmDelete(info: { title: string; running: boolean }): Promise<boolean> };
+  sessions: {
+    confirmDelete(info: { title: string; running: boolean }): Promise<boolean>;
+    /** The native modal of "Discard for good" (issue #32); resolves `true` only on that button. */
+    confirmRevertDiscard(): Promise<boolean>;
+  };
   preferences: ModelPreferences;
   server: ServerCommands;
   /** The SSE loop; replaced in tests. */
@@ -453,6 +469,12 @@ export class ChatController {
   };
   private resyncing = 0;
   /**
+   * Counts the `session.revert.staged` / `.cleared` events and the revert calls the host made. A
+   * snapshot compares it with the value at its start: if it moved, the REST row is older than what
+   * the host already knows about the revert (issue #32).
+   */
+  private revertEvents = 0;
+  /**
    * Ids with a {@link refreshSession} read in flight. A `session.removed` for the id takes it out
    * (`live.removed` only records during a resync, so it cannot guard that call); the read then
    * drops its row. Entries leave when their read ends, so the set stays bounded.
@@ -487,11 +509,14 @@ export class ChatController {
   private ignoredSettingNoticed: string | undefined;
   /** The "Changed files" list of the open session and the originals of its diffs (issue #31). */
   private readonly diffs: SessionDiffs;
+  /** The prepared revert of the open session and the files behind its banner (issue #32). */
+  private readonly reverts: SessionReverts;
 
   /**
    * Wires the injected effects and the "Changed files" holder (issue #31), which reads the client,
    * the served folder and the open session through getters, so a new server or a session change
-   * is seen by a load that is already in flight.
+   * is seen by a load that is already in flight. The revert holder (issue #32) is the source of
+   * the boundary that bounds the "Changed files" range, and borrows its root lookup.
    */
   constructor(private readonly deps: ChatControllerDeps) {
     this.log = safeLog(deps.log);
@@ -500,11 +525,21 @@ export class ChatController {
       client: () => this.client,
       folder: () => this.server?.folder,
       open: () => this.open,
+      boundary: (sessionID) => this.reverts.boundary(sessionID),
       post: (message) => {
         this.post(message);
       },
       log: this.log,
       describe: (error) => toErrorInfo(error, this.secrets),
+    });
+    this.reverts = createSessionReverts({
+      folder: () => this.server?.folder,
+      open: () => this.open,
+      rootFor: (sessionID) => this.diffs.rootFor(sessionID),
+      post: (message) => {
+        this.post(message);
+      },
+      log: this.log,
     });
   }
 
@@ -616,6 +651,7 @@ export class ChatController {
     this.fileSearch?.abort();
     this.fileSearch = undefined;
     this.diffs.reset();
+    this.reverts.reset();
     this.client = undefined;
     this.server = undefined;
     this.generation++; // a snapshot in flight for the old server must not be published
@@ -794,16 +830,47 @@ export class ChatController {
         return;
       case 'session.revert.committed':
         if (event.data.sessionID !== open) return;
-        this.diffs.forgetRange(open);
-        void this.diffs.request(open);
+        this.log.info(`revert committed for ${open}`);
+        this.afterCommit(open, event.data.to);
         return;
       case 'session.revert.staged':
+        if (event.data.sessionID !== open) return;
+        this.revertEvents += 1;
+        // The boundary is set synchronously by `apply`, so the load that follows is bounded by it.
+        void this.reverts.apply(open, event.data.revert, { post: true });
+        void this.diffs.request(open);
+        return;
       case 'session.revert.cleared':
-        if (event.data.sessionID === open) void this.diffs.request(open);
+        if (event.data.sessionID !== open) return;
+        this.revertEvents += 1;
+        void this.reverts.apply(open, undefined, { post: true });
+        void this.diffs.request(open);
         return;
       default:
         return;
     }
+  }
+
+  /**
+   * A revert of the open session was committed (by the user, by an accepted prompt, or by another
+   * client): the server deleted the history from the boundary on, so the host forgets the revert
+   * and the cached start of the "Changed files" range and publishes a fresh snapshot. NO empty
+   * `session.revert` is posted first: the hidden messages would flash back for an instant, and the
+   * snapshot (whose row no longer has a `revert`) clears the webview's state atomically.
+   * Idempotent: the event and the HTTP answer of a commit both call it, and a second resync costs
+   * one more read. HYPOTHESIS: that the server has deleted the history by the time the event
+   * reaches the stream (the projector runs before the bus publishes); if it had not, the snapshot
+   * would still list the messages until the next resync (a reconnect, an open or another commit)
+   * reads the session again; no event handler removes listed messages.
+   */
+  private afterCommit(sessionID: string, boundary?: string): void {
+    // The live copies of the deleted messages must go too, or the snapshot's `mergeLive` brings
+    // them back as "in flight". Not done for a commit made by a prompt (no `boundary`): its
+    // `committed` event does it, before the messages of the prompt itself.
+    if (boundary !== undefined) this.translator.forgetFrom(boundary);
+    this.reverts.forget(sessionID);
+    this.diffs.forgetRange(sessionID);
+    void this.resync();
   }
 
   /**
@@ -836,6 +903,7 @@ export class ChatController {
   private onSessionRemoved(sessionID: string): void {
     const ours = this.deleting.delete(sessionID);
     this.diffs.forget(sessionID);
+    this.reverts.forget(sessionID);
     if (sessionID !== this.open) return;
     this.log.info(`open session deleted ${sessionID}`);
     void this.forgetOpen();
@@ -1040,6 +1108,7 @@ export class ChatController {
     const server = this.server;
     if (client === undefined || server === undefined) return;
     const generation = ++this.generation;
+    const revertEventsAtStart = this.revertEvents;
     // Statuses the stream derives from here on override the (older) REST ones at publication.
     this.translator.beginResync();
     if (this.resyncing === 0) {
@@ -1081,16 +1150,30 @@ export class ChatController {
             open.messages.push(mapped.message);
             if (mapped.parts.length > 0) open.parts[mapped.message.id] = mapped.parts;
           }
-          if (!sessions.some((row) => row.id === openID)) {
+          // Issue #32: the prepared revert is a field of the session row, so it comes from the
+          // list (or from the `session.get` below when the session is older than the 50 newest).
+          let openRow = list.data.find((row) => row.id === openID);
+          if (openRow === undefined) {
             // Issue #20: a session opened from the list can be older than the 50 newest, and the
             // header takes its title from `sessions`; without the row it read "Untitled session".
             // Cosmetic, so a failure here must not fail the snapshot.
             try {
-              sessions.push(toSessionSummary(await client.session.get({ sessionID: openID })));
+              openRow = await client.session.get({ sessionID: openID });
+              sessions.push(toSessionSummary(openRow));
             } catch (error) {
               this.log.debug(`could not read the open session row: ${String(error)}`);
             }
           }
+          // An event about the revert that arrived during these reads is newer than the row: it
+          // owns the state, and the snapshot just carries what the host holds. The same when the row
+          // could not be read (not in the list and `session.get` failed): "no row" is not "no
+          // revert", and applying `undefined` would clear a revert the server still has, showing
+          // the hidden messages again while the files stay reverted (review W2).
+          const revertState =
+            openRow !== undefined && this.revertEvents === revertEventsAtStart
+              ? await this.reverts.apply(openID, openRow.revert, { post: false })
+              : this.reverts.state(openID);
+          if (revertState !== undefined) open.revert = revertState;
           await this.addLineage(client, sessions, openID, children);
           if (statuses[openID] === undefined) {
             const newest = messages.data[0];
@@ -1155,6 +1238,8 @@ export class ChatController {
       // Issue #31: the webview replaced its state with this snapshot, so the held list is sent
       // again (a new document starts without one) and then refreshed.
       if (this.open !== undefined) {
+        // Issue #32: a revert event applied while the snapshot was being built is newer than it.
+        this.reverts.resend(this.open, complete?.revert);
         this.diffs.resend(this.open);
         void this.diffs.request(this.open);
       }
@@ -1604,6 +1689,190 @@ export class ChatController {
   }
 
   /**
+   * `session.revert.open` (issue #32): opens the diff of what a prepared revert undid in one file,
+   * the text before the revert on the left and the file on disk on the right. Same policy as
+   * {@link openChangedFile}: only a path the host listed in the revert it sent, for the open
+   * session, is opened; anything else is a `warning` notice and the log line `revert diff open
+   * refused: not listed|session not open` (no path). Success logs `revert diff opened (<status>)`
+   * (or `… file only` for a file with no text diff). Never throws.
+   * VERIFIED by `chatController.test.ts` with a fake editor ("opens the diff of a file the revert
+   * undid and refuses one it did not list", Windows 11, 23/10/2026); the VS Code side is covered
+   * by `sessionDiffEditor.ts`.
+   */
+  private async openRevertedFile(sessionID: string, shown: string): Promise<void> {
+    const checked = this.reverts.target(sessionID, shown);
+    if (!checked.ok) {
+      this.log.warn(`revert diff open refused: ${checked.reason}`);
+      this.post({
+        type: 'notice',
+        level: 'warning',
+        error: {
+          code: 'DiffNotListed',
+          message: 'That file is not among the files of the revert any more',
+        },
+      });
+      return;
+    }
+    await this.editorAction('session.revert.open', async () => {
+      const opened = await this.deps.editor.openDiff(checked.target);
+      this.log.info(
+        opened === 'diff'
+          ? `revert diff opened (${checked.target.status})`
+          : `revert diff opened (${checked.target.status}, file only)`,
+      );
+      if (opened === 'file') {
+        this.post({
+          type: 'notice',
+          level: 'info',
+          error: {
+            code: 'NoTextDiff',
+            message: 'There is no text diff for this file, so the file itself was opened',
+          },
+        });
+      }
+    });
+  }
+
+  /**
+   * The text `shown` had before the prepared revert undid the session's changes, for the left side
+   * of a revert diff (called by the content provider of `sessionDiffEditor.ts`). Rejects with
+   * `DiffNotListed` when it is not a file of the revert and `NoTextDiff` when it cannot be rebuilt.
+   */
+  revertedOriginal(sessionID: string, shown: string): Promise<string> {
+    return this.reverts.original(sessionID, shown);
+  }
+
+  /**
+   * `session.revert.stage` (issue #32): prepares a revert from a USER message of the open session.
+   *
+   * Staging rewrites files on the user's disk, so unlike the fork the host checks first, with
+   * `session.message.get`, that `messageID` is a `user` message (upstream only offers the action on
+   * those; staging from an assistant message would delete history without restoring its files,
+   * `revert.ts` @843a6c51) and that `sessionID` is the open session. Otherwise the result is an
+   * error (`SessionNotOpen`, `NotAUserMessage`) and the server is not asked to stage. A turn in
+   * flight is the server's `SessionBusyError`, returned as the error of the result (the webview
+   * disables the action while busy; this covers the race). On success the answer is mapped and
+   * published as `session.revert` and the "Changed files" list is reloaded, bounded by the new
+   * boundary. Logs ids and a count only: `revert staged for <sid>: <n> files`, `revert refused:
+   * <reason>`.
+   * HYPOTHESIS: `message.get` answers a `type` for every message kind (read in the client types);
+   * the real server answered `MessageNotFoundError` for an unknown id on `stage` (observed 23/10/2026,
+   * Windows 11, case "stages, clears and commits a revert on a shell message" of `realOpencode.test.ts`).
+   * VERIFIED (23/10/2026, Windows 11, real opencode 2.0.32, same case): `message.get` with the
+   * `messageID` of a `shell` message of ANOTHER session did not return that message under this
+   * `sessionID` (an assertion inside the case, no model needed). HYPOTHESIS: a foreign `user`
+   * message is refused the same way, so it cannot pass the `type === 'user'` check (only `shell`
+   * messages exist without a model). Not observed: whether it rejects or returns something else
+   * (the assertion accepts both).
+   */
+  private async stageRevert(
+    message: Extract<WebviewToHost, { type: 'session.revert.stage' }>,
+  ): Promise<void> {
+    const { requestId, sessionID, messageID } = message;
+    const client = this.client;
+    if (client === undefined) return this.result(requestId, unavailable());
+    if (sessionID !== this.open) {
+      this.log.warn('revert refused: session not open');
+      return this.result(requestId, {
+        _tag: 'SessionNotOpen',
+        message: 'Only the open session can be reverted',
+      });
+    }
+    try {
+      const target = await client.session.message.get({ sessionID, messageID });
+      if (target.type !== 'user') {
+        this.log.warn('revert refused: not a user message');
+        return this.result(requestId, {
+          _tag: 'NotAUserMessage',
+          message: 'You can only revert from a message you sent',
+        });
+      }
+      const revert = await client.session.revert.stage({ sessionID, messageID });
+      if (client !== this.client) return this.result(requestId, unavailable());
+      this.revertEvents += 1;
+      this.log.info(`revert staged for ${sessionID}: ${String(revert.files?.length ?? 0)} files`);
+      await this.reverts.apply(sessionID, revert, { post: true });
+      void this.diffs.request(sessionID);
+      this.result(requestId);
+    } catch (error) {
+      this.healMissing(error, sessionID);
+      this.result(requestId, error);
+    }
+  }
+
+  /**
+   * `session.revert.clear` ("Restore"): the server puts the files back and the history returns. The
+   * state is applied from the HTTP answer without waiting for `session.revert.cleared`, so the
+   * banner goes at once and a downed stream cannot leave it up. Right after a clear the server
+   * wakes the session and a new revert can be `SessionBusyError` for a moment (observed, see
+   * {@link ChatApi}). Logs `revert cleared for <sid>`.
+   */
+  private async clearRevert(
+    message: Extract<WebviewToHost, { type: 'session.revert.clear' }>,
+  ): Promise<void> {
+    const { requestId, sessionID } = message;
+    const client = this.client;
+    if (client === undefined) return this.result(requestId, unavailable());
+    if (sessionID !== this.open) {
+      this.log.warn('revert refused: session not open');
+      return this.result(requestId, {
+        _tag: 'SessionNotOpen',
+        message: 'Only the open session can be restored',
+      });
+    }
+    try {
+      await client.session.revert.clear({ sessionID });
+      if (client !== this.client) return this.result(requestId, unavailable());
+      this.revertEvents += 1;
+      this.log.info(`revert cleared for ${sessionID}`);
+      await this.reverts.apply(sessionID, undefined, { post: true });
+      void this.diffs.request(sessionID);
+      this.result(requestId);
+    } catch (error) {
+      this.healMissing(error, sessionID);
+      this.result(requestId, error);
+    }
+  }
+
+  /**
+   * `session.revert.commit` ("Discard for good"): asks the user through
+   * `deps.sessions.confirmRevertDiscard` (a native modal, the only confirmation of the feature;
+   * the step that cannot be undone is this one, preparing is reversible) and only on "Discard for
+   * good" calls the server. A declined dialog is a success without error and logs `revert commit
+   * cancelled <sid>`. After the call the host forgets the revert and resyncs ({@link afterCommit}):
+   * the `session.revert.committed` event does the same, and a downed stream must not leave the
+   * banner up. Refuses (`SessionNotOpen`) a session that is not the open one.
+   */
+  private async commitRevert(
+    message: Extract<WebviewToHost, { type: 'session.revert.commit' }>,
+  ): Promise<void> {
+    const { requestId, sessionID } = message;
+    const client = this.client;
+    if (client === undefined) return this.result(requestId, unavailable());
+    if (sessionID !== this.open) {
+      this.log.warn('revert refused: session not open');
+      return this.result(requestId, {
+        _tag: 'SessionNotOpen',
+        message: 'Only the open session can be discarded',
+      });
+    }
+    try {
+      if (!(await this.deps.sessions.confirmRevertDiscard())) {
+        this.log.info(`revert commit cancelled ${sessionID}`);
+        return this.result(requestId);
+      }
+      const boundary = this.reverts.boundary(sessionID);
+      await client.session.revert.commit({ sessionID });
+      if (client !== this.client) return this.result(requestId, unavailable());
+      this.afterCommit(sessionID, boundary);
+      this.result(requestId);
+    } catch (error) {
+      this.healMissing(error, sessionID);
+      this.result(requestId, error);
+    }
+  }
+
+  /**
    * The text `shown` had before the open session changed it, for the read-only document on the left
    * of a diff (called by the content provider of `sessionDiffEditor.ts`). Rejects with
    * `DiffNotListed` when the path is not one the host listed for the open session, and with
@@ -2048,6 +2317,8 @@ export class ChatController {
    * Issues #28/#29: `files.search` asks the server for files (answer `files.found`) and
    * `attachments.fromEditor` takes the active file or selections from the editor.
    * Issue #31: `session.diff.open` opens the native diff of a listed changed file.
+   * Issue #32: `session.revert.stage|clear|commit` prepare, restore and discard for good a revert
+   * from a user message, and `session.revert.open` opens the diff of a file the revert undid.
    * Phase 3: `permission.reply`, `form.reply` and `form.cancel` call the server (a reply that fails
    * because the request is gone also resyncs, since the snapshot tells the truth);
    * `permissions.manage` runs the saved-permissions manager; `server.restart` and `logs.show` go
@@ -2124,6 +2395,18 @@ export class ChatController {
       },
       'session.diff.open': (m) => {
         pending.push(this.openChangedFile(m.sessionID, m.path));
+      },
+      'session.revert.stage': (m) => {
+        pending.push(this.stageRevert(m));
+      },
+      'session.revert.clear': (m) => {
+        pending.push(this.clearRevert(m));
+      },
+      'session.revert.commit': (m) => {
+        pending.push(this.commitRevert(m));
+      },
+      'session.revert.open': (m) => {
+        pending.push(this.openRevertedFile(m.sessionID, m.path));
       },
       'editor.insert': (m) => {
         pending.push(this.editorAction(m.type, () => this.deps.editor.insert(m.text)));
@@ -2469,7 +2752,11 @@ export class ChatController {
           await this.applySelection(client, sessionID, model, agent);
         }
       }
-      await client.session.prompt({
+      // Issue #32: a prompt sent with a revert prepared makes the server COMMIT it (`session.ts`
+      // @843a6c51 L164-165), without asking; the banner says so. The host forgets the revert as
+      // soon as the prompt is accepted (the event does it too).
+      const committing = this.reverts.boundary(sessionID) !== undefined;
+      const admitted = await client.session.prompt({
         sessionID,
         text: message.text,
         delivery: message.delivery,
@@ -2486,7 +2773,8 @@ export class ChatController {
             }
           : {}),
       });
-      this.log.info(`prompt accepted for ${sessionID}`);
+      this.log.info(`prompt accepted for ${sessionID} (input ${admitted.id})`);
+      if (committing) this.afterCommit(sessionID);
       this.result(requestId);
       if (model !== undefined) await this.rememberModel(model);
     } catch (error) {

@@ -13,7 +13,9 @@
  * tag v2.0.32, read with `gh api` on 22/10/2026): the LAST assistant message that has token usage
  * and was created after the last completed compaction; context = input + output + reasoning +
  * cache read + cache write; percent = context / the context limit of THAT message's model. The
- * revert boundary of upstream is left out (no revert yet, issue #32 must add it: UNVERIFIED).
+ * revert boundary of upstream is applied by the CALLER (issue #32): `UsageIndicator.tsx` passes the
+ * messages without the ones a prepared revert hides (`splitAtRevert`), so this function sees only
+ * what the model will see.
  * Differences that are ours: a message whose total is 0 (a step that failed before the model
  * answered) is skipped instead of hiding the line, and the 80 % "high" level is our own threshold.
  */

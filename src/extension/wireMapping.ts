@@ -98,6 +98,16 @@ function stringField(record: Record<string, unknown>, key: string): string | und
 }
 
 /**
+ * Words for the server errors that arrive without a `message`. Only the ones a user can meet:
+ * `SessionBusyError` (stage, clear and commit of a revert while a turn runs, observed with a real
+ * opencode 2.0.32 on 23/10/2026) and `MessageNotFoundError` (stage from an unknown id). Our text.
+ */
+const TAG_MESSAGES: Readonly<Record<string, string>> = {
+  SessionBusyError: 'The session is busy with a turn. Try again when it has finished.',
+  MessageNotFoundError: 'That message no longer exists.',
+};
+
+/**
  * Turns anything thrown by the client, or a structured error from an event, into an
  * {@link ErrorInfo} that is safe to show.
  *
@@ -109,6 +119,9 @@ function stringField(record: Record<string, unknown>, key: string): string | und
  * {@link sanitizeText}. The `_tag` and `type` shapes were seen on a real opencode 2.0.32
  * (`SessionNotFoundError`, `provider.no-route`; Windows 11, 2026-10-20); the `ClientError` shape
  * is read from `client-error.d.ts` only (HYPOTHESIS for its text in a real failure).
+ * A body with a `_tag` and NO `message` keeps its code and gets the text of {@link TAG_MESSAGES}
+ * (or the tag itself): the real `SessionBusyError` of opencode 2.0.32 is `{ _tag, sessionID, name }`
+ * with no `message` (issue #32 spike, Windows 11, 23/10/2026), and the user would read "Unknown error".
  */
 export function toErrorInfo(error: unknown, secrets: ErrorSecrets): ErrorInfo {
   const clean = (text: string): string => sanitizeText(text, secrets);
@@ -126,6 +139,8 @@ export function toErrorInfo(error: unknown, secrets: ErrorSecrets): ErrorInfo {
     const message = stringField(error, 'message');
     const code = stringField(error, '_tag') ?? stringField(error, 'type');
     if (message !== undefined) return { code: code ?? 'Unknown', message: clean(message) };
+    const tag = stringField(error, '_tag');
+    if (tag !== undefined) return { code: tag, message: clean(TAG_MESSAGES[tag] ?? tag) };
   }
   return { code: 'Unknown', message: clean(typeof error === 'string' ? error : 'Unknown error') };
 }

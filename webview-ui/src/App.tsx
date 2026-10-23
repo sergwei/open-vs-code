@@ -1,5 +1,7 @@
 import { createEffect, createMemo, createSignal, on, onCleanup, Show, untrack } from 'solid-js';
 import type { AttachmentRef } from '../../src/shared/protocol';
+import { RevertBanner } from './changes/RevertBanner';
+import { splitAtRevert } from './changes/revertView';
 import { EmptyState } from './chat/EmptyState';
 import { Header } from './chat/Header';
 import { HostContext, type SendToHost } from './chat/hostContext';
@@ -44,6 +46,13 @@ interface LastSend {
 
 /** What the last `session.fork` carried: the text (and known files) to refill the prompt with. */
 interface LastFork {
+  requestId: string;
+  text: string;
+  files: AttachmentRef[];
+}
+
+/** What the last `session.revert.stage` carried: the text (and known files) to refill the prompt with. */
+interface LastRevert {
   requestId: string;
   text: string;
   files: AttachmentRef[];
@@ -103,6 +112,17 @@ interface LastFork {
  * Issue #31: the header shows the "Changed files" list of the open session, and `openChangedFile`
  * turns a click on a row into `session.diff.open` for the open session (no `requestId`).
  *
+ * Issue #32 (decisions of Sergio, 23/10/2026, Engram #1174): "Revert from here" on user messages
+ * asks the host to prepare a revert (`revertFrom`, `session.revert.stage`); while one is prepared
+ * the conversation is drawn WITHOUT the messages from its boundary on (`splitAtRevert`; the store
+ * keeps them, so Restore is instant) and the {@link RevertBanner} sits between the conversation
+ * and the request dock with the files it changed and two buttons: Restore (`session.revert.clear`)
+ * and Discard for good (`session.revert.commit`, which the HOST confirms with a native modal).
+ * Retry, the activity line and the context indicator read the visible messages, not the hidden
+ * ones. When the stage succeeds the prompt is refilled with the text of that message, ONLY if the
+ * draft is empty (the same rule as the fork), and gets the focus. While a revert request is in
+ * flight, or the session is busy, the revert buttons are `aria-disabled`.
+ *
  * Decisions: Send is disabled while the session is busy and Stop takes its place (plan decision
  * 6; `steer`/`queue` while busy is not offered); every prompt goes with `delivery: 'queue'`;
  * Retry resends the text of the last user message of the open session, with the attachments of
@@ -132,10 +152,17 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   let focusInput: (() => void) | undefined;
   let lastSend: LastSend | undefined;
   const [lastFork, setLastFork] = createSignal<LastFork | undefined>(undefined);
+  const [lastRevert, setLastRevert] = createSignal<LastRevert | undefined>(undefined);
+  /** `requestId` of a clear or commit in flight (the stage has its own, in `lastRevert`). */
+  const [revertRequest, setRevertRequest] = createSignal<string | undefined>(undefined);
   let stopRequested = false;
   let announcementFlip = false;
   /** Every file picked in this document, to validate what Retry may re-attach. */
   const knownFiles = new Map<string, AttachmentRef>();
+
+  // The conversation without the messages a prepared revert hides (issue #32).
+  const split = createMemo(() => splitAtRevert(state.open.messages, state.open.revert));
+  const messages = () => split().visible;
 
   const status = () =>
     state.open.sessionID === undefined ? undefined : state.statuses[state.open.sessionID];
@@ -150,8 +177,9 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
    * until the new assistant message exists, so the activity then falls back to the session status.
    */
   const lastAssistantParts = () => {
-    for (let index = state.open.messages.length - 1; index >= 0; index--) {
-      const message = state.open.messages[index];
+    const shown = messages();
+    for (let index = shown.length - 1; index >= 0; index--) {
+      const message = shown[index];
       if (message?.kind === 'user') return [];
       if (message?.kind === 'assistant') return state.open.parts[message.id] ?? [];
     }
@@ -161,15 +189,17 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     deriveActivity(state.connection, status(), lastAssistantParts()),
   );
   const lastUser = () => {
-    for (let index = state.open.messages.length - 1; index >= 0; index--) {
-      const message = state.open.messages[index];
+    const shown = messages();
+    for (let index = shown.length - 1; index >= 0; index--) {
+      const message = shown[index];
       if (message?.kind === 'user') return message;
     }
     return undefined;
   };
   /** True when the newest message is an assistant message with its own error (it has a Retry). */
   const lastMessageHasError = () => {
-    const message = state.open.messages[state.open.messages.length - 1];
+    const shown = messages();
+    const message = shown[shown.length - 1];
     return message?.kind === 'assistant' && message.error !== undefined;
   };
   const connected = () => state.connection.state === 'connected';
@@ -248,6 +278,43 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       setDraft(fork.text);
       props.store.addDraftFiles(fork.files);
     }
+    focusInput?.();
+  });
+
+  /**
+   * True while a revert request waits for the host, when the session is busy (the server refuses
+   * a revert then) or when there is no host to ask. Reads `pending` so it stays reactive.
+   */
+  const revertDisabled = () => {
+    const inFlight = lastRevert()?.requestId ?? revertRequest();
+    return !connected() || busy() || (inFlight !== undefined && state.pending.includes(inFlight));
+  };
+
+  // A prepared revert gives the text of its message back to the prompt (only an empty draft) and
+  // focuses it. Reads `pending` and `notices` BEFORE the early return, like the fork effect.
+  createEffect(() => {
+    const pending = state.pending.slice();
+    const notices = state.notices.slice();
+    const revert = lastRevert();
+    if (revert === undefined || pending.includes(revert.requestId)) return;
+    setLastRevert(undefined);
+    if (notices.some((notice) => notice.requestId === revert.requestId)) return;
+    if (untrack(draft).trim() === '') {
+      setDraft(revert.text);
+      props.store.addDraftFiles(revert.files);
+    }
+    focusInput?.();
+  });
+
+  // A finished Restore or Discard for good (no notice) focuses the prompt: the button that had the
+  // focus lives in the banner, which unmounts when the revert goes away. Same reads as above.
+  createEffect(() => {
+    const pending = state.pending.slice();
+    const notices = state.notices.slice();
+    const requestId = revertRequest();
+    if (requestId === undefined || pending.includes(requestId)) return;
+    setRevertRequest(undefined);
+    if (notices.some((notice) => notice.requestId === requestId)) return;
     focusInput?.();
   });
 
@@ -418,6 +485,50 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     props.send({ type: 'session.fork', requestId, sessionID, messageID: message.id });
   };
 
+  /**
+   * Asks the host to prepare a revert from `message` (a user message): the history from it on is
+   * hidden and the files the agent touched after it are put back on disk. The text and the known
+   * attachments of the message are kept to refill the prompt once the host answers (see the effect
+   * above). Does nothing without an open session or while {@link revertDisabled}.
+   */
+  const revertFrom = (message: UserMessage): void => {
+    const sessionID = state.open.sessionID;
+    if (sessionID === undefined || revertDisabled()) return;
+    const files: AttachmentRef[] = [];
+    for (const file of message.files) {
+      const known = file.uri === undefined ? undefined : knownFiles.get(file.uri);
+      if (known !== undefined) files.push(known);
+    }
+    const requestId = nextRequestId();
+    // `begin` BEFORE `setLastRevert`, for the reason given in `forkFrom`.
+    props.store.begin(requestId);
+    setLastRevert({ requestId, text: message.text, files });
+    props.send({ type: 'session.revert.stage', requestId, sessionID, messageID: message.id });
+  };
+
+  /**
+   * "Restore" or "Discard for good" of the revert block: one request, the host does the rest.
+   * When it finishes without a notice the prompt gets the focus (see the effect above), because
+   * the banner that held it disappears. Cancelling the "Discard for good" modal also finishes
+   * without a notice, so the focus moves to the prompt while the block stays: accepted, harmless
+   * (review-2 of E7-message-revert). Does nothing while {@link revertDisabled}.
+   */
+  const finishRevert = (type: 'session.revert.clear' | 'session.revert.commit'): void => {
+    const sessionID = state.open.sessionID;
+    if (sessionID === undefined || revertDisabled()) return;
+    const requestId = nextRequestId();
+    props.store.begin(requestId);
+    setRevertRequest(requestId);
+    props.send({ type, requestId, sessionID });
+  };
+
+  /** Opens the diff of what the revert undid in one file of the revert block. */
+  const openRevertedFile = (path: string): void => {
+    const sessionID = state.open.sessionID;
+    if (sessionID === undefined) return;
+    props.send({ type: 'session.revert.open', sessionID, path });
+  };
+
   /** Opens a session chosen in the session list (the same message the request dock uses). */
   const openSession = (sessionID: string): void => {
     const requestId = nextRequestId();
@@ -460,18 +571,37 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
           >
             <MessageList
               open={state.open}
+              messages={messages()}
               catalog={state.catalog}
               resolutions={state.resolutions}
               requests={state.requests}
               busy={busy()}
               canRetry={lastUser() !== undefined}
               forkDisabled={forkDisabled()}
+              revertDisabled={revertDisabled()}
               onRetry={retry}
               onFork={forkFrom}
+              onRevert={revertFrom}
               onOpenSession={openSession}
             />
           </Show>
         </main>
+        <Show when={state.open.revert}>
+          {(revert) => (
+            <RevertBanner
+              revert={revert()}
+              split={split()}
+              disabled={revertDisabled()}
+              onRestore={() => {
+                finishRevert('session.revert.clear');
+              }}
+              onDiscard={() => {
+                finishRevert('session.revert.commit');
+              }}
+              onOpenFile={openRevertedFile}
+            />
+          )}
+        </Show>
         <RequestDock
           store={props.store}
           typing={draft().trim() !== ''}

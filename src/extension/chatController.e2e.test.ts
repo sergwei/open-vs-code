@@ -111,7 +111,7 @@ async function boot(
       },
     },
     savedPermissions: { pickToRevoke: () => Promise.resolve([]) },
-    sessions: { confirmDelete },
+    sessions: { confirmDelete, confirmRevertDiscard: () => Promise.resolve(true) },
     preferences: {
       defaultModel: () => undefined,
       lastModel: () => lastModel,
@@ -1526,10 +1526,38 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     const lists = () => posted.flatMap((m) => (m.type === 'session.diff' ? [m] : []));
     await waitUntil(() => lists().length >= 1, 'the changed files');
     expect(lists()[0]?.files).toEqual([
-      { path: 'assets/logo.png', status: 'added', additions: 0, deletions: 0, binary: true },
-      { path: 'src/added.ts', status: 'added', additions: 1, deletions: 0, binary: false },
-      { path: 'src/removed.ts', status: 'deleted', additions: 0, deletions: 1, binary: false },
-      { path: 'src/sample.ts', status: 'modified', additions: 1, deletions: 1, binary: false },
+      {
+        path: 'assets/logo.png',
+        status: 'added',
+        additions: 0,
+        deletions: 0,
+        binary: true,
+        tooLarge: false,
+      },
+      {
+        path: 'src/added.ts',
+        status: 'added',
+        additions: 1,
+        deletions: 0,
+        binary: false,
+        tooLarge: false,
+      },
+      {
+        path: 'src/removed.ts',
+        status: 'deleted',
+        additions: 0,
+        deletions: 1,
+        binary: false,
+        tooLarge: false,
+      },
+      {
+        path: 'src/sample.ts',
+        status: 'modified',
+        additions: 1,
+        deletions: 1,
+        binary: false,
+        tooLarge: false,
+      },
     ]);
 
     const sessionID = lists()[0]?.sessionID ?? '';
@@ -1557,5 +1585,92 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     expect(await controller.diffOriginal(sessionID, 'src/sample.ts')).toBe(
       '// Sample file for the visual test run.\nexport const value2 = 2;\n',
     );
+  }, 30_000);
+
+  // E7-message-revert (#32). What can break only over HTTP: the routes and bodies the real client
+  // builds (`POST /revert/stage` with `{messageID}`, `DELETE /revert`, `POST /revert/commit`), the
+  // `GET /message/:id` the host checks first, the `session.revert.*` events through the stream and
+  // the `revert` field of the session row in the snapshot. The fixture's revert model is SYNTHETIC
+  // (read from the server, files invented); a pass proves our wiring, not the real server.
+  it('stages, restores and discards a revert over HTTP', async () => {
+    const { controller, posted, state } = await boot('ok');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'r1',
+      text: 'EDIT_FILES first turn',
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn',
+    );
+    const reverts = () => posted.flatMap((m) => (m.type === 'session.revert' ? [m] : []));
+    const results = (requestId: string) =>
+      posted.flatMap((m) => (m.type === 'request.result' && m.requestId === requestId ? [m] : []));
+    const user = posted.find((m) => m.type === 'message.upserted' && m.message.kind === 'user');
+    if (user?.type !== 'message.upserted') throw new Error('no user message was streamed');
+    const sessionID = user.sessionID;
+    const messageID = user.message.id;
+
+    // A message that is not a user one is refused by the host before the server is asked.
+    const assistant = posted.find(
+      (m) => m.type === 'message.upserted' && m.message.kind === 'assistant',
+    );
+    if (assistant?.type !== 'message.upserted') throw new Error('no assistant message');
+    await controller.handle({
+      type: 'session.revert.stage',
+      requestId: 'r2',
+      sessionID,
+      messageID: assistant.message.id,
+    });
+    expect(results('r2')[0]?.error?.code).toBe('NotAUserMessage');
+    expect(reverts()).toEqual([]);
+
+    await controller.handle({
+      type: 'session.revert.stage',
+      requestId: 'r3',
+      sessionID,
+      messageID,
+    });
+    expect(results('r3')).toEqual([{ type: 'request.result', requestId: 'r3' }]);
+    await waitUntil(() => reverts().length >= 1, 'the staged revert');
+    expect(reverts()[0]?.revert?.messageID).toBe(messageID);
+    expect(reverts()[0]?.revert?.files.map((file) => file.path)).toEqual([
+      'assets/logo.png',
+      'src/added.ts',
+      'src/removed.ts',
+      'src/sample.ts',
+    ]);
+    // The stream's own `session.revert.staged` carries the same state and is not repeated.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(reverts()).toHaveLength(1);
+
+    await controller.handle({ type: 'session.revert.clear', requestId: 'r4', sessionID });
+    expect(results('r4')).toEqual([{ type: 'request.result', requestId: 'r4' }]);
+    await waitUntil(() => reverts().length >= 2, 'the cleared revert');
+    expect(reverts()[1]).toEqual({ type: 'session.revert', sessionID });
+
+    await controller.handle({
+      type: 'session.revert.stage',
+      requestId: 'r5',
+      sessionID,
+      messageID,
+    });
+    await waitUntil(() => reverts().length >= 3, 'the second staged revert');
+    const snapshotsBefore = posted.filter((m) => m.type === 'snapshot').length;
+    await controller.handle({ type: 'session.revert.commit', requestId: 'r6', sessionID });
+    expect(results('r6')).toEqual([{ type: 'request.result', requestId: 'r6' }]);
+    await waitUntil(
+      () => posted.filter((m) => m.type === 'snapshot').length > snapshotsBefore,
+      'the snapshot after the commit',
+    );
+    const last = posted.filter((m) => m.type === 'snapshot').at(-1);
+    // The history from the boundary on is gone, and the webview learns it from the snapshot alone.
+    expect(last?.type === 'snapshot' ? last.snapshot.open?.messages : undefined).toEqual([]);
+    expect(last?.type === 'snapshot' ? last.snapshot.open?.revert : 'missing').toBeUndefined();
+    expect(reverts()).toHaveLength(3);
   }, 30_000);
 });
