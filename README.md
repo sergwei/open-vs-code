@@ -46,7 +46,9 @@ affiliated with opencode or with Microsoft.
 - **Revert from a message:** "Revert from here" on one of your messages undoes that turn and
   everything after it, files included, and hides those messages. A block under the conversation
   lists the files it restored, "Restore" brings everything back and "Discard for good" deletes the
-  hidden messages. Sending a new message also makes the revert final.
+  hidden messages. Sending a new message also makes the revert final. The revert also replaces
+  edits you made by hand to those files after the reverted turns touched them: "Restore" brings them back
+  (but drops what you edited while reverted), and once the revert is final they are gone.
 - **Themes and accessibility:** light, dark and high-contrast, keyboard navigation and screen
   reader labels. Colors come from your VS Code theme.
 
