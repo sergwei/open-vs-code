@@ -1,6 +1,7 @@
 import { createEffect, createSignal, For, on, Show, type JSX } from 'solid-js';
 import type { AttachmentRef } from '../../../src/shared/protocol';
 import { AttachmentOpenButton } from './AttachmentOpenButton';
+import { hasDropPayload, imagesOf, readDrop, type DropContent } from './dropData';
 import { applyMention, findMention, type MentionToken } from './mentionQuery';
 import { MentionPopup, mentionStatus, optionId, type FileSearchView } from './MentionPopup';
 import type { PromptHistory } from './promptHistory';
@@ -66,6 +67,22 @@ export function nextRequestId(): string {
  * `aria-activedescendant` only while the popup is open; a visually hidden live region announces
  * the number of results.
  *
+ * Issue #30, drop and paste. The form accepts a drag that carries files (`hasDropPayload`: a dragged
+ * text selection is left to the browser), cancels `dragenter` and `dragover`, shows the hint "Hold
+ * Shift to drop files from the Explorer" with `data-drop="active"` while it is over, and on `drop`
+ * hands `readDrop(...)` to the parent. VS Code only delivers a drop to a sidebar webview with
+ * Shift held (`WebviewWindowDragMonitor`, read in 1.105.0), and from 1.140 not at all
+ * (microsoft/vscode#339036); the same hint is the tooltip of Attach. A paste with image files
+ * (`imagesOf`) is cancelled and handed to `onPasteImages`; a text paste is left native. Chips of
+ * pasted images show a thumbnail from `thumbs`.
+ * VERIFIED on Windows 11, VS Code 1.143.1 (23/10/2026, `test:visual` step 20, a real Ctrl+V with
+ * a PNG on the system clipboard): the paste event of the page listed `["file:image/png"]`, and the
+ * checks "the chip shows a thumbnail that loaded (blob: allowed by the CSP)" and "a text paste
+ * writes text and adds no chip" passed. The drag events are only unit-tested with fabricated
+ * events plus untrusted synthetic ones in that step: a real drag from the Explorer was NOT
+ * observed (it is not delivered to webviews in 1.140+, microsoft/vscode#339036, not reproduced
+ * here either), and neither was macOS or Linux.
+ *
  * Add selection (issue #29, decision Q2): a separate button; it only calls `onAddSelection`, and
  * is `aria-disabled` (not `disabled`, so it keeps the focus) without a connection. The name of a
  * chip is a button that opens the file ({@link AttachmentOpenButton}).
@@ -102,6 +119,12 @@ export function PromptInput(props: {
   onAttach(): void;
   onAddSelection(): void;
   onRemoveFile(uri: string): void;
+  /** Issue #30: something was dropped on the box; the parent decides what to do with each kind. */
+  onDrop(content: DropContent): void;
+  /** Issue #30: a paste carried images (and then nothing is written in the textarea). */
+  onPasteImages(files: File[]): void;
+  /** Thumbnails (`blob:` URLs the webview made itself) of the pasted-image chips, by `uri`. */
+  thumbs: Readonly<Record<string, string>>;
   onFocusReady?(focus: () => void): void;
   /**
    * The agent and model selectors (issues #23/#24), drawn at the start of the action row. They are
@@ -303,20 +326,54 @@ export function PromptInput(props: {
     }
   };
 
+  /** True while a drag with something attachable is over the box (issue #30). */
+  const [dropActive, setDropActive] = createSignal(false);
+
+  /** Accepts a drag over the box when it carries files; a dragged text selection is left alone. */
+  const onDragOver = (event: DragEvent): void => {
+    const transfer = event.dataTransfer;
+    if (transfer === null || !hasDropPayload(Array.from(transfer.types))) return;
+    // Cancelling `dragenter` as well keeps VS Code's webview script from asking the workbench to
+    // block the drop (F1 of the plan, read in `pre/index.html` of VS Code 1.105.0).
+    event.preventDefault();
+    transfer.dropEffect = 'copy';
+    setDropActive(true);
+  };
+
   return (
     <form
       class="prompt"
       aria-label="Send a message"
+      data-drop={dropActive() ? 'active' : undefined}
       onSubmit={(event) => {
         event.preventDefault();
         submit();
       }}
+      onDragEnter={onDragOver}
+      onDragOver={onDragOver}
+      onDragLeave={(event) => {
+        const next = event.relatedTarget;
+        if (!(next instanceof Node) || !event.currentTarget.contains(next)) setDropActive(false);
+      }}
+      onDrop={(event) => {
+        const transfer = event.dataTransfer;
+        setDropActive(false);
+        if (transfer === null || !hasDropPayload(Array.from(transfer.types))) return;
+        event.preventDefault();
+        props.onDrop(readDrop(transfer));
+      }}
     >
+      <Show when={dropActive()}>
+        <p class="drop-hint">Hold Shift to drop files from the Explorer</p>
+      </Show>
       <Show when={props.files.length > 0}>
         <ul class="chips" aria-label="Attached files">
           <For each={props.files}>
             {(file) => (
               <li class="chip">
+                <Show when={props.thumbs[file.uri]}>
+                  {(src) => <img class="chip-thumb" src={src()} alt="" />}
+                </Show>
                 <AttachmentOpenButton name={file.name} uri={file.uri} />
                 <button
                   type="button"
@@ -363,6 +420,12 @@ export function PromptInput(props: {
           applyToken(findMention(field.value, field.selectionStart));
         }}
         onKeyDown={onKeyDown}
+        onPaste={(event) => {
+          const images = imagesOf(event.clipboardData?.items ?? []);
+          if (images.length === 0) return; // text: the browser writes it as usual
+          event.preventDefault();
+          props.onPasteImages(images);
+        }}
         onKeyUp={(event) => {
           refreshToken(event.currentTarget);
         }}
@@ -391,6 +454,7 @@ export function PromptInput(props: {
           type="button"
           class="secondary"
           disabled={props.attachDisabled}
+          title="Hold Shift to drop files from the Explorer"
           onClick={() => props.onAttach()}
         >
           Attach

@@ -1435,6 +1435,31 @@ button.secondary:hover:not(:disabled),
   padding: 4px 6px;
 }
 
+/* Issue #30: a drag with files is over the box. Colours only from the theme; the border is the
+   focus border, and in high contrast the contrast border. */
+.prompt[data-drop='active'] {
+  outline: 2px dashed var(--vscode-focusBorder);
+  outline-offset: 2px;
+  background: var(--vscode-list-dropBackground);
+}
+
+[class*='vscode-high-contrast'] .prompt[data-drop='active'] {
+  outline-color: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+}
+
+.drop-hint {
+  margin: 0;
+  color: var(--vscode-foreground);
+}
+
+/* The thumbnail of a pasted image on its chip (issue #30). */
+.chip-thumb {
+  width: 18px;
+  height: 18px;
+  object-fit: cover;
+  border-radius: 2px;
+}
+
 .prompt-text::placeholder {
   color: var(--vscode-input-placeholderForeground);
 }

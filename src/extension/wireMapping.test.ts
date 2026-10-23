@@ -66,7 +66,22 @@ describe('catalog mapping', () => {
       contextLimit: 200000,
       free: true,
       variants: ['low', 'high', 'max'],
+      images: false,
     });
+  });
+
+  // Issue #30. The wire JSON is hand-made in the shape of `ModelInfo.capabilities` (client types
+  // of 2.0.32); only the fake server was seen to serve it, no real catalog was read for it.
+  it('reads images from capabilities.input', () => {
+    const withInput = (input: string): ModelInfo =>
+      wire<ModelInfo>(`{
+        "id": "m", "modelID": "m", "providerID": "p", "name": "M",
+        "capabilities": {"tools": true, "input": ${input}, "output": []},
+        "variants": [], "time": {"released": 1}, "cost": [], "status": "active", "enabled": true,
+        "limit": {"context": 1, "output": 1}
+      }`);
+    expect(toModelOption(withInput('["text","image"]')).images).toBe(true);
+    expect(toModelOption(withInput('["text"]')).images).toBe(false);
   });
 
   it('is free only when EVERY cost entry is zero, and never with no cost entry at all', () => {

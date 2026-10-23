@@ -38,6 +38,7 @@ const option = (
   contextLimit: 200000,
   free: true,
   variants: [],
+  images: true,
   ...extra,
 });
 

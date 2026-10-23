@@ -62,6 +62,7 @@ import {
   type EditorContext,
   type SavedPermission,
 } from './chatController';
+import type { DroppedFiles } from './chatController';
 import type { EventStreamOptions } from './eventStream';
 import type { ChatApi } from './opencodeClient';
 import type { PendingSummary } from './pendingRequests';
@@ -540,6 +541,7 @@ function fakeEditor(
     picked?: AttachmentRef[];
     context?: EditorContext;
     diffOutcome?: 'diff' | 'file';
+    dropped?: DroppedFiles;
   } = {},
 ) {
   const calls: unknown[][] = [];
@@ -562,6 +564,16 @@ function fakeEditor(
       return options.failWith === undefined
         ? Promise.resolve(options.picked ?? [])
         : Promise.reject(options.failWith);
+    },
+    droppedFiles: (folder, uris) => {
+      calls.push(['droppedFiles', folder, uris]);
+      if (options.failWith !== undefined) return Promise.reject(options.failWith);
+      return Promise.resolve(
+        options.dropped ?? {
+          refs: [],
+          skipped: { folders: 0, outside: 0, remote: 0, missing: 0 },
+        },
+      );
     },
     openDiff: (target) => {
       calls.push(['openDiff', target]);
@@ -590,6 +602,8 @@ function setup(
   const confirmations: Array<{ title: string; running: boolean }> = [];
   let discardAsked = 0;
   const posted: HostToWebview[] = [];
+  /** Whether the chat view can take a post; a test sets `ready` false to model a hidden view. */
+  const view = { ready: true };
   const logs: string[] = [];
   const memoryWrites: Array<{ folder: string; id: string | undefined }> = [];
   const stored = new Map<string, string>();
@@ -619,6 +633,7 @@ function setup(
     createClient: () => api,
     editor,
     post: (message) => posted.push(message),
+    webviewReady: () => view.ready,
     log: {
       info: (m) => logs.push(`info: ${m}`),
       warn: (m) => logs.push(`warn: ${m}`),
@@ -676,6 +691,7 @@ function setup(
   return {
     controller,
     posted,
+    view,
     logs,
     memoryWrites,
     streams,
@@ -1539,6 +1555,204 @@ describe('file mentions and editor context (issues #28/#29)', () => {
       sendWith([{ ...file, mention: { start: 0, end: 9, text: '@src/a.ts' } }], text),
     );
     expect(prompts.map((prompt) => prompt.files)).toEqual([[{ ...file, mention }], [file]]);
+  });
+
+  // Issue #30, decisions Q1/Q2 of Sergio. Fake editor and fake `file.find`: they pin what the
+  // controller does with a drop, not what a real VS Code puts in `resourceurls`.
+  describe('dropped files and pasted images (issue #30)', () => {
+    const A = { uri: 'file:///C:/work/src/a.ts', name: 'src/a.ts' };
+    const IGNORED = { uri: 'file:///C:/work/.env', name: '.env' };
+    const skipped = { folders: 1, outside: 1, remote: 0, missing: 0 };
+    const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]).toString('base64');
+    const drop = (uris: string[]) => ({ type: 'attachments.drop', requestId: 'd1', uris }) as const;
+
+    it('whitelists only the files the server also lists, and warns once with the count', async () => {
+      const { editor, calls } = fakeEditor({
+        dropped: { refs: [A, IGNORED], skipped },
+      });
+      const { api, prompts } = fakeApi({
+        findImpl: (input) =>
+          Promise.resolve(input.query === 'src/a.ts' ? found('src/a.ts') : found()),
+      });
+      const { controller, posted, logs } = setup(api, 'ses_old', editor);
+      controller.onServerState(RUNNING);
+      await controller.handle(drop(['file:///c%3A/work/src/a.ts', 'file:///c%3A/work/.env']));
+      expect(calls[0]?.[0]).toBe('droppedFiles');
+      expect(posted).toContainEqual({ type: 'attachments.picked', requestId: 'd1', files: [A] });
+      expect(posted).toContainEqual({
+        type: 'notice',
+        level: 'warning',
+        error: {
+          code: 'DroppedItemsSkipped',
+          message:
+            '3 dropped items were not added: folders, ignored files and files outside the workspace folder cannot be attached',
+        },
+      });
+      expect(logs).toContain(
+        'info: dropped files added: 1, skipped: 3 (1 folder(s), 1 outside, 0 remote, 0 missing, 1 ignored)',
+      );
+      expect(logs.join(' | ')).not.toContain('a.ts');
+      await controller.handle(sendWith([A]));
+      await controller.handle({ ...sendWith([IGNORED]), requestId: 'r2' });
+      expect(prompts).toHaveLength(1);
+      expect(posted.at(-1)).toMatchObject({ error: { code: 'AttachmentRejected' } });
+    });
+
+    it('refuses a drop with no server to verify against, and skips the check for the menu command', async () => {
+      const { editor } = fakeEditor({
+        dropped: { refs: [A], skipped: { ...skipped, folders: 0, outside: 0 } },
+      });
+      const { api, finds } = fakeApi();
+      const { controller, posted } = setup(api, 'ses_old', editor);
+      await controller.handle(drop(['file:///c%3A/work/src/a.ts']));
+      const results = posted.filter((message) => message.type === 'request.result');
+      expect(results).toHaveLength(1);
+      expect(results[0]).toHaveProperty('error');
+      expect(posted.map((message) => message.type)).not.toContain('attachments.picked');
+      controller.onServerState(RUNNING);
+      await controller.addToChat(['file:///c%3A/work/src/a.ts']);
+      expect(finds).toEqual([]);
+      expect(posted).toContainEqual({
+        type: 'attachments.picked',
+        requestId: 'menu-1',
+        files: [A],
+      });
+    });
+
+    it('answers a drop with no folder through request.result', async () => {
+      const failure = Object.assign(
+        new Error('Only files inside the workspace folder can be added'),
+        {
+          name: 'OutsideWorkspace',
+        },
+      );
+      const { editor } = fakeEditor({ failWith: failure });
+      const { controller, posted } = setup(fakeApi().api, undefined, editor);
+      controller.onServerState(RUNNING);
+      await controller.handle(drop(['file:///c%3A/other/a.ts']));
+      expect(posted.at(-1)).toMatchObject({ error: { code: 'OutsideWorkspace' } });
+      expect(posted.map((m) => m.type)).not.toContain('attachments.picked');
+    });
+
+    it('keeps a pasted image in memory and sends it as a data URL without a mention', async () => {
+      const { api, prompts } = fakeApi();
+      const { controller, posted, logs } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      await controller.handle({
+        type: 'attachments.image',
+        requestId: 'i1',
+        mime: 'image/png',
+        data: PNG,
+      });
+      const ref = { uri: 'pasted-image:1', name: 'Pasted image 1' };
+      expect(posted.slice(-2)).toEqual([
+        { type: 'attachments.picked', requestId: 'i1', files: [ref] },
+        { type: 'request.result', requestId: 'i1' },
+      ]);
+      expect(logs).toContain('info: image added: image/png, 0 KiB');
+      await controller.handle(sendWith([ref]));
+      expect(prompts[0]?.files).toEqual([
+        { uri: `data:image/png;base64,${PNG}`, name: 'Pasted image 1' },
+      ]);
+      // Accepted: the host forgot it, so a second send of the same chip is refused.
+      await controller.handle({ ...sendWith([ref]), requestId: 'r2' });
+      expect(prompts).toHaveLength(1);
+      expect(posted.at(-1)).toMatchObject({ error: { code: 'AttachmentRejected' } });
+    });
+
+    // Review of 23/10/2026 (B2): with the chat hidden the provider drops every post, so the chips of
+    // the Explorer command were lost. Fake `view.ready`: it models the provider's condition.
+    it('keeps the Explorer command chips for a hidden chat and delivers them after the next ready', async () => {
+      const { editor } = fakeEditor({
+        dropped: { refs: [A], skipped: { ...skipped, folders: 0, outside: 0 } },
+      });
+      const { controller, posted, view } = setup(fakeApi().api, 'ses_old', editor);
+      controller.onServerState(RUNNING);
+      view.ready = false;
+      await controller.addToChat(['file:///c%3A/work/src/a.ts']);
+      expect(posted.map((m) => m.type)).not.toContain('attachments.picked');
+      view.ready = true;
+      await controller.onWebviewReady();
+      const types = posted.map((m) => m.type);
+      expect(posted.at(-1)).toEqual({
+        type: 'attachments.picked',
+        requestId: 'menu-1',
+        files: [A],
+      });
+      expect(types.indexOf('snapshot')).toBeLessThan(types.indexOf('attachments.picked'));
+      // Delivered once: a later ready does not bring the chip back.
+      const before = posted.length;
+      await controller.onWebviewReady();
+      expect(posted.slice(before).map((m) => m.type)).not.toContain('attachments.picked');
+    });
+
+    // Review-2 of 23/10/2026 (W7): the view can hide again during the resync of a `ready`; the kept
+    // chips must wait for the next one instead of being posted into a provider that drops them.
+    it('keeps the Explorer command chips when the chat hides again before they go out', async () => {
+      const { editor } = fakeEditor({
+        dropped: { refs: [A], skipped: { ...skipped, folders: 1, outside: 0 } },
+      });
+      const { controller, posted, view } = setup(fakeApi().api, 'ses_old', editor);
+      controller.onServerState(RUNNING);
+      view.ready = false;
+      await controller.addToChat(['file:///c%3A/work/src/a.ts', 'file:///c%3A/work/src']);
+      // A `ready` arrives but the view is hidden again by the time the kept chips go out.
+      await controller.onWebviewReady();
+      expect(posted.map((m) => m.type)).not.toContain('attachments.picked');
+      view.ready = true;
+      await controller.onWebviewReady();
+      expect(posted.filter((m) => m.type === 'attachments.picked')).toHaveLength(1);
+      // The command has its own notice: it neither drops nor filters ignored files.
+      expect(posted.find((m) => m.type === 'notice')).toMatchObject({
+        error: {
+          code: 'DroppedItemsSkipped',
+          message:
+            '1 selected item was not added: folders and files outside the workspace folder cannot be attached',
+        },
+      });
+    });
+
+    it('frees a pasted image when the webview forgets it, and ignores a uri it never issued', async () => {
+      const { api, prompts } = fakeApi();
+      const { controller, posted } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      await controller.handle({
+        type: 'attachments.image',
+        requestId: 'i1',
+        mime: 'image/png',
+        data: PNG,
+      });
+      const ref = { uri: 'pasted-image:1', name: 'Pasted image 1' };
+      await controller.handle({ type: 'attachments.forget', uri: 'pasted-image:77' });
+      await controller.handle({ type: 'attachments.forget', uri: 'file:///C:/work/src/a.ts' });
+      await controller.handle({ type: 'attachments.forget', uri: ref.uri });
+      await controller.handle(sendWith([ref]));
+      expect(prompts).toHaveLength(0);
+      expect(posted.at(-1)).toMatchObject({ error: { code: 'AttachmentRejected' } });
+    });
+
+    it('refuses an image whose bytes are not the declared type and an invented pasted-image uri', async () => {
+      const { api, prompts } = fakeApi();
+      const { controller, posted } = setup(api, 'ses_old');
+      controller.onServerState(RUNNING);
+      await controller.handle({
+        type: 'attachments.image',
+        requestId: 'i1',
+        mime: 'image/jpeg',
+        data: PNG,
+      });
+      expect(posted.at(-1)).toEqual({
+        type: 'request.result',
+        requestId: 'i1',
+        error: {
+          code: 'UnsupportedImage',
+          message: 'Only PNG, JPEG, GIF and WebP images can be attached',
+        },
+      });
+      await controller.handle(sendWith([{ uri: 'pasted-image:99', name: 'x' }]));
+      expect(prompts).toHaveLength(0);
+      expect(posted.at(-1)).toMatchObject({ error: { code: 'AttachmentRejected' } });
+    });
   });
 
   it('adds the editor context to the whitelist and answers like the file picker', async () => {

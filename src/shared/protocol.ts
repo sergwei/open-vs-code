@@ -54,6 +54,30 @@ export const MAX_FILE_SEARCH_LENGTH = 200;
  */
 export const MAX_DIFF_PATH_LENGTH = 4096;
 
+/** Most items one `attachments.drop` may carry. The TUI's `MAX_PASTED_FILEPATHS` figure (issue #30); our choice. */
+export const MAX_DROPPED_ITEMS = 32;
+
+/** Longest URI of a dropped item (issue #30): PATH_MAX of Linux plus room for the scheme and escapes. Our choice. */
+export const MAX_DROPPED_URI_LENGTH = 4096 + 64;
+
+/**
+ * Largest pasted image the webview and the host accept, in BYTES (issue #30). Our choice: its
+ * base64 is about 13.4 MiB, under the 16 MiB `maxSseEventBytes` of the client (the
+ * `session.inbox.enqueued` event repeats the data), while the server itself would take 20 MiB.
+ */
+export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+/** Longest base64 text of a pasted image: the encoding of {@link MAX_IMAGE_BYTES}. */
+export const MAX_IMAGE_BASE64_LENGTH = 4 * Math.ceil(MAX_IMAGE_BYTES / 3);
+
+/** The image types the model receives as media (`to-llm-message.ts@v2.0.32`; bmp and avif are dropped silently). */
+export const IMAGE_MIMES: readonly string[] = [
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+];
+
 /**
  * File the host emitted: picked in the dialog (`attachments.picked`), taken from the editor
  * (`attachments.picked` after `attachments.fromEditor`) or found by `files.search`
@@ -260,6 +284,16 @@ export type HostToWebview =
  * `request.result` error `OutsideWorkspace`); the answer is `attachments.picked` plus the usual
  * `request.result`. `prompt.send` files may carry a `mention` (see {@link PromptMention}).
  * The host builds every `uri` itself, so the webview can only send back what it was given.
+ * `attachments.drop` (issue #30) carries the URI strings VS Code put in `resourceurls` when the user
+ * dropped files from the Explorer. They are untrusted text, not a gesture the host sees: the host
+ * keeps only regular files of the served folder that `file.find` also lists, and answers with
+ * `attachments.picked`, `request.result` and, for what it dropped, one `notice`.
+ * `attachments.image` (issue #30) carries ONE pasted image as base64 (`mime` is only a claim: the
+ * host detects the type from the bytes). The host keeps the bytes under an opaque
+ * `pasted-image:<n>` `uri` it returns in `attachments.picked`; `prompt.send` echoes that `uri`
+ * and the host puts the data in the prompt, so the bytes never travel twice. `attachments.forget`
+ * (decision of 23/10/2026) tells the host the user removed the chip of that `uri`, so it frees the
+ * image; it has no `requestId` and no answer, and a `uri` the host did not issue is ignored.
  * `session.diff.open` (issue #31) asks the host to open the native diff editor for one row of the
  * "Changed files" list. It has no `requestId`, like `editor.open`: a failure is a `notice`. `path`
  * is the `ChangedFile.path` the host sent; the host opens it only if it listed that path for that
@@ -305,6 +339,9 @@ export type WebviewToHost =
   | { type: 'form.cancel'; requestId: string; sessionID: string; formID: string; message?: string }
   | { type: 'attachments.pick'; requestId: string }
   | { type: 'attachments.fromEditor'; requestId: string }
+  | { type: 'attachments.drop'; requestId: string; uris: string[] }
+  | { type: 'attachments.image'; requestId: string; mime: string; data: string }
+  | { type: 'attachments.forget'; uri: string }
   | { type: 'files.search'; requestId: string; query: string }
   | { type: 'permissions.manage' }
   | { type: 'server.restart' }
@@ -606,6 +643,32 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
     isOptional(field(m, 'message'), isString),
   'attachments.pick': requestOnly,
   'attachments.fromEditor': requestOnly,
+  'attachments.drop': (m) => {
+    const uris = field(m, 'uris');
+    return (
+      isNonEmptyString(field(m, 'requestId')) &&
+      isDenseArray(uris) &&
+      uris.length >= 1 &&
+      uris.length <= MAX_DROPPED_ITEMS &&
+      uris.every(
+        (uri) =>
+          isNonEmptyString(uri) && uri.length <= MAX_DROPPED_URI_LENGTH && !uri.includes('\0'),
+      )
+    );
+  },
+  'attachments.image': (m) => {
+    const data = field(m, 'data');
+    return (
+      isNonEmptyString(field(m, 'requestId')) &&
+      isOneOf(IMAGE_MIMES)(field(m, 'mime')) &&
+      isNonEmptyString(data) &&
+      data.length <= MAX_IMAGE_BASE64_LENGTH
+    );
+  },
+  'attachments.forget': (m) => {
+    const uri = field(m, 'uri');
+    return isNonEmptyString(uri) && uri.length <= MAX_DROPPED_URI_LENGTH;
+  },
   // An empty query has nothing to search for (the server answers `[]` to it anyway), so it is
   // refused here instead of costing a round trip.
   'files.search': (m) => {

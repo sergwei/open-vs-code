@@ -32,6 +32,7 @@ import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
 import { toEditorRef } from '../../src/extension/fileMentions';
 import {
+  ADD_TO_CHAT_COMMAND_ID,
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
   RESTART_SERVER_COMMAND_ID,
@@ -320,6 +321,146 @@ describe('fake server', function () {
     await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
     await sleep(SETTLE_MS);
     log.assertAbsent('rejected: an attachment');
+  });
+
+  /**
+   * A drop is whitelisted only for regular files of the served folder that the server also lists,
+   * and what it refuses is counted in one log line.
+   *
+   * Protects: `attachments.drop` (issue #30) through the real host with a real `vscode.workspace.fs`:
+   * the form `Uri.toString()` gives (`file:///c%3A/...` on Windows, the one VS Code writes in
+   * `resourceurls`), the folder, the outside, the remote and the not-listed counts, and that the
+   * accepted ref then passes the `prompt.send` whitelist. The accepted file is `src/util/helpers.ts`,
+   * which no other case of this host searches, selects or attaches, so the only way its URL
+   * reaches the whitelist is the drop (review of 23/10/2026, W4; `sample.ts` is already in
+   * `offeredUris` and `pickedUris` by earlier cases). The message is INJECTED: this does not
+   * show that VS Code delivers a real drag to the webview (it does not in the stable 1.143,
+   * microsoft/vscode#339036). `file.find` is the fixture's, whose list is invented.
+   */
+  it('adds dropped files, counts what it refuses', async function () {
+    const folder = workspaceFolderPath();
+    const outside = process.env['OPEN_VS_CODE_TEST_FAKE_OUTSIDE_DIR'];
+    assert.ok(
+      outside,
+      'OPEN_VS_CODE_TEST_FAKE_OUTSIDE_DIR is not set: run with the fake-server config',
+    );
+    await openSample();
+    // `src/util/helpers.ts` is in the fixture's list (FIND_ENTRIES) and no other case searches,
+    // selects or attaches it. Created here only if absent, and removed only if created here.
+    const sample = path.join(folder, 'src', 'util', 'helpers.ts');
+    const unlisted = path.join(folder, 'src', 'unlisted.ts');
+    const createdSample = !fs.existsSync(sample);
+    if (createdSample) {
+      fs.mkdirSync(path.dirname(sample), { recursive: true });
+      fs.writeFileSync(sample, 'export const d = 1;\n');
+    }
+    fs.writeFileSync(unlisted, 'export const u = 1;\n');
+    try {
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+        type: 'attachments.drop',
+        requestId: 'fake-drop-1',
+        uris: [
+          vscode.Uri.file(sample).toString(),
+          vscode.Uri.file(path.join(folder, 'src')).toString(),
+          vscode.Uri.file(path.join(outside, 'outside.ts')).toString(),
+          'vscode-remote://ssh-remote+box/home/u/a.ts',
+          vscode.Uri.file(unlisted).toString(),
+        ],
+      });
+      await log.waitFor(
+        'dropped files added: 1, skipped: 4 (1 folder(s), 1 outside, 1 remote, 0 missing, 1 ignored)',
+        10_000,
+      );
+      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+        type: 'prompt.send',
+        requestId: 'fake-drop-2',
+        text: 'Reply with exactly: OK.',
+        delivery: 'queue',
+        files: [toEditorRef(folder, sample)],
+      });
+      await log.waitFor('prompt accepted for ses_', 10_000);
+      await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+      await sleep(SETTLE_MS);
+      log.assertAbsent('rejected: an attachment');
+    } finally {
+      fs.rmSync(unlisted, { force: true });
+      if (createdSample) {
+        fs.rmSync(sample, { force: true });
+        try {
+          fs.rmdirSync(path.dirname(sample));
+        } catch {
+          // The folder had other files: not ours to remove.
+        }
+      }
+    }
+  });
+
+  /**
+   * "Add to OpenCode Chat" attaches the selected Explorer files without asking the server.
+   *
+   * Protects: the command (issue #30, decision Q1) is registered, takes the `(clicked, selected)`
+   * arguments the Explorer passes and reaches the same host checks as a drop. The right-click on
+   * the menu entry itself is NOT driven (the test API cannot); the arguments are built by hand.
+   */
+  it('attaches the Explorer selection through Add to OpenCode Chat', async function () {
+    const editor = await openSample();
+    const uri = editor.document.uri;
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(ADD_TO_CHAT_COMMAND_ID, uri, [uri]);
+    await log.waitFor(
+      'dropped files added: 1, skipped: 0 (0 folder(s), 0 outside, 0 remote, 0 missing, 0 ignored)',
+      10_000,
+    );
+  });
+
+  /**
+   * A pasted image is checked by its bytes, held by the host and sent as a `data:` URL.
+   *
+   * Protects: `attachments.image` (issue #30): a real 1x1 PNG is accepted and its opaque
+   * `pasted-image:1` uri (the first image of this host) passes the prompt whitelist; JPEG bytes
+   * declared as PNG are refused with `UnsupportedImage`; an invented `pasted-image:` uri is
+   * refused as not emitted by the host. The fixture stores the attachment `inline` and ignores the
+   * bytes: what the real server does with them is only read in code, not run.
+   */
+  it('accepts a pasted PNG, refuses a lying type and an invented image uri', async function () {
+    const png =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'attachments.image',
+      requestId: 'fake-image-1',
+      mime: 'image/png',
+      data: png,
+    });
+    await log.waitFor('image added: image/png, 0 KiB', 8_000);
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'fake-image-2',
+      text: 'Reply with exactly: OK.',
+      delivery: 'queue',
+      files: [{ uri: 'pasted-image:1', name: 'Pasted image 1' }],
+    });
+    await log.waitFor('prompt accepted for ses_', 10_000);
+    await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'attachments.image',
+      requestId: 'fake-image-bad',
+      mime: 'image/png',
+      data: '/9j/4AAQ',
+    });
+    await log.waitFor(
+      'request fake-image-bad failed: UnsupportedImage: Only PNG, JPEG, GIF and WebP images can be attached',
+      8_000,
+    );
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'fake-image-3',
+      text: 'look',
+      delivery: 'queue',
+      files: [{ uri: 'pasted-image:99', name: 'Pasted image 99' }],
+    });
+    await log.waitFor('rejected: an attachment was not emitted by the host', 8_000);
   });
 
   // Editor context cases that need a served folder (decision W2 of Sergio, 22/10/2026: only files

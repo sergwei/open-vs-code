@@ -78,6 +78,8 @@ import type { V2Event } from '@opencode/client';
 import type { Catalog, ErrorInfo, ModelRef, SessionStatus, SessionSummary } from '../shared/model';
 import {
   dispatch,
+  MAX_DROPPED_ITEMS,
+  MAX_FILE_SEARCH_LENGTH,
   MAX_SESSION_TITLE_LENGTH,
   type AttachmentRef,
   type ConnectionState,
@@ -93,6 +95,7 @@ import { createEventTranslator, type EventTranslator } from './eventTranslator';
 import { runEventStream, type StreamState } from './eventStream';
 import { toSearchRefs } from './fileMentions';
 import { resolvePreferredModel } from './modelPreference';
+import { PASTED_IMAGE_SCHEME, PastedImages } from './pastedImages';
 import type { ChatApi } from './opencodeClient';
 import { safeLog, type ServerLog } from './opencodeServer';
 import { createPendingRequests, type PendingSummary } from './pendingRequests';
@@ -184,6 +187,9 @@ export type FocusTarget = Extract<HostToWebview, { type: 'ui.focus' }>['target']
  */
 export const FOCUS_REQUEST_TTL_MS = 10_000;
 
+/** Most messages of "Add to OpenCode Chat" kept for a hidden chat (issue #30); our choice, a few clicks' worth. */
+const MAX_KEPT_MENU_MESSAGES = 64;
+
 /**
  * What the webview may ask the editor to do (issues #13/#15). Implemented in
  * `editorActions.ts` (the only side that imports `vscode`); the controller stays pure. Every
@@ -218,6 +224,12 @@ export interface EditorActions {
    */
   pickFiles(): Promise<AttachmentRef[]>;
   /**
+   * Issue #30: turns the URIs of a drop (or of "Add to OpenCode Chat") into chips. Only regular
+   * files inside `folder` come back in `refs`; the rest is counted in `skipped`. Rejects with
+   * `OutsideWorkspace` when there is no `folder`. See {@link DroppedFiles}.
+   */
+  droppedFiles(folder: string | undefined, uris: readonly string[]): Promise<DroppedFiles>;
+  /**
    * Issue #31: opens the native diff editor for a file the host listed in "Changed files" (the
    * caller already checked the whitelist), original on the left and the file on disk on the right.
    * Resolves `'diff'` when it did, or `'file'` when there is no text diff to show (a binary, or a
@@ -239,11 +251,27 @@ export interface EditorContext {
   unsaved: boolean;
 }
 
+/**
+ * What {@link EditorActions.droppedFiles} made of a drop: the chips of the regular files of the
+ * served folder, and how many items were refused. `missing` also counts URIs that could not be
+ * read at all; `remote` is any scheme but `file`.
+ */
+export interface DroppedFiles {
+  refs: AttachmentRef[];
+  skipped: { folders: number; outside: number; remote: number; missing: number };
+}
+
 /** External effects of the controller, injected so tests need no VS Code, network or processes. */
 export interface ChatControllerDeps {
   createClient(server: RunningServerInfo): ChatApi;
   /** Publishes to the webview; the provider drops what it cannot deliver (not ready or hidden). */
   post: Sender<HostToWebview>;
+  /**
+   * True while a `post` would reach the webview. Optional: absent means "always" (tests that do
+   * not model a hidden view). Used only by "Add to OpenCode Chat" (issue #30), whose chips would
+   * otherwise be lost when the chat view is hidden.
+   */
+  webviewReady?: () => boolean;
   log: ServerLog;
   memory: SessionMemory;
   editor: EditorActions;
@@ -422,21 +450,40 @@ export class ChatController {
   /** Open session of the SERVED folder; read from the memory when a server comes up. */
   private open: string | undefined;
   /**
-   * `uri`s the host took from two sources: the native file dialog and `editorContext`.
-   * `prompt.send` accepts these and {@link offeredUris}, no other attachment. No cap: a user does
-   * not pick thousands.
+   * `uri`s the host took from four sources: the native file dialog, `editorContext`, a drop and
+   * the "Add to OpenCode Chat" command. `prompt.send` accepts these and {@link offeredUris}, plus
+   * the live pasted images of {@link images}, no other attachment. No cap: a user does not pick
+   * thousands.
    *
-   * Threat model, as it stands (decision W2 of Sergio, 22/10/2026). The dialog is a native modal,
-   * so only the user can fill it. `attachments.fromEditor` is NOT a proof of a click: it is a
-   * webview message, and a compromised webview can send it without the user. What bounds it is
-   * on the editor side: it yields only the file ACTIVE in the editor (or its selections), and only
-   * when that file is inside the served folder (`OutsideWorkspace` otherwise). So the worst a
-   * compromised webview gets whitelisted is the file the user already has in front of them inside
-   * the project, `.env` or a git-ignored file included; the model's `read` permission is skipped
-   * for it. It cannot name any other path. Accepted risk; closing it needs a user gesture the host
-   * can see (a command or a native confirmation), which the plan did not ask for.
+   * Threat model, as it stands (decision W2 of Sergio, 22/10/2026, widened by issue #30). The
+   * dialog is a native modal, so only the user can fill it, and so is the Explorer command
+   * (`addToChat`): a click the host sees. `attachments.fromEditor` is NOT a proof of a click: it
+   * is a webview message, and a compromised webview can send it without the user. What bounds it
+   * is on the editor side: it yields only the file ACTIVE in the editor (or its selections), and
+   * only when that file is inside the served folder (`OutsideWorkspace` otherwise). So the worst
+   * a compromised webview gets whitelisted that way is the file the user already has in front of
+   * them inside the project, `.env` or a git-ignored file included; the model's `read`
+   * permission is skipped for it. `attachments.drop` is also only a webview message (the host
+   * sees no drag), and it takes ANY path, so it is bounded harder (decision Q2 of Sergio,
+   * 23/10/2026): a dropped URI is whitelisted only if it is a `file:` URI of a regular file inside
+   * the served folder AND `file.find` of the server lists that exact file, so what git ignores
+   * (`.env` included) cannot enter by a drop; for those there is Attach, whose dialog needs the
+   * user. The Explorer command skips the `file.find` step on purpose (the user chose that file in
+   * a click the host sees, the same trust as Attach) but keeps the folder and regular-file rules.
+   * A pasted image is not a path: the host holds the bytes it validated (`pasted-image:` URIs) and
+   * nothing else. Symlinks are not resolved anywhere (the check is lexical). Accepted risk.
    */
   private readonly pickedUris = new Set<string>();
+  /** Pasted images that can still be sent (issue #30); bytes live only here, never in the webview. */
+  private readonly images = new PastedImages();
+  /** Counter of the synthetic request ids of "Add to OpenCode Chat" (no webview request to answer). */
+  private menuRequests = 0;
+  /**
+   * Answers of "Add to OpenCode Chat" that the webview could not receive because the chat was
+   * hidden (a hidden view loses its document; the chips live only in the webview). Published after
+   * the snapshot of the next `ready`; capped at {@link MAX_KEPT_MENU_MESSAGES}.
+   */
+  private undeliveredMenu: HostToWebview[] = [];
   /**
    * `uri`s the host listed in `files.found`, in insertion order and capped at
    * {@link OFFERED_URIS_MAX}. Kept apart from `pickedUris` because they are not a choice yet: a
@@ -548,6 +595,32 @@ export class ChatController {
     return this.server === undefined
       ? {}
       : { url: this.server.url, password: this.server.password };
+  }
+
+  /**
+   * Posts a message of "Add to OpenCode Chat": delivered now if the webview can take it, else kept
+   * for {@link flushUndeliveredMenu} (called when the next document says `ready`).
+   */
+  private postOrKeep(message: HostToWebview): void {
+    if (this.deps.webviewReady === undefined || this.deps.webviewReady()) {
+      this.post(message);
+      return;
+    }
+    this.undeliveredMenu.push(message);
+    if (this.undeliveredMenu.length > MAX_KEPT_MENU_MESSAGES) this.undeliveredMenu.shift();
+  }
+
+  /**
+   * Publishes what {@link postOrKeep} kept, after the snapshot of a `ready`. It goes through
+   * {@link postOrKeep} again: the view may have been hidden during the `await` of the resync, and
+   * a plain `post` would then drop the chips for good (review-2 of 23/10/2026, W7). VERIFIED by
+   * the unit test "keeps the Explorer command chips when the chat hides again before they go out"
+   * (fake view, 23/10/2026, Windows 11). Not observed in a real VS Code: the window is narrow.
+   */
+  private flushUndeliveredMenu(): void {
+    const kept = this.undeliveredMenu;
+    this.undeliveredMenu = [];
+    for (const message of kept) this.postOrKeep(message);
   }
 
   /** Posts, never throwing: a failing sender must not break the stream or a request. */
@@ -1026,13 +1099,16 @@ export class ChatController {
    * first `ui.focus` went nowhere) it is sent again after the snapshot, as long as it is fresher
    * than {@link FOCUS_REQUEST_TTL_MS}. The cached catalog, if any, is sent right after the snapshot
    * (a new document starts without one; the load that produced it already went to the old
-   * document or was dropped).
+   * document or was dropped). Last, the chips and notices that "Add to OpenCode Chat" produced
+   * while the view was hidden ({@link postOrKeep}) go out, after the snapshot so nothing empties
+   * them.
    */
   async onWebviewReady(): Promise<void> {
     this.log.info('webview ready');
     this.post({ type: 'connection.state', connection: this.connection });
     if (this.client === undefined) {
       this.post({ type: 'snapshot', snapshot: EMPTY_SNAPSHOT });
+      this.flushUndeliveredMenu();
       return;
     }
     await this.resync();
@@ -1042,6 +1118,7 @@ export class ChatController {
     if (requested !== undefined && Date.now() - requested.at <= FOCUS_REQUEST_TTL_MS) {
       this.post({ type: 'ui.focus', target: requested.target });
     }
+    this.flushUndeliveredMenu();
   }
 
   /**
@@ -1909,6 +1986,126 @@ export class ChatController {
   }
 
   /**
+   * `attachments.drop` (issue #30) and, with `verify` false, "Add to OpenCode Chat": turns URIs
+   * into chips. The editor side keeps regular files inside the served folder; with `verify` the
+   * server must also LIST each one (`file.find` with the relative path, exact match on the `uri`),
+   * so what git ignores cannot be whitelisted by a message that is no click (decision Q2 of
+   * Sergio, 23/10/2026; the threat model is on {@link pickedUris}). The Explorer command passes
+   * `false`: it is a click the host sees, the same trust as the Attach dialog. Whatever was
+   * refused (folders, ignored files, outside the folder, remote, missing) makes ONE `warning`
+   * notice with the count and nothing else (no names); the valid ones of the same drop still go.
+   * The drop says "dropped … folders, ignored files and files outside…"; the Explorer command says
+   * "selected … folders and files outside…", since it filters no ignored file.
+   * Logs `dropped files added: N, skipped: M` (counts only). Without a server `verify` fails with
+   * `ServerUnavailable`. The chips and the notice of the Explorer command (`verify` false) go
+   * through {@link postOrKeep}: with the chat view hidden they wait for the next `ready` instead of
+   * being dropped by the provider (review of 23/10/2026, B2).
+   * UNVERIFIED against a real VS Code drag (microsoft/vscode#339036); see the integration case
+   * "adds dropped files, counts what it refuses" for the injected message. UNVERIFIED that
+   * `file.find` of a real server lists an ordinary file among its first 20 results (the fake
+   * invents the list).
+   */
+  private async dropFiles(
+    requestId: string,
+    uris: readonly string[],
+    verify: boolean,
+  ): Promise<void> {
+    try {
+      const folder = this.server?.folder;
+      const dropped = await this.deps.editor.droppedFiles(folder, uris);
+      let refs = dropped.refs;
+      let ignored = 0;
+      if (verify) {
+        const client = this.client;
+        if (client === undefined || folder === undefined) {
+          return this.result(requestId, unavailable());
+        }
+        const listed = await Promise.all(
+          refs.map(async (ref) => {
+            if (ref.name.length > MAX_FILE_SEARCH_LENGTH) return false;
+            const found = await client.file.find({
+              query: ref.name,
+              type: 'file',
+              limit: FILE_SEARCH_LIMIT,
+            });
+            return toSearchRefs(folder, found.data.slice(0, FILE_SEARCH_LIMIT)).some(
+              (entry) => entry.uri === ref.uri,
+            );
+          }),
+        );
+        const kept = refs.filter((_, index) => listed[index] === true);
+        ignored = refs.length - kept.length;
+        refs = kept;
+      }
+      for (const ref of refs) this.pickedUris.add(ref.uri);
+      const send = (message: HostToWebview): void => {
+        if (verify) this.post(message);
+        else this.postOrKeep(message);
+      };
+      send({ type: 'attachments.picked', requestId, files: refs });
+      const { folders, outside, remote, missing } = dropped.skipped;
+      const skipped = folders + outside + remote + missing + ignored;
+      this.log.info(
+        `dropped files added: ${String(refs.length)}, skipped: ${String(skipped)} (${String(folders)} folder(s), ${String(outside)} outside, ${String(remote)} remote, ${String(missing)} missing, ${String(ignored)} ignored)`,
+      );
+      if (skipped > 0) {
+        const items = skipped === 1 ? 'item was' : 'items were';
+        // The Explorer command neither drops nor filters ignored files: its own text (decision of
+        // Sergio, 23/10/2026, Engram `E7-drop-paste/decisions/cierre`).
+        send({
+          type: 'notice',
+          level: 'warning',
+          error: {
+            code: 'DroppedItemsSkipped',
+            message: verify
+              ? `${String(skipped)} dropped ${items} not added: folders, ignored files and files outside the workspace folder cannot be attached`
+              : `${String(skipped)} selected ${items} not added: folders and files outside the workspace folder cannot be attached`,
+          },
+        });
+      }
+      this.result(requestId);
+    } catch (error) {
+      this.result(requestId, error);
+    }
+  }
+
+  /**
+   * "Add to OpenCode Chat" of the Explorer context menu (issue #30, decision Q1 of Sergio): the
+   * `uris` are what VS Code handed the command for the clicked or selected items. A user gesture
+   * the host sees, so it skips the `file.find` check of a drop (see {@link dropFiles}); the answer
+   * goes to the webview with a request id of its own, which the webview never began.
+   */
+  async addToChat(uris: readonly string[]): Promise<void> {
+    if (uris.length === 0) return;
+    this.menuRequests += 1;
+    await this.dropFiles(
+      `menu-${String(this.menuRequests)}`,
+      uris.slice(0, MAX_DROPPED_ITEMS),
+      false,
+    );
+  }
+
+  /**
+   * `attachments.image` (issue #30): validates one pasted image BY ITS BYTES ({@link PastedImages}),
+   * keeps it in memory and answers with a chip whose `uri` is the opaque `pasted-image:<n>`. The
+   * bytes never go back to the webview and are never logged; the log line has the type and the
+   * size in KiB. A refusal (`UnsupportedImage`, `ImageTooLarge`) is the error of the
+   * `request.result`. Needs no server. Retry, fork and revert do not re-attach the image: the
+   * history has no `uri` for an inline attachment (README says so, decision Q3).
+   */
+  private attachImage(requestId: string, mime: string, data: string): Promise<void> {
+    try {
+      const ref = this.images.add(mime, data);
+      this.post({ type: 'attachments.picked', requestId, files: [ref] });
+      this.log.info(`image added: ${mime}, ${String(this.images.sizeKiB(ref.uri) ?? 0)} KiB`);
+      this.result(requestId);
+    } catch (error) {
+      this.result(requestId, error);
+    }
+    return Promise.resolve();
+  }
+
+  /**
    * `attachments.fromEditor` (issue #29): asks the editor side for the active file, or each
    * non-empty selection with its line range, remembers the `uri`s in `pickedUris` (not proof of a
    * click, unlike the dialog; the editor side limits it to the served folder, see that field) and
@@ -2374,6 +2571,17 @@ export class ChatController {
       'attachments.fromEditor': (m) => {
         pending.push(this.attachFromEditor(m.requestId));
       },
+      'attachments.drop': (m) => {
+        pending.push(this.dropFiles(m.requestId, m.uris, true));
+      },
+      'attachments.image': (m) => {
+        pending.push(this.attachImage(m.requestId, m.mime, m.data));
+      },
+      // Sergio's decision of 23/10/2026 (S5): removing a chip frees the image. Only `PastedImages`
+      // can forget, and it knows only the uris it issued; any other uri is a no-op.
+      'attachments.forget': (m) => {
+        this.images.forget(m.uri);
+      },
       'files.search': (m) => {
         pending.push(this.searchFiles(m));
       },
@@ -2666,6 +2874,16 @@ export class ChatController {
    * Every `files[].uri` must be in `pickedUris` or `offeredUris` (what the dialog, the editor
    * button or a search emitted), else the whole prompt is refused with `AttachmentRejected` before
    * touching the server (the attachment name is not trusted either, but it is only a label). A
+   * `pasted-image:` uri is checked against the live {@link images} instead, whose `data:` URL is
+   * read before the first `await`, so an image evicted or forgotten meanwhile still goes whole
+   * (UNVERIFIED by execution: read from the code, no test evicts an image during the await). It
+   * goes to the server as that `data:` URL without a `mention`, and is forgotten once `prompt
+   * accepted` is logged (not after a failure: the chip comes back and can be sent again, unless
+   * the image was evicted during the await, or its chip was removed, which
+   * already made the webview send `attachments.forget`). VERIFIED by the chatController unit test
+   * "keeps a pasted image in memory and sends it as a data URL without a mention" and the
+   * integration case "accepts a pasted PNG, refuses a lying type and an invented image uri"
+   * (fake server). UNVERIFIED against a real opencode: the `real-opencode` suite sends no prompt. A
    * file may carry the `mention` of its `@path` text (issue #28); it is forwarded only when
    * `text.slice(start, end)` equals its `text`, otherwise the file goes without it (see
    * {@link sameMention}). Chip and text are independent: deleting the `@path` text leaves the file
@@ -2699,9 +2917,19 @@ export class ChatController {
     const { requestId } = message;
     const client = this.client;
     if (client === undefined) return this.result(requestId, unavailable());
+    // The `data:` URLs are taken NOW, before any await: an image evicted or forgotten while the
+    // catalog or the session loads must not leave its raw `pasted-image:` uri for the server
+    // (review-2 of 23/10/2026, S8).
+    const imageData = new Map<string, string>();
+    for (const file of message.files) {
+      const data = this.images.dataUrlFor(file.uri);
+      if (data !== undefined) imageData.set(file.uri, data);
+    }
     if (
-      message.files.some(
-        (file) => !this.pickedUris.has(file.uri) && !this.offeredUris.has(file.uri),
+      message.files.some((file) =>
+        file.uri.startsWith(PASTED_IMAGE_SCHEME)
+          ? !imageData.has(file.uri)
+          : !this.pickedUris.has(file.uri) && !this.offeredUris.has(file.uri),
       )
     ) {
       this.log.warn(`prompt ${requestId} rejected: an attachment was not emitted by the host`);
@@ -2763,6 +2991,9 @@ export class ChatController {
         ...(message.files.length > 0
           ? {
               files: message.files.map((file) => {
+                // A pasted image goes as its `data:` URL and without a mention (issue #30).
+                const data = imageData.get(file.uri);
+                if (data !== undefined) return { uri: data, name: file.name };
                 const mention = sameMention(file.mention, message.text);
                 return {
                   uri: file.uri,
@@ -2774,6 +3005,7 @@ export class ChatController {
           : {}),
       });
       this.log.info(`prompt accepted for ${sessionID} (input ${admitted.id})`);
+      for (const file of message.files) this.images.forget(file.uri);
       if (committing) this.afterCommit(sessionID);
       this.result(requestId);
       if (model !== undefined) await this.rememberModel(model);

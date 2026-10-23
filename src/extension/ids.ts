@@ -51,6 +51,13 @@ export const SHOW_REQUEST_COMMAND_ID = 'openVsCode.internal.showRequest';
  */
 export const REPLY_PERMISSION_COMMAND_ID = 'openVsCode.internal.replyPermission';
 
+/**
+ * Command id of "Add to OpenCode Chat" (contributed in `menus.explorer/context`; issue #30,
+ * decision Q1 of Sergio): attaches the selected Explorer files to the prompt. It works in every
+ * VS Code version, unlike dropping, which the stable 1.140+ does not deliver (#339036).
+ */
+export const ADD_TO_CHAT_COMMAND_ID = 'openVsCode.addToChat';
+
 /** Configuration section (the prefix of every setting id). */
 export const CONFIG_SECTION = 'openVsCode';
 

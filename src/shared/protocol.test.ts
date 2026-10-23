@@ -29,7 +29,10 @@ import {
   isHostToWebview,
   isWebviewToHost,
   MAX_DIFF_PATH_LENGTH,
+  MAX_DROPPED_ITEMS,
+  MAX_DROPPED_URI_LENGTH,
   MAX_FILE_SEARCH_LENGTH,
+  MAX_IMAGE_BASE64_LENGTH,
   MAX_SESSION_SEARCH_LENGTH,
   MAX_SESSION_TITLE_LENGTH,
   WEBVIEW_TO_HOST_TYPES,
@@ -92,6 +95,7 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
           contextLimit: 200_000,
           free: true,
           variants: [],
+          images: true,
         },
       ],
       providers: [{ id: 'p', name: 'P' }],
@@ -261,6 +265,14 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   'form.cancel': { type: 'form.cancel', requestId: 'r1', sessionID: 's1', formID: 'f1' },
   'attachments.pick': { type: 'attachments.pick', requestId: 'r1' },
   'attachments.fromEditor': { type: 'attachments.fromEditor', requestId: 'r1' },
+  'attachments.drop': { type: 'attachments.drop', requestId: 'r1', uris: ['file:///c%3A/ws/a.ts'] },
+  'attachments.image': {
+    type: 'attachments.image',
+    requestId: 'r1',
+    mime: 'image/png',
+    data: 'AA==',
+  },
+  'attachments.forget': { type: 'attachments.forget', uri: 'pasted-image:1' },
   'files.search': { type: 'files.search', requestId: 'r1', query: 'prompt' },
   'permissions.manage': { type: 'permissions.manage' },
   'server.restart': { type: 'server.restart' },
@@ -462,6 +474,39 @@ describe('isWebviewToHost', () => {
     expect(isWebviewToHost({ type: 'files.search', query: 'a' })).toBe(false);
     expect(isWebviewToHost({ type: 'attachments.fromEditor' })).toBe(false);
     expect(isWebviewToHost({ type: 'attachments.fromEditor', requestId: '' })).toBe(false);
+  });
+
+  // Issue #30. Fabricated messages: they pin the guard of the two entries that carry untrusted
+  // strings or bytes from the webview. The caps are our choice (see the constants).
+  it('bounds attachments.drop and attachments.image (issue #30)', () => {
+    const drop = WEBVIEW_SAMPLES['attachments.drop'];
+    expect(isWebviewToHost(drop)).toBe(true);
+    expect(isWebviewToHost({ ...drop, uris: [] })).toBe(false);
+    expect(isWebviewToHost({ ...drop, uris: Array(MAX_DROPPED_ITEMS).fill('file:///a') })).toBe(
+      true,
+    );
+    expect(isWebviewToHost({ ...drop, uris: Array(MAX_DROPPED_ITEMS + 1).fill('file:///a') })).toBe(
+      false,
+    );
+    expect(isWebviewToHost({ ...drop, uris: [''] })).toBe(false);
+    expect(isWebviewToHost({ ...drop, uris: ['file:///a\0b'] })).toBe(false);
+    expect(isWebviewToHost({ ...drop, uris: ['x'.repeat(MAX_DROPPED_URI_LENGTH + 1)] })).toBe(
+      false,
+    );
+    expect(isWebviewToHost({ ...drop, uris: 'file:///a' })).toBe(false);
+    const image = WEBVIEW_SAMPLES['attachments.image'];
+    expect(isWebviewToHost(image)).toBe(true);
+    expect(isWebviewToHost({ ...image, mime: 'image/bmp' })).toBe(false);
+    expect(isWebviewToHost({ ...image, data: '' })).toBe(false);
+    expect(isWebviewToHost({ ...image, data: 'A'.repeat(MAX_IMAGE_BASE64_LENGTH + 1) })).toBe(
+      false,
+    );
+    expect(isWebviewToHost({ ...image, requestId: '' })).toBe(false);
+    const forget = WEBVIEW_SAMPLES['attachments.forget'];
+    expect(isWebviewToHost(forget)).toBe(true);
+    expect(isWebviewToHost({ ...forget, uri: '' })).toBe(false);
+    expect(isWebviewToHost({ ...forget, uri: 'x'.repeat(MAX_DROPPED_URI_LENGTH + 1) })).toBe(false);
+    expect(isWebviewToHost({ type: 'attachments.forget' })).toBe(false);
   });
 
   // Issue #28 (decision Q1). Fabricated messages: they pin the guard. Whether the text matches the

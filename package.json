@@ -119,6 +119,10 @@
         "command": "openVsCode.clearServerPassword",
         "title": "Forget Server Password",
         "category": "OpenCode"
+      },
+      {
+        "command": "openVsCode.addToChat",
+        "title": "Add to OpenCode Chat"
       }
     ],
     "menus": {
@@ -127,6 +131,19 @@
           "command": "openVsCode.restartServer",
           "group": "navigation",
           "when": "view == openVsCode.chat"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "openVsCode.addToChat",
+          "group": "6_copypath@99",
+          "when": "resourceScheme == file"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "openVsCode.addToChat",
+          "when": "false"
         }
       ]
     }

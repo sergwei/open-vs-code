@@ -46,8 +46,8 @@ function escapeAttribute(value: string): string {
  * Pure on purpose (no `vscode` import) so Vitest can test it.
  * The policy is `default-src 'none'` with scripts only by nonce: no inline scripts
  * or styles, none of the unsafe keywords, and no network directive because the
- * webview never touches the network (architecture rule 1). `img-src` has no
- * `https:`/`data:` since there are no images yet and Vite inlines nothing.
+ * webview never touches the network (architecture rule 1). `img-src` allows `blob:` for the
+ * thumbnails of pasted images (issue #30) and has no `https:`/`data:`: Vite inlines nothing.
  * `script-src` has no `cspSource` because the bundle is a single chunk. The
  * "Loading..." text in `#root` stays visible if the CSP blocks the script,
  * instead of a blank panel; `index.tsx` clears it on mount.
@@ -60,7 +60,9 @@ export function buildWebviewHtml(options: WebviewHtmlOptions): string {
   const { cspSource, nonce } = options;
   const csp = [
     "default-src 'none'",
-    `img-src ${cspSource}`,
+    // `blob:` is only for the thumbnails of pasted images, URLs the webview makes itself with
+    // `URL.createObjectURL` (issue #30, decision Q4 of Sergio). No `data:` and no `https:`.
+    `img-src ${cspSource} blob:`,
     `style-src ${cspSource}`,
     `font-src ${cspSource}`,
     `script-src 'nonce-${nonce}'`,

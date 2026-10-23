@@ -243,6 +243,13 @@ export interface ChatState {
   notices: Notice[];
   /** Files chosen with Attach and not sent yet; no two share a `uri`. */
   draftFiles: AttachmentRef[];
+  /**
+   * Thumbnails of pasted images (issue #30): `blob:` URLs the webview made itself, by the `uri`
+   * the host gave the image. Never persisted, never sent to the host.
+   */
+  thumbs: Record<string, string>;
+  /** Thumbnails waiting for the `attachments.picked` that names the `uri`, by `requestId`. */
+  awaitingThumbs: Record<string, string>;
 }
 
 /** What {@link createChatStore} returns. */
@@ -275,6 +282,15 @@ export interface ChatStore {
   clearFileSearch: () => void;
   /** Removes the notice with that id (the user dismissed it). */
   dismissNotice: (id: number) => void;
+  /** Shows a notice born in the webview itself (issue #30: a pasted image it refused to send). */
+  notify: (level: Notice['level'], error: ErrorInfo) => void;
+  /**
+   * Remembers `url` (a thumbnail) for the image that the `attachments.picked` of `requestId` will
+   * name; a failed result drops it.
+   */
+  expectThumb: (requestId: string, url: string) => void;
+  /** Revokes and forgets the thumbnails of those chip `uri`s (removed, sent or refused). */
+  releaseThumbs: (uris: readonly string[]) => void;
   /** Adds files to the draft attachments, skipping any `uri` already there. */
   addDraftFiles: (files: readonly AttachmentRef[]) => void;
   /** Removes one draft attachment (the chip's remove button). */
@@ -360,6 +376,8 @@ export function createChatStore(): ChatStore {
     pending: [],
     notices: [],
     draftFiles: [],
+    thumbs: {},
+    awaitingThumbs: {},
   });
 
   // Non-reactive indexes: message id -> position, and message id -> part id -> position.
@@ -739,12 +757,28 @@ export function createChatStore(): ChatStore {
           }
           return;
         }
+        if (m.requestId in state.awaitingThumbs) {
+          // A failed result never gets its chip, so nothing would ever revoke this blob.
+          const unclaimed = state.awaitingThumbs[m.requestId];
+          if (m.error !== undefined && unclaimed !== undefined) URL.revokeObjectURL(unclaimed);
+          setState(
+            'awaitingThumbs',
+            produce((awaiting) => {
+              delete awaiting[m.requestId];
+            }),
+          );
+        }
         if (m.error !== undefined) addNotice('error', m.error, m.requestId);
       });
     },
 
     'attachments.picked': (m) => {
-      addDraftFiles(m.files);
+      batch(() => {
+        addDraftFiles(m.files);
+        const thumb = state.awaitingThumbs[m.requestId];
+        const first = m.files[0];
+        if (thumb !== undefined && first !== undefined) setState('thumbs', first.uri, thumb);
+      });
     },
 
     'files.found': (m) => {
@@ -822,6 +856,26 @@ export function createChatStore(): ChatStore {
     },
     dismissNotice: (id) => {
       setState('notices', (notices) => notices.filter((notice) => notice.id !== id));
+    },
+    notify: (level, error) => {
+      addNotice(level, error);
+    },
+    expectThumb: (requestId, url) => {
+      setState('awaitingThumbs', requestId, url);
+    },
+    releaseThumbs: (uris) => {
+      const held = uris.filter((uri) => state.thumbs[uri] !== undefined);
+      if (held.length === 0) return;
+      for (const uri of held) {
+        const url = state.thumbs[uri];
+        if (url !== undefined) URL.revokeObjectURL(url);
+      }
+      setState(
+        'thumbs',
+        produce((thumbs) => {
+          for (const uri of held) delete thumbs[uri];
+        }),
+      );
     },
     addDraftFiles,
     removeDraftFile: (uri) => {
