@@ -43,6 +43,10 @@ affiliated with opencode or with Microsoft.
 - **Changed files:** a "Changed files (N)" list under the header shows what the agent changed in
   the session (git repositories only); a click opens VS Code's own diff editor with the original on
   the left and the file on the right.
+- **Revert from a message:** "Revert from here" on one of your messages undoes that turn and
+  everything after it, files included, and hides those messages. A block under the conversation
+  lists the files it restored, "Restore" brings everything back and "Discard for good" deletes the
+  hidden messages. Sending a new message also makes the revert final.
 - **Themes and accessibility:** light, dark and high-contrast, keyboard navigation and screen
   reader labels. Colors come from your VS Code theme.
 
@@ -114,8 +118,7 @@ always `opencode`.
   (`opencode.exe` on Windows).
 - "Allowed once" lines in the history do not survive **Developer: Reload Window**: opencode keeps no
   trace of a permission that was allowed once.
-- Not yet: dragging images into the prompt (issue #30), a diff of the session changes
-  (issue #31), reverting changes (issue #32) and slash commands (issue #33).
+- Not yet: dragging images into the prompt (issue #30) and slash commands (issue #33).
 - Mostly tested on Windows; CI builds and tests on Windows, macOS and Linux.
 
 ## Privacy and security
