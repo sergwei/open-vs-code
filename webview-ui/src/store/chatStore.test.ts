@@ -1143,6 +1143,7 @@ describe('changed files (issue #31)', () => {
     additions,
     deletions: 0,
     binary: false,
+    tooLarge: false,
   });
   const list = (sessionID: string, files: ReturnType<typeof file>[]) => ({
     type: 'session.diff' as const,
@@ -1268,6 +1269,93 @@ describe('changed files (issue #31)', () => {
       store.apply(list(SES, [file('src/a.ts')]));
       store.apply({ type: 'connection.state', connection: { state: 'reconnecting', attempt: 1 } });
       expect(store.state.diff.files).toHaveLength(1);
+    });
+  });
+});
+
+// Issue #32: the prepared revert of the open session lives in `open.revert`. It comes with the
+// snapshot (so hiding is atomic with the messages) or as `session.revert`, which REPLACES it and
+// only counts for the open session; a snapshot without it clears it. The store never deletes the
+// reverted messages (Restore is instant). Provenance: messages FABRICATED by hand in the shape of
+// the protocol.
+describe('prepared revert (issue #32)', () => {
+  const file = (path: string, additions = 1) => ({
+    path,
+    status: 'modified' as const,
+    additions,
+    deletions: 0,
+    binary: false,
+    tooLarge: false,
+  });
+  const revert = (messageID: string, ...files: ReturnType<typeof file>[]) => ({
+    type: 'session.revert' as const,
+    sessionID: SES,
+    revert: { messageID, files },
+  });
+
+  it('keeps the revert of the open session, and clears it on an absent one', () => {
+    withStore((store) => {
+      store.apply({ type: 'snapshot', snapshot: openSnapshot() });
+      store.apply(revert('m3', file('src/a.ts')));
+      expect(store.state.open.revert?.messageID).toBe('m3');
+      expect(store.state.open.revert?.files.map((f) => f.path)).toEqual(['src/a.ts']);
+      store.apply({ type: 'session.revert', sessionID: SES });
+      expect(store.state.open.revert).toBeUndefined();
+    });
+  });
+
+  it('ignores the revert of a session that is not the open one', () => {
+    withStore((store) => {
+      store.apply({ type: 'snapshot', snapshot: openSnapshot() });
+      store.apply({ ...revert('m3'), sessionID: 'ses_other' });
+      expect(store.state.open.revert).toBeUndefined();
+    });
+  });
+
+  it('takes the revert from the snapshot, and a snapshot without one clears it', () => {
+    withStore((store) => {
+      const open = openSnapshot().open;
+      store.apply({
+        type: 'snapshot',
+        snapshot: {
+          ...openSnapshot(),
+          open: { ...open, sessionID: SES, revert: { messageID: 'm3', files: [] } },
+        },
+      });
+      expect(store.state.open.revert).toEqual({ messageID: 'm3', files: [] });
+      store.apply({ type: 'snapshot', snapshot: openSnapshot() });
+      expect(store.state.open.revert).toBeUndefined();
+    });
+  });
+
+  it('keeps the rows that did not change when the same boundary is reported again', () => {
+    withStore((store) => {
+      store.apply({ type: 'snapshot', snapshot: openSnapshot() });
+      store.apply(revert('m3', file('src/a.ts', 1)));
+      const before = store.state.open.revert?.files[0];
+      store.apply(revert('m3', file('src/a.ts', 5)));
+      expect(store.state.open.revert?.files[0]).toBe(before);
+      expect(store.state.open.revert?.files[0]?.additions).toBe(5);
+      // Another boundary replaces the whole state.
+      store.apply(revert('m1', file('src/a.ts', 7)));
+      expect(store.state.open.revert?.messageID).toBe('m1');
+      expect(store.state.open.revert?.files[0]).not.toBe(before);
+    });
+  });
+
+  it('forgets it when another session opens or the open one is removed', () => {
+    withStore((store) => {
+      store.apply({ type: 'snapshot', snapshot: openSnapshot() });
+      store.apply(revert('m3'));
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...openSnapshot(), open: { sessionID: 'ses_2', messages: [], parts: {} } },
+      });
+      expect(store.state.open.revert).toBeUndefined();
+      store.apply({ type: 'snapshot', snapshot: openSnapshot() });
+      store.apply(revert('m3'));
+      store.apply({ type: 'session.removed', sessionID: SES });
+      expect(store.state.open.revert).toBeUndefined();
     });
   });
 });

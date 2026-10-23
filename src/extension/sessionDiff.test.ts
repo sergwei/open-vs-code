@@ -244,7 +244,9 @@ describe('toEntries', () => {
     expect(entries[0]?.file.additions).toBe(7);
   });
 
-  it('marks a file without a text diff: an empty patch, or a header cut for size', () => {
+  // `binary` is the empty patch and `tooLarge` the header cut for size (pending item of #31, done in
+  // #32): exclusive, and an empty file is neither. FABRICATED rows in the format READ in `patch.ts`.
+  it('marks a binary (empty patch) apart from a file whose patch was cut for size', () => {
     const { entries } = toEntries(
       [
         row('logo.png', 'added', { patch: '', additions: 0, deletions: 0 }),
@@ -256,12 +258,17 @@ describe('toEntries', () => {
       '/repo',
       path.posix,
     );
-    const binary = Object.fromEntries(entries.map((entry) => [entry.file.path, entry.file.binary]));
-    expect(binary).toEqual({
-      'big.sql': true,
-      'empty.txt': false,
-      'logo.png': true,
-      'text.ts': false,
+    const flags = Object.fromEntries(
+      entries.map((entry) => [
+        entry.file.path,
+        { binary: entry.file.binary, tooLarge: entry.file.tooLarge },
+      ]),
+    );
+    expect(flags).toEqual({
+      'big.sql': { binary: false, tooLarge: true },
+      'empty.txt': { binary: false, tooLarge: false },
+      'logo.png': { binary: true, tooLarge: false },
+      'text.ts': { binary: false, tooLarge: false },
     });
   });
 });
@@ -282,6 +289,8 @@ interface Scenario {
   /** Held back on the `asc` read of the first user message, before anything is cached. */
   listGate: Promise<void> | undefined;
   failure: object | undefined;
+  /** The message a prepared revert starts at (issue #32); none by default. */
+  boundary: string | undefined;
 }
 
 /** Builds the module over a fake client; returns the module, what it did and the knobs. */
@@ -294,6 +303,7 @@ function build(overrides: Partial<Scenario> = {}, served = '/repo') {
     gate: undefined,
     listGate: undefined,
     failure: undefined,
+    boundary: undefined,
     ...overrides,
   };
   const diffs: SessionDiffInput[] = [];
@@ -339,6 +349,7 @@ function build(overrides: Partial<Scenario> = {}, served = '/repo') {
     client: () => state.client as ChatApi | undefined,
     folder: () => state.folder,
     open: () => state.open,
+    boundary: () => scenario.boundary,
     post: (message) => posted.push(message),
     log: {
       info: (m) => logs.push(`info: ${m}`),
@@ -370,11 +381,84 @@ describe('createSessionDiffs: loading the list', () => {
         type: 'session.diff',
         sessionID: 'ses_1',
         files: [
-          { path: 'src/a.ts', status: 'modified', additions: 1, deletions: 1, binary: false },
+          {
+            path: 'src/a.ts',
+            status: 'modified',
+            additions: 1,
+            deletions: 1,
+            binary: false,
+            tooLarge: false,
+          },
         ],
       },
     ]);
     expect(logs).toContain('info: session diff: 1 files for ses_1');
+  });
+
+  // Issue #32: while a revert is prepared the range stops at the turn BEFORE its boundary, so the
+  // list matches the history and the disk the user sees. FABRICATED ids that ascend like the real
+  // ones (`schema/src/session-message.ts` @843a6c51, read).
+  describe('with a prepared revert', () => {
+    it('stops at the user message before the boundary', async () => {
+      const { module, diffs, reads } = build({
+        users: ['msg_1', 'msg_2', 'msg_3'],
+        boundary: 'msg_3',
+      });
+      await module.request('ses_1');
+      expect(diffs).toEqual([{ sessionID: 'ses_1', from: 'msg_1', to: 'msg_2', context: 0 }]);
+      expect(reads).toContain('message.list user desc 50');
+    });
+
+    it('has no `to` when only the first message is before the boundary', async () => {
+      const { module, diffs } = build({ users: ['msg_1', 'msg_2'], boundary: 'msg_2' });
+      await module.request('ses_1');
+      expect(diffs).toEqual([{ sessionID: 'ses_1', from: 'msg_1', context: 0 }]);
+    });
+
+    it('lists nothing when the boundary is the first user message', async () => {
+      const { module, diffs, posted } = build({ users: ['msg_1', 'msg_2'], boundary: 'msg_1' });
+      await module.request('ses_1');
+      expect(diffs).toEqual([]);
+      expect(posted).toEqual([]);
+    });
+
+    it('uses the whole range, and says so, when the boundary is older than the page read', async () => {
+      const users = Array.from({ length: 60 }, (_, i) => `msg_${String(i + 100)}`);
+      const { module, diffs, logs } = build({ users, boundary: 'msg_099' });
+      // The first user message (`msg_100`) is after the boundary: no range at all.
+      await module.request('ses_1');
+      expect(diffs).toEqual([]);
+      const {
+        module: other,
+        diffs: otherDiffs,
+        logs: otherLogs,
+      } = build({
+        users: ['msg_000', ...users],
+        boundary: 'msg_130',
+      });
+      await other.request('ses_1');
+      // msg_130 is inside the newest 50 (msg_110..msg_159) and has msg_129 right before it.
+      expect(otherDiffs).toEqual([
+        { sessionID: 'ses_1', from: 'msg_000', to: 'msg_129', context: 0 },
+      ]);
+      const {
+        module: far,
+        diffs: farDiffs,
+        logs: farLogs,
+      } = build({
+        users: ['msg_000', ...users],
+        boundary: 'msg_050',
+      });
+      await far.request('ses_1');
+      expect(farDiffs).toEqual([
+        { sessionID: 'ses_1', from: 'msg_000', to: 'msg_159', context: 0 },
+      ]);
+      expect(
+        farLogs.some((line) => line.startsWith('debug: session diff: the revert boundary')),
+      ).toBe(true);
+      expect(logs).toEqual([]);
+      expect(otherLogs.some((line) => line.includes('boundary'))).toBe(false);
+    });
   });
 
   it('leaves out `to` when the session has a single user message', async () => {
@@ -560,7 +644,10 @@ describe('createSessionDiffs: loading the list', () => {
     expect(reads.filter((read) => read === 'message.list user asc 1')).toHaveLength(2);
   });
 
-  it('tells the subscribers when the list or the start of the range changed, not otherwise', async () => {
+  // S1' of the review #1162: the original of a file is its text at `range.from`, so only a move of
+  // the START (or the range appearing or disappearing) renews it; a longer list with the same start
+  // does not. Before #32 this test expected the opposite for a new list.
+  it('tells the subscribers when the start of the range moved, not when only the list changed', async () => {
     const { module, scenario } = build();
     const renewed: string[] = [];
     const off = module.onRenewed((sessionID) => renewed.push(sessionID));
@@ -569,15 +656,29 @@ describe('createSessionDiffs: loading the list', () => {
     expect(renewed).toEqual([]);
     scenario.rows = [row('src/a.ts'), row('src/b.ts')];
     await module.request('ses_1');
-    expect(renewed).toEqual(['ses_1']);
+    expect(renewed).toEqual([]);
     scenario.users = ['msg_9'];
     module.forgetRange('ses_1');
     await module.request('ses_1');
-    expect(renewed).toEqual(['ses_1', 'ses_1']);
+    expect(renewed).toEqual(['ses_1']);
     off();
-    scenario.rows = [];
+    scenario.users = ['msg_10'];
+    module.forgetRange('ses_1');
     await module.request('ses_1');
-    expect(renewed).toHaveLength(2);
+    expect(renewed).toHaveLength(1);
+  });
+
+  it('also renews when the range disappears or comes back (the revert starts at the first message)', async () => {
+    const { module, scenario } = build({ users: ['msg_1', 'msg_2'] });
+    const renewed: string[] = [];
+    module.onRenewed((sessionID) => renewed.push(sessionID));
+    await module.request('ses_1');
+    scenario.boundary = 'msg_1';
+    await module.request('ses_1');
+    expect(renewed).toEqual(['ses_1']);
+    scenario.boundary = undefined;
+    await module.request('ses_1');
+    expect(renewed).toEqual(['ses_1', 'ses_1']);
   });
 
   it('is silent when the session no longer exists', async () => {
@@ -623,6 +724,7 @@ describe('createSessionDiffs: what may be opened', () => {
         absolute: '/repo/src/a.ts',
         status: 'deleted',
         binary: false,
+        side: 'before',
       },
     });
   });

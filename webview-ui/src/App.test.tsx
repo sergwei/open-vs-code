@@ -857,7 +857,7 @@ describe('fork from a message (issue #21)', () => {
   it('offers "Fork from here" on user messages only, named after the message', () => {
     const h = start();
     h.apply(...openWith([{ id: SES, title: 'Fix the build' }], twoExchanges));
-    const buttons = [...h.container.querySelectorAll('.message-action')];
+    const buttons = [...h.container.querySelectorAll('.message-action[aria-label^="Fork"]')];
     expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
       'Fork from here: first question',
       'Fork from here: second question with a break',
@@ -874,8 +874,8 @@ describe('fork from a message (issue #21)', () => {
         [user('m1', 'x'.repeat(100)), userWithFiles('m3', '', [{ mime: 'text/plain' }])],
       ),
     );
-    const names = [...h.container.querySelectorAll('.message-action')].map((b) =>
-      b.getAttribute('aria-label'),
+    const names = [...h.container.querySelectorAll('.message-action[aria-label^="Fork"]')].map(
+      (b) => b.getAttribute('aria-label'),
     );
     expect(names).toEqual([`Fork from here: ${'x'.repeat(60)}…`, 'Fork from here']);
   });
@@ -1994,6 +1994,7 @@ describe('changed files (issue #31)', () => {
     additions: 3,
     deletions: 1,
     binary: false,
+    tooLarge: false,
     ...extra,
   });
 
@@ -2075,5 +2076,287 @@ describe('changed files (issue #31)', () => {
       'Could not refresh the list: it broke',
     );
     expect(h.container.querySelectorAll('.changed-files button')).toHaveLength(1);
+  });
+});
+
+// Issue #32 (E7-message-revert): "Revert from here", the hidden messages and the block under the
+// conversation. FABRICATED host messages in jsdom: they prove the wiring, the names and the
+// aria-disabled rules, not the host contract (`chatController*.test.ts`), the contrast or the real
+// modal (`test:visual` step 19 covers those in a real VS Code).
+describe('revert from a message (issue #32)', () => {
+  const exchanges = [
+    user('m1', 'first question'),
+    assistant('m2'),
+    user('m3', 'second   question\nwith a break'),
+    assistant('m4'),
+  ];
+  const aFile: ChangedFile = {
+    path: 'src/a.ts',
+    status: 'modified',
+    additions: 3,
+    deletions: 1,
+    binary: false,
+    tooLarge: false,
+  };
+  const revertAt = (messageID: string, files: ChangedFile[] = [aFile]): HostToWebview => ({
+    type: 'session.revert',
+    sessionID: SES,
+    revert: { messageID, files },
+  });
+  const log = (h: Harness): HTMLElement => must(h.container, '[role="log"]');
+  const names = (h: Harness): (string | null)[] =>
+    [...log(h).querySelectorAll('.message-user .part-text')].map((e) => e.textContent);
+
+  it('offers "Revert from here" on user messages only, named after the message', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    const buttons = [...h.container.querySelectorAll('.message-action[aria-label^="Revert"]')];
+    expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Revert from here: first question',
+      'Revert from here: second question with a break',
+    ]);
+    expect(buttons.map((b) => b.textContent)).toEqual(['Revert from here', 'Revert from here']);
+  });
+
+  it('sends session.revert.stage with the id of the message that was clicked', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    h.button('Revert from here: second question with a break').click();
+    expect(h.sent).toHaveLength(1);
+    const { requestId, rest } = splitRequestId(h.sent[0]);
+    expect(requestId).toMatch(/\S/);
+    expect(rest).toEqual({ type: 'session.revert.stage', sessionID: SES, messageID: 'm3' });
+  });
+
+  it('locks the buttons with aria-disabled (focus stays) while the request is in flight', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    const button = h.button('Revert from here: first question');
+    button.focus();
+    button.click();
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect(button.hasAttribute('disabled')).toBe(false);
+    expect(document.activeElement).toBe(button);
+    button.click();
+    h.button('Revert from here: second question with a break').click();
+    expect(h.sent).toHaveLength(1);
+    h.apply({ type: 'request.result', requestId: splitRequestId(h.sent[0]).requestId });
+    expect(button.hasAttribute('aria-disabled')).toBe(false);
+  });
+
+  it('locks the buttons, and ignores the click, while the session is busy or disconnected', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    h.apply({ type: 'session.status', sessionID: SES, status: { type: 'busy' } });
+    const button = h.button('Revert from here: first question');
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    button.click();
+    expect(h.sent).toEqual([]);
+    h.apply({ type: 'session.status', sessionID: SES, status: { type: 'idle' } });
+    h.apply({
+      type: 'connection.state',
+      connection: { state: 'reconnecting', attempt: 1, error: { code: 'x', message: 'lost' } },
+    });
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+  });
+
+  it('refills the prompt with the message text only when the draft is empty', () => {
+    const empty = start();
+    empty.apply(...openWith([{ id: SES }], exchanges));
+    empty.button('Revert from here: second question with a break').click();
+    expect(empty.textarea().value).toBe('');
+    empty.apply({ type: 'request.result', requestId: splitRequestId(empty.sent[0]).requestId });
+    expect(empty.textarea().value).toBe('second   question\nwith a break');
+    expect(document.activeElement).toBe(empty.textarea());
+
+    const typed = start();
+    typed.apply(...openWith([{ id: SES }], exchanges));
+    typed.type('my own draft');
+    typed.button('Revert from here: first question').click();
+    typed.apply({ type: 'request.result', requestId: splitRequestId(typed.sent[0]).requestId });
+    expect(typed.textarea().value).toBe('my own draft');
+  });
+
+  it('does not refill the prompt when the revert fails, and shows why', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    h.button('Revert from here: first question').click();
+    h.apply({
+      type: 'request.result',
+      requestId: splitRequestId(h.sent[0]).requestId,
+      error: { code: 'SessionBusyError', message: 'The session is busy' },
+    });
+    expect(h.textarea().value).toBe('');
+    expect(must(h.container, '[role="alert"]').textContent).toContain('The session is busy');
+  });
+
+  it('hides the messages from the boundary on and draws the block OUTSIDE the log', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    expect(h.container.querySelector('.revert-banner')).toBeNull();
+    h.apply(revertAt('m3'));
+    expect(names(h)).toEqual(['first question']);
+    expect(log(h).querySelectorAll('.message')).toHaveLength(2);
+    const banner = must(h.container, '.revert-banner');
+    expect(log(h).contains(banner)).toBe(false);
+    expect(must(banner, '.revert-banner-title').textContent).toBe('1 message reverted');
+    expect(banner.querySelectorAll('.changed-file')).toHaveLength(1);
+    expect(banner.textContent).toContain('1 file changed on disk');
+  });
+
+  it('brings the messages back when the revert goes away, without a new snapshot', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    h.apply(revertAt('m1'));
+    expect(names(h)).toEqual([]);
+    expect(must(h.container, '.revert-banner-title').textContent).toBe('2 messages reverted');
+    h.apply({ type: 'session.revert', sessionID: SES });
+    expect(names(h)).toEqual(['first question', 'second   question\nwith a break']);
+    expect(h.container.querySelector('.revert-banner')).toBeNull();
+  });
+
+  it('hides from the very first snapshot when the host carries the revert inside it', () => {
+    const h = start();
+    h.apply(
+      ...openWith(
+        [{ id: SES }],
+        exchanges,
+        {},
+        {
+          open: {
+            sessionID: SES,
+            messages: exchanges,
+            parts: {},
+            revert: { messageID: 'm3', files: [] },
+          },
+        },
+      ),
+    );
+    expect(names(h)).toEqual(['first question']);
+    expect(h.container.querySelector('.revert-banner-caption')).toBeNull();
+  });
+
+  it('says only "Reverted messages" when the boundary is not among the loaded messages', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    h.apply(revertAt('msg_old'));
+    expect(names(h)).toHaveLength(2);
+    expect(must(h.container, '.revert-banner-title').textContent).toBe('Reverted messages');
+  });
+
+  it('ignores the revert of another session', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    h.apply({
+      type: 'session.revert',
+      sessionID: 'ses_other',
+      revert: { messageID: 'm1', files: [] },
+    });
+    expect(h.container.querySelector('.revert-banner')).toBeNull();
+    expect(names(h)).toHaveLength(2);
+  });
+
+  it('Restore and Discard for good send the requests for the open session', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    h.apply(revertAt('m3'));
+    h.button('Restore').click();
+    expect(splitRequestId(h.sent[0]).rest).toEqual({
+      type: 'session.revert.clear',
+      sessionID: SES,
+    });
+    // The first request is still in flight: the other button waits.
+    h.button('Discard for good').click();
+    expect(h.sent).toHaveLength(1);
+    h.apply({ type: 'request.result', requestId: splitRequestId(h.sent[0]).requestId });
+    h.button('Discard for good').click();
+    expect(splitRequestId(h.sent[1]).rest).toEqual({
+      type: 'session.revert.commit',
+      sessionID: SES,
+    });
+  });
+
+  // Defends against the focus falling to <body> when the banner (which held it) unmounts after a
+  // Restore or Discard for good (review of E7-message-revert, W1). Fabricated host messages in
+  // jsdom: the real-VS-Code part is the `test:visual` step of the revert.
+  it('focuses the prompt after Restore finishes, but not when it ended with a notice', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    h.apply(revertAt('m3'));
+    h.button('Restore').click();
+    h.button('Restore').focus();
+    h.apply({ type: 'session.revert', sessionID: SES });
+    h.apply({ type: 'request.result', requestId: splitRequestId(h.sent[0]).requestId });
+    expect(document.activeElement).toBe(h.textarea());
+
+    h.apply(revertAt('m3'));
+    h.button('Discard for good').click();
+    h.button('Discard for good').focus();
+    h.apply({
+      type: 'request.result',
+      requestId: splitRequestId(h.sent[1]).requestId,
+      error: { code: 'SessionBusyError', message: 'The session is busy.' },
+    });
+    expect(document.activeElement).not.toBe(h.textarea());
+  });
+
+  it('locks the two buttons of the block while the session is busy', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    h.apply(revertAt('m3'));
+    h.apply({ type: 'session.status', sessionID: SES, status: { type: 'busy' } });
+    for (const name of ['Restore', 'Discard for good']) {
+      const button = h.button(name);
+      expect(button.getAttribute('aria-disabled')).toBe('true');
+      button.click();
+    }
+    expect(h.sent).toEqual([]);
+  });
+
+  it('sends session.revert.open with the exact path of the pressed row', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES }], exchanges));
+    h.apply(revertAt('m3', [aFile, { ...aFile, path: 'src/b.ts' }]));
+    h.button('Show what the revert undid in src/b.ts, Modified, 3 added, 1 deleted').click();
+    expect(h.sent).toEqual([{ type: 'session.revert.open', sessionID: SES, path: 'src/b.ts' }]);
+  });
+
+  it('measures the context without the hidden messages', () => {
+    const h = start();
+    h.apply(
+      ...openWith(
+        [{ id: SES }],
+        [
+          user('m1', 'first'),
+          assistant('m2', {
+            tokens: { input: 1000, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+          }),
+          user('m3', 'second'),
+          assistant('m4', {
+            tokens: { input: 9000, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+          }),
+        ],
+      ),
+    );
+    expect(must(h.container, '.usage-line [aria-hidden="true"]').textContent).toBe('Context 9K');
+    h.apply(revertAt('m3'));
+    expect(must(h.container, '.usage-line [aria-hidden="true"]').textContent).toBe('Context 1K');
+  });
+
+  it('Retry resends the last VISIBLE user message, not a hidden one', () => {
+    const h = start();
+    h.apply(
+      ...openWith(
+        [{ id: SES }],
+        [
+          user('m1', 'first question'),
+          assistant('m2', { error: { code: 'X', message: 'broke' } }),
+          user('m3', 'hidden one'),
+        ],
+      ),
+    );
+    h.apply(revertAt('m3'));
+    h.button('Retry').click();
+    expect(h.sent.at(-1)).toMatchObject({ type: 'prompt.send', text: 'first question' });
   });
 });

@@ -21,7 +21,7 @@ import { pickSavedPermissionsToRevoke } from './savedPermissionsUi';
 import { restartServerWithFeedback } from './serverLifecycle';
 import type { ServerManager } from './serverManager';
 import { registerSessionDiffProvider } from './sessionDiffEditor';
-import { confirmSessionDelete } from './sessionUi';
+import { confirmRevertDiscard, confirmSessionDelete } from './sessionUi';
 
 /**
  * `workspaceState` key of the sessions this extension opened last, one per served folder:
@@ -118,7 +118,10 @@ function parseReply(
  * `safeLog` because the channel is closed only after the stop.
  *
  * Issue #31 registers the content provider of the "Changed files" diffs
- * (`registerSessionDiffProvider`), fed by `controller.diffOriginal`.
+ * (`registerSessionDiffProvider`), fed by `controller.diffOriginal` and, for the "what the revert
+ * undid" diffs of issue #32, `controller.revertedOriginal`; it re-reads its open documents on
+ * `controller.onDiffRenewed`. Issue #32 also hands the controller the modal that confirms
+ * "Discard for good" (`confirmRevertDiscard`).
  *
  * The injection command runs a raw message through the SAME guard (`isWebviewToHost`) and the
  * SAME controller as a real webview message. It exists only if `context.extensionMode` is
@@ -177,7 +180,7 @@ export function registerChat(
     },
     attention,
     savedPermissions: { pickToRevoke: pickSavedPermissionsToRevoke },
-    sessions: { confirmDelete: confirmSessionDelete },
+    sessions: { confirmDelete: confirmSessionDelete, confirmRevertDiscard },
     preferences: {
       defaultModel: () =>
         vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>(DEFAULT_MODEL_KEY),
@@ -221,10 +224,14 @@ export function registerChat(
     }),
     // Issue #31: the original side of "Changed files" diffs. Registered now, not on first use, so
     // a diff tab restored by Reload Window finds its provider.
-    registerSessionDiffProvider({
-      original: (sessionID, shown) => controller.diffOriginal(sessionID, shown),
-      onRenewed: (listener) => controller.onDiffRenewed(listener),
-    }),
+    registerSessionDiffProvider(
+      {
+        original: (sessionID, shown) => controller.diffOriginal(sessionID, shown),
+        reverted: (sessionID, shown) => controller.revertedOriginal(sessionID, shown),
+        onRenewed: (listener) => controller.onDiffRenewed(listener),
+      },
+      log,
+    ),
     { dispose: () => controller.dispose() },
     { dispose: () => attention.dispose() },
     vscode.commands.registerCommand(MANAGE_PERMISSIONS_COMMAND_ID, async () => {

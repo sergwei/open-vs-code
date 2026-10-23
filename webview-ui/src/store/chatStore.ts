@@ -71,6 +71,7 @@ import type {
   Part,
   PermissionAsk,
   RequestResolution,
+  RevertState,
   SessionStatus,
   SessionSummary,
 } from '../../../src/shared/model';
@@ -131,12 +132,16 @@ export interface Notice {
  * The session being shown. `sessionID` is `undefined` before the first prompt creates one.
  * `compactedAt` (issue #25) is the boundary of the last completed compaction, copied from the
  * snapshot and absent when there is none; only a snapshot changes it.
+ * `revert` (issue #32) is the prepared revert of the session, copied from the snapshot and
+ * replaced by `session.revert`; absent when there is none. The store never deletes the reverted
+ * messages: the view hides them (`splitAtRevert`), so Restore is instant.
  */
 export interface OpenView {
   sessionID: string | undefined;
   messages: MessageInfo[];
   parts: { [messageID: string]: Part[] };
   compactedAt?: number;
+  revert?: RevertState;
 }
 
 /**
@@ -467,6 +472,7 @@ export function createChatStore(): ChatStore {
                 messages: open.messages,
                 parts: open.parts,
                 ...(open.compactedAt === undefined ? {} : { compactedAt: open.compactedAt }),
+                ...(open.revert === undefined ? {} : { revert: open.revert }),
               },
           { key: 'id' },
         ),
@@ -768,6 +774,24 @@ export function createChatStore(): ChatStore {
         if (state.diff.sessionID !== m.sessionID) setState('diff', emptyDiff());
         setState('diff', { sessionID: m.sessionID, error: m.error });
         setState('diff', 'files', reconcile(m.files, { key: 'path' }));
+      });
+    },
+
+    'session.revert': (m) => {
+      // Only the open session's revert is kept (the host may report one it just left).
+      if (!isOpen(m.sessionID)) return;
+      batch(() => {
+        const revert = m.revert;
+        if (revert === undefined) {
+          setState('open', 'revert', undefined);
+          return;
+        }
+        if (state.open.revert?.messageID === revert.messageID) {
+          // Same boundary: keep the rows (and their DOM) that did not change.
+          setState('open', 'revert', 'files', reconcile(revert.files, { key: 'path' }));
+        } else {
+          setState('open', 'revert', { messageID: revert.messageID, files: revert.files });
+        }
       });
     },
 

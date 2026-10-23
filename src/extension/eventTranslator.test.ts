@@ -670,6 +670,39 @@ describe('seed merges instead of emptying (review BLOCKER)', () => {
     };
     expect(t.mergeLive(snapshot)).toBe(snapshot);
   });
+
+  // Issue #32: a committed revert deletes the messages from its boundary on, and REST then lists
+  // fewer of them; without `forgetFrom` the stream's copies would come back as "in flight" in the
+  // next snapshot (seen over HTTP in `chatController.e2e.test.ts`). FABRICATED ids that ascend.
+  it('forgetFrom drops the live messages at and after the boundary, and keeps the earlier ones', () => {
+    const t = createEventTranslator();
+    t.setOpen(SES);
+    t.translate(
+      ev('session.inbox.enqueued', {
+        sessionID: SES,
+        inboxID: USER,
+        item: { type: 'user', payload: { text: 'hello' }, delivery: 'queue' },
+      }),
+    );
+    run(t, [
+      ev('session.inbox.delivered', { sessionID: SES, inboxID: USER }, 1100),
+      ev('session.step.started', {
+        ...a,
+        agent: 'build',
+        model: { id: 'm', providerID: 'p' },
+        started: 1200,
+      }),
+    ]);
+    // The test ids are `msg_a` (assistant) < `msg_b` < `msg_u` (user): only the user one is cut.
+    t.forgetFrom('msg_b');
+    t.seed(empty);
+    expect(
+      t.mergeLive({ sessionID: SES, messages: [], parts: {} }).messages.map((m) => m.id),
+    ).toEqual([ASSISTANT]);
+    t.forgetFrom(ASSISTANT);
+    t.seed(empty);
+    expect(t.mergeLive({ sessionID: SES, messages: [], parts: {} }).messages).toEqual([]);
+  });
 });
 
 // Review round 2 (2026-10-20): `mergeLive` must not bring back messages REST stopped listing, the

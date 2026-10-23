@@ -26,6 +26,7 @@ import type {
   PermissionAsk,
   PermissionDecision,
   RequestResolution,
+  RevertState,
   SessionStatus,
   SessionSummary,
 } from './model';
@@ -103,12 +104,18 @@ export type ConnectionState =
  * 2.0.32, Windows 11, 22/10/2026; not re-run here; plan line "Los mensajes previos SIGUEN
  * listados"). It only changes with a snapshot:
  * the host resyncs when `session.compaction.ended` arrives for the open session.
+ *
+ * `revert` (issue #32) is the revert prepared in the session, if any (`SessionInfo.revert` of the
+ * row the host read, mapped by `sessionRevert.ts`). It travels inside the snapshot so that hiding
+ * the reverted messages is atomic with the messages themselves; the live changes arrive as
+ * `session.revert`. Absent = no revert.
  */
 export type OpenSession = {
   sessionID: string;
   messages: MessageInfo[];
   parts: { [messageID: string]: Part[] };
   compactedAt?: number;
+  revert?: RevertState;
 };
 
 /**
@@ -162,6 +169,11 @@ export type Snapshot = {
  * `session.diff` (issue #31) is the whole "Changed files" list of ONE session and REPLACES what the
  * webview holds for it; the webview keeps it only if `sessionID` is the open session. `error` says
  * the host could not refresh the list: `files` then is the last list it had (possibly empty).
+ * `session.revert` (issue #32) REPLACES the revert the webview holds for ONE session; the webview
+ * keeps it only if `sessionID` is the open session, and an absent `revert` means "no revert" (it
+ * was restored, discarded for good, or never existed). The host sends it when a revert is prepared
+ * or cleared; a committed one is announced by a fresh `snapshot` instead, never by an empty
+ * `session.revert` first (the hidden messages would flash back for an instant).
  */
 export type HostToWebview =
   | { type: 'connection.state'; connection: ConnectionState }
@@ -216,6 +228,7 @@ export type HostToWebview =
     }
   | { type: 'ui.focus'; target: { kind: 'permission' | 'form'; sessionID: string; id: string } }
   | { type: 'session.diff'; sessionID: string; files: ChangedFile[]; error?: ErrorInfo }
+  | { type: 'session.revert'; sessionID: string; revert?: RevertState }
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; error: ErrorInfo };
 
 /**
@@ -251,6 +264,15 @@ export type HostToWebview =
  * "Changed files" list. It has no `requestId`, like `editor.open`: a failure is a `notice`. `path`
  * is the `ChangedFile.path` the host sent; the host opens it only if it listed that path for that
  * session, so the webview cannot name a file of its own.
+ * `session.revert.stage`, `.clear` and `.commit` (issue #32) prepare a revert from a user message
+ * (the history from it on is hidden and the files the agent touched after it are put back on
+ * disk), restore it, or make it permanent. They carry a `requestId` and are answered by
+ * `request.result`; the new state arrives as `session.revert` (or a `snapshot` after a commit). The
+ * host, not the webview, validates that `messageID` is a user message of the open session and asks
+ * the user to confirm a commit with a native modal. `session.revert.open` opens the diff of what a
+ * prepared revert undid in one file (left: the text before the revert, right: the file on disk); it
+ * has no `requestId`, like `session.diff.open`, and `path` must be one the host listed in the
+ * `RevertState` it sent.
  */
 export type WebviewToHost =
   | { type: 'ready' }
@@ -289,6 +311,10 @@ export type WebviewToHost =
   | { type: 'logs.show' }
   | { type: 'editor.open'; path: string; line?: number; column?: number }
   | { type: 'session.diff.open'; sessionID: string; path: string }
+  | { type: 'session.revert.stage'; requestId: string; sessionID: string; messageID: string }
+  | { type: 'session.revert.clear'; requestId: string; sessionID: string }
+  | { type: 'session.revert.commit'; requestId: string; sessionID: string }
+  | { type: 'session.revert.open'; sessionID: string; path: string }
   | { type: 'editor.insert'; text: string }
   | { type: 'editor.newFile'; text: string; language?: string }
   | { type: 'clipboard.write'; text: string }
@@ -514,6 +540,21 @@ const hasPromptContent: Validator = (m) => {
 };
 
 /**
+ * Shape of `session.diff.open` and `session.revert.open`: a session id and a `path` of at most
+ * `MAX_DIFF_PATH_LENGTH` characters without `NUL`. That the path is one the host listed is the
+ * handler's check, not this guard's.
+ */
+const isDiffOpen: Validator = (m) => {
+  const path = field(m, 'path');
+  return (
+    isNonEmptyString(field(m, 'sessionID')) &&
+    isNonEmptyString(path) &&
+    path.length <= MAX_DIFF_PATH_LENGTH &&
+    !path.includes('\0')
+  );
+};
+
+/**
  * One validator per webview-to-host `type`. The `Record` key type makes it exhaustive: adding a
  * member to `WebviewToHost` without its validator is a compile error.
  */
@@ -583,15 +624,16 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
     isOptional(field(m, 'line'), isPositiveInteger) &&
     isOptional(field(m, 'column'), isPositiveInteger),
   // Only the shape: that the path is one the host listed for that session is the handler's check.
-  'session.diff.open': (m) => {
-    const path = field(m, 'path');
-    return (
-      isNonEmptyString(field(m, 'sessionID')) &&
-      isNonEmptyString(path) &&
-      path.length <= MAX_DIFF_PATH_LENGTH &&
-      !path.includes('\0')
-    );
-  },
+  'session.diff.open': isDiffOpen,
+  'session.revert.stage': (m) =>
+    isNonEmptyString(field(m, 'requestId')) &&
+    isNonEmptyString(field(m, 'sessionID')) &&
+    isNonEmptyString(field(m, 'messageID')),
+  'session.revert.clear': (m) =>
+    isNonEmptyString(field(m, 'requestId')) && isNonEmptyString(field(m, 'sessionID')),
+  'session.revert.commit': (m) =>
+    isNonEmptyString(field(m, 'requestId')) && isNonEmptyString(field(m, 'sessionID')),
+  'session.revert.open': isDiffOpen,
   'editor.insert': (m) => isString(field(m, 'text')),
   'editor.newFile': (m) => isString(field(m, 'text')) && isOptional(field(m, 'language'), isString),
   // An empty string is a legitimate clipboard write (clears it), unlike an empty prompt.
@@ -624,6 +666,7 @@ const HOST_TYPE_SET: Record<HostToWebview['type'], true> = {
   'files.found': true,
   'ui.focus': true,
   'session.diff': true,
+  'session.revert': true,
   notice: true,
 };
 

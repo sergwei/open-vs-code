@@ -42,6 +42,7 @@ import type {
   SessionInfo,
   SessionListInput,
   SessionMessageInfo,
+  SessionRevert,
   SessionsResponse,
   V2Event,
 } from '@opencode/client';
@@ -139,6 +140,18 @@ type FakeOptions = Partial<{
   };
   /** Rejects `switchAgent` / `switchModel` with this server error body. */
   switchError: object;
+  /**
+   * Issue #32. `rowRevert` is the `revert` every session row (`session.list` and `session.get`)
+   * carries; `stageImpl` replaces `session.revert.stage`; `revertError` rejects stage, clear and
+   * commit with this server error body; `messageTypes` are the `type` `session.message.get` answers
+   * by id (default `user`; an id mapped to `unknown` rejects `MessageNotFoundError`).
+   */
+  rowRevert: SessionRevert;
+  stageImpl: (input: { sessionID: string; messageID: string }) => Promise<SessionRevert>;
+  revertError: object;
+  messageTypes: Record<string, string>;
+  /** Replaces `session.revert.clear` / `commit`, to hold them while a test runs something else. */
+  clearImpl: () => Promise<void>;
   /** Replaces `file.find` (issue #28); receives the input and the abort signal of the call. */
   findImpl: (
     input: FileFindInput,
@@ -236,6 +249,7 @@ function fakeApi(options: FakeOptions = {}) {
   const switches: string[] = [];
   const finds: FileFindInput[] = [];
   const diffInputs: SessionDiffInput[] = [];
+  const reverts: string[] = [];
   /** Rejects like the real client: with the server's error BODY, an object, not an Error. */
   const failWith = (body: object): Promise<never> =>
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
@@ -260,7 +274,14 @@ function fakeApi(options: FakeOptions = {}) {
         listInputs.push(input);
         return (
           options.listImpl ??
-          (() => Promise.resolve({ data: (options.sessions ?? []).map(sessionInfo), cursor: {} }))
+          (() =>
+            Promise.resolve({
+              data: (options.sessions ?? []).map((id) => ({
+                ...sessionInfo(id),
+                ...(options.rowRevert === undefined ? {} : { revert: options.rowRevert }),
+              })),
+              cursor: {},
+            }))
         )(input);
       },
       active: () => {
@@ -282,8 +303,41 @@ function fakeApi(options: FakeOptions = {}) {
           ...sessionInfo(sessionID),
           ...(title === undefined ? {} : { title }),
           ...(options.subpath === undefined ? {} : { subpath: options.subpath }),
+          ...(options.rowRevert === undefined ? {} : { revert: options.rowRevert }),
           ...stored,
         });
+      },
+      revert: {
+        stage: (input) => {
+          calls.push('session.revert.stage');
+          reverts.push(`stage ${input.messageID}`);
+          if (options.revertError !== undefined) return failWith(options.revertError);
+          return (
+            options.stageImpl ?? ((i) => Promise.resolve({ messageID: i.messageID, files: [] }))
+          )(input);
+        },
+        clear: () => {
+          calls.push('session.revert.clear');
+          reverts.push('clear');
+          if (options.revertError !== undefined) return failWith(options.revertError);
+          return (options.clearImpl ?? (() => Promise.resolve()))();
+        },
+        commit: () => {
+          calls.push('session.revert.commit');
+          reverts.push('commit');
+          if (options.revertError !== undefined) return failWith(options.revertError);
+          return Promise.resolve();
+        },
+      },
+      message: {
+        get: ({ sessionID, messageID }) => {
+          calls.push('session.message.get');
+          const type = options.messageTypes?.[messageID] ?? 'user';
+          if (type === 'unknown') {
+            return failWith({ _tag: 'MessageNotFoundError', sessionID, messageID });
+          }
+          return Promise.resolve({ id: messageID, type } as unknown as SessionMessageInfo);
+        },
       },
       diff: (input) => {
         calls.push('session.diff');
@@ -336,7 +390,7 @@ function fakeApi(options: FakeOptions = {}) {
           ...(input.delivery ? { delivery: input.delivery } : {}),
           ...(input.files ? { files: input.files } : {}),
         });
-        return (options.promptImpl ?? (() => Promise.resolve({})))() as ReturnType<
+        return (options.promptImpl ?? (() => Promise.resolve({ id: 'msg_in' })))() as ReturnType<
           ChatApi['session']['prompt']
         >;
       },
@@ -471,6 +525,7 @@ function fakeApi(options: FakeOptions = {}) {
     switches,
     finds,
     diffInputs,
+    reverts,
   };
 }
 
@@ -530,8 +585,10 @@ function setup(
   picker: (items: SavedPermission[]) => Promise<string[]> = () => Promise.resolve([]),
   confirmDelete: (info: { title: string; running: boolean }) => Promise<boolean> = () =>
     Promise.resolve(true),
+  confirmRevertDiscard: () => Promise<boolean> = () => Promise.resolve(true),
 ) {
   const confirmations: Array<{ title: string; running: boolean }> = [];
+  let discardAsked = 0;
   const posted: HostToWebview[] = [];
   const logs: string[] = [];
   const memoryWrites: Array<{ folder: string; id: string | undefined }> = [];
@@ -593,6 +650,10 @@ function setup(
         confirmations.push(info);
         return confirmDelete(info);
       },
+      confirmRevertDiscard: () => {
+        discardAsked += 1;
+        return confirmRevertDiscard();
+      },
     },
     server: {
       restart: () => {
@@ -623,6 +684,8 @@ function setup(
     serverCalls,
     picked,
     confirmations,
+    /** How many times the "Discard for good" modal was shown. */
+    discardAsked: () => discardAsked,
     prefs,
     /** Makes the host know a pending permission, as the stream would (needs a running server). */
     seedPermission: (id = 'per_1', sessionID = 'ses_1', save: string[] = ['*']) => {
@@ -683,7 +746,7 @@ describe('prompt.send', () => {
     expect(snapshots().at(-1)?.open?.sessionID).toBe('ses_new');
     expect(prompts).toEqual([{ sessionID: 'ses_new', text: 'hi', delivery: 'queue' }]);
     expect(posted.at(-1)).toEqual({ type: 'request.result', requestId: 'r1' });
-    expect(logs).toContain('info: prompt accepted for ses_new');
+    expect(logs).toContain('info: prompt accepted for ses_new (input msg_in)');
   });
 
   it('reuses the open session instead of creating one', async () => {
@@ -3825,7 +3888,14 @@ describe('changed files (issue #31)', () => {
         type: 'session.diff',
         sessionID: 'ses_1',
         files: [
-          { path: 'src/a.ts', status: 'modified', additions: 1, deletions: 1, binary: false },
+          {
+            path: 'src/a.ts',
+            status: 'modified',
+            additions: 1,
+            deletions: 1,
+            binary: false,
+            tooLarge: false,
+          },
         ],
       },
     ]);
@@ -3861,7 +3931,8 @@ describe('changed files (issue #31)', () => {
     await flush();
     expect(diffInputs).toEqual([]);
     for (const [type, data] of [
-      ['session.revert.staged', { sessionID: 'ses_1', revert: { messageID: 'm' } }],
+      // `msg_2` is the second user message: the range then stops at `msg_1` (issue #32).
+      ['session.revert.staged', { sessionID: 'ses_1', revert: { messageID: 'msg_2' } }],
       ['session.revert.cleared', { sessionID: 'ses_1' }],
       ['session.revert.committed', { sessionID: 'ses_1', to: 'm' }],
     ] as const) {
@@ -3949,6 +4020,7 @@ describe('changed files (issue #31)', () => {
             absolute: absolute('src/a.ts'),
             status: 'deleted',
             binary: false,
+            side: 'before',
           },
         ],
       ]);
@@ -4034,6 +4106,295 @@ describe('changed files (issue #31)', () => {
       await expect(controller.diffOriginal('ses_1', 'src/a.ts')).rejects.toMatchObject({
         name: 'DiffNotListed',
       });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// E7-message-revert (issue #32): revert from a user message.
+//
+// Protects: the host refusing to stage from anything but a USER message of the OPEN session before
+// the server rewrites a single file; the state reaching the webview once, in the snapshot and as
+// `session.revert`; a committed revert clearing the webview through a snapshot and NEVER through an
+// empty `session.revert` first (the hidden messages would flash back); the only confirmation being
+// the "Discard for good" modal; the boundary bounding the "Changed files" range; and the whitelist
+// of the "what the revert undid" diffs. Provenance: a FAKE client with hand-made `SessionRevert`
+// rows (the real client over HTTP is `chatController.e2e.test.ts`; the real server, only with an
+// empty `files`, is `realOpencode.test.ts`). `sessionRevert.test.ts` has the module's own logic.
+// ---------------------------------------------------------------------------------------------
+describe('message revert (issue #32)', () => {
+  const userMessage = (id: string): SessionMessageInfo =>
+    wire<SessionMessageInfo>(
+      JSON.stringify({ id, type: 'user', text: 'hi', time: { created: 1 } }),
+    );
+  const undone: FileDiffInfo = {
+    file: 'src/a.ts',
+    status: 'modified',
+    additions: 1,
+    deletions: 1,
+    patch: 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n',
+  };
+  /** A running controller with `ses_1` open, two user messages and a client that stages `msg_2`. */
+  function withOpenSession(
+    options: Parameters<typeof fakeApi>[0] = {},
+    editor?: EditorActions,
+    discard?: () => Promise<boolean>,
+  ) {
+    const api = fakeApi({
+      sessions: ['ses_1'],
+      userMessages: [userMessage('msg_1'), userMessage('msg_2')],
+      stageImpl: (input) => Promise.resolve({ messageID: input.messageID, files: [undone] }),
+      ...options,
+    });
+    const ctl = setup(api.api, 'ses_1', editor, undefined, undefined, discard);
+    ctl.controller.onServerState(RUNNING);
+    return { ...api, ...ctl };
+  }
+  const stage = (messageID = 'msg_2', sessionID = 'ses_1'): WebviewToHost => ({
+    type: 'session.revert.stage',
+    requestId: 'r1',
+    sessionID,
+    messageID,
+  });
+  const revertPosts = (posted: HostToWebview[]) =>
+    posted.flatMap((m) => (m.type === 'session.revert' ? [m] : []));
+  const mapped = {
+    path: 'src/a.ts',
+    status: 'modified',
+    additions: 1,
+    deletions: 1,
+    binary: false,
+    tooLarge: false,
+  };
+
+  it('refuses a message that is not a user one, and a session that is not open, without staging', async () => {
+    const { controller, posted, reverts, logs } = withOpenSession({
+      messageTypes: { msg_a: 'assistant' },
+    });
+    await controller.handle(stage('msg_a'));
+    await controller.handle(stage('msg_2', 'ses_other'));
+    expect(reverts).toEqual([]);
+    expect(posted.filter((m) => m.type === 'request.result')).toMatchObject([
+      { requestId: 'r1', error: { code: 'NotAUserMessage' } },
+      { requestId: 'r1', error: { code: 'SessionNotOpen' } },
+    ]);
+    expect(logs).toContain('warn: revert refused: not a user message');
+    expect(logs).toContain('warn: revert refused: session not open');
+  });
+
+  it('answers the server error of a busy session or an unknown message as the result', async () => {
+    const busy = withOpenSession({ revertError: { _tag: 'SessionBusyError', sessionID: 'ses_1' } });
+    await busy.controller.handle(stage());
+    expect(busy.posted.at(-1)).toMatchObject({
+      type: 'request.result',
+      error: { code: 'SessionBusyError' },
+    });
+    expect(revertPosts(busy.posted)).toEqual([]);
+    const unknown = withOpenSession({ messageTypes: { msg_x: 'unknown' } });
+    await unknown.controller.handle(stage('msg_x'));
+    expect(unknown.reverts).toEqual([]);
+    expect(unknown.posted.at(-1)).toMatchObject({ error: { code: 'MessageNotFoundError' } });
+  });
+
+  it('stages from a user message: publishes the state once and bounds the changed files', async () => {
+    const { controller, posted, logs, reverts, diffInputs } = withOpenSession({
+      diffImpl: () => Promise.resolve([]),
+    });
+    await controller.handle(stage());
+    await flush();
+    await flush();
+    expect(reverts).toEqual(['stage msg_2']);
+    expect(revertPosts(posted)).toEqual([
+      {
+        type: 'session.revert',
+        sessionID: 'ses_1',
+        revert: { messageID: 'msg_2', files: [mapped] },
+      },
+    ]);
+    expect(posted.filter((m) => m.type === 'request.result')).toEqual([
+      { type: 'request.result', requestId: 'r1' },
+    ]);
+    expect(logs).toContain('info: revert staged for ses_1: 1 files');
+    // The range stops at the user message before the boundary (`msg_1`), one turn only.
+    expect(diffInputs.at(-1)).toEqual({ sessionID: 'ses_1', from: 'msg_1', context: 0 });
+  });
+
+  // Defends against a resync that cannot read the open row (not in the list of 50 and `session.get`
+  // failing) clearing a revert the server still has (review W2). Fake client: the failing read is
+  // fabricated; no real server was made to fail like that.
+  it('keeps the held revert in the snapshot when the open row cannot be read', async () => {
+    let failGet = false;
+    const { controller, snapshots } = withOpenSession({
+      listImpl: () => Promise.resolve({ data: [], cursor: {} }),
+      getImpl: (sessionID) =>
+        failGet ? Promise.reject(new Error('down')) : Promise.resolve(sessionInfo(sessionID)),
+    });
+    await controller.handle(stage());
+    await flush();
+    failGet = true;
+    await controller.onWebviewReady();
+    expect(snapshots().at(-1)?.open?.revert).toMatchObject({ messageID: 'msg_2' });
+  });
+
+  it('does not repeat the state when the staged event follows the answer, and ignores another session', async () => {
+    const { controller, posted, streams } = withOpenSession();
+    await controller.handle(stage());
+    emit(streams, 'session.revert.staged', {
+      sessionID: 'ses_1',
+      revert: { messageID: 'msg_2', files: [undone] },
+    });
+    emit(streams, 'session.revert.staged', { sessionID: 'ses_other', revert: { messageID: 'x' } });
+    emit(streams, 'session.revert.cleared', { sessionID: 'ses_other' });
+    await flush();
+    await flush();
+    expect(revertPosts(posted)).toHaveLength(1);
+  });
+
+  it('clears the state when the server says cleared, with an absent revert', async () => {
+    const { controller, posted, streams } = withOpenSession();
+    await controller.handle(stage());
+    emit(streams, 'session.revert.cleared', { sessionID: 'ses_1' });
+    await flush();
+    await flush();
+    expect(revertPosts(posted).at(-1)).toEqual({ type: 'session.revert', sessionID: 'ses_1' });
+  });
+
+  it('takes the revert of the session row into the snapshot, without a second message', async () => {
+    const { controller, posted, snapshots } = withOpenSession({
+      rowRevert: { messageID: 'msg_2', files: [undone] },
+    });
+    await controller.onWebviewReady();
+    expect(snapshots().at(-1)?.open?.revert).toEqual({ messageID: 'msg_2', files: [mapped] });
+    expect(revertPosts(posted)).toEqual([]);
+  });
+
+  it('a committed revert resyncs and never posts an empty session.revert first', async () => {
+    const { controller, posted, streams, snapshots } = withOpenSession({
+      rowRevert: { messageID: 'msg_2', files: [] },
+    });
+    await controller.onWebviewReady();
+    posted.length = 0;
+    emit(streams, 'session.revert.committed', { sessionID: 'ses_1', to: 'msg_2' });
+    await flush();
+    await flush();
+    expect(revertPosts(posted)).toEqual([]);
+    // A snapshot arrived after the event: that is what clears the webview.
+    expect(snapshots().length).toBeGreaterThan(0);
+  });
+
+  describe('Restore and Discard for good', () => {
+    const clear: WebviewToHost = {
+      type: 'session.revert.clear',
+      requestId: 'r2',
+      sessionID: 'ses_1',
+    };
+    const commit: WebviewToHost = {
+      type: 'session.revert.commit',
+      requestId: 'r3',
+      sessionID: 'ses_1',
+    };
+
+    it('restores from the answer, without waiting for the event', async () => {
+      const { controller, posted, reverts, logs } = withOpenSession();
+      await controller.handle(stage());
+      await controller.handle(clear);
+      expect(reverts).toEqual(['stage msg_2', 'clear']);
+      expect(revertPosts(posted).at(-1)).toEqual({ type: 'session.revert', sessionID: 'ses_1' });
+      expect(logs).toContain('info: revert cleared for ses_1');
+      expect(posted.at(-1)).toEqual({ type: 'request.result', requestId: 'r2' });
+    });
+
+    it('asks with the native modal and commits only on yes', async () => {
+      const yes = withOpenSession({}, undefined, () => Promise.resolve(true));
+      await yes.controller.handle(commit);
+      expect(yes.discardAsked()).toBe(1);
+      expect(yes.reverts).toEqual(['commit']);
+      const no = withOpenSession({}, undefined, () => Promise.resolve(false));
+      await no.controller.handle(commit);
+      expect(no.discardAsked()).toBe(1);
+      expect(no.reverts).toEqual([]);
+      expect(no.logs).toContain('info: revert commit cancelled ses_1');
+      expect(no.posted.at(-1)).toEqual({ type: 'request.result', requestId: 'r3' });
+    });
+
+    it('forgets the revert and resyncs after a commit, and refuses another session', async () => {
+      const { controller, posted, snapshots, logs } = withOpenSession();
+      await controller.handle(stage());
+      const before = snapshots().length;
+      await controller.handle(commit);
+      await flush();
+      await flush();
+      expect(snapshots().length).toBeGreaterThan(before);
+      expect(snapshots().at(-1)?.open?.revert).toBeUndefined();
+      posted.length = 0;
+      await controller.handle({ ...commit, sessionID: 'ses_other' });
+      expect(posted).toMatchObject([{ error: { code: 'SessionNotOpen' } }]);
+      expect(logs).toContain('warn: revert refused: session not open');
+    });
+
+    it('a prompt sent with a revert prepared forgets it and resyncs', async () => {
+      const { controller, snapshots, logs } = withOpenSession();
+      await controller.handle(stage());
+      const before = snapshots().length;
+      await controller.handle({
+        type: 'prompt.send',
+        requestId: 'r9',
+        text: 'next',
+        delivery: 'queue',
+        files: [],
+      });
+      await flush();
+      await flush();
+      expect(snapshots().length).toBeGreaterThan(before);
+      expect(logs).toContain('info: prompt accepted for ses_1 (input msg_in)');
+    });
+  });
+
+  describe('session.revert.open', () => {
+    const open = (path: string, sessionID = 'ses_1'): WebviewToHost => ({
+      type: 'session.revert.open',
+      sessionID,
+      path,
+    });
+
+    it('opens the diff of a file the revert undid and refuses one it did not list', async () => {
+      const { editor, calls } = fakeEditor();
+      const { controller, logs, posted } = withOpenSession({}, editor);
+      await controller.handle(stage());
+      await controller.handle(open('src/never.ts'));
+      await controller.handle(open('../outside.ts'));
+      await controller.handle(open('src/a.ts', 'ses_other'));
+      expect(calls).toEqual([]);
+      expect(logs.filter((l) => l === 'warn: revert diff open refused: not listed')).toHaveLength(
+        2,
+      );
+      expect(logs).toContain('warn: revert diff open refused: session not open');
+      expect(logs.join('\n')).not.toContain('never.ts');
+      await controller.handle(open('src/a.ts'));
+      expect(calls).toEqual([
+        [
+          'openDiff',
+          {
+            sessionID: 'ses_1',
+            path: 'src/a.ts',
+            absolute: path.resolve(SERVER.folder, 'src/a.ts'),
+            status: 'modified',
+            binary: false,
+            side: 'reverted',
+          },
+        ],
+      ]);
+      expect(logs).toContain('info: revert diff opened (modified)');
+      expect(posted.filter((m) => m.type === 'notice')).toHaveLength(3);
+    });
+
+    it('rebuilds the text before the revert from the patch the stage answered', async () => {
+      const { controller } = withOpenSession();
+      await expect(controller.revertedOriginal('ses_1', 'src/a.ts')).rejects.toMatchObject({
+        name: 'DiffNotListed',
+      });
+      await controller.handle(stage());
+      expect(await controller.revertedOriginal('ses_1', 'src/a.ts')).toBe('one\ntwo\n');
     });
   });
 });
