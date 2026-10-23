@@ -1560,8 +1560,11 @@ describe('file mentions and editor context (issues #28/#29)', () => {
   // Issue #30, decisions Q1/Q2 of Sergio. Fake editor and fake `file.find`: they pin what the
   // controller does with a drop, not what a real VS Code puts in `resourceurls`.
   describe('dropped files and pasted images (issue #30)', () => {
-    const A = { uri: 'file:///C:/work/src/a.ts', name: 'src/a.ts' };
-    const IGNORED = { uri: 'file:///C:/work/.env', name: '.env' };
+    // Built with `refOf` (the `path` of the machine running the test), like the search results the
+    // fake `file.find` maps: a literal Windows uri only matched on Windows (CI failed on Linux and
+    // macOS, 23/10/2026).
+    const A = refOf('src/a.ts');
+    const IGNORED = refOf('.env');
     const skipped = { folders: 1, outside: 1, remote: 0, missing: 0 };
     const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]).toString('base64');
     const drop = (uris: string[]) => ({ type: 'attachments.drop', requestId: 'd1', uris }) as const;
