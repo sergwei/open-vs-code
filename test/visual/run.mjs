@@ -176,6 +176,7 @@
 // suite sees only their log lines), a screen reader, a catalog of hundreds of files, macOS and
 // Linux.
 import { chromium } from 'playwright-core';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createWorkspace, startVSCode, writeSettings } from './vscodeProcess.mjs';
@@ -4103,6 +4104,328 @@ try {
     );
     await command('View: Close All Editors');
     assertNoWebviewErrors('revert');
+  });
+
+  // Issue #30. The PASTE is real (a PNG on the system clipboard and the real keyboard); the DROP is
+  // synthetic (`isTrusted: false` events with a `DataTransfer` that carries `resourceurls`): it
+  // proves our handler and the host, NOT that VS Code delivers a drag to the webview. A real drag
+  // from the Explorer is not automated here (the chat and the Explorer cannot share a side bar
+  // without moving a view), so that half stays UNVERIFIED. This step OVERWRITES the system
+  // clipboard (image, then text); nothing is restored.
+  await step('20 drop and paste (issue #30)', async () => {
+    const THEMES = [
+      ['light', 'Default Light Modern'],
+      ['dark', 'Default Dark Modern'],
+      ['hc-dark', 'Default High Contrast'],
+      ['hc-light', 'Default High Contrast Light'],
+    ];
+    const PNG_B64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    const NO_IMAGES = 'The selected model cannot read images: it will be told so';
+    /** The URI string VS Code's Explorer writes in `resourceurls` (`URI.toString()`, F2 of the plan). */
+    const vsUri = (file) => {
+      const slashed = file.replace(/\\/g, '/');
+      const drive = /^([A-Za-z]):(.*)$/.exec(slashed);
+      return drive
+        ? `file:///${drive[1].toLowerCase()}%3A${encodeURI(drive[2])}`
+        : `file://${encodeURI(slashed)}`;
+    };
+    const ui = () =>
+      web.inDoc((doc) => {
+        const field = doc.querySelector('textarea.prompt-text');
+        const thumb = doc.querySelector('.chips img.chip-thumb');
+        return {
+          value: field?.value ?? '',
+          chips: [...doc.querySelectorAll('.chips .chip-open, .chips .chip-name')].map(
+            (c) => c.textContent ?? '',
+          ),
+          thumbLoaded: thumb ? thumb.complete && thumb.naturalWidth > 0 : null,
+          drop: doc.querySelector('form.prompt')?.getAttribute('data-drop') ?? '',
+          hint: doc.querySelector('.drop-hint')?.textContent ?? '',
+          alerts: doc.querySelectorAll('[role="alert"]').length,
+          text: doc.body?.innerText ?? '',
+          sent: [...doc.querySelectorAll('[role="log"] .message-files .chip')].map(
+            (c) => c.textContent ?? '',
+          ),
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+        };
+      });
+    const count = (text, phrase) => text.split(phrase).length - 1;
+    /** Puts the PNG on the system clipboard: the page's own API first, PowerShell on Windows next. */
+    const clipboardImage = async () => {
+      const viaPage = await page.evaluate(async (b64) => {
+        try {
+          const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+          await navigator.clipboard.write([
+            new globalThis.ClipboardItem({ 'image/png': new Blob([bytes], { type: 'image/png' }) }),
+          ]);
+          return true;
+        } catch (error) {
+          return String(error);
+        }
+      }, PNG_B64);
+      if (viaPage === true) return 'navigator.clipboard';
+      if (process.platform !== 'win32') throw new Error(`no way to set the clipboard: ${viaPage}`);
+      const file = path.join(workDir, 'clipboard.png');
+      fs.writeFileSync(file, Buffer.from(PNG_B64, 'base64'));
+      execFileSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-STA',
+          '-Command',
+          `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile('${file}'))`,
+        ],
+        { windowsHide: true },
+      );
+      return `powershell (page API said: ${viaPage})`;
+    };
+    // The page's `navigator.clipboard.write*` is denied in the workbench ("Write permission
+    // denied", seen in this step), so the text goes through the OS too.
+    const clipboardText = (text) => {
+      if (process.platform !== 'win32') throw new Error('no way to set the text clipboard here');
+      execFileSync(
+        'powershell',
+        ['-NoProfile', '-STA', '-Command', `Set-Clipboard -Value '${text}'`],
+        {
+          windowsHide: true,
+        },
+      );
+    };
+    const pasteIntoBox = async () => {
+      check(await clickIn('textarea'), 'the prompt box is clicked');
+      await sleep(300);
+      await web.inDoc((doc) => {
+        // Diagnostics only: what the paste event of the page carried (types, never contents).
+        doc.defaultView.__lastPaste = undefined;
+        doc.addEventListener(
+          'paste',
+          (event) => {
+            doc.defaultView.__lastPaste = [...(event.clipboardData?.items ?? [])].map(
+              (item) => `${item.kind}:${item.type}`,
+            );
+          },
+          { capture: true, once: true },
+        );
+      });
+      await page.keyboard.press('ControlOrMeta+V');
+      await sleep(1200);
+      const seen = await web.inDoc((doc) => doc.defaultView.__lastPaste ?? null);
+      console.log(`  paste event items: ${JSON.stringify(seen)}`);
+      return seen;
+    };
+    /**
+     * Puts the PNG on the clipboard and pastes, up to three times, but ONLY when the clipboard was
+     * empty: the clipboard written by a short-lived PowerShell was seen to be gone at the first
+     * paste of one run, which shows as a paste event WITHOUT `file:image/png`. If the event did
+     * carry the image and there is still no chip, the fault is ours (onPaste, readImage or the
+     * host) and the step fails at once instead of being retried into a pass (review of
+     * 23/10/2026, W3). Every try says which of the two it was.
+     */
+    const pasteImage = async () => {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        console.log(`  clipboard set through ${await clipboardImage()} (try ${String(attempt)})`);
+        const seen = await pasteIntoBox();
+        if ((await ui()).chips.length > 0) return attempt;
+        if (seen?.includes('file:image/png')) {
+          throw new Error(
+            `the paste event carried the image (${JSON.stringify(seen)}) but no chip appeared: our bug, not an empty clipboard`,
+          );
+        }
+        console.log(`  try ${String(attempt)}: the clipboard was empty (environment), retrying`);
+      }
+      return 0;
+    };
+    const removeChips = async () => {
+      for (let guard = 0; guard < 6 && (await ui()).chips.length > 0; guard += 1) {
+        await clickIn('.chips .chip-remove');
+        await sleep(200);
+      }
+    };
+
+    writeSettings(vscode.userDataDir, {
+      'workbench.colorTheme': 'Default Dark Modern',
+      'openVsCode.defaultModel': 'opencode/big-pickle',
+    });
+    await page.waitForTimeout(2500);
+    assertNoWebviewErrors('before the drop and paste step');
+    check(await clickButton('New session'), 'New session is pressed');
+    await page.waitForTimeout(1500);
+
+    // --- Paste a real image with the real keyboard (HYPOTHESIS F6 of the plan) ------------------
+    console.log(`  tries needed: ${String(await pasteImage())}`);
+    let state = await ui();
+    console.log(`  after paste: ${JSON.stringify({ ...state, text: undefined })}`);
+    check(
+      state.chips.includes('Pasted image 1'),
+      'Ctrl+V with an image on the clipboard adds the chip "Pasted image 1"',
+    );
+    check(state.value === '', 'and writes no text in the prompt box');
+    check(
+      state.thumbLoaded === true,
+      'the chip shows a thumbnail that loaded (blob: allowed by the CSP)',
+    );
+    check(
+      count(state.text, NO_IMAGES) === 1,
+      'a model that cannot read images gets one warning ("The selected model cannot read images")',
+    );
+    await shot('20a-pasted-image');
+
+    // --- A text paste still writes text and adds no chip ---------------------------------------
+    await clipboardText('hello from the clipboard');
+    await pasteIntoBox();
+    state = await ui();
+    check(
+      state.value.includes('hello from the clipboard') && state.chips.length === 1,
+      'a text paste writes text and adds no chip',
+    );
+    await shot('20b-text-pasted');
+
+    // --- Remove the chip, then paste again with a model that reads images (no warning) ---------
+    await removeChips();
+    check((await ui()).chips.length === 0, 'the x button removes the image chip');
+    writeSettings(vscode.userDataDir, { 'openVsCode.defaultModel': 'opencode/glm-5.3-flash-free' });
+    await page.waitForTimeout(2500);
+    check(await clickButton('New session'), 'New session is pressed (the image-capable model)');
+    await page.waitForTimeout(1500);
+    const warningsBefore = count((await ui()).text, NO_IMAGES);
+    console.log(`  tries needed: ${String(await pasteImage())}`);
+    state = await ui();
+    check(state.chips.length === 1, 'the image is attached with the image-capable model');
+    check(
+      count(state.text, NO_IMAGES) <= warningsBefore,
+      'and the warning does not appear again for a model that reads images',
+    );
+
+    // --- Send it: the chip leaves with the prompt and shows by name in the conversation ---------
+    await page.keyboard.type('Reply with exactly: OK.');
+    check(await clickButton('Send'), 'Send is pressed with the image chip');
+    const delivered = await waitFor(async () => (await ui()).sent.length > 0, 20_000, 300);
+    state = await ui();
+    check(
+      delivered === true && state.sent.some((name) => name.includes('Pasted image')),
+      `the conversation shows the chip "Pasted image" (${JSON.stringify(state.sent)})`,
+    );
+    check(state.alerts === 0, 'and no alert was raised');
+    await shot('20c-image-sent');
+
+    // --- Drop (synthetic): the highlight, its hint, and the chips the host answers with ---------
+    const drag = (type, uris) =>
+      web.inDoc(
+        (doc, spec) => {
+          const { DataTransfer: Transfer, DragEvent: Drag } = doc.defaultView;
+          const transfer = new Transfer();
+          if (spec.uris) transfer.setData('resourceurls', JSON.stringify(spec.uris));
+          const event = new Drag(spec.type, {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer: transfer,
+          });
+          doc.querySelector('form.prompt').dispatchEvent(event);
+          return event.defaultPrevented;
+        },
+        { type, uris },
+      );
+    const sample = path.join(workspace, 'src', 'sample.ts');
+    const folder = path.join(workspace, 'src');
+    const outside = path.join(workDir, 'outside.ts');
+    for (const [name, theme] of THEMES) {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+      const prevented = await drag('dragover', [vsUri(sample)]);
+      await sleep(250);
+      state = await ui();
+      check(
+        prevented === true && state.drop === 'active',
+        `a drag over the box highlights it (data-drop=active) in ${name}`,
+      );
+      check(
+        state.hint === 'Hold Shift to drop files from the Explorer',
+        'and says "Hold Shift to drop files from the Explorer"',
+      );
+      const look = await web.inDoc(measureText, { hint: '.drop-hint' });
+      check(
+        look.hint !== null && look.hint !== undefined && look.hint.ratio >= 4.5,
+        `the hint has contrast >= 4.5 in ${name} (${look.hint ? look.hint.ratio.toFixed(2) : 'not found'})`,
+      );
+      await shot(`20d-drop-highlight-${name}`);
+      await web.inDoc((doc) => {
+        doc
+          .querySelector('form.prompt')
+          .dispatchEvent(
+            new doc.defaultView.DragEvent('dragleave', { bubbles: true, cancelable: true }),
+          );
+      });
+      await sleep(200);
+      check((await ui()).drop === '', `the highlight goes away when the drag leaves in ${name}`);
+    }
+    await removeChips();
+    await drag('drop', [vsUri(sample), vsUri(folder), vsUri(outside)]);
+    const added = await waitFor(
+      async () => (await ui()).chips.includes('src/sample.ts'),
+      15_000,
+      300,
+    );
+    state = await ui();
+    check(
+      added === true,
+      `the dropped src/sample.ts becomes a chip (${JSON.stringify(state.chips)})`,
+    );
+    check(
+      state.text.includes(
+        '2 dropped items were not added: folders, ignored files and files outside the workspace folder cannot be attached',
+      ),
+      'and the folder and the outside file raise ONE notice with the count',
+    );
+    check(
+      state.drop === '' && state.styled === 0,
+      'the highlight is gone and there is no style attribute',
+    );
+    await shot('20e-dropped');
+    await removeChips();
+
+    // --- "Add to OpenCode Chat" with the chat view HIDDEN (review of 23/10/2026, B2) -------------
+    // A real right-click on the Explorer row (the command is not in the palette and the mouse is
+    // the only way to hand it the clicked Uri). Showing the Explorer hides the chat view, so the
+    // chip can only exist if the host kept it until the new document said `ready`. What is read is
+    // the CHIP in the DOM of the webview, not a log line.
+    await command('View: Show Explorer');
+    await sleep(1200);
+    const sampleRow = page.locator(
+      '.explorer-folders-view [role="treeitem"][aria-label^="sample.ts"]',
+    );
+    if ((await sampleRow.count()) === 0) {
+      await page
+        .locator('.explorer-folders-view [role="treeitem"][aria-label="src"]')
+        .first()
+        .click();
+      await sleep(800);
+    }
+    check(
+      (await sampleRow.count()) > 0,
+      'the Explorer lists src/sample.ts (the chat view is hidden while it is shown)',
+    );
+    await sampleRow.first().click({ button: 'right' });
+    await sleep(600);
+    const entry = page.getByText('Add to OpenCode Chat', { exact: true });
+    check((await entry.count()) > 0, 'the Explorer context menu has "Add to OpenCode Chat"');
+    await entry.first().click();
+    await openChat();
+    const viaMenu = await waitFor(
+      async () => (await ui()).chips.includes('src/sample.ts'),
+      15_000,
+      300,
+    );
+    state = await ui();
+    check(
+      viaMenu === true,
+      `the chip src/sample.ts is in the chat that was hidden when the command ran (${JSON.stringify(state.chips)})`,
+    );
+    await shot('20f-add-to-chat-hidden');
+    await removeChips();
+    assertNoWebviewErrors('drop and paste');
   });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
