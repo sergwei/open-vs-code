@@ -40,6 +40,9 @@ affiliated with opencode or with Microsoft.
 - **Context and cost:** a line under the session title shows how much of the model's context the
   last step used and, when the model is not free, what the session cost so far, direct subagents
   included.
+- **Changed files:** a "Changed files (N)" list under the header shows what the agent changed in
+  the session (git repositories only); a click opens VS Code's own diff editor with the original on
+  the left and the file on the right.
 - **Themes and accessibility:** light, dark and high-contrast, keyboard navigation and screen
   reader labels. Colors come from your VS Code theme.
 
