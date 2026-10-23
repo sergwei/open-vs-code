@@ -44,19 +44,32 @@ function draw(options: { files?: ChangedFile[]; disabled?: boolean; count?: numb
 }
 
 describe('RevertBanner', () => {
-  it('says how many messages were reverted and warns that sending discards them', () => {
+  it('says how many messages were reverted and warns that sending makes it final', () => {
     const { container } = draw({ count: 2 });
     expect(must(container, '.revert-banner-title').textContent).toBe('2 messages reverted');
-    expect(must(container, '.revert-banner-note').textContent).toContain('discards them for good');
+    expect(must(container, '.revert-banner-note').textContent).toBe(
+      'Restore brings back what the revert replaced; sending a message or Discard for good makes it final.',
+    );
     expect(container.querySelector('section')?.getAttribute('aria-label')).toBe(
       'Reverted messages',
     );
   });
 
-  it('draws no list and no caption without files', () => {
+  it('draws no list, no caption and no warning about own edits without files', () => {
     const { container } = draw();
     expect(container.querySelector('.changed-files-list')).toBeNull();
     expect(container.querySelector('.revert-banner-caption')).toBeNull();
+    expect(container.querySelectorAll('.revert-banner-note')).toHaveLength(1);
+  });
+
+  it('warns that edits made by hand to the reverted files were replaced too', () => {
+    const { container } = draw({ files: [file('src/a.ts')] });
+    const notes = [...container.querySelectorAll('.revert-banner-note')].map((n) =>
+      n.textContent?.replace(/\s+/g, ' ').trim(),
+    );
+    expect(notes).toContain(
+      'Your own edits to these files since then were replaced too, and edits made while reverted are lost on Restore.',
+    );
   });
 
   it('draws one row per file, named after what the revert undid, and a click reports the path', () => {
