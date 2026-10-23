@@ -366,9 +366,9 @@ export function describeDetection(result: DetectionResult): DetectionDescription
  * VERIFIED on Windows 11 by a test that runs `node --version` through it; POSIX UNVERIFIED.
  *
  * `launchFor` (issue #41) maps the path to the command that really runs; the default is the path
- * itself with no extra args, i.e. the behaviour above. Only the Test-mode seam of `testLaunch.ts`
- * passes something else (a `.mjs` stand-in run through Node); `--version` is appended after the
- * args it returns.
+ * itself with no extra args, i.e. the behaviour above. Only the seam of `testLaunch.ts` (test
+ * hosts, and the visual run's explicit opt-in) passes something else (a `.mjs` stand-in run
+ * through Node); `--version` is appended after the args it returns.
  */
 export function nodeDeps(
   launchFor: (p: string) => { command: string; args: string[] } = (p) => ({

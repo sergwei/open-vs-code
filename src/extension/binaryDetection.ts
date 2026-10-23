@@ -12,7 +12,7 @@ import {
   nodeDeps,
   type DetectionResult,
 } from './opencodeBinary';
-import { launchCommandFor, testLaunchFrom } from './testLaunch';
+import { launchCommandFor, launchModesOf, testLaunchFrom } from './testLaunch';
 
 const OPEN_SETTINGS = 'Open Settings';
 const SHOW_LOGS = 'Show Logs';
@@ -44,9 +44,11 @@ const SHOW_LOGS = 'Show Logs';
  * before the async target (password from SecretStorage) is known. VERIFIED in a real VS Code by
  * `externalServer.test.ts` (the skip line on activation, the detection line after emptying it).
  *
- * Issue #41: in `ExtensionMode.Test` with `OPEN_VS_CODE_TEST_NODE` set, a `.mjs` setting is run as
- * `node <mjs> --version` (`testLaunch.ts`), so the `fake-server` suite can use the synthetic
- * opencode as the extension's own server. Outside the test host the dependencies are the plain
+ * Issue #41: in `ExtensionMode.Test` with `OPEN_VS_CODE_TEST_NODE` set (or, for `npm run
+ * test:visual`, in `ExtensionMode.Development` with that variable plus `OPEN_VS_CODE_VISUAL_FAKE=1`),
+ * a `.mjs` setting is run as `node <mjs> --version` (`testLaunch.ts`), so the `fake-server` suite
+ * and the visual run can use the synthetic opencode as the extension's own server. Never in
+ * production. Elsewhere (installed `.vsix`, plain F5) the dependencies are the plain
  * `nodeDeps()`, built on every detection (not once at registration) because it captures
  * `process.env.PATH`/`PATHEXT` and the platform when called; only the launch rule is computed
  * once. HYPOTHESIS that this per-detection read matters in practice (it only does if something
@@ -59,11 +61,19 @@ export function registerBinaryDetection(
   onResult?: (result: DetectionResult) => void,
 ): void {
   let run = 0;
-  // Test-mode seam (issue #41): `undefined`, hence plain `nodeDeps()`, outside the test host.
+  // Seam of issue #41: `undefined`, hence plain `nodeDeps()`, unless the host is a test host or
+  // the visual run's explicit opt-in (never in production). See `testLaunchFrom`.
   // Only the launch rule is fixed at registration; `nodeDeps` runs inside `detect` so that PATH,
   // PATHEXT and the platform are read afresh on every detection.
   const launchFor = launchCommandFor(
-    testLaunchFrom(context.extensionMode === vscode.ExtensionMode.Test, process.env),
+    testLaunchFrom(
+      launchModesOf(
+        context.extensionMode,
+        vscode.ExtensionMode.Test,
+        vscode.ExtensionMode.Development,
+      ),
+      process.env,
+    ),
   );
 
   const detect = async (): Promise<void> => {

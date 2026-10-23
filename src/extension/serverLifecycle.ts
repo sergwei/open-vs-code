@@ -16,7 +16,7 @@ import {
   ServerManager,
   type ServerState,
 } from './serverManager';
-import { testLaunchFrom, wrapStartServer } from './testLaunch';
+import { launchModesOf, testLaunchFrom, wrapStartServer } from './testLaunch';
 
 /**
  * `workspaceState` key of the folder the user chose to serve (an `fsPath`). Not a secret. The
@@ -129,8 +129,10 @@ async function runFailureAction(
  * 11 (opt-in `realOpencode.test.ts`, 2026-10-20): the start against a real opencode and its
  * `starting the server` and `server ready` log lines. UNVERIFIED in VS Code: the notification
  * and its buttons, and that the stop on `deactivate` leaves no process behind; POSIX UNVERIFIED.
- * Issue #41: in `ExtensionMode.Test` with `OPEN_VS_CODE_TEST_NODE` set, `start` runs a `.mjs`
- * binary as `node <mjs> serve ...` (`testLaunch.ts`); otherwise it is `startServer` itself.
+ * Issue #41: in `ExtensionMode.Test` with `OPEN_VS_CODE_TEST_NODE` set (or in
+ * `ExtensionMode.Development` with that variable plus `OPEN_VS_CODE_VISUAL_FAKE=1`, which only
+ * `npm run test:visual` sets), `start` runs a `.mjs` binary as `node <mjs> serve ...`
+ * (`testLaunch.ts`); otherwise, and always in production, it is `startServer` itself.
  */
 export function registerServerLifecycle(
   context: vscode.ExtensionContext,
@@ -141,10 +143,18 @@ export function registerServerLifecycle(
 } {
   const log = safeLog(channel);
   const manager = new ServerManager({
-    // Test-mode seam (issue #41): `startServer` itself outside the test host.
+    // Seam of issue #41: `startServer` itself unless the host is a test host or the visual run's
+    // explicit opt-in (never in production). See `testLaunchFrom`.
     start: wrapStartServer(
       startServer,
-      testLaunchFrom(context.extensionMode === vscode.ExtensionMode.Test, process.env),
+      testLaunchFrom(
+        launchModesOf(
+          context.extensionMode,
+          vscode.ExtensionMode.Test,
+          vscode.ExtensionMode.Development,
+        ),
+        process.env,
+      ),
     ),
     stop: (server) => stopServer(server.child, log),
     fetchInfo: (url, password, signal) =>

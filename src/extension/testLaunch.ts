@@ -1,7 +1,8 @@
-// Test-mode seam that lets the integration suite `fake-server` (issue #41) run the synthetic
-// opencode (`fake-opencode.mjs`) as the extension's OWN server. Pure logic: no `vscode` import, so
-// Vitest covers it; the VS Code side only passes `context.extensionMode` in
-// (`binaryDetection.ts`, `serverLifecycle.ts`).
+// Test-mode seam that lets the integration suite `fake-server` (issue #41) and, with an explicit
+// opt-in, `npm run test:visual` (tooling/tests-without-model) run the synthetic opencode
+// (`fake-opencode.mjs`) as the extension's OWN server. Pure logic: no `vscode` import, so Vitest
+// covers it; the VS Code side only passes `context.extensionMode` in (`binaryDetection.ts`,
+// `serverLifecycle.ts`).
 
 import path from 'node:path';
 import type { RunningServer, StartServerOptions } from './opencodeServer';
@@ -21,30 +22,63 @@ export interface LaunchCommand {
 }
 
 /**
- * Decides whether the seam is on: only in `ExtensionMode.Test` AND with `OPEN_VS_CODE_TEST_NODE`
- * set to an absolute path.
+ * Environment variable that, together with {@link TEST_NODE_ENV}, switches the seam on in
+ * `ExtensionMode.Development` (set only by `test/visual/vscodeProcess.mjs`).
+ */
+export const VISUAL_FAKE_ENV = 'OPEN_VS_CODE_VISUAL_FAKE';
+
+/** The two `ExtensionMode`s that can switch the seam on, as flags (this module imports no `vscode`). */
+export interface LaunchModes {
+  /** `context.extensionMode === ExtensionMode.Test`. */
+  test: boolean;
+  /** `context.extensionMode === ExtensionMode.Development`. */
+  development: boolean;
+}
+
+/**
+ * Decides whether the seam is on: with `OPEN_VS_CODE_TEST_NODE` set to an absolute path AND either
+ * `ExtensionMode.Test`, or `ExtensionMode.Development` with `OPEN_VS_CODE_VISUAL_FAKE=1`.
  *
- * Both conditions are on purpose: `ExtensionMode.Test` is what VS Code sets for an extension loaded
- * by the test runner (never for an installed or F5 one), and the variable is what
- * `.vscode-test.mjs` sets for the test host, so a user who happens to export it gets nothing and
- * a test host without it keeps the plain behaviour. Returns `undefined` when off; the other
- * functions of this module then behave as the identity, so production code paths are unchanged. A
- * relative or empty value counts as unset.
- * VERIFIED by `testLaunch.test.ts` (on; off outside test mode; off without the variable; empty and
- * relative values). VERIFIED in a real VS Code 1.143.0 on Windows 11 (22/10/2026) by the
- * `fake-server` suite: with the seam on the log said `binary detection: setting ...fake-opencode.mjs:
- * ok (version 2.0.32)`, and with the function forced to return `undefined` the same run logged
+ * Conditions are on purpose. `ExtensionMode.Test` is what VS Code sets for an extension loaded by
+ * the test runner. `npm run test:visual` launches VS Code with `--extensionDevelopmentPath` and no
+ * `--extensionTestsPath`, which is `Development` (HYPOTHESIS read in VS Code's
+ * `extHostExtensionService.ts`; VERIFIED by a mutation on Windows 11, VS Code 1.143.0
+ * (22/10/2026): with `vscodeProcess.mjs` setting `OPEN_VS_CODE_VISUAL_FAKE` to `0`,
+ * `npm run test:visual` logged `binary detection failed: spawn EFTYPE` and failed "the webview
+ * shows "Connected"", so that run is not in `ExtensionMode.Test` and the opt-in is what turns the
+ * seam on), so that mode needs its own
+ * explicit opt-in: a developer pressing F5 gets nothing unless they export BOTH variables.
+ * Production (an installed `.vsix`) is never on, whatever the environment says; a `.mjs` setting
+ * there still fails as before. This widens the "Test mode only" decision of #41 on purpose
+ * (Sergio, 22/10/2026). Returns `undefined` when off; the other functions of this module then
+ * behave as the identity. A relative or empty path counts as unset, and only the exact value `1`
+ * counts as the opt-in.
+ * VERIFIED by `testLaunch.test.ts` (on in Test; on in Development only with both variables; off in
+ * Development without the opt-in; off in production with everything set; empty and relative
+ * values). VERIFIED in a real VS Code 1.143.0 on Windows 11 (22/10/2026) by the `fake-server`
+ * suite: with the seam on the log said `binary detection: setting ...fake-opencode.mjs: ok
+ * (version 2.0.32)`, and with the function forced to return `undefined` the same run logged
  * `binary detection failed: spawn EFTYPE` and 13 of 15 cases failed. NOT observed: the real
- * `ExtensionMode` value outside the test host (F5, installed `.vsix`). UNVERIFIED on macOS/Linux
- * until the CI runs the suite.
+ * `ExtensionMode` value of an installed `.vsix`. UNVERIFIED on macOS/Linux until the CI runs the
+ * suite.
  */
 export function testLaunchFrom(
-  isTestMode: boolean,
+  modes: LaunchModes,
   env: Record<string, string | undefined>,
 ): TestLaunch | undefined {
   const nodePath = env[TEST_NODE_ENV];
-  if (!isTestMode || nodePath === undefined || !path.isAbsolute(nodePath)) return undefined;
-  return { nodePath };
+  if (nodePath === undefined || !path.isAbsolute(nodePath)) return undefined;
+  const optedIn = modes.test || (modes.development && env[VISUAL_FAKE_ENV] === '1');
+  return optedIn ? { nodePath } : undefined;
+}
+
+/**
+ * Builds the {@link LaunchModes} of an `ExtensionMode` value by comparing it with the two numeric
+ * constants the caller passes (`vscode.ExtensionMode.Test` / `.Development`), so both call sites
+ * share one mapping without this module importing `vscode`.
+ */
+export function launchModesOf(mode: number, test: number, development: number): LaunchModes {
+  return { test: mode === test, development: mode === development };
 }
 
 /**
