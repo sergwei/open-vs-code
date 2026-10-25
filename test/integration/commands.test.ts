@@ -3,9 +3,11 @@
 // Protects against: a contributed command that is not registered (the palette would list a dead
 // entry), a command that cannot reveal the chat from a closed view, and a default key that clashes
 // with one VS Code ships. The last one is meant to close "does not collide on macOS and Linux":
-// this file runs in the CI matrix of the three systems and each one should read ITS OWN default
-// keybindings. UNVERIFIED on macOS and Linux until the first CI run: that the default keybindings
-// document opens, parses and lists the keys of THAT system has only been seen on Windows 11.
+// this file runs in the CI matrix of the three systems and each one reads ITS OWN default
+// keybindings. VERIFIED by the CI of PR #81 (25/10/2026): the ubuntu-latest job passed the check
+// "uses no default key that VS Code already binds to another command", and the macos-latest job
+// read the Mac defaults (it failed on `alt+cmd+p`, which led to ACCEPTED_CLASHES). UNVERIFIED on
+// macOS that the check passes with that exception until the next CI run.
 //
 // What this is NOT: it does not see the keys of other extensions (`--disable-extensions`), of the
 // desktop environment or of the operating system. Built-in extensions do contribute to the default
@@ -137,8 +139,43 @@ describe('palette commands and keybindings', () => {
   });
 
   /**
-   * No default key may equal a key VS Code binds to ANOTHER command on this operating system.
-   * A key that VS Code binds to one of ours (impossible today) would pass.
+   * Default rules that share a key with ours and are accepted on purpose: key → command → the
+   * exact `when` the default rule must still have. The check ignores `when` (it can only err
+   * towards a false clash); an entry passes only while VS Code keeps that same `when`, so a change
+   * of context in VS Code fails here instead of slipping through. Decision of Sergio, 25/10/2026,
+   * to keep Cmd+Alt+P on macOS with this exception.
+   * VERIFIED by the macos-latest CI job of PR #81 (25/10/2026): VS Code binds `alt+cmd+p` to these
+   * three commands on macOS. The `when` values were READ in the bundle of VS Code 1.143.1 (Windows
+   * build, its `mac` key 2606), not executed: `editorFocus`, `searchViewletFocus`, `inKeybindings`.
+   * `editorFocus` is NOT disjoint from our `when` (`editorTextFocus || openVsCode.chatFocused`):
+   * with the caret in editor text both rules apply, and VS Code runs only the winning one.
+   * HYPOTHESIS that the extension rule wins there (contributed keybindings weigh more than
+   * built-in ones), so Cmd+Alt+P is Focus Prompt in editor text and Preserve Case in the find
+   * input, where our `when` is false. UNVERIFIED on a real Mac: pressing Cmd+Alt+P in each place
+   * would settle it.
+   */
+  const ACCEPTED_CLASHES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+    'alt+cmd+p': {
+      togglePreserveCase: 'editorFocus',
+      toggleSearchPreserveCase: 'searchViewletFocus',
+      'keybindings.editor.toggleSortByPrecedence': 'inKeybindings',
+    },
+  };
+
+  /**
+   * True only for an entry of {@link ACCEPTED_CLASHES} whose recorded `when` is the rule's own: an
+   * unknown command, or a rule with no `when` or another one, is never accepted (a missing entry
+   * must not compare equal to a missing `when`).
+   */
+  const isAcceptedClash = (key: string, rule: DefaultRule): boolean => {
+    const expected = rule.command === undefined ? undefined : ACCEPTED_CLASHES[key]?.[rule.command];
+    return expected !== undefined && expected === rule.when?.trim();
+  };
+
+  /**
+   * No default key may equal a key VS Code binds to ANOTHER command on this operating system,
+   * except the rules of {@link ACCEPTED_CLASHES} while they keep their recorded `when`. A key
+   * that VS Code binds to one of ours (impossible today) would pass.
    */
   it('uses no default key that VS Code already binds to another command', async () => {
     const ours = new Set([FOCUS_PROMPT_COMMAND_ID, NEW_SESSION_COMMAND_ID]);
@@ -152,7 +189,8 @@ describe('palette commands and keybindings', () => {
           rule.key !== undefined &&
           normalizeKey(rule.key) === key &&
           rule.command !== undefined &&
-          !ours.has(rule.command.replace(/^-/, '')),
+          !ours.has(rule.command.replace(/^-/, '')) &&
+          !isAcceptedClash(key, rule),
       );
       assert.deepStrictEqual(
         clashes,
