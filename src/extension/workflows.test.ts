@@ -21,6 +21,17 @@ import { describe, expect, it } from 'vitest';
 //   checkout credentials";
 // - turning `if ! git merge-base --is-ancestor` into `if git merge-base …`: "checks the tagged
 //   commit is on main in the package job".
+// Second round, same method (Windows 11, 2026-10-25), RED by title:
+// - `# ${{ github.head_ref }}` as a shell comment line inside the Summary `run: |`: "puts the tag
+//   name in an env var, never inside a `run:` script";
+// - `cache: npm` on the setup-node of `publish-marketplace`: "installs without the npm cache in
+//   the jobs that hold a token";
+// - deleting the `sha256sum -c` line of the Marketplace publish step: "re-checks the sha256 of
+//   the .vsix before it publishes, in both publish jobs";
+// - `if: false` on the "Check the tagged commit is on main" step: "checks the tagged commit is
+//   on main in the package job";
+// - dropping `--from-vsix` from the `node scripts/check-vsix.mjs` line: "lists the .vsix with
+//   unzip and normalizes it with --from-vsix, under `shell: bash`".
 // macOS and Linux UNVERIFIED until the CI matrix runs this file.
 
 const WORKFLOWS_DIR = new URL('../../.github/workflows/', import.meta.url);
@@ -79,11 +90,14 @@ const TAG_IF = "    if: github.event_name == 'push' && startsWith(github.ref, 'r
  * key that are indented deeper than it (a block scalar, `|` or `>`), blank lines included.
  *
  * Why it exists: checking a few known lines let a `${{ github.head_ref }}` inside a multi-line
- * `run:` go through; the body has to be collected whole. Relies on the layout used here (block
- * scalars indented deeper than the `run:` key, no flow-style YAML).
+ * `run:` go through; the body has to be collected whole. The lines are RAW, `#` lines included:
+ * inside a block scalar a `# …` line is shell text, not a YAML comment, and GitHub still
+ * evaluates `${{ }}` in it. Only comments at the indent of the `run:` key or less (real YAML
+ * comments between steps) end the body. Relies on the layout used here (block scalars indented
+ * deeper than the `run:` key, no flow-style YAML).
  */
 function runBodies(text: string): string[] {
-  const lines = codeLines(text);
+  const lines = text.split(/\r?\n/);
   const bodies: string[] = [];
   lines.forEach((line, i) => {
     const match = /^(\s*)(?:- )?run:\s*(.*)$/.exec(line);
@@ -224,6 +238,32 @@ describe('workflows: release.yml', () => {
     }
   });
 
+  it('installs without the npm cache in the jobs that hold a token', () => {
+    for (const name of publishJobs) {
+      expect(codeLines(jobs.get(name) ?? '').join('\n'), name).not.toMatch(/^\s*cache:/m);
+    }
+  });
+
+  it('re-checks the sha256 of the .vsix before it publishes, in both publish jobs', () => {
+    for (const name of publishJobs) {
+      const code = codeLines(jobs.get(name) ?? '').join('\n');
+      const check = code.indexOf('sha256sum -c');
+      const publish = code.search(/\b(vsce|ovsx) publish\b/);
+      expect(check, name).toBeGreaterThan(-1);
+      expect(publish, name).toBeGreaterThan(check);
+    }
+  });
+
+  it('lists the .vsix with unzip and normalizes it with --from-vsix, under `shell: bash`', () => {
+    // The listing must be of the real zip, whose names vsce changes; see scripts/check-vsix.mjs.
+    const step = (jobs.get('package') ?? '').split('- name: Check package contents')[1] ?? '';
+    const head = step.split('- name:')[0];
+    expect(head).toContain('shell: bash');
+    expect(head).toContain('unzip -Z1 "$VSIX"');
+    // `node …` so the mention in the step's own comment does not satisfy it.
+    expect(head).toContain('node scripts/check-vsix.mjs --from-vsix');
+  });
+
   it('puts the tag name in an env var, never inside a `run:` script', () => {
     // Whole body of every `run:`, inline or block: no `${{ … }}` expression may be interpolated
     // into a script (script injection through `github.ref_name`, `head_ref`, …).
@@ -235,7 +275,12 @@ describe('workflows: release.yml', () => {
   });
 
   it('checks the tagged commit is on main in the package job', () => {
-    expect(jobs.get('package')).toContain('if ! git merge-base --is-ancestor');
+    const job = jobs.get('package') ?? '';
+    expect(job).toContain('if ! git merge-base --is-ancestor');
+    // The step must also be tag-only and not neutralised: `if: false` would leave the text intact.
+    expect(job).toContain(
+      "- name: Check the tagged commit is on main\n        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')\n",
+    );
   });
 
   it('writes the dry-run notice and the package job summary', () => {
