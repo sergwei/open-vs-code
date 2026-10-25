@@ -18,7 +18,7 @@ push of a tag vX.Y.Z
 - **package** checks that the tag, `package.json` and `CHANGELOG.md` agree
   (`scripts/check-release.mjs`), that the tagged commit is on `main`, then runs the format check,
   the unit tests and, through `vscode:prepublish`, the type check and lint. It packages once,
-  checks the file list and the version inside the `.vsix`, and uploads the file as the `release-vsix`
+  checks the real file list of the `.vsix` and the version inside it, and uploads the file as the `release-vsix`
   artifact. The three-OS matrix and the integration tests are not repeated: CI already ran them on
   `main`.
 - **publish-marketplace** and **publish-open-vsx** publish that same file. Both run only for a
@@ -26,7 +26,8 @@ push of a tag vX.Y.Z
   Marketplace rejects the package nothing reaches Open VSX and the two listings never diverge.
 
 Any other trigger is a **dry run**: `workflow_dispatch` (`gh workflow run release.yml --ref main`),
-or a pull request that touches the workflow or the check script. It packages and checks exactly
+or a pull request that touches the workflow, the check scripts, `package.json`,
+`package-lock.json` or `.vscodeignore`. It packages and checks exactly
 the same way, the summary starts with `DRY RUN — nothing was published`, and it has no job that can
 read a token. A dry run on `main` prints a WARNING while `CHANGELOG.md` still has only
 `## [Unreleased]`: it means a real tag would fail until the release PR (below) is merged.
@@ -52,8 +53,18 @@ issue, not part of the release workflow); the first Marketplace publish is the r
    - Organization: **All accessible organizations**.
    - Scope: **Marketplace › Manage** only.
    - Expiration: short, for example 90 days. Write the date down.
-3. Check it locally without publishing anything: `VSCE_PAT=<token> npx vsce verify-pat sergwei`
-   (set the variable in the shell; do not put the token on the command line).
+3. Check it locally without publishing anything. Read the token into the environment without
+   echoing it, so it never appears on a command line or in the shell history:
+
+   ```bash
+   read -rs VSCE_PAT && export VSCE_PAT
+   npx vsce verify-pat sergwei
+   ```
+
+   ```powershell
+   $env:VSCE_PAT = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR((Read-Host -AsSecureString 'VSCE_PAT')))
+   npx vsce verify-pat sergwei
+   ```
 
 **The PAT will be retired.** The official guide says global PATs in Azure DevOps are retired on
 1 December 2026, and a later announcement postpones it to a date that is not clear. Treat a PAT as
@@ -68,13 +79,24 @@ Sources:
    the Publisher Agreement.
 2. Create a token in Settings › Access Tokens.
 3. Create the namespace, passing the token through the environment, not the command line:
-   `OVSX_PAT=<token> npx ovsx create-namespace sergwei`.
+
+   ```bash
+   read -rs OVSX_PAT && export OVSX_PAT
+   npx ovsx create-namespace sergwei
+   ```
+
+   ```powershell
+   $env:OVSX_PAT = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR((Read-Host -AsSecureString 'OVSX_PAT')))
+   npx ovsx create-namespace sergwei
+   ```
+
 4. Claim ownership of the namespace separately (creating it does not make you the verified owner);
    the steps are in <https://github.com/eclipse/openvsx/wiki/Publishing-Extensions>.
-5. Check the token without publishing: `OVSX_PAT=<token> npx ovsx verify-pat sergwei`.
+5. Check the token without publishing (same variable as above): `npx ovsx verify-pat sergwei`.
 
-The first publication to Open VSX has to use the token. Trusted publishing for Open VSX only works
-for extensions that already exist there.
+The first publication to Open VSX has to use the token. Per the Open VSX wiki, trusted publishing
+only works for extensions that already exist there
+(<https://github.com/eclipse/openvsx/wiki/Trusted-Publishing>; HYPOTHESIS: read there, not tried).
 
 ### 4. GitHub: the `release` environment and its secrets
 
@@ -136,9 +158,9 @@ published version cannot be silently re-pointed.
 3. Review the latest runs of `release.yml` and the versions of both listings for anything you did
    not publish.
 
-Tokens live only in environment secrets and only in the `env:` of the step that uses them; they
-are never on a command line, and the jobs that hold them install dependencies with
-`--ignore-scripts`. A compromised dependency of `vsce` or `ovsx` is the remaining risk, which is why
+Tokens live only in environment secrets and only in the `env:` of the steps that use them (the
+token check and the publish step); they are never on a command line, and the jobs that hold them
+install dependencies with `--ignore-scripts` and without the npm cache. A compromised dependency of `vsce` or `ovsx` is the remaining risk, which is why
 both are pinned in `package-lock.json`.
 
 ## PAT retirement and the next step
