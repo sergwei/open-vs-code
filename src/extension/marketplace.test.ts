@@ -12,7 +12,8 @@ interface Manifest {
   scripts: Record<string, string>;
   contributes: {
     configuration: { properties: Record<string, unknown> };
-    commands: { title: string; category?: string }[];
+    commands: { command: string; title: string; category?: string }[];
+    keybindings?: { command: string; key: string; mac?: string }[];
   };
 }
 
@@ -180,6 +181,24 @@ describe('README.md', () => {
       category ? `${category}: ${title}` : title,
     );
     expect(tableKeys(readme, /^\| \*\*([^*|]+)\*\* \|/)).toEqual(labels.sort());
+  });
+
+  // Issue #35. The first column is NOT bold on purpose: the Commands regex above would count a
+  // bold cell as a command. Keys are compared case-insensitively ("Ctrl+Alt+P" vs "ctrl+alt+p").
+  it('has a Keyboard shortcuts table whose rows are exactly the contributed keybindings', () => {
+    const label = (id: string): string => {
+      const command = manifest.contributes.commands.find((c) => c.command === id);
+      if (command === undefined) throw new Error(`keybinding for an uncontributed command ${id}`);
+      return command.category ? `${command.category}: ${command.title}` : command.title;
+    };
+    const expected = (manifest.contributes.keybindings ?? []).map((binding) =>
+      `${binding.key} | ${binding.mac ?? ''} | ${label(binding.command)}`.toLowerCase(),
+    );
+    const rows = readme
+      .split(/\r?\n/)
+      .map((line) => /^\| `([^`]+)` \| `([^`]+)` \| (OpenCode: [^|]+?) \|/.exec(line))
+      .flatMap((m) => (m === null ? [] : [`${m[1]} | ${m[2]} | ${m[3]}`.toLowerCase()]));
+    expect(rows.sort()).toEqual(expected.sort());
   });
 });
 

@@ -610,6 +610,9 @@ function setup(
   if (remembered !== undefined) stored.set(SERVER.folder, remembered);
   const attentionCalls: Array<readonly PendingSummary[]> = [];
   const serverCalls: string[] = [];
+  const focusCalls: boolean[] = [];
+  /** How many times the controller asked to give the keyboard to the chat iframe again. */
+  const viewFocuses = { count: 0 };
   const picked: SavedPermission[][] = [];
   const streams: Array<{ options: EventStreamOptions<V2Event>; aborted: () => boolean }> = [];
   /** The user's model preferences, editable by a test; `writes` records `setLastModel`. */
@@ -678,6 +681,14 @@ function setup(
         serverCalls.push('showLogs');
       },
     },
+    ui: {
+      setChatFocused: (focused) => {
+        focusCalls.push(focused);
+      },
+      focusView: () => {
+        viewFocuses.count += 1;
+      },
+    },
     runStream: ((options: EventStreamOptions<V2Event>) => {
       streams.push({ options, aborted: () => options.signal.aborted });
       return new Promise<void>((resolve) => {
@@ -698,6 +709,8 @@ function setup(
     snapshots,
     attentionCalls,
     serverCalls,
+    focusCalls,
+    viewFocuses,
     picked,
     confirmations,
     /** How many times the "Discard for good" modal was shown. */
@@ -2485,6 +2498,77 @@ describe('focusRequest', () => {
   });
 
   const target = { kind: 'permission', sessionID: 'ses_1', id: 'per_1' } as const;
+
+  // Issue #35. Protects against a command running twice (the way `focusRequest` repeats itself would
+  // re-run New Session or Stop on the next `ready`) and against one lost to a document still loading.
+  // Fabricated view state (`view.ready`); a real hidden view is covered by `commands.test.ts`.
+  describe('runUiCommand', () => {
+    const uiCommands = (posted: HostToWebview[]) =>
+      posted.flatMap((m) => (m.type === 'ui.command' ? [m.command] : []));
+
+    it('posts now when the webview can take it and does not repeat it after the next ready', async () => {
+      const { controller, posted, viewFocuses } = setup(fakeApi().api);
+      controller.onServerState(RUNNING);
+      controller.runUiCommand('session.stop');
+      expect(uiCommands(posted)).toEqual(['session.stop']);
+      await controller.onWebviewReady();
+      expect(uiCommands(posted)).toEqual(['session.stop']);
+      // The reveal of the command itself focused a document that existed: nothing to repeat.
+      expect(viewFocuses.count).toBe(0);
+    });
+
+    it('keeps it for a hidden view and sends it once, after the snapshot and the ui.focus', async () => {
+      const { controller, posted, view, viewFocuses } = setup(fakeApi().api);
+      controller.onServerState(RUNNING);
+      view.ready = false;
+      controller.focusRequest(target);
+      controller.runUiCommand('prompt.focus');
+      controller.runUiCommand('session.new');
+      controller.runUiCommand('session.new');
+      expect(uiCommands(posted)).toEqual([]);
+      view.ready = true;
+      await controller.onWebviewReady();
+      expect(uiCommands(posted)).toEqual(['prompt.focus', 'session.new']);
+      const types = posted.map((m) => m.type);
+      expect(types.indexOf('ui.command')).toBeGreaterThan(types.lastIndexOf('snapshot'));
+      await controller.onWebviewReady();
+      expect(uiCommands(posted)).toEqual(['prompt.focus', 'session.new']);
+      // Once, for the flush that sent them; the second ready had nothing to send.
+      expect(viewFocuses.count).toBe(1);
+    });
+
+    it('drops a kept command older than the focus TTL', async () => {
+      const { controller, posted, view } = setup(fakeApi().api);
+      controller.onServerState(RUNNING);
+      const now = Date.now();
+      const spy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      view.ready = false;
+      controller.runUiCommand('session.stop');
+      spy.mockReturnValue(now + FOCUS_REQUEST_TTL_MS + 1);
+      view.ready = true;
+      await controller.onWebviewReady();
+      expect(uiCommands(posted)).toEqual([]);
+    });
+
+    it('keeps it when the view hides again during the resync', async () => {
+      const { controller, posted, view } = setup(fakeApi().api);
+      controller.onServerState(RUNNING);
+      view.ready = false;
+      controller.runUiCommand('session.stop');
+      await controller.onWebviewReady();
+      expect(uiCommands(posted)).toEqual([]);
+      view.ready = true;
+      await controller.onWebviewReady();
+      expect(uiCommands(posted)).toEqual(['session.stop']);
+    });
+
+    it('relays chat.focusChanged to the focus dependency', async () => {
+      const { controller, focusCalls } = setup(fakeApi().api);
+      await controller.handle({ type: 'chat.focusChanged', focused: true });
+      await controller.handle({ type: 'chat.focusChanged', focused: false });
+      expect(focusCalls).toEqual([true, false]);
+    });
+  });
 
   it('sends ui.focus now and again after the next snapshot of a webview that was loading', async () => {
     const { controller, posted } = setup(fakeApi().api);

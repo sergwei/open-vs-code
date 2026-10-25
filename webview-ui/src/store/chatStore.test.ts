@@ -14,7 +14,7 @@
 // Provenance of the data: messages FABRICATED by hand in the shape of the protocol of
 // `src/shared`. They confirm the reducer's logic, not what the host actually sends: that is
 // protected by the host tests and the opt-in integration suite.
-import { createEffect, createRoot } from 'solid-js';
+import { batch, createEffect, createRoot } from 'solid-js';
 import { describe, expect, it } from 'vitest';
 import type { MessageInfo, Part, RequestResolution } from '../../../src/shared/model';
 import { createChatStore, MAX_NOTICES, MAX_RESOLVED, type ChatStore } from './chatStore';
@@ -711,6 +711,27 @@ describe('requests', () => {
       expect(store.state.focusTarget).toEqual(target);
       store.clearFocusTarget();
       expect(store.state.focusTarget).toBeUndefined();
+    });
+  });
+
+  // Issue #35, review B1: the commands are a QUEUE; two in one `batch` (what `listenHost` does for
+  // a frame) must both be there, equal ones included, until they are taken.
+  it('ui.command queues every command of a batch, oldest first, until they are taken', () => {
+    withStore((store) => {
+      batch(() => {
+        store.apply({ type: 'ui.command', command: 'session.stop' });
+        store.apply({ type: 'ui.command', command: 'prompt.focus' });
+        store.apply({ type: 'ui.command', command: 'session.stop' });
+      });
+      expect(store.state.uiCommands.map((entry) => entry.command)).toEqual([
+        'session.stop',
+        'prompt.focus',
+        'session.stop',
+      ]);
+      const seqs = store.state.uiCommands.map((entry) => entry.seq);
+      expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+      expect(store.takeUiCommands()).toEqual(['session.stop', 'prompt.focus', 'session.stop']);
+      expect(store.state.uiCommands).toEqual([]);
     });
   });
 

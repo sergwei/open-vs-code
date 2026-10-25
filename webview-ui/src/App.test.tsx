@@ -11,7 +11,7 @@
 // with a recording sender and a fake persisted-state API. They confirm the wiring between the
 // components and the store, not the host contract, the layout, the themes or a screen reader
 // (F5 points 1, 6, 8-11).
-import { createRoot } from 'solid-js';
+import { batch, createRoot } from 'solid-js';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -50,6 +50,8 @@ const assistant = (
 interface Harness {
   store: ChatStore;
   sent: WebviewToHost[];
+  /** The `chat.focusChanged` messages, apart from `sent`. */
+  focusReports: WebviewToHost[];
   saved: unknown[];
   container: HTMLElement;
   apply(...messages: HostToWebview[]): void;
@@ -68,6 +70,7 @@ afterEach(() => {
 function start(initial: unknown = undefined): Harness {
   const store = createRoot(() => createChatStore());
   const sent: WebviewToHost[] = [];
+  const focusReports: WebviewToHost[] = [];
   const saved: unknown[] = [];
   const uiState = createUiState({
     getState: () => initial,
@@ -82,7 +85,10 @@ function start(initial: unknown = undefined): Harness {
       <App
         store={store}
         send={(message) => {
-          sent.push(message);
+          // Focus reports (issue #35) go to their own list so `sent.at(-1)` and `sent[0]` keep
+          // meaning "the last / first thing the user caused".
+          if (message.type === 'chat.focusChanged') focusReports.push(message);
+          else sent.push(message);
         }}
         uiState={uiState}
       />
@@ -92,6 +98,7 @@ function start(initial: unknown = undefined): Harness {
   const harness: Harness = {
     store,
     sent,
+    focusReports,
     saved,
     container,
     apply: (...messages) => {
@@ -2584,5 +2591,97 @@ describe('drop and paste (issue #30)', () => {
     expect(h.container.textContent).toContain(
       'Drop files from the VS Code Explorer, or use Attach',
     );
+  });
+});
+
+// Issue #35. Protects that a palette or keyboard command runs the code of the matching button
+// (so "Stopped" is announced, Send is locked while the new session is in flight and the draft
+// survives), that Stop with no turn says so instead of staying silent, and that the focus the host
+// mirrors into a context key is reported. Fabricated host messages in jsdom: whether the key
+// reaches the host with the focus inside the iframe is checked by `test:visual` step 22.
+describe('host commands (ui.command)', () => {
+  const announced = (h: Harness): string =>
+    must(h.container, '.status-bar .visually-hidden[aria-live="polite"]').textContent.trim();
+
+  it('prompt.focus puts the caret in the prompt', () => {
+    const h = start();
+    h.apply({ type: 'ui.command', command: 'prompt.focus' });
+    expect(document.activeElement).toBe(h.textarea());
+  });
+
+  it('session.new sends session.new, keeps the draft and focuses the prompt', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    h.type('half written');
+    h.apply({ type: 'ui.command', command: 'session.new' });
+    expect(h.sent.filter((m) => m.type === 'session.new')).toHaveLength(1);
+    expect(h.textarea().value).toBe('half written');
+    expect(document.activeElement).toBe(h.textarea());
+  });
+
+  it('session.stop on a running turn aborts it and announces "Stopped"', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    h.apply({ type: 'ui.command', command: 'session.stop' });
+    expect(h.sent.filter((m) => m.type === 'session.abort')).toHaveLength(1);
+    h.apply({ type: 'session.status', sessionID: SES, status: { type: 'idle' } });
+    expect(announced(h)).toBe('Stopped');
+  });
+
+  it('session.stop with no turn running sends nothing and shows "No response is running"', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    h.apply({ type: 'ui.command', command: 'session.stop' });
+    expect(h.sent.filter((m) => m.type === 'session.abort')).toHaveLength(0);
+    expect(h.container.textContent).toContain('No response is running');
+  });
+
+  // `listenHost` applies a whole frame inside one `batch`; the harness `apply` does not, so these
+  // two wrap it. Without the batch the first test could not see the real behaviour.
+  it('runs a stop that arrives in the same batch as the snapshot that makes the turn busy', () => {
+    const h = start();
+    batch(() => {
+      h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }), {
+        type: 'ui.command',
+        command: 'session.stop',
+      });
+    });
+    expect(h.sent.filter((m) => m.type === 'session.abort')).toHaveLength(1);
+  });
+
+  // Protects the case of review B1: Stop and Focus Prompt kept for the same `ready` reach the
+  // webview in one frame; the Stop must not be overwritten by the second command.
+  it('runs every ui.command of one batch, in order', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    batch(() => {
+      h.apply(
+        { type: 'ui.command', command: 'session.stop' },
+        { type: 'ui.command', command: 'prompt.focus' },
+      );
+    });
+    expect(h.sent.filter((m) => m.type === 'session.abort')).toHaveLength(1);
+    expect(document.activeElement).toBe(h.textarea());
+  });
+
+  it('session.new closes the session list, as its button does', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    h.button('Sessions').click();
+    expect(h.container.querySelector('#session-picker')).not.toBeNull();
+    h.apply({ type: 'ui.command', command: 'session.new' });
+    expect(h.container.querySelector('#session-picker')).toBeNull();
+  });
+
+  it('reports the window focus and blur to the host', () => {
+    const h = start();
+    // The first report is the value at mount (jsdom: no focus), the next two are the events.
+    window.dispatchEvent(new Event('focus'));
+    window.dispatchEvent(new Event('blur'));
+    expect(h.focusReports.slice(1)).toEqual([
+      { type: 'chat.focusChanged', focused: true },
+      { type: 'chat.focusChanged', focused: false },
+    ]);
+    expect(h.focusReports).toHaveLength(3);
   });
 });

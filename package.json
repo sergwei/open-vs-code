@@ -126,6 +126,40 @@
       {
         "command": "openVsCode.addToChat",
         "title": "Add to OpenCode Chat"
+      },
+      {
+        "command": "openVsCode.openChat",
+        "title": "Open Chat",
+        "category": "OpenCode"
+      },
+      {
+        "command": "openVsCode.focusPrompt",
+        "title": "Focus Prompt",
+        "category": "OpenCode"
+      },
+      {
+        "command": "openVsCode.newSession",
+        "title": "New Session",
+        "category": "OpenCode"
+      },
+      {
+        "command": "openVsCode.stopResponse",
+        "title": "Stop Response",
+        "category": "OpenCode"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "openVsCode.focusPrompt",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p",
+        "when": "editorTextFocus || openVsCode.chatFocused"
+      },
+      {
+        "command": "openVsCode.newSession",
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n",
+        "when": "openVsCode.chatFocused"
       }
     ],
     "menus": {

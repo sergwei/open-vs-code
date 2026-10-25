@@ -116,6 +116,90 @@ describe('ids.ts matches package.json contributes', () => {
 });
 
 /**
+ * Protects the default keybindings (issue #35) against the mistakes a `when` clause and a key
+ * choice let through: a binding for a command nobody contributed (it would not show up by name in
+ * Keyboard Shortcuts), a binding without `mac` or `when` (it would fire everywhere, or with the
+ * wrong modifier), and a key that is already taken by a key the webview handles itself (the iframe
+ * forwards every keydown to the workbench, so the command would run on top of the webview's own
+ * handler) or by Claude Code or the official opencode extension.
+ * Provenance: the data are the REAL package.json. The deny list is copied from the docs read on
+ * 25/10/2026 (Claude Code: https://code.claude.com/docs/en/vs-code; opencode:
+ * `sdks/vscode/package.json` on `dev`); it is a list written by hand, not a live check. The check
+ * against the default keybindings of VS Code itself runs in `test/integration/commands.test.ts`.
+ */
+describe('keybindings in package.json', () => {
+  interface Binding {
+    command: string;
+    key: string;
+    mac?: string;
+    when?: string;
+  }
+  const bindings = readJson<{ contributes: { keybindings?: Binding[] } }>('../../package.json')
+    .contributes.keybindings;
+  const list = bindings ?? [];
+  const contributed = manifest.contributes.commands.map((c) => c.command);
+  const DENIED = [
+    'escape',
+    'enter',
+    'tab',
+    'ctrl+v',
+    'cmd+v',
+    'ctrl+escape',
+    'cmd+escape',
+    'ctrl+shift+escape',
+    'cmd+shift+escape',
+    'alt+k',
+    'ctrl+alt+k',
+    'cmd+alt+k',
+    'ctrl+alt+f',
+    'ctrl+shift+t',
+    'cmd+shift+t',
+    'ctrl+alt+i',
+    'ctrl+i',
+    'cmd+i',
+  ];
+
+  it('declares the shortcuts of Focus Prompt and New Session', () => {
+    expect(list.map((b) => b.command).sort()).toEqual(
+      [ids.FOCUS_PROMPT_COMMAND_ID, ids.NEW_SESSION_COMMAND_ID].sort(),
+    );
+  });
+
+  it('binds only contributed commands, each with key, mac and a non-empty when', () => {
+    for (const binding of list) {
+      expect(contributed, binding.command).toContain(binding.command);
+      expect(binding.key, binding.command).not.toBe('');
+      expect(binding.mac ?? '', binding.command).not.toBe('');
+      expect((binding.when ?? '').trim(), binding.command).not.toBe('');
+    }
+  });
+
+  // Both sides are normalised (lower case, modifiers sorted, key last) so `alt+ctrl+k` does not
+  // slip past `ctrl+alt+k`.
+  it('uses no key on the deny list', () => {
+    const normalize = (key: string): string => {
+      const parts = key.toLowerCase().split('+');
+      const last = parts.pop() ?? '';
+      return [...parts.sort(), last].join('+');
+    };
+    const denied = DENIED.map(normalize);
+    const used = list.flatMap((b) => [b.key, b.mac ?? '']).map(normalize);
+    expect(used.filter((k) => denied.includes(k))).toEqual([]);
+  });
+
+  it('declares the four palette commands with their constants', () => {
+    for (const id of [
+      ids.OPEN_CHAT_COMMAND_ID,
+      ids.FOCUS_PROMPT_COMMAND_ID,
+      ids.NEW_SESSION_COMMAND_ID,
+      ids.STOP_RESPONSE_COMMAND_ID,
+    ]) {
+      expect(contributed).toContain(id);
+    }
+  });
+});
+
+/**
  * Protects the rule "@types/vscode must not be newer than engines.vscode". It mirrors
  * `validateVSCodeTypesCompatibility` in vsce (src/validation.ts), which compares only
  * major.minor of the DECLARED specs; vsce does NOT look at the installed version. The last test

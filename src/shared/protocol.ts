@@ -171,6 +171,14 @@ export type Snapshot = {
 };
 
 /**
+ * What a host command (palette or key) asks the webview to do (issue #35): `prompt.focus` puts the
+ * caret in the prompt box, `session.new` runs the "New session" button and `session.stop` the
+ * "Stop" button. Running the button code in the webview keeps its invariants (Send locked while a
+ * request is in flight, "Stopped" announced); the host runs none of it itself.
+ */
+export type UiCommand = 'prompt.focus' | 'session.new' | 'session.stop';
+
+/**
  * Messages sent by the host. `*.upserted` carry the whole object and REPLACE it (this covers
  * opencode's `text.ended`, which holds the full text); `part.delta` APPENDS to `field`.
  * `request.result` without `error` means success. The `error` of `request.result` and of `notice`
@@ -193,6 +201,9 @@ export type Snapshot = {
  * `session.diff` (issue #31) is the whole "Changed files" list of ONE session and REPLACES what the
  * webview holds for it; the webview keeps it only if `sessionID` is the open session. `error` says
  * the host could not refresh the list: `files` then is the last list it had (possibly empty).
+ * `ui.command` (issue #35) is a palette or keyboard command of the host, relayed so the webview runs
+ * the SAME code as the matching button ({@link UiCommand}); it is a one-shot action, never state,
+ * so the host must not repeat one the webview already received.
  * `session.revert` (issue #32) REPLACES the revert the webview holds for ONE session; the webview
  * keeps it only if `sessionID` is the open session, and an absent `revert` means "no revert" (it
  * was restored, discarded for good, or never existed). The host sends it when a revert is prepared
@@ -251,6 +262,7 @@ export type HostToWebview =
       error?: ErrorInfo;
     }
   | { type: 'ui.focus'; target: { kind: 'permission' | 'form'; sessionID: string; id: string } }
+  | { type: 'ui.command'; command: UiCommand }
   | { type: 'session.diff'; sessionID: string; files: ChangedFile[]; error?: ErrorInfo }
   | { type: 'session.revert'; sessionID: string; revert?: RevertState }
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; error: ErrorInfo };
@@ -298,6 +310,10 @@ export type HostToWebview =
  * "Changed files" list. It has no `requestId`, like `editor.open`: a failure is a `notice`. `path`
  * is the `ChangedFile.path` the host sent; the host opens it only if it listed that path for that
  * session, so the webview cannot name a file of its own.
+ * `chat.focusChanged` (issue #35) tells the host whether the webview document has the keyboard focus
+ * (`focus`/`blur` of its window, plus the value after `ready`). The host only mirrors it into the
+ * `openVsCode.chatFocused` context key, which a `when` clause cannot get from `focusedView`
+ * because the webview is an iframe outside the view's own element.
  * `session.revert.stage`, `.clear` and `.commit` (issue #32) prepare a revert from a user message
  * (the history from it on is hidden and the files the agent touched after it are put back on
  * disk), restore it, or make it permanent. They carry a `requestId` and are answered by
@@ -355,7 +371,8 @@ export type WebviewToHost =
   | { type: 'editor.insert'; text: string }
   | { type: 'editor.newFile'; text: string; language?: string }
   | { type: 'clipboard.write'; text: string }
-  | { type: 'webview.log'; level: 'info' | 'warn' | 'error'; message: string };
+  | { type: 'webview.log'; level: 'info' | 'warn' | 'error'; message: string }
+  | { type: 'chat.focusChanged'; focused: boolean };
 
 /** Posts one message of union `M` to the other side. The concrete binding is issue #2. */
 export type Sender<M extends { type: string }> = (message: M) => void;
@@ -702,6 +719,7 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
   // An empty string is a legitimate clipboard write (clears it), unlike an empty prompt.
   'clipboard.write': (m) => isString(field(m, 'text')),
   'webview.log': (m) => isLogLevel(field(m, 'level')) && isString(field(m, 'message')),
+  'chat.focusChanged': (m) => isBoolean(field(m, 'focused')),
 };
 
 /**
@@ -728,6 +746,7 @@ const HOST_TYPE_SET: Record<HostToWebview['type'], true> = {
   'attachments.picked': true,
   'files.found': true,
   'ui.focus': true,
+  'ui.command': true,
   'session.diff': true,
   'session.revert': true,
   notice: true,

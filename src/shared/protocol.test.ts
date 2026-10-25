@@ -190,6 +190,7 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
     files: [{ uri: 'file:///ws/src/a.ts', name: 'src/a.ts' }],
   },
   'ui.focus': { type: 'ui.focus', target: { kind: 'permission', sessionID: 's1', id: 'perm1' } },
+  'ui.command': { type: 'ui.command', command: 'session.stop' },
   'session.diff': {
     type: 'session.diff',
     sessionID: 's1',
@@ -292,6 +293,7 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   'editor.newFile': { type: 'editor.newFile', text: 'x', language: 'ts' },
   'clipboard.write': { type: 'clipboard.write', text: 'x' },
   'webview.log': { type: 'webview.log', level: 'warn', message: 'm' },
+  'chat.focusChanged': { type: 'chat.focusChanged', focused: true },
 };
 
 describe('sample coverage', () => {
@@ -624,6 +626,9 @@ describe('isWebviewToHost', () => {
       { ...reply, decision: 'maybe' },
       { ...reply, message: 3 },
       { ...WEBVIEW_SAMPLES['webview.log'], level: 'debug' },
+      // Issue #35: the focus flag must be a real boolean, not a string or absent.
+      { ...WEBVIEW_SAMPLES['chat.focusChanged'], focused: 'true' },
+      { type: 'chat.focusChanged' },
       { ...WEBVIEW_SAMPLES['editor.open'], line: -1 },
       { ...WEBVIEW_SAMPLES['editor.open'], line: 0 },
       { ...WEBVIEW_SAMPLES['editor.open'], line: 1.5 },
