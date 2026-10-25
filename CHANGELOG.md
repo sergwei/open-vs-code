@@ -50,3 +50,5 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Continuous integration on Windows, macOS and Linux, with a check of the packaged file list
   (issue #5).
 - Marketplace packaging: icon, README, changelog and MIT license (issue #42).
+- Release workflow that publishes the same package to the VS Code Marketplace and Open VSX from a
+  version tag (issue #43).
