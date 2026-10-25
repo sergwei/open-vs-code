@@ -2,9 +2,9 @@
 #
 # Pushing a tag `vX.Y.Z` builds ONE .vsix, checks it, and publishes that same file to the VS Code
 # Marketplace and then to Open VSX, after a manual approval in the `release` environment. Any
-# other trigger (`workflow_dispatch`, or a pull request that touches this file or the check
-# script) is a DRY RUN: it packages and checks exactly the same way but has no job that can read
-# a token, so it cannot publish. The how-to (one-time setup, cutting a release, leaks) is in
+# other trigger (`workflow_dispatch`, or a pull request that touches this file, the check
+# scripts, `package.json`, `package-lock.json` or `.vscodeignore`) is a DRY RUN: it packages and
+# checks exactly the same way but has no job that can read a token, so it cannot publish. The how-to (one-time setup, cutting a release, leaks) is in
 # docs/RELEASING.md.
 #
 # Decisions:
@@ -17,8 +17,11 @@
 # - Stable releases only (decision of issue #43): no `--pre-release` anywhere. The Marketplace
 #   rejects semver suffixes, so tags are `vMAJOR.MINOR.PATCH`.
 # - Tokens (`VSCE_PAT`, `OVSX_PAT`) are environment secrets, appear only in the `env:` of the steps
-#   that use them and never on a command line (vsce and ovsx read them from the environment).
-#   Dependencies are installed with `--ignore-scripts` in the jobs that hold a token.
+#   that use them (the token check and the publish step of each job) and never on a command line
+#   (vsce and ovsx read them from the environment). Dependencies are installed with
+#   `--ignore-scripts` in the jobs that hold a token, and without the npm cache, so a cache
+#   written by another run cannot reach a job that holds a token. The package job passes the
+#   sha256 of the .vsix as an output and each publish step checks it before publishing.
 # - The Open VSX job needs the Marketplace job: if the Marketplace rejects the package (for
 #   instance the display name), nothing is published to Open VSX and the two listings never
 #   diverge. It has no `id-token: write`, or ovsx would try trusted publishing instead of the PAT.
@@ -43,6 +46,10 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - 'scripts/check-release.mjs'
+      - 'scripts/check-vsix.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.vscodeignore'
 
 permissions: {}
 
@@ -60,6 +67,7 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
       vsix: ${{ steps.package.outputs.vsix }}
+      sha256: ${{ steps.package.outputs.sha256 }}
     env:
       IS_TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     steps:
@@ -121,13 +129,16 @@ jobs:
           npm run vsix -- -o "$VSIX" --githubBranch "$REF"
           echo "vsix=open-vs-code-$VERSION.vsix" >> "$GITHUB_OUTPUT"
           echo "path=$VSIX" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$VSIX" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Check package contents
         env:
           VERSION: ${{ steps.check.outputs.version }}
           VSIX: ${{ steps.package.outputs.path }}
         run: |
-          npx vsce ls --no-dependencies > "$RUNNER_TEMP/vsix-files.txt"
+          # The real content of the .vsix: entries under `extension/` (the zip root also holds
+          # `extension.vsixmanifest` and `[Content_Types].xml`, which are not extension files).
+          unzip -Z1 "$VSIX" | sed -n 's#^extension/##p' | { grep -v '/$' || true; } > "$RUNNER_TEMP/vsix-files.txt"
           node scripts/check-vsix.mjs "$RUNNER_TEMP/vsix-files.txt"
           unzip -p "$VSIX" extension/package.json > "$RUNNER_TEMP/vsix-package.json"
           node scripts/check-release.mjs --dry-run --packaged "$RUNNER_TEMP/vsix-package.json"
@@ -147,7 +158,7 @@ jobs:
       - name: Summary
         env:
           VERSION: ${{ steps.check.outputs.version }}
-          VSIX: ${{ steps.package.outputs.path }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
           TAG: ${{ github.ref_name }}
         run: |
           {
@@ -159,7 +170,7 @@ jobs:
             echo
             echo "- version: $VERSION"
             echo "- commit: $GITHUB_SHA"
-            echo "- sha256: $(sha256sum "$VSIX" | cut -d' ' -f1)"
+            echo "- sha256: $SHA256"
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish-marketplace:
@@ -183,7 +194,6 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
-          cache: npm
 
       - name: Install
         run: npm ci --ignore-scripts
@@ -208,7 +218,10 @@ jobs:
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
           VSIX: ${{ runner.temp }}/vsix/${{ needs.package.outputs.vsix }}
-        run: npx --no-install vsce publish --packagePath "$VSIX"
+          SHA256: ${{ needs.package.outputs.sha256 }}
+        run: |
+          echo "$SHA256  $VSIX" | sha256sum -c -
+          npx --no-install vsce publish --packagePath "$VSIX"
 
   publish-open-vsx:
     name: publish-open-vsx
@@ -231,7 +244,6 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
-          cache: npm
 
       - name: Install
         run: npm ci --ignore-scripts
@@ -256,4 +268,7 @@ jobs:
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
           VSIX: ${{ runner.temp }}/vsix/${{ needs.package.outputs.vsix }}
-        run: npx --no-install ovsx publish "$VSIX"
+          SHA256: ${{ needs.package.outputs.sha256 }}
+        run: |
+          echo "$SHA256  $VSIX" | sha256sum -c -
+          npx --no-install ovsx publish "$VSIX"

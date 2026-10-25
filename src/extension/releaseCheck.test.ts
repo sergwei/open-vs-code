@@ -59,7 +59,12 @@ afterEach(() => {
  */
 function run(
   args: string[],
-  options: { version?: string; changelog?: string; packagedVersion?: string },
+  options: {
+    version?: string;
+    changelog?: string;
+    packagedVersion?: string;
+    packagedText?: string;
+  },
 ): RunResult & { outputPath: string } {
   const manifest = join(dir, 'package.json');
   const changelog = join(dir, 'CHANGELOG.md');
@@ -68,9 +73,12 @@ function run(
   writeFileSync(changelog, options.changelog ?? CHANGELOG_WITH_ENTRY);
   writeFileSync(outputPath, '');
   const extra = ['--manifest', manifest, '--changelog', changelog];
-  if (options.packagedVersion !== undefined) {
+  if (options.packagedVersion !== undefined || options.packagedText !== undefined) {
     const packaged = join(dir, 'vsix-package.json');
-    writeFileSync(packaged, JSON.stringify({ version: options.packagedVersion }));
+    writeFileSync(
+      packaged,
+      options.packagedText ?? JSON.stringify({ version: options.packagedVersion }),
+    );
     extra.push('--packaged', packaged);
   }
   const result = spawnSync(process.execPath, [SCRIPT, ...args, ...extra], {
@@ -161,6 +169,24 @@ describe('scripts/check-release.mjs', () => {
     const result = run([], {});
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('Usage');
+  });
+
+  it('exits 1 with a read error when the manifest cannot be read', () => {
+    const result = run(['--dry-run', '--manifest', join(dir, 'nope.json')], {});
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('ERROR: cannot read the release inputs');
+  });
+
+  it('fails with a usage message when a flag has no value', () => {
+    const result = run(['--tag'], {});
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('--tag needs a value');
+  });
+
+  it('rejects a packaged manifest that is not JSON', () => {
+    const result = run(['--tag', 'v1.2.3'], { packagedText: 'not json {' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('not valid JSON');
   });
 
   it('accepts a packaged manifest with the expected version', () => {
