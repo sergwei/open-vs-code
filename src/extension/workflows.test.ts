@@ -7,10 +7,21 @@ import { describe, expect, it } from 'vitest';
 // dependency), so these tests see the shape of the file, not what GitHub would evaluate: they are
 // a tripwire for edits, and the real boundary is the `release` environment on GitHub.
 //
-// Mutations applied by hand to release.yml and seen RED (Windows 11, 2026-10-25), then reverted:
-// (1) deleting the tag `if:` of a publish job; (2) pinning an action to `@v7` instead of a SHA;
-// (3) moving `VSCE_PAT` to the job-level `env:`. The exact failing tests are in the reply of the
-// task, not here. macOS and Linux UNVERIFIED until the CI matrix runs this file.
+// Mutations applied by hand to release.yml and seen RED (Windows 11, 2026-10-25), then reverted;
+// the tests that failed, by their titles:
+// - deleting the tag `if:` of `publish-marketplace`: "has a tag-only `if` and the release
+//   environment on both publish jobs, and nowhere else";
+// - pinning `actions/setup-node` to `@v7`: "pins every `uses:` to a 40-hex commit SHA with the tag
+//   in a comment";
+// - moving `VSCE_PAT` to the job-level `env:` of `publish-marketplace`: "references only VSCE_PAT
+//   and OVSX_PAT, each in its own job and in a step-level env";
+// - `${{ github.head_ref }}` inside the multi-line `run:` of the Summary step: "puts the tag name
+//   in an env var, never inside a `run:` script";
+// - removing `persist-credentials: false` from the package checkout: "never persists the
+//   checkout credentials";
+// - turning `if ! git merge-base --is-ancestor` into `if git merge-base …`: "checks the tagged
+//   commit is on main in the package job".
+// macOS and Linux UNVERIFIED until the CI matrix runs this file.
 
 const WORKFLOWS_DIR = new URL('../../.github/workflows/', import.meta.url);
 
@@ -60,7 +71,57 @@ function codeLines(text: string): string[] {
   return text.split(/\r?\n/).filter((l) => !/^\s*#/.test(l));
 }
 
-const TAG_IF = "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')";
+/** The `if:` of a publish job, at job level (four spaces: job name 2, key 4). */
+const TAG_IF = "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')";
+
+/**
+ * Returns the full body of every `run:` in `text`: the inline value, or all the lines after the
+ * key that are indented deeper than it (a block scalar, `|` or `>`), blank lines included.
+ *
+ * Why it exists: checking a few known lines let a `${{ github.head_ref }}` inside a multi-line
+ * `run:` go through; the body has to be collected whole. Relies on the layout used here (block
+ * scalars indented deeper than the `run:` key, no flow-style YAML).
+ */
+function runBodies(text: string): string[] {
+  const lines = codeLines(text);
+  const bodies: string[] = [];
+  lines.forEach((line, i) => {
+    const match = /^(\s*)(?:- )?run:\s*(.*)$/.exec(line);
+    if (!match) return;
+    const keyIndent = line.indexOf('run:');
+    const body = [match[2]];
+    for (const next of lines.slice(i + 1)) {
+      if (next.trim() === '') {
+        body.push(next);
+        continue;
+      }
+      if (next.length - next.trimStart().length <= keyIndent) break;
+      body.push(next);
+    }
+    bodies.push(body.join('\n'));
+  });
+  return bodies;
+}
+
+/**
+ * Returns, for every `uses: actions/checkout@…` in `text`, the lines of that step after the
+ * `uses:` line (everything indented deeper than the step's own keys).
+ */
+function checkoutSteps(text: string): string[] {
+  const lines = codeLines(text);
+  const steps: string[] = [];
+  lines.forEach((line, i) => {
+    if (!/\buses:\s*actions\/checkout@/.test(line)) return;
+    const indent = line.length - line.trimStart().length;
+    const body: string[] = [];
+    for (const next of lines.slice(i + 1)) {
+      if (next.trim() !== '' && next.length - next.trimStart().length < indent) break;
+      body.push(next);
+    }
+    steps.push(body.join('\n'));
+  });
+  return steps;
+}
 
 describe('workflows: actions', () => {
   it('pins every `uses:` to a 40-hex commit SHA with the tag in a comment', () => {
@@ -70,6 +131,16 @@ describe('workflows: actions', () => {
         if (!match) continue;
         expect(match[1], `${name}: ${line.trim()}`).toMatch(/^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/);
         expect(match[2], `${name}: ${line.trim()}`).toMatch(/^\s+# v\d/);
+      }
+    }
+  });
+
+  it('never persists the checkout credentials', () => {
+    for (const { name, text } of readWorkflows()) {
+      const steps = checkoutSteps(text);
+      expect(steps.length, name).toBeGreaterThan(0);
+      for (const step of steps) {
+        expect(step, name).toContain('persist-credentials: false');
       }
     }
   });
@@ -92,7 +163,7 @@ describe('workflows: release.yml', () => {
   it('has a tag-only `if` and the release environment on both publish jobs, and nowhere else', () => {
     for (const name of publishJobs) {
       const job = jobs.get(name) ?? '';
-      expect(job, name).toContain(TAG_IF);
+      expect(job.split(/\r?\n/), name).toContain(TAG_IF);
       expect(job, name).toMatch(/environment:\n\s+name: release\n/);
     }
     expect(jobs.get('package')).not.toMatch(/^\s*environment:/m);
@@ -154,12 +225,17 @@ describe('workflows: release.yml', () => {
   });
 
   it('puts the tag name in an env var, never inside a `run:` script', () => {
-    expect(codeLines(text).join('\n')).not.toMatch(/run:.*\$\{\{\s*github\.ref_name/);
-    for (const line of codeLines(text)) {
-      if (/^\s{10,}(if \[|node |npm |npx |git |echo )/.test(line)) {
-        expect(line).not.toContain('${{');
-      }
+    // Whole body of every `run:`, inline or block: no `${{ … }}` expression may be interpolated
+    // into a script (script injection through `github.ref_name`, `head_ref`, …).
+    const bodies = runBodies(text);
+    expect(bodies.length).toBeGreaterThan(0);
+    for (const body of bodies) {
+      expect(body).not.toContain('${{');
     }
+  });
+
+  it('checks the tagged commit is on main in the package job', () => {
+    expect(jobs.get('package')).toContain('if ! git merge-base --is-ancestor');
   });
 
   it('writes the dry-run notice and the package job summary', () => {

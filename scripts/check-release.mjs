@@ -33,9 +33,16 @@ const STABLE_VERSION = /^(\d+)\.(\d+)\.(\d+)$/;
  * is an error and a missing changelog section is reported as a warning, which keeps the test run
  * on `main` (still on `## [Unreleased]`) green while saying that a real tag would fail.
  * Returns `{ problems, warnings, version }`; `problems` empty means the release may go on.
- * VERIFIED by `releaseCheck.test.ts`, which runs the real CLI on hand-made fixtures: "accepts a
- * matching tag, version and changelog entry" and the rejection cases passed (Windows 11,
- * 2026-10-25). UNVERIFIED on macOS/Linux until `npm test` runs there in CI.
+ * VERIFIED by `releaseCheck.test.ts`, which runs the real CLI on hand-made fixtures; these passed
+ * on Windows 11, 2026-10-25: "accepts a matching tag, version and changelog entry and writes the
+ * version output", "rejects a tag that differs from the package.json version and names both",
+ * "rejects a pre-release tag suffix", "rejects a tag without the leading v", "rejects a
+ * package.json version with a pre-release suffix", "rejects a tag whose version has no dated
+ * changelog section", "rejects a changelog section with no bullet under it", "does not let the
+ * dots of the version match any character in the changelog", "accepts a changelog with CRLF line
+ * endings", "dry run with only [Unreleased] exits 0 and warns that a real tag would fail" and "dry
+ * run still rejects a version with a pre-release suffix". UNVERIFIED on macOS/Linux until `npm
+ * test` runs there in CI.
  */
 export function checkRelease({ tag, version, changelog, dryRun }) {
   const problems = [];
@@ -100,8 +107,9 @@ function changelogEntryHasBullets(changelog, version) {
  * It exists because the .vsix is what gets published: a stale `dist/` or a manifest edited after
  * packaging would otherwise ship under a version the checks above never looked at. Unparseable
  * JSON is itself a problem. Pure: no I/O.
- * VERIFIED by `releaseCheck.test.ts` ("rejects a packaged manifest with another version",
- * Windows 11, 2026-10-25). Not run against a real .vsix yet: that happens in the release workflow.
+ * VERIFIED by `releaseCheck.test.ts` ("rejects a packaged manifest with another version" and
+ * "rejects a packaged manifest that is not JSON", Windows 11, 2026-10-25). Not run against a real
+ * .vsix yet: that happens in the release workflow.
  */
 export function checkPackagedVersion(expectedVersion, packagedManifestText) {
   let parsed;
@@ -118,27 +126,57 @@ export function checkPackagedVersion(expectedVersion, packagedManifestText) {
 }
 
 /**
- * Reads the value that follows `--name` in `argv`, or undefined when the flag is absent or last.
+ * Reads the value that follows `--name` in `argv`, or undefined when the flag is absent.
+ *
+ * Throws when the flag is present but has no value (it is last, or the next token is another
+ * `--flag`): silently using a default would make `--changelog` with a forgotten path check the
+ * wrong file and pass, which in a release gate is worse than stopping. `main` turns the throw into
+ * a usage error (exit 1).
  */
 function optionValue(argv, name) {
   const index = argv.indexOf(name);
-  return index === -1 ? undefined : argv[index + 1];
+  if (index === -1) return undefined;
+  const value = argv[index + 1];
+  if (value === undefined || value.startsWith('--')) {
+    throw new Error(`${name} needs a value`);
+  }
+  return value;
 }
 
 /**
  * Parses the command line, runs the checks, prints the result and sets the exit code.
  *
  * Sets `process.exitCode = 1` instead of calling `process.exit`, so stdout is flushed on every
- * platform. Needs `--tag <name>` or `--dry-run`; anything else is a usage error (exit 1). Unreadable
- * files exit 1 with a message. Appends `version=<x.y.z>` to the file named by `GITHUB_OUTPUT` only
- * when every check passed.
- * VERIFIED on Windows 11 (2026-10-25) with `--dry-run`, `--tag v0.0.1` and `--tag v9.9.9` against
- * this repository, and by `releaseCheck.test.ts` for the GITHUB_OUTPUT line.
+ * platform. Needs `--tag <name>` or `--dry-run`; anything else, including a flag with no value, is
+ * a usage error (exit 1). Unreadable files exit 1 with a message. Appends `version=<x.y.z>` to the
+ * file named by `GITHUB_OUTPUT` only when every check passed.
+ * VERIFIED on Windows 11 (2026-10-25), run by hand in this repository (changelog still on
+ * `## [Unreleased]`, version 0.0.1): `--dry-run` printed `WARNING: CHANGELOG.md has no "##
+ * [0.0.1] - YYYY-MM-DD" section with at least one "- " line. A real tag would fail here.` and `OK:
+ * dry run for v0.0.1 (version 0.0.1)`, exit 0; `--tag v0.0.1` printed `ERROR: CHANGELOG.md has no
+ * "## [0.0.1] - YYYY-MM-DD" section with at least one "- " line.`, exit 1; `--dry-run --manifest
+ * nope.json` printed `ERROR: cannot read the release inputs: ENOENT: no such file or directory,
+ * open ...`, exit 1. In `releaseCheck.test.ts`: "writes the version output" in "accepts a matching
+ * tag, version and changelog entry and writes the version output", "exits 1 with a read error
+ * when the manifest cannot be read" and "fails with a usage message when a flag has no value".
  */
 function main() {
   const argv = process.argv.slice(2);
   const dryRun = argv.includes('--dry-run');
-  const tagArg = optionValue(argv, '--tag');
+  let tagArg;
+  let manifestPath;
+  let changelogPath;
+  let packagedPath;
+  try {
+    tagArg = optionValue(argv, '--tag');
+    manifestPath = optionValue(argv, '--manifest') ?? 'package.json';
+    changelogPath = optionValue(argv, '--changelog') ?? 'CHANGELOG.md';
+    packagedPath = optionValue(argv, '--packaged');
+  } catch (error) {
+    console.error(`Usage error: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
   if (!dryRun && !tagArg) {
     console.error(
       'Usage: node scripts/check-release.mjs (--tag <vX.Y.Z> | --dry-run) [--packaged <file>]',
@@ -146,9 +184,6 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  const manifestPath = optionValue(argv, '--manifest') ?? 'package.json';
-  const changelogPath = optionValue(argv, '--changelog') ?? 'CHANGELOG.md';
-  const packagedPath = optionValue(argv, '--packaged');
 
   let version;
   let changelog;
