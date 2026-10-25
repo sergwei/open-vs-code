@@ -18,8 +18,8 @@ push of a tag vX.Y.Z
 - **package** checks that the tag, `package.json` and `CHANGELOG.md` agree
   (`scripts/check-release.mjs`), that the tagged commit is on `main`, then runs the format check,
   the unit tests and, through `vscode:prepublish`, the type check and lint. It packages once,
-  checks the real file list of the `.vsix` and the version inside it, and uploads the file as the `release-vsix`
-  artifact. The three-OS matrix and the integration tests are not repeated: CI already ran them on
+  checks the real file list of the `.vsix` and the version inside it, and uploads the file as the
+  `release-vsix` artifact. The three-OS matrix and the integration tests are not repeated: CI already ran them on
   `main`.
 - **publish-marketplace** and **publish-open-vsx** publish that same file. Both run only for a
   tag push, both wait for a manual approval, and Open VSX waits for the Marketplace job, so if the
@@ -59,11 +59,16 @@ issue, not part of the release workflow); the first Marketplace publish is the r
    ```bash
    read -rs VSCE_PAT && export VSCE_PAT
    npx vsce verify-pat sergwei
+   unset VSCE_PAT
    ```
 
    ```powershell
-   $env:VSCE_PAT = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR((Read-Host -AsSecureString 'VSCE_PAT')))
+   $secure = Read-Host -AsSecureString 'VSCE_PAT'
+   $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+   $env:VSCE_PAT = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+   [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
    npx vsce verify-pat sergwei
+   Remove-Item Env:VSCE_PAT
    ```
 
 **The PAT will be retired.** The official guide says global PATs in Azure DevOps are retired on
@@ -86,13 +91,18 @@ Sources:
    ```
 
    ```powershell
-   $env:OVSX_PAT = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR((Read-Host -AsSecureString 'OVSX_PAT')))
+   $secure = Read-Host -AsSecureString 'OVSX_PAT'
+   $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+   $env:OVSX_PAT = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+   [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
    npx ovsx create-namespace sergwei
    ```
 
 4. Claim ownership of the namespace separately (creating it does not make you the verified owner);
    the steps are in <https://github.com/eclipse/openvsx/wiki/Publishing-Extensions>.
 5. Check the token without publishing (same variable as above): `npx ovsx verify-pat sergwei`.
+   Then remove it from the session: `unset OVSX_PAT` (bash) or `Remove-Item Env:OVSX_PAT`
+   (PowerShell).
 
 The first publication to Open VSX has to use the token. Per the Open VSX wiki, trusted publishing
 only works for extensions that already exist there
@@ -160,8 +170,8 @@ published version cannot be silently re-pointed.
 
 Tokens live only in environment secrets and only in the `env:` of the steps that use them (the
 token check and the publish step); they are never on a command line, and the jobs that hold them
-install dependencies with `--ignore-scripts` and without the npm cache. A compromised dependency of `vsce` or `ovsx` is the remaining risk, which is why
-both are pinned in `package-lock.json`.
+install dependencies with `--ignore-scripts` and without the npm cache. A compromised dependency
+of `vsce` or `ovsx` is the remaining risk, which is why both are pinned in `package-lock.json`.
 
 ## PAT retirement and the next step
 
