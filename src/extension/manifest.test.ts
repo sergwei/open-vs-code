@@ -8,9 +8,18 @@ interface Manifest {
   contributes: {
     viewsContainers: { activitybar: { id: string }[] };
     views: Record<string, { id: string }[]>;
-    commands: { command: string }[];
+    commands: { command: string; title?: string; category?: string }[];
     configuration: {
-      properties: Record<string, { type?: string; default?: unknown; scope?: string }>;
+      properties: Record<
+        string,
+        {
+          type?: string;
+          default?: unknown;
+          scope?: string;
+          order?: number;
+          markdownDescription?: string;
+        }
+      >;
     };
   };
 }
@@ -152,5 +161,79 @@ describe('@types/vscode versus engines.vscode', () => {
       '../../node_modules/@types/vscode/package.json',
     );
     expect(installed.version).toBe(declared);
+  });
+});
+
+/**
+ * Protects the contributed settings (issue #38) from drifting between `ids.ts`, the manifest and
+ * the descriptions the Settings editor renders. Each test defends against one regression:
+ * renaming a setting on one side only (the constant and the manifest disagree and nothing fails
+ * at runtime); a setting without type, default, explicit scope or description; two settings
+ * sharing an `order` (the editor then picks the order itself); a `#id#` link to a setting that
+ * does not exist (the editor paints it as plain text); and a `**OpenCode: X**` command quoted in
+ * a description that was renamed or removed (issue #35 may rename commands).
+ * The data is the REAL package.json, not a fabricated fixture. How the Settings editor RENDERS
+ * the descriptions is not covered here: that is `test:visual` step 21.
+ */
+describe('contributes.configuration', () => {
+  const properties = manifest.contributes.configuration.properties;
+  const entries = Object.entries(properties);
+
+  it('has a constant in ids.ts for every contributed setting', () => {
+    const missing = Object.keys(properties).filter((id) => !idValues.includes(id));
+    expect(missing).toEqual([]);
+  });
+
+  it('gives every setting a type, a default, an explicit scope and a description', () => {
+    const incomplete = entries
+      .filter(
+        ([, s]) =>
+          s.type === undefined ||
+          s.default === undefined ||
+          s.scope === undefined ||
+          (s.markdownDescription ?? '').trim() === '',
+      )
+      .map(([id]) => id);
+    expect(incomplete).toEqual([]);
+  });
+
+  it('gives every setting a distinct integer order', () => {
+    const orders = entries.map(([, s]) => s.order);
+    expect(orders.every((o) => Number.isInteger(o))).toBe(true);
+    expect(new Set(orders).size).toBe(orders.length);
+  });
+
+  // The Settings editor links `#id#` only when it is wrapped in backticks (VS Code 1.143.1,
+  // `test:visual` step 21: the bare form was painted as the literal text, 0 links).
+  it('writes every #id# link between backticks', () => {
+    const bare = entries.flatMap(([id, s]) =>
+      [...(s.markdownDescription ?? '').matchAll(/(?<!`)#[\w.]+#(?!`)/g)].map(
+        (m) => `${id}: ${m[0]}`,
+      ),
+    );
+    expect(bare).toEqual([]);
+  });
+
+  it('links (#id#) only to settings that exist', () => {
+    const broken = entries.flatMap(([id, s]) =>
+      [...(s.markdownDescription ?? '').matchAll(/`#([\w.]+)#`/g)]
+        .map((m) => m[1] ?? '')
+        .filter((target) => !(target in properties))
+        .map((target) => `${id} -> ${target}`),
+    );
+    expect(broken).toEqual([]);
+  });
+
+  it('quotes (**OpenCode: X**) only commands that are contributed with that title', () => {
+    const titles = manifest.contributes.commands
+      .filter((c) => c.category === 'OpenCode')
+      .map((c) => c.title);
+    const unknown = entries.flatMap(([id, s]) =>
+      [...(s.markdownDescription ?? '').matchAll(/\*\*OpenCode: ([^*]+)\*\*/g)]
+        .map((m) => m[1] ?? '')
+        .filter((title) => !titles.includes(title))
+        .map((title) => `${id} -> ${title}`),
+    );
+    expect(unknown).toEqual([]);
   });
 });

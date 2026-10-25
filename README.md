@@ -99,8 +99,8 @@ Folder**.
 
 | Setting | Scope | Default | What it does |
 | --- | --- | --- | --- |
-| `openVsCode.opencodePath` | machine | empty | Absolute path to the opencode **v2** executable. Empty searches `PATH` for `opencode2`, then `opencode`. |
-| `openVsCode.serverUrl` | machine | empty | Address of an opencode **v2** server that is already running on **this machine**, for example `http://127.0.0.1:4096`. Empty lets the extension launch its own server. See [Using a server you started](#using-a-server-you-started). |
+| `openVsCode.opencodePath` | machine | empty | Absolute path to the opencode **v2** executable. Empty searches `PATH` for `opencode2`, then `opencode`. On Windows an npm `opencode.cmd` shim is accepted. Not used while `openVsCode.serverUrl` is set. |
+| `openVsCode.serverUrl` | machine | empty | Address of an opencode **v2** server that is already running on **this machine**, for example `http://127.0.0.1:4096`. Empty lets the extension launch its own server. The extension then does not use `openVsCode.opencodePath`. See [Using a server you started](#using-a-server-you-started). |
 | `openVsCode.defaultModel` | window | empty | Model every **new** chat session starts with, written `provider/model` (for example `opencode/big-pickle`). It wins over the last model you used. A badly written or unavailable value is ignored with a warning. |
 
 ## Commands

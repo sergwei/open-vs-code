@@ -28,6 +28,7 @@ import * as vscode from 'vscode';
 import {
   CLEAR_SERVER_PASSWORD_COMMAND_ID,
   CONFIG_SECTION,
+  DEFAULT_MODEL_KEY,
   RESTART_SERVER_COMMAND_ID,
   SERVER_URL_KEY,
   TEST_SET_SERVER_PASSWORD_COMMAND_ID,
@@ -135,6 +136,13 @@ describe('external server', function () {
     const extension = vscode.extensions.getExtension(EXTENSION_ID);
     assert.ok(extension, `${EXTENSION_ID} is not installed in the test instance`);
     extensionPath = extension.extensionPath;
+    // A run that died halfway may have left the probe file of the workspace-settings case.
+    await vscode.workspace.fs
+      .delete(vscode.Uri.joinPath(vscode.Uri.file(folder), '.vscode'), {
+        recursive: true,
+        useTrash: false,
+      })
+      .then(undefined, () => undefined);
     await extension.activate();
   });
 
@@ -296,5 +304,61 @@ describe('external server', function () {
     await setServerUrl(undefined);
     await log.waitFor('binary detection: setting ', WAIT_MS);
     log.assertAbsent('launching:');
+  });
+
+  /**
+   * A workspace cannot set `openVsCode.serverUrl` (issue #38; the scope is `machine`, issue #11).
+   *
+   * Protects against dropping `"scope": "machine"` from the manifest, which would let the
+   * `.vscode/settings.json` of a cloned repository point the prompts and the code of the user at
+   * another server. Two doors are closed: the API refuses to write the setting in the Workspace
+   * scope, and a `.vscode/settings.json` that already carries it (what a clone brings) is ignored.
+   * The file also sets `openVsCode.defaultModel` (scope `window`) as a positive control: once the
+   * model is read, the file has been read, so "serverUrl did not change" is not an empty result.
+   * After that, `SETTLE_MS` and an `assertAbsent` of the connection to the address of the file
+   * (lesson: a final state, not a transitional one). The file is removed at the start and in a
+   * `finally`. The Settings editor's own view is `test:visual` step 21.
+   */
+  it('ignores openVsCode.serverUrl written by the workspace (scope machine)', async function () {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+    assert.ok(folder, 'no workspace folder is open');
+    const vscodeDir = vscode.Uri.joinPath(folder, '.vscode');
+    const settingsFile = vscode.Uri.joinPath(vscodeDir, 'settings.json');
+    const config = () => vscode.workspace.getConfiguration(CONFIG_SECTION);
+    const probeUrl = 'http://127.0.0.1:1';
+    const removeVscodeDir = () =>
+      vscode.workspace.fs.delete(vscodeDir, { recursive: true, useTrash: false });
+
+    await removeVscodeDir().then(undefined, () => undefined);
+    await assert.rejects(
+      Promise.resolve(
+        config().update(SERVER_URL_KEY, probeUrl, vscode.ConfigurationTarget.Workspace),
+      ),
+      'writing a machine-scoped setting in the Workspace scope should be refused',
+    );
+    const before = config().get<string>(SERVER_URL_KEY);
+    log.mark();
+    try {
+      await vscode.workspace.fs.createDirectory(vscodeDir);
+      const content = JSON.stringify({
+        [`${CONFIG_SECTION}.${SERVER_URL_KEY}`]: probeUrl,
+        [`${CONFIG_SECTION}.${DEFAULT_MODEL_KEY}`]: 'probe/model',
+      });
+      await vscode.workspace.fs.writeFile(settingsFile, new TextEncoder().encode(content));
+      const deadline = Date.now() + WAIT_MS;
+      while (config().get<string>(DEFAULT_MODEL_KEY) !== 'probe/model') {
+        assert.ok(Date.now() < deadline, 'the workspace settings.json was never read');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      assert.strictEqual(config().get<string>(SERVER_URL_KEY), before);
+      log.assertAbsent(`connecting to the external server at ${probeUrl}`);
+    } finally {
+      await removeVscodeDir().then(undefined, () => undefined);
+      const deadline = Date.now() + WAIT_MS;
+      while (config().get<string>(DEFAULT_MODEL_KEY) === 'probe/model' && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
   });
 });
