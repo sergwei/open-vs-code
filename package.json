@@ -69,7 +69,8 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "markdownDescription": "Absolute path to the opencode **v2** executable. Leave empty to search `PATH` for `opencode2`, then `opencode`."
+          "order": 1,
+          "markdownDescription": "Absolute path to the opencode **v2** executable. Leave empty to search `PATH` for `opencode2`, then `opencode`. On Windows an npm shim (`opencode.cmd`) is accepted and the executable it wraps is launched. Not used while `#openVsCode.serverUrl#` is set. A change applies without reloading the window."
         },
         "openVsCode.serverUrl": {
           "type": "string",
@@ -77,12 +78,14 @@
           "scope": "machine",
           "pattern": "^\\s*$|^\\s*[hH][tT][tT][pP][sS]?://",
           "patternErrorMessage": "Write the address of a server on this machine, like http://127.0.0.1:4096.",
-          "markdownDescription": "Address of an opencode **v2** server that is already running on **this machine**, for example `http://127.0.0.1:4096` (`127.0.0.1`, `[::1]` and `localhost` are accepted, over `http` or `https`). When set, the extension does **not** launch its own server. Its password is not a setting: run **OpenCode: Set Server Password** (the user is always `opencode`). Leave empty to let the extension launch its own server."
+          "order": 2,
+          "markdownDescription": "Address of an opencode **v2** server that is already running on **this machine**, for example `http://127.0.0.1:4096` (`127.0.0.1`, `[::1]` and `localhost` are accepted, over `http` or `https`). When set, the extension does **not** launch its own server and `#openVsCode.opencodePath#` is not used. Its password is not a setting: run **OpenCode: Set Server Password** (the user is always `opencode`). Leave empty to let the extension launch its own server."
         },
         "openVsCode.defaultModel": {
           "type": "string",
           "default": "",
           "scope": "window",
+          "order": 3,
           "markdownDescription": "Model that every **new** chat session starts with, written `provider/model` (for example `opencode/big-pickle`). It wins over the last model you sent a prompt with. Leave empty to start with that last model, or with opencode's own default if there is none. A value that is badly written or not offered by the server is ignored with a warning."
         }
       }

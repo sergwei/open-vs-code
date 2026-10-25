@@ -9,6 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Settings editor: the three settings are listed in a fixed order (executable, server address,
+  default model) and link to each other (issue #38).
 - opencode v2 detection: finds `opencode2` or `opencode` (or the `openVsCode.opencodePath`
   executable), accepts only major version 2, and resolves npm `.cmd` shims to the real executable
   on Windows (issue #7).

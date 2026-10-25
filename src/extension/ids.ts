@@ -7,8 +7,9 @@
 // contributed command / view / view container id must have a constant here.
 // `opencodeBinary.test.ts` (issue #7) checks that OPENCODE_PATH_SETTING exists in
 // `contributes.configuration` with scope `machine`. A new command, view or view container
-// without its constant fails `manifest.test.ts`; settings are only checked from the constant to
-// the manifest, so a new setting without a constant fails nothing: add the constant by hand.
+// without its constant fails `manifest.test.ts`. Since issue #38 the `contributes.configuration`
+// describe of that file also fails for a contributed setting without a constant here (and for
+// one without type, default, scope, description or a distinct `order`).
 
 /** Activity Bar container id (`contributes.viewsContainers.activitybar[].id`). */
 export const VIEW_CONTAINER_ID = 'openVsCode';
