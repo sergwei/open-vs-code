@@ -4,8 +4,11 @@
 # Marketplace and then to Open VSX, after a manual approval in the `release` environment. Any
 # other trigger (`workflow_dispatch`, or a pull request that touches this file, the check
 # scripts, `package.json`, `package-lock.json` or `.vscodeignore`) is a DRY RUN: it packages and
-# checks exactly the same way but has no job that can read a token, so it cannot publish. The how-to (one-time setup, cutting a release, leaks) is in
-# docs/RELEASING.md.
+# checks exactly the same way but has no job that can read a token, so it cannot publish. The
+# how-to (one-time setup, cutting a release, leaks) is in docs/RELEASING.md.
+#
+# Steps that use a pipe set `shell: bash` (which adds `pipefail`; the default `bash -e` does not),
+# so a failing command at the left of a pipe fails the step instead of passing an empty list on.
 #
 # Decisions:
 # - Three layers against publishing by mistake, weakest first: (1) the `if:` on the publish jobs;
@@ -121,6 +124,7 @@ jobs:
       # `vscode:prepublish` runs check-types, lint and the production builds before vsce packs.
       - name: Package
         id: package
+        shell: bash
         env:
           VERSION: ${{ steps.check.outputs.version }}
           REF: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.sha }}
@@ -132,17 +136,19 @@ jobs:
           echo "sha256=$(sha256sum "$VSIX" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Check package contents
+        shell: bash
         env:
           VERSION: ${{ steps.check.outputs.version }}
           VSIX: ${{ steps.package.outputs.path }}
         run: |
-          # The real content of the .vsix: entries under `extension/` (the zip root also holds
-          # `extension.vsixmanifest` and `[Content_Types].xml`, which are not extension files).
-          unzip -Z1 "$VSIX" | sed -n 's#^extension/##p' | { grep -v '/$' || true; } > "$RUNNER_TEMP/vsix-files.txt"
-          node scripts/check-vsix.mjs "$RUNNER_TEMP/vsix-files.txt"
+          # The real content of the .vsix. check-vsix.mjs --from-vsix keeps the entries under
+          # `extension/` and undoes the renames vsce makes (readme.md, changelog.md, LICENSE.txt).
+          unzip -Z1 "$VSIX" > "$RUNNER_TEMP/vsix-files.txt"
+          node scripts/check-vsix.mjs --from-vsix "$RUNNER_TEMP/vsix-files.txt"
           unzip -p "$VSIX" extension/package.json > "$RUNNER_TEMP/vsix-package.json"
           node scripts/check-release.mjs --dry-run --packaged "$RUNNER_TEMP/vsix-package.json"
-          if unzip -p "$VSIX" extension.vsixmanifest | grep -q 'Microsoft.VisualStudio.Code.PreRelease" Value="true"'; then
+          PRERELEASE='Microsoft.VisualStudio.Code.PreRelease" Value="true"'
+          if unzip -p "$VSIX" extension.vsixmanifest | grep -q "$PRERELEASE"; then
             echo "::error::The package is marked as a pre-release; only stable releases are published."
             exit 1
           fi
@@ -215,6 +221,7 @@ jobs:
           npx --no-install vsce verify-pat sergwei
 
       - name: Publish to the VS Code Marketplace
+        shell: bash
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
           VSIX: ${{ runner.temp }}/vsix/${{ needs.package.outputs.vsix }}
@@ -265,6 +272,7 @@ jobs:
           npx --no-install ovsx verify-pat sergwei
 
       - name: Publish to Open VSX
+        shell: bash
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
           VSIX: ${{ runner.temp }}/vsix/${{ needs.package.outputs.vsix }}

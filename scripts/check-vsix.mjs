@@ -3,15 +3,19 @@
 // Protects against two regressions: (1) local-only files (CLAUDE.md, .claude/, sources, source
 // maps) leaking into a PUBLIC package, and (2) a .vsix that ships without what it needs: the host
 // bundle and the webview assets (to work), and the README, CHANGELOG, LICENSE and icon (what the
-// Marketplace page asks for, #42). The list comes from `vsce ls --no-dependencies`; `vsce ls` and
-// `vsce package` share `collectFiles`, so the list equals the package content (HYPOTHESIS:
-// read in vsce v4.0.0 src/package.ts, not compared against a real zip).
+// Marketplace page asks for, #42).
+//
+// Two sources feed it. `ci.yml` passes `vsce ls --no-dependencies` (project-relative names, no
+// zip). `release.yml` passes `unzip -Z1 <file>.vsix` with `--from-vsix`: the real content of the
+// package, whose names differ because vsce renames three files when it packs (see
+// `normalizeVsixListing`). The `vsce ls` list is NOT the package content for those three names.
 //
 // In CI the workflow creates canary files (CLAUDE.md, .claude/canary.md) before packaging, so
 // the "must not ship" check is not vacuous: those files are never versioned and would not exist
 // in the checkout otherwise. Nothing is created here, to avoid overwriting a real CLAUDE.md.
 //
-// Usage: node scripts/check-vsix.mjs <file-with-one-path-per-line>
+// Usage: node scripts/check-vsix.mjs [--from-vsix] <file-with-one-path-per-line>
+// `--from-vsix`: the file is the raw output of `unzip -Z1` on a .vsix.
 // Exit code 0 when the list is fine, 1 with one message per problem otherwise.
 // ASCII only on purpose: it prints to Windows consoles with arbitrary code pages.
 
@@ -57,6 +61,38 @@ const FORBIDDEN_ANYWHERE = ['.claude/', 'node_modules/'];
 const FORBIDDEN_NAMES = [/^claude\.md$/, /\.(ts|tsx|mts|map|vsix)$/, /^\.env/, /^\.npmrc$/];
 
 /**
+ * Turns a raw `unzip -Z1` listing of a .vsix into the project-relative names `REQUIRED` uses.
+ *
+ * Keeps only entries under `extension/` (the zip root also holds `extension.vsixmanifest` and
+ * `[Content_Types].xml`, which are not extension files), strips that prefix, drops directory
+ * entries (trailing `/`) and maps back the three names vsce changes when it packs: `readme.md`
+ * to `README.md`, `changelog.md` to `CHANGELOG.md` and `LICENSE.txt` to `LICENSE`. Other names
+ * pass through untouched, so a stray `readme.md` elsewhere is still reported as itself.
+ * HYPOTHESIS for the license mapping beyond this repo: vsce appends `.txt` only to a license file
+ * with no extension, so a `LICENSE.md` would stay `LICENSE.md` and be reported missing; to check,
+ * package a project with `LICENSE.md`.
+ * VERIFIED in vsce 4.0.0 (`node_modules/@vscode/vsce/out/package.js`, 2026-10-25): `path:
+ * 'extension/readme.md'` in `ReadmeProcessor.processFile`, `path: 'extension/changelog.md'` in
+ * `ChangelogProcessor.processFile` and `file.path += '.txt';` in `LicenseProcessor.onFile`.
+ * VERIFIED on Windows 11 (Git Bash, 2026-10-25) on a .vsix packed by `npm run vsix`:
+ * `unzip -Z1` listed `extension/changelog.md`, `extension/LICENSE.txt` and `extension/readme.md`,
+ * and `node scripts/check-vsix.mjs --from-vsix <that listing>` printed `OK: 9 files`, exit 0.
+ * Not observed: the CI canary files (they could not be created in this run).
+ */
+export function normalizeVsixListing(entries) {
+  const renamed = new Map([
+    ['readme.md', 'README.md'],
+    ['changelog.md', 'CHANGELOG.md'],
+    ['LICENSE.txt', 'LICENSE'],
+  ]);
+  return entries
+    .map((entry) => entry.replaceAll('\\', '/'))
+    .filter((entry) => entry.startsWith('extension/') && !entry.endsWith('/'))
+    .map((entry) => entry.slice('extension/'.length))
+    .map((entry) => renamed.get(entry) ?? entry);
+}
+
+/**
  * Returns one message per packaging problem found in a list of packaged paths.
  *
  * Paths are normalized to `/`. Forbidden paths are compared case-insensitively, because Windows
@@ -64,7 +100,7 @@ const FORBIDDEN_NAMES = [/^claude\.md$/, /\.(ts|tsx|mts|map|vsix)$/, /^\.env/, /
  * Required paths are compared case-SENSITIVELY: the host loads `assets/index.js` by that exact
  * name, and `Index.js` would not load on Linux. Forbidden directories are matched at the root,
  * and `.claude/` and `node_modules/` at any depth. An empty list
- * is itself a problem (a broken `vsce ls` would otherwise look like "nothing forbidden").
+ * is itself a problem (a failed listing command would otherwise look like "nothing forbidden").
  * Pure: no I/O, so it can be exercised with hand-made lists.
  * VERIFIED on Windows 11 with a valid list, a list with forbidden paths and the real `vsce ls`
  * output of a checkout without `dist/` (2026-10-20). UNVERIFIED on macOS/Linux until the first CI run.
@@ -72,7 +108,7 @@ const FORBIDDEN_NAMES = [/^claude\.md$/, /\.(ts|tsx|mts|map|vsix)$/, /^\.env/, /
 export function findPackagingProblems(files) {
   const problems = [];
   if (files.length === 0) {
-    return ['The file list is empty: `vsce ls` produced no output.'];
+    return ['The file list is empty: the listing command produced no usable entries.'];
   }
   const normalized = files.map((f) => f.replaceAll('\\', '/').replace(/^\.\//, ''));
   const lower = normalized.map((f) => f.toLowerCase());
@@ -98,16 +134,20 @@ export function findPackagingProblems(files) {
 }
 
 /**
- * Reads the file list named in `process.argv[2]`, reports problems and sets the exit code.
+ * Reads the file list named on the command line, reports problems and sets the exit code.
  *
- * Sets `process.exitCode = 1` instead of calling `process.exit`, so stdout is flushed on every
- * platform. A missing argument or an unreadable file also exits 1 with a message.
+ * With `--from-vsix` the list is first run through `normalizeVsixListing` (raw `unzip -Z1`
+ * output); without it the list is used as is (`vsce ls`). Sets `process.exitCode = 1` instead of
+ * calling `process.exit`, so stdout is flushed on every platform. A missing argument or an
+ * unreadable file also exits 1 with a message.
  * UNVERIFIED on macOS/Linux until the first CI run.
  */
 function main() {
-  const listPath = process.argv[2];
+  const args = process.argv.slice(2);
+  const fromVsix = args.includes('--from-vsix');
+  const listPath = args.find((arg) => !arg.startsWith('--'));
   if (!listPath) {
-    console.error('Usage: node scripts/check-vsix.mjs <file-list>');
+    console.error('Usage: node scripts/check-vsix.mjs [--from-vsix] <file-list>');
     process.exitCode = 1;
     return;
   }
@@ -119,10 +159,11 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  const files = text
+  const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+  const files = fromVsix ? normalizeVsixListing(lines) : lines;
   const problems = findPackagingProblems(files);
   if (problems.length > 0) {
     for (const problem of problems) console.error(`ERROR: ${problem}`);

@@ -183,6 +183,13 @@ describe('scripts/check-release.mjs', () => {
     expect(result.stderr).toContain('--tag needs a value');
   });
 
+  it('fails with a usage message when a flag is followed by another flag', () => {
+    // `--changelog` first on the command line: `run` appends its own flags after these args.
+    const result = run(['--dry-run', '--changelog', '--packaged', 'x.json'], {});
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('--changelog needs a value');
+  });
+
   it('rejects a packaged manifest that is not JSON', () => {
     const result = run(['--tag', 'v1.2.3'], { packagedText: 'not json {' });
     expect(result.status).toBe(1);
