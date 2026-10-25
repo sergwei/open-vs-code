@@ -4536,6 +4536,120 @@ try {
     assertNoWebviewErrors('drop and paste');
   };
   await step('20 drop and paste (issue #30)', withSavedClipboard(dropAndPaste));
+
+  /**
+   * Step 21 (issue #38): how the Settings editor of a real VS Code shows the three contributed
+   * settings: filtered by `@ext:sergwei.open-vs-code`, in the `order` of the manifest, with the
+   * label the user reads, the first sentence of each description, and the `#id#` link of
+   * `opencodePath` painted as a link and followed with a real mouse click.
+   *
+   * Protects against: `order` ignored by the editor; a label that changes ("Open Vs Code: …" is
+   * what VS Code derives from the extension name, and the plan hoped for no prefix); a `#id#`
+   * link painted as plain text; a description that lost its Markdown. Reads the editor's own DOM
+   * (`.settings-editor`, `.setting-item`, `.setting-item-label`, `.setting-item-category`,
+   * `.setting-item-description`), which is internal to VS Code and may move in another version:
+   * when a selector finds nothing, the check says how many rows it found instead of timing out
+   * silently. The expected first sentences are copied from `package.json`; the labels are the
+   * ones VS Code really showed, and each one is printed in its own line.
+   *
+   * What was seen (VS Code 1.143.1, Windows 11, 2026-10-25): with one category (`title`
+   * "OpenCode") the labels carry the prefix, "Open Vs Code: Opencode Path", "Open Vs Code: Server
+   * Url", "Open Vs Code: Default Model". Adding an `id` to the category (`"openVsCode"`) did NOT
+   * change them, so it was not kept. A `#id#` is painted as a link ONLY between backticks
+   * (`` `#openVsCode.serverUrl#` ``); bare, the editor showed the literal text and 0 links. The
+   * link text is the target's label ("Open Vs Code: Server Url"), and a real mouse click on it
+   * focuses that setting.
+   * VERIFIED in `npm run test:visual` on Windows 11, VS Code 1.143.1 (2026-10-25): the checks
+   * "the Settings editor lists exactly 3 settings for the extension (3; selector
+   * .settings-editor .setting-item)", "the #id# link of the first setting is painted as a link
+   * ("Open Vs Code: Server Url", 1 link(s))" and "clicking the link focuses the second setting
+   * ("Server Url")" passed. Not observed: other VS Code versions or operating systems.
+   */
+  const settingsUi = async () => {
+    await command('Preferences: Open Settings (UI)');
+    const searchBox = page
+      .locator('.settings-editor .suggest-input-container .monaco-editor')
+      .first();
+    await searchBox.click({ timeout: 15_000 });
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('@ext:sergwei.open-vs-code');
+    const readRows = () =>
+      page.evaluate(() =>
+        [...globalThis.document.querySelectorAll('.settings-editor .setting-item')].map((row) => ({
+          id: row.getAttribute('data-id') ?? row.getAttribute('data-key') ?? '',
+          label: row.querySelector('.setting-item-label')?.textContent?.trim() ?? '',
+          category: row.querySelector('.setting-item-category')?.textContent?.trim() ?? '',
+          description: row.querySelector('.setting-item-description')?.textContent?.trim() ?? '',
+          links: [...row.querySelectorAll('.setting-item-description a')].map((a) => ({
+            text: a.textContent ?? '',
+            href: a.getAttribute('href') ?? '',
+          })),
+        })),
+      );
+    const rows =
+      (await waitFor(async () => {
+        // The editor shows its default page ("Commonly Used") until the filter is applied, so a row
+        // count alone would accept it: wait for a row that only this extension contributes.
+        const found = await readRows();
+        return found.some((row) => row.label === 'Default Model') ? found : undefined;
+      }, 20_000)) ?? (await readRows());
+    console.log(`  rows: ${JSON.stringify(rows)}`);
+    check(
+      rows.length === 3,
+      `the Settings editor lists exactly 3 settings for the extension (${String(rows.length)}; selector .settings-editor .setting-item)`,
+    );
+    const expected = [
+      'Absolute path to the opencode v2 executable.',
+      'Address of an opencode v2 server that is already running on this machine',
+      'Model that every new chat session starts with',
+    ];
+    const expectedLabels = [
+      'Open Vs Code: Opencode Path',
+      'Open Vs Code: Server Url',
+      'Open Vs Code: Default Model',
+    ];
+    rows.slice(0, 3).forEach((row, index) => {
+      console.log(
+        `  label ${String(index + 1)}: "${row.category}${row.category ? ' ' : ''}${row.label}"`,
+      );
+      const shown = `${row.category} ${row.label}`.trim();
+      check(
+        shown === expectedLabels[index],
+        `setting ${String(index + 1)} is shown as "${shown}", in the order of the manifest`,
+      );
+      check(
+        row.description.includes(expected[index] ?? '?'),
+        `setting ${String(index + 1)} shows its description ("${row.description.slice(0, 60)}")`,
+      );
+    });
+    await shot('21a-settings');
+    const first = rows[0];
+    const link = first?.links[0];
+    check(
+      link !== undefined && !/^#.*#$/.test(link.text),
+      `the #id# link of the first setting is painted as a link ("${link?.text ?? 'none'}", ${String(first?.links.length ?? 0)} link(s))`,
+    );
+    if (link !== undefined) {
+      const target = page.locator('.settings-editor .setting-item-description a').first();
+      const box = await target.boundingBox({ timeout: 5_000 }).catch(() => null);
+      if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await sleep(1_000);
+      const focused = await page.evaluate(() => {
+        const active = globalThis.document.activeElement?.closest('.setting-item');
+        const marked = globalThis.document.querySelector('.settings-editor .setting-item.focused');
+        const row = active ?? marked;
+        return row?.querySelector('.setting-item-label')?.textContent?.trim() ?? '';
+      });
+      check(
+        focused === (rows[1]?.label ?? '?'),
+        `clicking the link focuses the second setting ("${focused}")`,
+      );
+      await shot('21b-settings-link');
+    }
+    await page.keyboard.press('Control+W');
+    await sleep(500);
+  };
+  await step('21 settings UI (issue #38)', settingsUi);
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
