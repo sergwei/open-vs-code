@@ -1,6 +1,17 @@
 // The chat brain of the extension host (issues #9/#14): owns the opencode client, the SSE loop,
-// the snapshot, the open session and the answers to the webview. Pure: no `vscode` import. The
-// VS Code side (`chatViewProvider.ts`, `chatLifecycle.ts`) only moves messages in and out.
+// the snapshot and the answers to the webview. Pure: no `vscode` import. The VS Code side
+// (`chatViewProvider.ts`, `chatLifecycle.ts`) only moves messages in and out.
+//
+// E9-chat-editor-tabs, phase 1 (issue #77, plan Engram #1238, decisions #1245): the controller is
+// the shared CORE of one location (server, client, stream, connection, catalog, pending requests,
+// resolutions, attachment whitelists, translator) and serves N chat surfaces, each one a
+// {@link ChatPane} (`chatPane.ts`) holding what is per surface: the session it shows, its queues,
+// its snapshot generation, its file search and session cursor, and its own "Changed files" and
+// revert state. A webview message arrives as `handle(paneId, message)`; what the host produces is
+// routed by `routeOf`: the content of a session to the panes showing it, the location's news to
+// every pane, and the answer to a request ONLY to the pane that asked. In this phase the only
+// surface is the side-bar view, wired as pane 1: no protocol and no UI change. Wherever the text
+// below says "the open session" or "the webview", read it as the one of the pane concerned.
 //
 // Flow: `onServerState(running)` -> client + `runEventStream`; each `server.connected` and each
 // `location.shutdown` -> `resync()` (REST snapshot, because the stream has no replay); every
@@ -87,12 +98,18 @@ import {
   type OpenSession,
   type PendingAsks,
   type PromptMention,
-  type Sender,
   type Snapshot,
   type UiCommand,
   type WebviewToHost,
 } from '../shared/protocol';
-import { createEventTranslator, type EventTranslator } from './eventTranslator';
+import {
+  ChatPane,
+  FOCUS_REQUEST_TTL_MS,
+  routeOf,
+  type FocusTarget,
+  type PaneSurface,
+} from './chatPane';
+import { createEventTranslator, type EventTranslator, type ResyncToken } from './eventTranslator';
 import { runEventStream, type StreamState } from './eventStream';
 import { toSearchRefs } from './fileMentions';
 import { resolvePreferredModel } from './modelPreference';
@@ -102,9 +119,8 @@ import { safeLog, type ServerLog } from './opencodeServer';
 import { createPendingRequests, type PendingSummary } from './pendingRequests';
 import { createRequestResolutions } from './requestResolutions';
 import type { RunningServerInfo, ServerState } from './serverManager';
-import { createSessionBrowser } from './sessionBrowser';
-import { createSessionDiffs, type DiffTarget, type SessionDiffs } from './sessionDiff';
-import { createSessionReverts, type SessionReverts } from './sessionRevert';
+import { codedError, createSessionDiffs, type DiffTarget } from './sessionDiff';
+import { createSessionReverts } from './sessionRevert';
 import {
   lastCompactionAt,
   toAgentOptions,
@@ -191,18 +207,8 @@ export interface ChatUi {
   focusView(): void;
 }
 
-/** Where `ui.focus` points: a pending request of any session. */
-export type FocusTarget = Extract<HostToWebview, { type: 'ui.focus' }>['target'];
-
-/**
- * How long a focus request waits for a webview that was still loading. Our own choice: long enough
- * for a document to load and send `ready`, short enough that a late `ready` (the user hid and
- * showed the view minutes later) does not steal the focus to a request long gone.
- */
-export const FOCUS_REQUEST_TTL_MS = 10_000;
-
-/** Most messages of "Add to OpenCode Chat" kept for a hidden chat (issue #30); our choice, a few clicks' worth. */
-const MAX_KEPT_MENU_MESSAGES = 64;
+// Where `ui.focus` points and how long a focus request waits live with the pane that keeps them.
+export { FOCUS_REQUEST_TTL_MS, type FocusTarget } from './chatPane';
 
 /**
  * What the webview may ask the editor to do (issues #13/#15). Implemented in
@@ -278,14 +284,6 @@ export interface DroppedFiles {
 /** External effects of the controller, injected so tests need no VS Code, network or processes. */
 export interface ChatControllerDeps {
   createClient(server: RunningServerInfo): ChatApi;
-  /** Publishes to the webview; the provider drops what it cannot deliver (not ready or hidden). */
-  post: Sender<HostToWebview>;
-  /**
-   * True while a `post` would reach the webview. Optional: absent means "always" (tests that do
-   * not model a hidden view). Used only by "Add to OpenCode Chat" (issue #30), whose chips would
-   * otherwise be lost when the chat view is hidden.
-   */
-  webviewReady?: () => boolean;
   log: ServerLog;
   memory: SessionMemory;
   editor: EditorActions;
@@ -404,7 +402,22 @@ const EMPTY_SNAPSHOT: Snapshot = {
 };
 
 /**
- * Coordinates the opencode client, the event stream and the webview.
+ * What {@link ChatController.readPane} read for one pane, waiting for the synchronous publication:
+ * the session it showed when the reads started (`openID`; the pane may show another one, or none,
+ * by publication time), the history as the snapshot's `open` (absent without a session), the raw
+ * messages the translator is seeded with, the session rows (the location's plus the pane's own
+ * and its lineage) and the REST statuses.
+ */
+interface PaneRead {
+  openID: string | undefined;
+  open: OpenSession | undefined;
+  rawMessages: Awaited<ReturnType<ChatApi['message']['list']>>['data'];
+  sessions: SessionSummary[];
+  statuses: { [sessionID: string]: SessionStatus };
+}
+
+/**
+ * Coordinates the opencode client, the event stream and the chat surfaces (panes).
  *
  * Decisions (plan `E2-mvp-prototype/plan-fase1`): the open session is the last one this extension
  * created or opened, kept in `workspaceState` (alternative discarded: the most recent of
@@ -462,8 +475,25 @@ export class ChatController {
   private translator: EventTranslator = createEventTranslator();
   private streamAbort: AbortController | undefined;
   private connection: ConnectionState = { state: 'starting' };
-  /** Open session of the SERVED folder; read from the memory when a server comes up. */
-  private open: string | undefined;
+  /**
+   * The chat surfaces, by pane id. Each one keeps its own session; only a server for a NEW folder
+   * replaces them (the first pane takes the session remembered for that folder, the others none).
+   */
+  private readonly panes = new Map<number, ChatPane>();
+  private nextPaneId = 1;
+  /**
+   * The folder of the last server that ran, so a restart of the SAME folder keeps the session of
+   * every pane, while another folder resets them (a session lives in its location).
+   */
+  private lastFolder: string | undefined;
+  /**
+   * Bumped by every resync and when the server goes away. Only consulted by a resync that targets
+   * NO pane (the controller can resync before any surface exists); with panes, their own
+   * `generation` decides.
+   */
+  private locationGeneration = 0;
+  /** Listeners of {@link onDiffRenewed}; each pane's holder feeds all of them. */
+  private readonly renewedListeners = new Set<(sessionID: string) => void>();
   /**
    * `uri`s the host took from four sources: the native file dialog, `editorContext`, a drop and
    * the "Add to OpenCode Chat" command. `prompt.send` accepts these and {@link offeredUris}, plus
@@ -494,12 +524,6 @@ export class ChatController {
   /** Counter of the synthetic request ids of "Add to OpenCode Chat" (no webview request to answer). */
   private menuRequests = 0;
   /**
-   * Answers of "Add to OpenCode Chat" that the webview could not receive because the chat was
-   * hidden (a hidden view loses its document; the chips live only in the webview). Published after
-   * the snapshot of the next `ready`; capped at {@link MAX_KEPT_MENU_MESSAGES}.
-   */
-  private undeliveredMenu: HostToWebview[] = [];
-  /**
    * `uri`s the host listed in `files.found`, in insertion order and capped at
    * {@link OFFERED_URIS_MAX}. Kept apart from `pickedUris` because they are not a choice yet: a
    * result becomes a chip only when the user picks it, but the host cannot tell which, so every
@@ -507,8 +531,6 @@ export class ChatController {
    * webview could use to attach `.env` and skip the model's `read` permission.
    */
   private readonly offeredUris = new Set<string>();
-  /** The file search in flight; a newer one or `stopStream` aborts it. */
-  private fileSearch: AbortController | undefined;
   private readonly pending = createPendingRequests();
   /**
    * What the user answered, kept for the history (E3-resolved-history). Created ONCE for the life of
@@ -531,19 +553,11 @@ export class ChatController {
   };
   private resyncing = 0;
   /**
-   * Counts the `session.revert.staged` / `.cleared` events and the revert calls the host made. A
-   * snapshot compares it with the value at its start: if it moved, the REST row is older than what
-   * the host already knows about the revert (issue #32).
-   */
-  private revertEvents = 0;
-  /**
    * Ids with a {@link refreshSession} read in flight. A `session.removed` for the id takes it out
    * (`live.removed` only records during a resync, so it cannot guard that call); the read then
    * drops its row. Entries leave when their read ends, so the set stays bounded.
    */
   private readonly refreshing = new Set<string>();
-  /** Paging state of the session list; owns the cursor, which never leaves the host. */
-  private readonly browser = createSessionBrowser();
   /**
    * Sessions this controller is deleting, so the `session.removed` that comes back is not
    * announced as "deleted elsewhere". The id only lives for the duration of `deleteSession`: it
@@ -553,11 +567,6 @@ export class ChatController {
    * needs no bound.
    */
   private readonly deleting = new Set<string>();
-  /** A focus request the webview may have missed, repeated after its next snapshot. */
-  private focusRequested: { target: FocusTarget; at: number } | undefined;
-  /** `ui.command`s the webview could not receive yet; see {@link runUiCommand}. */
-  private keptUiCommands: Array<{ command: UiCommand; at: number }> = [];
-  private generation = 0;
   private disposed = false;
   /** Models, providers and agents of the CURRENT server; `undefined` until the first load succeeds. */
   private catalog: Catalog | undefined;
@@ -571,40 +580,14 @@ export class ChatController {
   private catalogEpoch = 0;
   /** The `defaultModel` setting value the user was last told about, so it is told once. */
   private ignoredSettingNoticed: string | undefined;
-  /** The "Changed files" list of the open session and the originals of its diffs (issue #31). */
-  private readonly diffs: SessionDiffs;
-  /** The prepared revert of the open session and the files behind its banner (issue #32). */
-  private readonly reverts: SessionReverts;
 
   /**
-   * Wires the injected effects and the "Changed files" holder (issue #31), which reads the client,
-   * the served folder and the open session through getters, so a new server or a session change
-   * is seen by a load that is already in flight. The revert holder (issue #32) is the source of
-   * the boundary that bounds the "Changed files" range, and borrows its root lookup.
+   * Wires the injected effects. The "Changed files" and revert holders are per pane and are built
+   * in {@link attachPane}.
    */
   constructor(private readonly deps: ChatControllerDeps) {
     this.log = safeLog(deps.log);
     this.runStream = deps.runStream ?? runEventStream;
-    this.diffs = createSessionDiffs({
-      client: () => this.client,
-      folder: () => this.server?.folder,
-      open: () => this.open,
-      boundary: (sessionID) => this.reverts.boundary(sessionID),
-      post: (message) => {
-        this.post(message);
-      },
-      log: this.log,
-      describe: (error) => toErrorInfo(error, this.secrets),
-    });
-    this.reverts = createSessionReverts({
-      folder: () => this.server?.folder,
-      open: () => this.open,
-      rootFor: (sessionID) => this.diffs.rootFor(sessionID),
-      post: (message) => {
-        this.post(message);
-      },
-      log: this.log,
-    });
   }
 
   /** URL and password of the current server, for scrubbing error texts. */
@@ -614,50 +597,115 @@ export class ChatController {
       : { url: this.server.url, password: this.server.password };
   }
 
-  /** True while a `post` would reach the webview (`deps.webviewReady`, absent meaning always). */
-  private canPost(): boolean {
-    return this.deps.webviewReady === undefined || this.deps.webviewReady();
+  /**
+   * Adds a chat surface and returns its pane; the surface then receives what is routed to it.
+   *
+   * The pane's "Changed files" holder (issue #31) reads the client, the served folder and ITS
+   * session through getters, so a new server or a session change is seen by a load that is
+   * already in flight; its revert holder (issue #32) is the source of the boundary that bounds
+   * that range and borrows its root lookup. Both post to this pane only. A pane starts with no
+   * session: when a server for a new folder reaches `running`, {@link onServerState} gives the
+   * first pane the session remembered for that folder; a pane attached while the server already
+   * runs stays empty. Does not send anything: the
+   * surface announces itself with `ready`.
+   */
+  attachPane(surface: PaneSurface): ChatPane {
+    const id = this.nextPaneId++;
+    const pane = new ChatPane(id, surface, this.log, (built) => ({
+      diffs: createSessionDiffs({
+        client: () => this.client,
+        folder: () => this.server?.folder,
+        open: () => built.sessionID,
+        boundary: (sessionID) => built.reverts.boundary(sessionID),
+        post: (message) => {
+          built.post(message);
+        },
+        log: this.log,
+        describe: (error) => toErrorInfo(error, this.secrets),
+      }),
+      reverts: createSessionReverts({
+        folder: () => this.server?.folder,
+        open: () => built.sessionID,
+        rootFor: (sessionID) => built.diffs.rootFor(sessionID),
+        post: (message) => {
+          built.post(message);
+        },
+        log: this.log,
+      }),
+    }));
+    pane.releaseDiffs = pane.diffs.onRenewed((sessionID) => {
+      for (const listener of this.renewedListeners) listener(sessionID);
+    });
+    this.panes.set(id, pane);
+    return pane;
   }
 
   /**
-   * Posts a message of "Add to OpenCode Chat": delivered now if the webview can take it, else kept
-   * for {@link flushUndeliveredMenu} (called when the next document says `ready`).
+   * Removes a surface (it was closed): its pending work is cut off and it stops receiving. The
+   * session it showed is no longer tracked by the translator. Unknown ids are ignored.
    */
-  private postOrKeep(message: HostToWebview): void {
-    if (this.canPost()) {
-      this.post(message);
-      return;
+  detachPane(paneId: number): void {
+    const pane = this.panes.get(paneId);
+    if (pane === undefined) return;
+    pane.fileSearch?.abort();
+    pane.fileSearch = undefined;
+    pane.generation++;
+    pane.diffs.reset();
+    pane.reverts.reset();
+    pane.releaseDiffs?.();
+    this.panes.delete(paneId);
+    this.syncTracked();
+  }
+
+  /** The pane with this id, if it is attached. */
+  private paneById(paneId: number): ChatPane | undefined {
+    return this.panes.get(paneId);
+  }
+
+  /** Tells the translator which sessions are shown now (one per pane, without repeats). */
+  private syncTracked(): void {
+    const ids = new Set<string>();
+    for (const pane of this.panes.values()) {
+      if (pane.sessionID !== undefined) ids.add(pane.sessionID);
     }
-    this.undeliveredMenu.push(message);
-    if (this.undeliveredMenu.length > MAX_KEPT_MENU_MESSAGES) this.undeliveredMenu.shift();
+    this.translator.setTracked([...ids]);
+  }
+
+  /** The panes showing `sessionID`. */
+  private panesOf(sessionID: string): ChatPane[] {
+    return [...this.panes.values()].filter((pane) => pane.sessionID === sessionID);
+  }
+
+  /** Posts to every pane: what belongs to the location. */
+  private broadcast(message: HostToWebview): void {
+    for (const pane of this.panes.values()) pane.post(message);
   }
 
   /**
-   * Publishes what {@link postOrKeep} kept, after the snapshot of a `ready`. It goes through
-   * {@link postOrKeep} again: the view may have been hidden during the `await` of the resync, and
-   * a plain `post` would then drop the chips for good (review-2 of 23/10/2026, W7). VERIFIED by
-   * the unit test "keeps the Explorer command chips when the chat hides again before they go out"
-   * (fake view, 23/10/2026, Windows 11). Not observed in a real VS Code: the window is narrow.
+   * Routes a message produced by the host without a requester (`routeOf`): session content to the
+   * panes showing that session, location news to all. An `origin` message has no pane to answer
+   * here, so it is dropped with a debug line; nothing the translator makes is one.
    */
-  private flushUndeliveredMenu(): void {
-    const kept = this.undeliveredMenu;
-    this.undeliveredMenu = [];
-    for (const message of kept) this.postOrKeep(message);
-  }
-
-  /** Posts, never throwing: a failing sender must not break the stream or a request. */
-  private post(message: HostToWebview): void {
-    try {
-      this.deps.post(message);
-    } catch (error) {
-      this.log.error(`posting to the webview failed: ${String(error)}`);
+  private route(message: HostToWebview): void {
+    switch (routeOf(message)) {
+      case 'all':
+        this.broadcast(message);
+        return;
+      case 'session':
+        if ('sessionID' in message) {
+          for (const pane of this.panesOf(message.sessionID)) pane.post(message);
+        }
+        return;
+      case 'origin':
+        this.log.debug(`dropped a ${message.type} with no pane to answer`);
+        return;
     }
   }
 
-  /** Changes the connection state and tells the webview. */
+  /** Changes the connection state and tells every pane. */
   private setConnection(connection: ConnectionState): void {
     this.connection = connection;
-    this.post({ type: 'connection.state', connection });
+    this.broadcast({ type: 'connection.state', connection });
   }
 
   /**
@@ -665,7 +713,10 @@ export class ChatController {
    * state stops the stream (so a `stop` never causes reconnection attempts) and is mirrored as
    * a `ConnectionState`. Re-entering `running` with the same URL and password is a no-op.
    *
-   * Phase 3: a new server reads the session remembered for ITS folder (`memory.get(folder)`);
+   * Phase 3: a server for a NEW folder gives the first pane the session remembered for that folder
+   * (`memory.get(folder)`) and empties the other panes; a server for the SAME folder (a restart)
+   * leaves every pane on its own session, because that memory is last-writer-wins across panes.
+   * HYPOTHESIS for a real window: only unit tests cover two panes (phase 1 wires one pane).
    * `restarting` and `connecting` (an external server being checked, issue #11) look like
    * `starting` to the webview; the `message` of an `unavailable` is copied as is to the webview,
    * which is why the external-server messages carry no URL, port or raw cause (the webview never
@@ -690,9 +741,21 @@ export class ChatController {
         this.stopStream();
         this.server = next;
         this.client = this.deps.createClient(next);
-        this.open = this.deps.memory.get(next.folder);
+        // Same folder (a restart): every pane keeps its own session. The memory per folder is
+        // "last writer wins" across panes, so reading it here would move pane 1 to the session
+        // another pane opened last. New folder: the first pane shows the session remembered for
+        // it and the others start empty (a session lives in its location).
+        const sameFolder = this.lastFolder === next.folder;
+        this.lastFolder = next.folder;
+        if (!sameFolder) {
+          let first = true;
+          for (const pane of this.panes.values()) {
+            pane.sessionID = first ? this.deps.memory.get(next.folder) : undefined;
+            first = false;
+          }
+        }
         this.translator = createEventTranslator(this.secrets);
-        this.translator.setOpen(this.open);
+        this.syncTracked();
         this.setConnection({ state: 'starting' });
         this.startStream(this.client);
         return;
@@ -743,19 +806,22 @@ export class ChatController {
   private stopStream(): void {
     this.streamAbort?.abort();
     this.streamAbort = undefined;
-    this.fileSearch?.abort();
-    this.fileSearch = undefined;
-    this.diffs.reset();
-    this.reverts.reset();
+    for (const pane of this.panes.values()) {
+      pane.fileSearch?.abort();
+      pane.fileSearch = undefined;
+      pane.diffs.reset();
+      pane.reverts.reset();
+      pane.generation++; // a snapshot in flight for the old server must not be published
+      pane.browser.reset(); // its cursor embeds the old server's query
+    }
     this.client = undefined;
     this.server = undefined;
-    this.generation++; // a snapshot in flight for the old server must not be published
+    this.locationGeneration++;
     // The catalog belongs to the server that served it: another server may offer other models.
     this.catalog = undefined;
     this.catalogEpoch++;
     this.catalogRun = undefined;
     this.catalogDirty = false;
-    this.browser.reset(); // its cursor embeds the old server's query
     this.clearPending();
     this.resolutions.forgetAsks();
   }
@@ -862,17 +928,17 @@ export class ChatController {
         this.log.info(`usage updated for ${event.data.sessionID}: ${String(count)} tokens`);
       }
       this.watchChangedFiles(event);
-      if (
-        event.type === 'session.compaction.ended' &&
-        this.open !== undefined &&
-        event.data.sessionID === this.open
-      ) {
-        // The boundary of the context indicator lives in the snapshot (`compactedAt`), not in a
-        // message of its own (issue #25). Not translated: the branch returns first, and the translator
-        // has no case for it anyway (it would give `[]`).
-        this.log.info(`compaction ended for ${event.data.sessionID}; refreshing the snapshot`);
-        void this.resync();
-        return;
+      if (event.type === 'session.compaction.ended') {
+        const showing = this.panesOf(event.data.sessionID);
+        if (showing.length > 0) {
+          // The boundary of the context indicator lives in the snapshot (`compactedAt`), not in a
+          // message of its own (issue #25). Not translated: the branch returns first, and the
+          // translator has no case for it anyway (it would give `[]`). Only the panes showing the
+          // session are refreshed.
+          this.log.info(`compaction ended for ${event.data.sessionID}; refreshing the snapshot`);
+          void this.resync(showing);
+          return;
+        }
       }
       if (
         event.type === 'session.execution.succeeded' ||
@@ -914,33 +980,42 @@ export class ChatController {
    * real turn that edited files was observed.
    */
   private watchChangedFiles(event: V2Event): void {
-    const open = this.open;
-    if (open === undefined) return;
     switch (event.type) {
       case 'session.step.ended':
       case 'session.step.failed':
-        if (event.data.sessionID === open && (event.data.files?.length ?? 0) > 0) {
-          void this.diffs.request(open);
+        if ((event.data.files?.length ?? 0) > 0) {
+          for (const pane of this.panesOf(event.data.sessionID)) {
+            void pane.diffs.request(event.data.sessionID);
+          }
         }
         return;
-      case 'session.revert.committed':
-        if (event.data.sessionID !== open) return;
-        this.log.info(`revert committed for ${open}`);
-        this.afterCommit(open, event.data.to);
+      case 'session.revert.committed': {
+        const { sessionID } = event.data;
+        const showing = this.panesOf(sessionID);
+        if (showing.length === 0) return;
+        this.log.info(`revert committed for ${sessionID}`);
+        this.afterCommit(showing, sessionID, event.data.to);
         return;
-      case 'session.revert.staged':
-        if (event.data.sessionID !== open) return;
-        this.revertEvents += 1;
-        // The boundary is set synchronously by `apply`, so the load that follows is bounded by it.
-        void this.reverts.apply(open, event.data.revert, { post: true });
-        void this.diffs.request(open);
+      }
+      case 'session.revert.staged': {
+        const { sessionID } = event.data;
+        for (const pane of this.panesOf(sessionID)) {
+          pane.revertEvents += 1;
+          // The boundary is set synchronously by `apply`, so the load that follows is bounded by it.
+          void pane.reverts.apply(sessionID, event.data.revert, { post: true });
+          void pane.diffs.request(sessionID);
+        }
         return;
-      case 'session.revert.cleared':
-        if (event.data.sessionID !== open) return;
-        this.revertEvents += 1;
-        void this.reverts.apply(open, undefined, { post: true });
-        void this.diffs.request(open);
+      }
+      case 'session.revert.cleared': {
+        const { sessionID } = event.data;
+        for (const pane of this.panesOf(sessionID)) {
+          pane.revertEvents += 1;
+          void pane.reverts.apply(sessionID, undefined, { post: true });
+          void pane.diffs.request(sessionID);
+        }
         return;
+      }
       default:
         return;
     }
@@ -958,14 +1033,16 @@ export class ChatController {
    * would still list the messages until the next resync (a reconnect, an open or another commit)
    * reads the session again; no event handler removes listed messages.
    */
-  private afterCommit(sessionID: string, boundary?: string): void {
+  private afterCommit(panes: readonly ChatPane[], sessionID: string, boundary?: string): void {
     // The live copies of the deleted messages must go too, or the snapshot's `mergeLive` brings
     // them back as "in flight". Not done for a commit made by a prompt (no `boundary`): its
-    // `committed` event does it, before the messages of the prompt itself.
-    if (boundary !== undefined) this.translator.forgetFrom(boundary);
-    this.reverts.forget(sessionID);
-    this.diffs.forgetRange(sessionID);
-    void this.resync();
+    // `committed` event does it, before the messages of the prompt itself. Only that session's.
+    if (boundary !== undefined) this.translator.forgetFrom(boundary, sessionID);
+    for (const pane of panes) {
+      pane.reverts.forget(sessionID);
+      pane.diffs.forgetRange(sessionID);
+    }
+    void this.resync(panes);
   }
 
   /**
@@ -979,7 +1056,7 @@ export class ChatController {
     let changed = false;
     for (const message of messages) {
       if (this.trackRequest(message)) changed = true;
-      this.post(this.withResolution(message));
+      this.route(this.withResolution(message));
       // After the post: the webview empties its view on `session.removed`, and the notice that may
       // follow explains why.
       if (message.type === 'session.removed') this.onSessionRemoved(message.sessionID);
@@ -988,40 +1065,46 @@ export class ChatController {
   }
 
   /**
-   * A session is gone. If it was the open one the controller forgets it, memory included, so the
-   * next prompt without `sessionID` creates a session instead of going to a dead one (before this,
-   * `this.open` and `workspaceState` pointed at it until a resync got a 404). The webview empties
-   * its own view when it receives the same `session.removed`. An info notice says so unless the
-   * delete was ours (`deleting`). Idempotent: the second report finds `open` already cleared.
-   * Whatever it was, the session's "Changed files" state is forgotten (issue #31).
+   * A session is gone. Every pane that showed it forgets it, memory included, so the next prompt
+   * without `sessionID` creates a session instead of going to a dead one (before this, the pane's
+   * session and `workspaceState` pointed at it until a resync got a 404). The webview empties
+   * its own view when it receives the same `session.removed`. An info notice, to those panes
+   * only, says so unless the delete was ours (`deleting`). Idempotent: the second report finds no
+   * pane showing it. Whatever it was, the session's "Changed files" state is forgotten in every
+   * pane (issue #31).
    */
   private onSessionRemoved(sessionID: string): void {
     const ours = this.deleting.delete(sessionID);
-    this.diffs.forget(sessionID);
-    this.reverts.forget(sessionID);
-    if (sessionID !== this.open) return;
-    this.log.info(`open session deleted ${sessionID}`);
-    void this.forgetOpen();
-    if (!ours) {
-      this.post({
-        type: 'notice',
-        level: 'info',
-        error: {
-          code: 'SessionDeleted',
-          message: 'The open session was deleted outside this view',
-        },
-      });
+    for (const pane of this.panes.values()) {
+      pane.diffs.forget(sessionID);
+      pane.reverts.forget(sessionID);
+    }
+    for (const pane of this.panesOf(sessionID)) {
+      this.log.info(`open session deleted ${sessionID}`);
+      void this.forgetOpen(pane);
+      if (!ours) {
+        pane.post({
+          type: 'notice',
+          level: 'info',
+          error: {
+            code: 'SessionDeleted',
+            message: 'The open session was deleted outside this view',
+          },
+        });
+      }
     }
   }
 
   /**
-   * Makes the controller forget the open session: field, translator and the per-folder memory.
-   * The returned promise never rejects (a failed write is logged); callers that need the memory
-   * written before going on await it, the event path does not.
+   * Makes `pane` forget its session: field, translator and the per-folder memory. The returned
+   * promise never rejects (a failed write is logged); callers that need the memory written before
+   * going on await it, the event path does not. The memory holds ONE session per folder, so with
+   * several panes the last one to open or forget writes it (phase 1 has a single pane; the
+   * per-tab memory is for the phase that adds tabs).
    */
-  private async forgetOpen(): Promise<void> {
-    this.open = undefined;
-    this.translator.setOpen(undefined);
+  private async forgetOpen(pane: ChatPane): Promise<void> {
+    pane.sessionID = undefined;
+    this.syncTracked();
     const folder = this.server?.folder;
     if (folder === undefined) return;
     try {
@@ -1114,114 +1197,90 @@ export class ChatController {
   }
 
   /**
-   * The webview loaded (it sends `ready` on every document load): publishes the connection state
-   * and a fresh snapshot, or an empty one when there is no server yet. Anything posted earlier was
-   * dropped by the provider, so this is the only way a new document gets its state. If a
-   * `focusRequest` is waiting (an "Open chat" click that had to load the document first, so its
+   * The webview of pane `paneId` loaded (it sends `ready` on every document load): publishes to
+   * THAT pane the connection state and a fresh snapshot, or an empty one when there is no server
+   * yet; the other panes get nothing. Anything posted earlier was dropped by the provider, so this
+   * is the only way a new document gets its state. If a `focusRequest` is waiting (an "Open chat" click that had to load the document first, so its
    * first `ui.focus` went nowhere) it is sent again after the snapshot, as long as it is fresher
    * than {@link FOCUS_REQUEST_TTL_MS}. The cached catalog, if any, is sent right after the snapshot
    * (a new document starts without one; the load that produced it already went to the old
    * document or was dropped). Then the chips and notices that "Add to OpenCode Chat" produced
-   * while the view was hidden ({@link postOrKeep}) go out, after the snapshot so nothing empties
-   * them. Last, the `ui.command`s of issue #35 that waited for this document
+   * while the view was hidden ({@link ChatPane.postOrKeep}) go out, after the snapshot so nothing
+   * empties them. Last, the `ui.command`s of issue #35 that waited for this document
    * ({@link runUiCommand}), so New Session or Stop act on the state the snapshot just set.
+   * Unknown pane ids are ignored.
    */
-  async onWebviewReady(): Promise<void> {
+  async onPaneReady(paneId: number): Promise<void> {
+    const pane = this.paneById(paneId);
+    if (pane === undefined) return;
     this.log.info('webview ready');
-    this.post({ type: 'connection.state', connection: this.connection });
+    pane.post({ type: 'connection.state', connection: this.connection });
     if (this.client === undefined) {
-      this.post({ type: 'snapshot', snapshot: EMPTY_SNAPSHOT });
-      this.flushUndeliveredMenu();
-      this.flushUiCommands();
+      pane.post({ type: 'snapshot', snapshot: EMPTY_SNAPSHOT });
+      pane.flushUndeliveredMenu();
+      this.flushUiCommands(pane);
       return;
     }
-    await this.resync();
-    if (this.catalog !== undefined) this.post({ type: 'catalog', catalog: this.catalog });
-    const requested = this.focusRequested;
-    this.focusRequested = undefined;
+    await this.resync([pane]);
+    if (this.catalog !== undefined) pane.post({ type: 'catalog', catalog: this.catalog });
+    const requested = pane.focusRequested;
+    pane.focusRequested = undefined;
     if (requested !== undefined && Date.now() - requested.at <= FOCUS_REQUEST_TTL_MS) {
-      this.post({ type: 'ui.focus', target: requested.target });
+      pane.post({ type: 'ui.focus', target: requested.target });
     }
-    this.flushUndeliveredMenu();
-    this.flushUiCommands();
+    pane.flushUndeliveredMenu();
+    this.flushUiCommands(pane);
   }
 
   /**
-   * Relays a palette or keyboard command to the webview as `ui.command` (issue #35), which runs
-   * the same code as the matching button. With the webview able to take it, it goes out now and
-   * is NOT kept: unlike {@link focusRequest}, repeating it after the next `ready` would run New
-   * Session or Stop a second time. With the view hidden (revealing it loads a new document and a
-   * message sent before its `ready` is dropped) it is kept at most once per command (see
-   * {@link keepUiCommand}), and {@link flushUiCommands} sends it after the snapshot, the
-   * catalog and any `ui.focus` of that `ready`, as long as it is younger than
-   * {@link FOCUS_REQUEST_TTL_MS}. A command already waiting is not queued twice.
-   * VERIFIED against a real VS Code (Windows 11, 25/10/2026): with the chat hidden by Ctrl+B the
-   * log shows `ui command prompt.focus: kept for the next ready`, then `webview ready`, then
-   * `ui command prompt.focus: sent after ready`, and the `test:visual` step 22 check "and a real
-   * keystroke typed right after lands in the prompt box" passed. Not observed: a kept
-   * `session.new` or `session.stop` in a real window (unit tests only).
-   */
-  runUiCommand(command: UiCommand): void {
-    if (this.canPost()) {
-      this.log.info(`ui command ${command}: sent`);
-      this.post({ type: 'ui.command', command });
-      return;
-    }
-    this.log.info(`ui command ${command}: kept for the next ready`);
-    this.keepUiCommand(command, Date.now());
-  }
-
-  /**
-   * Queues `command` unless it already waits; `at` is when the user asked, not when it was re-kept.
-   * No size cap: one entry per {@link UiCommand} at most, so the queue is bounded by the union.
-   */
-  private keepUiCommand(command: UiCommand, at: number): void {
-    if (this.keptUiCommands.some((kept) => kept.command === command)) return;
-    this.keptUiCommands.push({ command, at });
-  }
-
-  /**
-   * Sends what {@link runUiCommand} kept, in the order asked, dropping what is older than
-   * {@link FOCUS_REQUEST_TTL_MS}. Each goes through the same gate as a fresh command, so a view
-   * hidden again during the resync keeps it instead of losing it (same trap as
-   * {@link flushUndeliveredMenu}). When at least one went out it also asks `ui.focusView`.
-   * HYPOTHESIS (same as `registerChat`): the focus given by the reveal landed on an iframe whose
+   * Sends the `ui.command`s a pane kept (see {@link ChatPane.flushUiCommands}) and, when at least
+   * one went out, asks the VS Code side to hand the keyboard to the chat iframe again.
+   * HYPOTHESIS (see `registerChat`): the focus given by the reveal landed on an iframe whose
    * document did not exist yet. Seen once in a `test:visual` step 22 run WITHOUT the second focus
    * (the new document had `hasFocus()` false); that run is not a check, and the run without
    * `focusView` was not repeated to prove it is needed.
    */
-  private flushUiCommands(): void {
-    const kept = this.keptUiCommands;
-    this.keptUiCommands = [];
-    const now = Date.now();
-    let posted = false;
-    for (const { command, at } of kept) {
-      if (now - at > FOCUS_REQUEST_TTL_MS) continue;
-      if (this.canPost()) {
-        this.log.info(`ui command ${command}: sent after ready`);
-        this.post({ type: 'ui.command', command });
-        posted = true;
-      } else {
-        this.keepUiCommand(command, at);
-      }
-    }
-    // HYPOTHESIS: the reveal that preceded the command focused an iframe with no document yet.
-    if (posted) this.deps.ui.focusView();
+  private flushUiCommands(pane: ChatPane): void {
+    if (pane.flushUiCommands()) this.deps.ui.focusView();
   }
 
   /**
-   * Asks the webview to bring a pending request into view (the "Open chat" link of an attention
-   * notification, issue #19). Sends `ui.focus` now and keeps the target for the next `ready`:
-   * revealing a hidden view loads a NEW document, the message sent before it exists is dropped by
-   * the provider, and the snapshot that follows its `ready` is what makes the card exist.
+   * Relays a palette or keyboard command to one pane's webview as `ui.command` (issue #35); the
+   * keeping rules and their verification are on {@link ChatPane.runUiCommand}. Unknown pane ids
+   * are ignored.
    */
-  focusRequest(target: FocusTarget): void {
-    this.focusRequested = { target, at: Date.now() };
-    this.post({ type: 'ui.focus', target });
+  runUiCommand(paneId: number, command: UiCommand): void {
+    this.paneById(paneId)?.runUiCommand(command);
   }
 
   /**
-   * Reads the state of the server by REST and publishes it as one `snapshot`.
+   * Asks one pane's webview to bring a pending request into view (the "Open chat" link of an
+   * attention notification, issue #19). Sends `ui.focus` now and keeps the target for the next
+   * `ready`: revealing a hidden view loads a NEW document, the message sent before it exists is
+   * dropped by the provider, and the snapshot that follows its `ready` is what makes the card
+   * exist. Unknown pane ids are ignored.
+   */
+  focusRequest(paneId: number, target: FocusTarget): void {
+    const pane = this.paneById(paneId);
+    if (pane === undefined) return;
+    pane.focusRequested = { target, at: Date.now() };
+    pane.post({ type: 'ui.focus', target });
+  }
+
+  /**
+   * Reads the state of the server by REST and publishes it as one `snapshot` per pane in `only`
+   * (all the panes when omitted).
+   *
+   * The location is read ONCE for all the targets (session list, active sessions, pending
+   * requests); each pane then adds the reads of ITS session ({@link readPane}) and receives its own
+   * snapshot ({@link publishSnapshot}), so two panes cost one list and not two. "The newest call
+   * wins" is per pane: a result is dropped for a pane whose `generation` moved meanwhile (another
+   * resync of that pane, or the server going away), and kept for the others; the registry of
+   * pending requests is replaced only if at least one target is still current (with no panes at
+   * all, if no newer resync started). Every resync takes its own `translator.beginResync()`
+   * stamp, so overlapping resyncs of different panes cannot erase each other's overlay of
+   * statuses and totals (R2 of the E9 plan; VERIFIED only by the translator unit test "keeps the
+   * idle that arrived after the first resync began although a second one began later").
    *
    * Asks for the session list (the 50 newest; the open session's row is added by `session.get`
    * when it is older than those), the active sessions, the pending permissions and forms of the
@@ -1243,8 +1302,8 @@ export class ChatController {
    * stream derived since the resync began wins over the REST one. Without these the webview,
    * which replaces its state with the snapshot, would lose a message in flight or stay on
    * "Working…" with Send disabled.
-   * If the open session is deleted while its messages are being read (`this.open` no longer is the
-   * id the reads started with), the snapshot goes out with NO open session, and the rows and
+   * If the open session is deleted while its messages are being read (`pane.sessionID` no longer is
+   * the id the reads started with), the snapshot goes out with NO open session, and the rows and
    * statuses of sessions deleted meanwhile (`live.removed`) are left out (review W1 of #20).
    * REST status of the open session: `busy` if listed as active; else `error` when its newest
    * message is an `idle` with outcome `failed` (scrubbed); else `idle`.
@@ -1268,14 +1327,19 @@ export class ChatController {
    * holds for it is sent again (the webview state was just replaced) and a reload is requested,
    * fire and forget; it never delays or fails the snapshot.
    */
-  async resync(): Promise<void> {
+  async resync(only?: readonly ChatPane[]): Promise<void> {
     const client = this.client;
     const server = this.server;
     if (client === undefined || server === undefined) return;
-    const generation = ++this.generation;
-    const revertEventsAtStart = this.revertEvents;
-    // Statuses the stream derives from here on override the (older) REST ones at publication.
-    this.translator.beginResync();
+    const targets = only ?? [...this.panes.values()];
+    const locationStamp = ++this.locationGeneration;
+    const stamps = new Map<ChatPane, { generation: number; revertEvents: number }>();
+    for (const pane of targets) {
+      stamps.set(pane, { generation: ++pane.generation, revertEvents: pane.revertEvents });
+    }
+    // Statuses the stream derives from here on override the (older) REST ones at publication. The
+    // stamp is this resync's own: another one starting meanwhile cannot erase them (R2).
+    const token = this.translator.beginResync();
     if (this.resyncing === 0) {
       this.live.permissions.clear();
       this.live.forms.clear();
@@ -1283,6 +1347,14 @@ export class ChatController {
       this.live.removed.clear();
     }
     this.resyncing += 1;
+    /** The targets whose snapshot is still the newest one for them (none left: drop everything). */
+    const stillCurrent = (): ChatPane[] =>
+      targets.filter((pane) => pane.generation === stamps.get(pane)?.generation);
+    const dropped = (): boolean =>
+      this.disposed ||
+      (targets.length === 0
+        ? locationStamp !== this.locationGeneration
+        : stillCurrent().length === 0);
     try {
       const [list, active, permissionList, formList] = await Promise.all([
         client.session.list({ directory: server.folder, order: 'desc', limit: SESSION_LIMIT }),
@@ -1290,90 +1362,24 @@ export class ChatController {
         client.permission.request.list(),
         client.form.list(),
       ]);
-      const sessions: SessionSummary[] = list.data.map(toSessionSummary);
-      const statuses: { [sessionID: string]: SessionStatus } = {};
-      for (const id of Object.keys(active)) statuses[id] = { type: 'busy' };
       const restRequests: PendingAsks = {
         permissions: permissionList.data.map(toPermissionAsk),
         forms: formList.data.map(toFormAsk),
       };
-
-      let open: OpenSession | undefined;
-      let rawMessages: Awaited<ReturnType<ChatApi['message']['list']>>['data'] = [];
-      const openID = this.open;
-      if (openID !== undefined) {
-        try {
-          const [messages, children] = await Promise.all([
-            client.message.list({ sessionID: openID, order: 'desc', limit: MESSAGE_LIMIT }),
-            this.readChildren(client, server.folder, openID),
-          ]);
-          rawMessages = [...messages.data].reverse(); // REST returned newest first
-          open = { sessionID: openID, messages: [], parts: {} };
-          for (const raw of rawMessages) {
-            const mapped = toMessage(raw, this.secrets);
-            if (mapped === undefined) continue;
-            open.messages.push(mapped.message);
-            if (mapped.parts.length > 0) open.parts[mapped.message.id] = mapped.parts;
-          }
-          // Issue #32: the prepared revert is a field of the session row, so it comes from the
-          // list (or from the `session.get` below when the session is older than the 50 newest).
-          let openRow = list.data.find((row) => row.id === openID);
-          if (openRow === undefined) {
-            // Issue #20: a session opened from the list can be older than the 50 newest, and the
-            // header takes its title from `sessions`; without the row it read "Untitled session".
-            // Cosmetic, so a failure here must not fail the snapshot.
-            try {
-              openRow = await client.session.get({ sessionID: openID });
-              sessions.push(toSessionSummary(openRow));
-            } catch (error) {
-              this.log.debug(`could not read the open session row: ${String(error)}`);
-            }
-          }
-          // An event about the revert that arrived during these reads is newer than the row: it
-          // owns the state, and the snapshot just carries what the host holds. The same when the row
-          // could not be read (not in the list and `session.get` failed): "no row" is not "no
-          // revert", and applying `undefined` would clear a revert the server still has, showing
-          // the hidden messages again while the files stay reverted (review W2).
-          const revertState =
-            openRow !== undefined && this.revertEvents === revertEventsAtStart
-              ? await this.reverts.apply(openID, openRow.revert, { post: false })
-              : this.reverts.state(openID);
-          if (revertState !== undefined) open.revert = revertState;
-          await this.addLineage(client, sessions, openID, children);
-          if (statuses[openID] === undefined) {
-            const newest = messages.data[0];
-            statuses[openID] =
-              newest?.type === 'idle' && newest.outcome === 'failed' && newest.error !== undefined
-                ? { type: 'error', error: toStructuredErrorInfo(newest.error, this.secrets) }
-                : { type: 'idle' };
-          }
-        } catch (error) {
-          if (!isSessionNotFound(error)) throw error;
-          this.log.warn(`remembered session ${openID} no longer exists; forgetting it`);
-          this.open = undefined;
-          await this.deps.memory.set(server.folder, undefined);
-        }
-      }
-      if (generation !== this.generation || this.disposed) return;
-      // Issue #20, review W1: the open session can be deleted (by another client, or by us) WHILE
-      // `message.list` was in flight and the server answered before deleting. `onSessionRemoved`
-      // already cleared `this.open`; publishing the local `open` would show the dead session again
-      // while the host believes there is none. The same goes for the rows the stream reported gone.
-      if (openID !== undefined && this.open !== openID) {
-        open = undefined;
-        rawMessages = [];
-      }
-      for (const id of this.live.removed) delete statuses[id];
-      // The totals of `session.usage.updated` seen since `beginResync` are newer than the REST rows.
-      const rows = this.translator.mergeUsage(
-        sessions.filter((row) => !this.live.removed.has(row.id)),
+      const reads = await Promise.all(
+        targets.map((pane) =>
+          this.readPane(
+            client,
+            server,
+            pane,
+            list.data,
+            active,
+            stamps.get(pane)?.revertEvents ?? pane.revertEvents,
+          ),
+        ),
       );
-      if (open !== undefined) {
-        const compactedAt = lastCompactionAt(rawMessages);
-        if (compactedAt !== undefined) open.compactedAt = compactedAt;
-      }
-      this.translator.setOpen(this.open);
-      this.translator.seed({ sessions: rows, messages: rawMessages });
+      if (dropped()) return;
+      const current = stillCurrent();
       const requests = this.completeWithLive(restRequests);
       if (this.pending.replaceAll(requests.permissions, requests.forms)) {
         this.deps.attention.update(this.pending.list());
@@ -1381,35 +1387,14 @@ export class ChatController {
       // So a request first seen here (asked before this host connected) can still be resolved
       // into a record when its `*.resolved` arrives.
       this.resolutions.rememberAsks(requests.permissions, requests.forms);
-      // The webview replaces its state with the snapshot, and the stream may have produced
-      // messages after the REST reads: complete the snapshot with them (review BLOCKER). The
-      // statuses need the same care in the other direction: `session.active()` can say `busy`
-      // and a `session.execution.succeeded` arrive before we publish; the stream already sent
-      // `idle`, so the stale `busy` would overwrite it and nothing would ever correct it (Send
-      // stays disabled while busy). `mergeStatuses` lets what the stream said since the resync
-      // began win over what REST said.
-      const complete = open === undefined ? undefined : this.translator.mergeLive(open);
-      this.post({
-        type: 'snapshot',
-        snapshot: {
-          sessions: rows,
-          statuses: this.translator.mergeStatuses(statuses),
-          ...(complete ? { open: complete } : {}),
-          requests,
-          resolutions: this.open === undefined ? [] : this.resolutions.forSession(this.open),
-        },
+      targets.forEach((pane, index) => {
+        const read = reads[index];
+        if (read !== undefined && current.includes(pane)) {
+          this.publishSnapshot(pane, read, token, requests);
+        }
       });
-      this.log.info(`snapshot sent (${String(rows.length)} sessions, open ${this.open ?? 'none'})`);
-      // Issue #31: the webview replaced its state with this snapshot, so the held list is sent
-      // again (a new document starts without one) and then refreshed.
-      if (this.open !== undefined) {
-        // Issue #32: a revert event applied while the snapshot was being built is newer than it.
-        this.reverts.resend(this.open, complete?.revert);
-        this.diffs.resend(this.open);
-        void this.diffs.request(this.open);
-      }
     } catch (error) {
-      if (generation !== this.generation || this.disposed) return;
+      if (dropped()) return;
       const info = toErrorInfo(error, this.secrets);
       if (info.code === 'Transport') {
         // The server is unreachable (it died or is restarting): the connection banner already
@@ -1419,9 +1404,167 @@ export class ChatController {
         return;
       }
       this.log.error(`snapshot failed: ${info.code}: ${info.message}`);
-      this.post({ type: 'notice', level: 'error', error: info });
+      for (const pane of stillCurrent()) pane.post({ type: 'notice', level: 'error', error: info });
     } finally {
       this.resyncing -= 1;
+    }
+  }
+
+  /**
+   * The per-pane half of a resync: reads what `pane`'s session needs on top of the location lists
+   * (its messages, its children, its row and revert, its lineage) and works out the statuses of
+   * the snapshot. Rows and statuses are copies, because every pane completes them its own way.
+   * A remembered session that no longer exists is forgotten here (`pane.sessionID` cleared and the
+   * per-folder memory emptied), which the caller sees as `pane.sessionID !== openID`. Rejects with
+   * whatever the client throws other than `SessionNotFoundError`.
+   * Issue #32: an event about the revert that arrived during these reads (`pane.revertEvents`
+   * moved since `revertEventsAtStart`) is newer than the row: it owns the state, and the snapshot
+   * just carries what the host holds. The same when the row could not be read (not in the list and
+   * `session.get` failed): "no row" is not "no revert", and applying `undefined` would clear a
+   * revert the server still has, showing the hidden messages again while the files stay reverted
+   * (review W2).
+   */
+  private async readPane(
+    client: ChatApi,
+    server: RunningServerInfo,
+    pane: ChatPane,
+    listed: Awaited<ReturnType<ChatApi['session']['list']>>['data'],
+    active: Awaited<ReturnType<ChatApi['session']['active']>>,
+    revertEventsAtStart: number,
+  ): Promise<PaneRead> {
+    const sessions: SessionSummary[] = listed.map(toSessionSummary);
+    const statuses: { [sessionID: string]: SessionStatus } = {};
+    for (const id of Object.keys(active)) statuses[id] = { type: 'busy' };
+    let open: OpenSession | undefined;
+    let rawMessages: PaneRead['rawMessages'] = [];
+    const openID = pane.sessionID;
+    if (openID !== undefined) {
+      try {
+        const [messages, children] = await Promise.all([
+          client.message.list({ sessionID: openID, order: 'desc', limit: MESSAGE_LIMIT }),
+          this.readChildren(client, server.folder, openID),
+        ]);
+        rawMessages = [...messages.data].reverse(); // REST returned newest first
+        open = { sessionID: openID, messages: [], parts: {} };
+        for (const raw of rawMessages) {
+          const mapped = toMessage(raw, this.secrets);
+          if (mapped === undefined) continue;
+          open.messages.push(mapped.message);
+          if (mapped.parts.length > 0) open.parts[mapped.message.id] = mapped.parts;
+        }
+        // Issue #32: the prepared revert is a field of the session row, so it comes from the
+        // list (or from the `session.get` below when the session is older than the 50 newest).
+        let openRow = listed.find((row) => row.id === openID);
+        if (openRow === undefined) {
+          // Issue #20: a session opened from the list can be older than the 50 newest, and the
+          // header takes its title from `sessions`; without the row it read "Untitled session".
+          // Cosmetic, so a failure here must not fail the snapshot.
+          try {
+            openRow = await client.session.get({ sessionID: openID });
+            sessions.push(toSessionSummary(openRow));
+          } catch (error) {
+            this.log.debug(`could not read the open session row: ${String(error)}`);
+          }
+        }
+        const revertState =
+          openRow !== undefined && pane.revertEvents === revertEventsAtStart
+            ? await pane.reverts.apply(openID, openRow.revert, { post: false })
+            : pane.reverts.state(openID);
+        if (revertState !== undefined) open.revert = revertState;
+        await this.addLineage(client, sessions, openID, children);
+        if (statuses[openID] === undefined) {
+          const newest = messages.data[0];
+          statuses[openID] =
+            newest?.type === 'idle' && newest.outcome === 'failed' && newest.error !== undefined
+              ? { type: 'error', error: toStructuredErrorInfo(newest.error, this.secrets) }
+              : { type: 'idle' };
+        }
+      } catch (error) {
+        if (!isSessionNotFound(error)) throw error;
+        this.log.warn(`remembered session ${openID} no longer exists; forgetting it`);
+        pane.sessionID = undefined;
+        await this.deps.memory.set(server.folder, undefined);
+      }
+    }
+    return { openID, open, rawMessages, sessions, statuses };
+  }
+
+  /**
+   * The synchronous end of a resync for one pane: reconciles what REST said with what the stream
+   * said meanwhile and posts the `snapshot` to THAT pane. Everything here runs without an `await`,
+   * so no event can slip between the reconciliation and the post.
+   *
+   * Issue #20, review W1: the pane's session can be deleted (by another client, or by us) WHILE
+   * `message.list` was in flight and the server answered before deleting. `onSessionRemoved`
+   * already cleared `pane.sessionID`; publishing the local `open` would show the dead session
+   * again while the host believes there is none. The same goes for the rows and statuses the
+   * stream reported gone (`live.removed`). The totals of `session.usage.updated` seen after
+   * `token` are newer than the REST rows (issue #25), and `open.compactedAt` is the
+   * `time.created` of the last completed compaction among the messages read (`lastCompactionAt`).
+   * The webview replaces its state with the snapshot, and the stream may have produced messages
+   * after the REST reads: the snapshot is completed with them (`mergeLive`, review BLOCKER). The
+   * statuses need the same care in the other direction: `session.active()` can say `busy` and a
+   * `session.execution.succeeded` arrive before we publish; the stream already sent `idle`, so
+   * the stale `busy` would overwrite it and nothing would ever correct it (Send stays disabled
+   * while busy). `mergeStatuses` lets what the stream said after THIS resync's `token` win over
+   * what REST said. Issue #31: once the snapshot is out and the pane has a session, its "Changed
+   * files" list is sent again (the webview state was just replaced) and a reload is requested,
+   * fire and forget. If the pane changed session between the read and this call, the snapshot
+   * carries no open session and the seed uses an empty session id so it prunes no tracker of the
+   * session the pane moved to (another pane may show it). HYPOTHESIS: by reading; the window needs
+   * two panes and was not driven in a real VS Code.
+   */
+  private publishSnapshot(
+    pane: ChatPane,
+    read: PaneRead,
+    token: ResyncToken,
+    requests: PendingAsks,
+  ): void {
+    let { open, rawMessages } = read;
+    if (read.openID !== undefined && pane.sessionID !== read.openID) {
+      open = undefined;
+      rawMessages = [];
+    }
+    const statuses = { ...read.statuses };
+    for (const id of this.live.removed) delete statuses[id];
+    const rows = this.translator.mergeUsage(
+      read.sessions.filter((row) => !this.live.removed.has(row.id)),
+      token,
+    );
+    if (open !== undefined) {
+      const compactedAt = lastCompactionAt(rawMessages);
+      if (compactedAt !== undefined) open.compactedAt = compactedAt;
+    }
+    this.syncTracked();
+    // The pane moved to another session since the read: seeding with its new id would prune the
+    // trackers of that session, which another pane may be showing. An empty id prunes none.
+    const moved = read.openID !== undefined && pane.sessionID !== read.openID;
+    this.translator.seed({
+      sessions: rows,
+      messages: rawMessages,
+      sessionID: moved ? '' : (pane.sessionID ?? ''),
+      merge: this.panes.size > 1,
+    });
+    const complete = open === undefined ? undefined : this.translator.mergeLive(open);
+    pane.post({
+      type: 'snapshot',
+      snapshot: {
+        sessions: rows,
+        statuses: this.translator.mergeStatuses(statuses, token),
+        ...(complete ? { open: complete } : {}),
+        requests,
+        resolutions:
+          pane.sessionID === undefined ? [] : this.resolutions.forSession(pane.sessionID),
+      },
+    });
+    this.log.info(
+      `snapshot sent (${String(rows.length)} sessions, open ${pane.sessionID ?? 'none'})`,
+    );
+    if (pane.sessionID !== undefined) {
+      // Issue #32: a revert event applied while the snapshot was being built is newer than it.
+      pane.reverts.resend(pane.sessionID, complete?.revert);
+      pane.diffs.resend(pane.sessionID);
+      void pane.diffs.request(pane.sessionID);
     }
   }
 
@@ -1575,7 +1718,7 @@ export class ChatController {
       this.log.info(
         `catalog loaded (${String(catalog.models.length)} models, ${String(catalog.agents.length)} agents)`,
       );
-      this.post({ type: 'catalog', catalog: this.catalog });
+      this.broadcast({ type: 'catalog', catalog: this.catalog });
     } catch (error) {
       if (epoch !== this.catalogEpoch) return;
       const info = toErrorInfo(error, this.secrets);
@@ -1622,7 +1765,7 @@ export class ChatController {
     this.ignoredSettingNoticed = ignored.value;
     this.log.warn(`default model setting ignored: ${ignored.reason}`);
     const shown = ignored.value.length > 80 ? `${ignored.value.slice(0, 80)}…` : ignored.value;
-    this.post({
+    this.broadcast({
       type: 'notice',
       level: 'info',
       error: {
@@ -1643,7 +1786,7 @@ export class ChatController {
   onPreferencesChanged(): void {
     if (this.catalog === undefined || this.disposed) return;
     this.catalog = this.withPreferredModel(this.catalog);
-    this.post({ type: 'catalog', catalog: this.catalog });
+    this.broadcast({ type: 'catalog', catalog: this.catalog });
   }
 
   /** The held catalog, loading it first when there is none; `undefined` if the load failed. */
@@ -1737,23 +1880,26 @@ export class ChatController {
     }
   }
 
-  /** Remembers `sessionID` as the open one (for the served folder) and publishes its history. */
-  private async openSession(sessionID: string): Promise<void> {
-    this.open = sessionID;
+  /**
+   * Makes `sessionID` the session `pane` shows, remembers it for the served folder and publishes
+   * its history to that pane.
+   */
+  private async openSession(pane: ChatPane, sessionID: string): Promise<void> {
+    pane.sessionID = sessionID;
     if (this.server !== undefined) await this.deps.memory.set(this.server.folder, sessionID);
-    this.translator.setOpen(sessionID);
-    await this.resync();
+    this.syncTracked();
+    await this.resync([pane]);
   }
 
-  /** Posts the outcome of a request: success, or the scrubbed error. */
-  private result(requestId: string, error?: unknown): void {
+  /** Posts to `pane` the outcome of a request it made: success, or the scrubbed error. */
+  private result(pane: ChatPane, requestId: string, error?: unknown): void {
     if (error === undefined) {
-      this.post({ type: 'request.result', requestId });
+      pane.post({ type: 'request.result', requestId });
       return;
     }
     const info: ErrorInfo = toErrorInfo(error, this.secrets);
     this.log.warn(`request ${requestId} failed: ${info.code}: ${info.message}`);
-    this.post({ type: 'request.result', requestId, error: info });
+    pane.post({ type: 'request.result', requestId, error: info });
   }
 
   /**
@@ -1772,16 +1918,16 @@ export class ChatController {
    * body and the event are as read. The `interrupted: false` path is only exercised against the
    * synthetic fixture (`chatController.e2e.test.ts`). POSIX UNVERIFIED.
    */
-  private async abort(requestId: string, sessionID: string): Promise<void> {
+  private async abort(pane: ChatPane, requestId: string, sessionID: string): Promise<void> {
     const client = this.client;
-    if (client === undefined) return this.result(requestId, unavailable());
+    if (client === undefined) return this.result(pane, requestId, unavailable());
     try {
       const { interrupted } = await client.session.interrupt({ sessionID });
       this.log.info(`abort requested for ${sessionID} (interrupted: ${String(interrupted)})`);
-      this.result(requestId);
+      this.result(pane, requestId);
       if (!interrupted) await this.resync();
     } catch (error) {
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -1790,13 +1936,17 @@ export class ChatController {
    * reported as a `warning` notice (scrubbed like every error text) and a `warn` log line; it
    * never throws.
    */
-  private async editorAction(type: string, action: () => Promise<void>): Promise<void> {
+  private async editorAction(
+    pane: ChatPane,
+    type: string,
+    action: () => Promise<void>,
+  ): Promise<void> {
     try {
       await action();
     } catch (error) {
       const info = toErrorInfo(error, this.secrets);
       this.log.warn(`${type} failed: ${info.code}: ${info.message}`);
-      this.post({ type: 'notice', level: 'warning', error: info });
+      pane.post({ type: 'notice', level: 'warning', error: info });
     }
   }
 
@@ -1819,11 +1969,11 @@ export class ChatController {
    * it did not list", and by the `test:visual` check "a diff editor opens in the active tab
    * "sample.ts"". macOS and Linux UNVERIFIED.
    */
-  private async openChangedFile(sessionID: string, shown: string): Promise<void> {
-    const checked = this.diffs.target(sessionID, shown);
+  private async openChangedFile(pane: ChatPane, sessionID: string, shown: string): Promise<void> {
+    const checked = pane.diffs.target(sessionID, shown);
     if (!checked.ok) {
       this.log.warn(`diff open refused: ${checked.reason}`);
-      this.post({
+      pane.post({
         type: 'notice',
         level: 'warning',
         error: {
@@ -1833,7 +1983,7 @@ export class ChatController {
       });
       return;
     }
-    await this.editorAction('session.diff.open', async () => {
+    await this.editorAction(pane, 'session.diff.open', async () => {
       const opened = await this.deps.editor.openDiff(checked.target);
       this.log.info(
         opened === 'diff'
@@ -1841,7 +1991,7 @@ export class ChatController {
           : `diff opened (${checked.target.status}, file only)`,
       );
       if (opened === 'file') {
-        this.post({
+        pane.post({
           type: 'notice',
           level: 'info',
           error: {
@@ -1864,11 +2014,11 @@ export class ChatController {
    * undid and refuses one it did not list", Windows 11, 23/10/2026); the VS Code side is covered
    * by `sessionDiffEditor.ts`.
    */
-  private async openRevertedFile(sessionID: string, shown: string): Promise<void> {
-    const checked = this.reverts.target(sessionID, shown);
+  private async openRevertedFile(pane: ChatPane, sessionID: string, shown: string): Promise<void> {
+    const checked = pane.reverts.target(sessionID, shown);
     if (!checked.ok) {
       this.log.warn(`revert diff open refused: ${checked.reason}`);
-      this.post({
+      pane.post({
         type: 'notice',
         level: 'warning',
         error: {
@@ -1878,7 +2028,7 @@ export class ChatController {
       });
       return;
     }
-    await this.editorAction('session.revert.open', async () => {
+    await this.editorAction(pane, 'session.revert.open', async () => {
       const opened = await this.deps.editor.openDiff(checked.target);
       this.log.info(
         opened === 'diff'
@@ -1886,7 +2036,7 @@ export class ChatController {
           : `revert diff opened (${checked.target.status}, file only)`,
       );
       if (opened === 'file') {
-        this.post({
+        pane.post({
           type: 'notice',
           level: 'info',
           error: {
@@ -1904,7 +2054,13 @@ export class ChatController {
    * `DiffNotListed` when it is not a file of the revert and `NoTextDiff` when it cannot be rebuilt.
    */
   revertedOriginal(sessionID: string, shown: string): Promise<string> {
-    return this.reverts.original(sessionID, shown);
+    const pane = this.panesOf(sessionID)[0];
+    if (pane === undefined) {
+      return Promise.reject(
+        codedError('DiffNotListed', 'That file is not among the files of the revert'),
+      );
+    }
+    return pane.reverts.original(sessionID, shown);
   }
 
   /**
@@ -1931,14 +2087,15 @@ export class ChatController {
    * (the assertion accepts both).
    */
   private async stageRevert(
+    pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'session.revert.stage' }>,
   ): Promise<void> {
     const { requestId, sessionID, messageID } = message;
     const client = this.client;
-    if (client === undefined) return this.result(requestId, unavailable());
-    if (sessionID !== this.open) {
+    if (client === undefined) return this.result(pane, requestId, unavailable());
+    if (sessionID !== pane.sessionID) {
       this.log.warn('revert refused: session not open');
-      return this.result(requestId, {
+      return this.result(pane, requestId, {
         _tag: 'SessionNotOpen',
         message: 'Only the open session can be reverted',
       });
@@ -1947,21 +2104,21 @@ export class ChatController {
       const target = await client.session.message.get({ sessionID, messageID });
       if (target.type !== 'user') {
         this.log.warn('revert refused: not a user message');
-        return this.result(requestId, {
+        return this.result(pane, requestId, {
           _tag: 'NotAUserMessage',
           message: 'You can only revert from a message you sent',
         });
       }
       const revert = await client.session.revert.stage({ sessionID, messageID });
-      if (client !== this.client) return this.result(requestId, unavailable());
-      this.revertEvents += 1;
+      if (client !== this.client) return this.result(pane, requestId, unavailable());
+      pane.revertEvents += 1;
       this.log.info(`revert staged for ${sessionID}: ${String(revert.files?.length ?? 0)} files`);
-      await this.reverts.apply(sessionID, revert, { post: true });
-      void this.diffs.request(sessionID);
-      this.result(requestId);
+      await pane.reverts.apply(sessionID, revert, { post: true });
+      void pane.diffs.request(sessionID);
+      this.result(pane, requestId);
     } catch (error) {
       this.healMissing(error, sessionID);
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -1973,29 +2130,30 @@ export class ChatController {
    * {@link ChatApi}). Logs `revert cleared for <sid>`.
    */
   private async clearRevert(
+    pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'session.revert.clear' }>,
   ): Promise<void> {
     const { requestId, sessionID } = message;
     const client = this.client;
-    if (client === undefined) return this.result(requestId, unavailable());
-    if (sessionID !== this.open) {
+    if (client === undefined) return this.result(pane, requestId, unavailable());
+    if (sessionID !== pane.sessionID) {
       this.log.warn('revert refused: session not open');
-      return this.result(requestId, {
+      return this.result(pane, requestId, {
         _tag: 'SessionNotOpen',
         message: 'Only the open session can be restored',
       });
     }
     try {
       await client.session.revert.clear({ sessionID });
-      if (client !== this.client) return this.result(requestId, unavailable());
-      this.revertEvents += 1;
+      if (client !== this.client) return this.result(pane, requestId, unavailable());
+      pane.revertEvents += 1;
       this.log.info(`revert cleared for ${sessionID}`);
-      await this.reverts.apply(sessionID, undefined, { post: true });
-      void this.diffs.request(sessionID);
-      this.result(requestId);
+      await pane.reverts.apply(sessionID, undefined, { post: true });
+      void pane.diffs.request(sessionID);
+      this.result(pane, requestId);
     } catch (error) {
       this.healMissing(error, sessionID);
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -2009,14 +2167,15 @@ export class ChatController {
    * banner up. Refuses (`SessionNotOpen`) a session that is not the open one.
    */
   private async commitRevert(
+    pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'session.revert.commit' }>,
   ): Promise<void> {
     const { requestId, sessionID } = message;
     const client = this.client;
-    if (client === undefined) return this.result(requestId, unavailable());
-    if (sessionID !== this.open) {
+    if (client === undefined) return this.result(pane, requestId, unavailable());
+    if (sessionID !== pane.sessionID) {
       this.log.warn('revert refused: session not open');
-      return this.result(requestId, {
+      return this.result(pane, requestId, {
         _tag: 'SessionNotOpen',
         message: 'Only the open session can be discarded',
       });
@@ -2024,16 +2183,16 @@ export class ChatController {
     try {
       if (!(await this.deps.sessions.confirmRevertDiscard())) {
         this.log.info(`revert commit cancelled ${sessionID}`);
-        return this.result(requestId);
+        return this.result(pane, requestId);
       }
-      const boundary = this.reverts.boundary(sessionID);
+      const boundary = pane.reverts.boundary(sessionID);
       await client.session.revert.commit({ sessionID });
-      if (client !== this.client) return this.result(requestId, unavailable());
-      this.afterCommit(sessionID, boundary);
-      this.result(requestId);
+      if (client !== this.client) return this.result(pane, requestId, unavailable());
+      this.afterCommit([pane], sessionID, boundary);
+      this.result(pane, requestId);
     } catch (error) {
       this.healMissing(error, sessionID);
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -2044,7 +2203,13 @@ export class ChatController {
    * `NoTextDiff` when the original cannot be rebuilt; VS Code then shows the message in the editor.
    */
   diffOriginal(sessionID: string, shown: string): Promise<string> {
-    return this.diffs.original(sessionID, shown);
+    const pane = this.panesOf(sessionID)[0];
+    if (pane === undefined) {
+      return Promise.reject(
+        codedError('DiffNotListed', 'That file is not in the changed files of this session'),
+      );
+    }
+    return pane.diffs.original(sessionID, shown);
   }
 
   /**
@@ -2053,7 +2218,10 @@ export class ChatController {
    * Returns the unsubscribe function.
    */
   onDiffRenewed(listener: (sessionID: string) => void): () => void {
-    return this.diffs.onRenewed(listener);
+    this.renewedListeners.add(listener);
+    return () => {
+      this.renewedListeners.delete(listener);
+    };
   }
 
   /**
@@ -2062,14 +2230,14 @@ export class ChatController {
    * given and send it to the model provider, so `prompt.send` accepts only what came from here.
    * A cancelled dialog is an empty list, not an error.
    */
-  private async pickAttachments(requestId: string): Promise<void> {
+  private async pickAttachments(pane: ChatPane, requestId: string): Promise<void> {
     try {
       const files = await this.deps.editor.pickFiles();
       for (const file of files) this.pickedUris.add(file.uri);
-      this.post({ type: 'attachments.picked', requestId, files });
-      this.result(requestId);
+      pane.post({ type: 'attachments.picked', requestId, files });
+      this.result(pane, requestId);
     } catch (error) {
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -2086,7 +2254,7 @@ export class ChatController {
    * "selected … folders and files outside…", since it filters no ignored file.
    * Logs `dropped files added: N, skipped: M` (counts only). Without a server `verify` fails with
    * `ServerUnavailable`. The chips and the notice of the Explorer command (`verify` false) go
-   * through {@link postOrKeep}: with the chat view hidden they wait for the next `ready` instead of
+   * through {@link ChatPane.postOrKeep}: with the chat view hidden they wait for the next `ready` instead of
    * being dropped by the provider (review of 23/10/2026, B2).
    * UNVERIFIED against a real VS Code drag (microsoft/vscode#339036); see the integration case
    * "adds dropped files, counts what it refuses" for the injected message. UNVERIFIED that
@@ -2094,6 +2262,7 @@ export class ChatController {
    * invents the list).
    */
   private async dropFiles(
+    pane: ChatPane,
     requestId: string,
     uris: readonly string[],
     verify: boolean,
@@ -2106,7 +2275,7 @@ export class ChatController {
       if (verify) {
         const client = this.client;
         if (client === undefined || folder === undefined) {
-          return this.result(requestId, unavailable());
+          return this.result(pane, requestId, unavailable());
         }
         const listed = await Promise.all(
           refs.map(async (ref) => {
@@ -2127,8 +2296,8 @@ export class ChatController {
       }
       for (const ref of refs) this.pickedUris.add(ref.uri);
       const send = (message: HostToWebview): void => {
-        if (verify) this.post(message);
-        else this.postOrKeep(message);
+        if (verify) pane.post(message);
+        else pane.postOrKeep(message);
       };
       send({ type: 'attachments.picked', requestId, files: refs });
       const { folders, outside, remote, missing } = dropped.skipped;
@@ -2151,9 +2320,9 @@ export class ChatController {
           },
         });
       }
-      this.result(requestId);
+      this.result(pane, requestId);
     } catch (error) {
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -2163,10 +2332,12 @@ export class ChatController {
    * the host sees, so it skips the `file.find` check of a drop (see {@link dropFiles}); the answer
    * goes to the webview with a request id of its own, which the webview never began.
    */
-  async addToChat(uris: readonly string[]): Promise<void> {
-    if (uris.length === 0) return;
+  async addToChat(paneId: number, uris: readonly string[]): Promise<void> {
+    const pane = this.paneById(paneId);
+    if (pane === undefined || uris.length === 0) return;
     this.menuRequests += 1;
     await this.dropFiles(
+      pane,
       `menu-${String(this.menuRequests)}`,
       uris.slice(0, MAX_DROPPED_ITEMS),
       false,
@@ -2181,14 +2352,19 @@ export class ChatController {
    * `request.result`. Needs no server. Retry, fork and revert do not re-attach the image: the
    * history has no `uri` for an inline attachment (README says so, decision Q3).
    */
-  private attachImage(requestId: string, mime: string, data: string): Promise<void> {
+  private attachImage(
+    pane: ChatPane,
+    requestId: string,
+    mime: string,
+    data: string,
+  ): Promise<void> {
     try {
       const ref = this.images.add(mime, data);
-      this.post({ type: 'attachments.picked', requestId, files: [ref] });
+      pane.post({ type: 'attachments.picked', requestId, files: [ref] });
       this.log.info(`image added: ${mime}, ${String(this.images.sizeKiB(ref.uri) ?? 0)} KiB`);
-      this.result(requestId);
+      this.result(pane, requestId);
     } catch (error) {
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
     return Promise.resolve();
   }
@@ -2219,14 +2395,14 @@ export class ChatController {
    * carrying that `?start=1&end=2` reference. NOT observed: the warning notice reaching the
    * webview (the controller test sees it posted).
    */
-  private async attachFromEditor(requestId: string): Promise<void> {
+  private async attachFromEditor(pane: ChatPane, requestId: string): Promise<void> {
     try {
       const context = await this.deps.editor.editorContext(this.server?.folder);
       for (const ref of context.refs) this.pickedUris.add(ref.uri);
-      this.post({ type: 'attachments.picked', requestId, files: context.refs });
+      pane.post({ type: 'attachments.picked', requestId, files: context.refs });
       if (context.unsaved) {
         this.log.warn('editor context: the buffer has unsaved changes, the saved file is attached');
-        this.post({
+        pane.post({
           type: 'notice',
           level: 'warning',
           error: {
@@ -2238,9 +2414,9 @@ export class ChatController {
       this.log.info(
         `editor context added: ${String(context.refs.length - context.ranged)} file(s), ${String(context.ranged)} selection(s)`,
       );
-      this.result(requestId);
+      this.result(pane, requestId);
     } catch (error) {
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -2271,14 +2447,15 @@ export class ChatController {
    * eviction of `offeredUris` (unit-tested), POSIX.
    */
   private async searchFiles(
+    pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'files.search' }>,
   ): Promise<void> {
     const { requestId, query } = message;
-    this.fileSearch?.abort();
+    pane.fileSearch?.abort();
     const client = this.client;
     const server = this.server;
     if (client === undefined || server === undefined) {
-      this.post({
+      pane.post({
         type: 'files.found',
         requestId,
         query,
@@ -2288,15 +2465,15 @@ export class ChatController {
       return;
     }
     const controller = new AbortController();
-    this.fileSearch = controller;
+    pane.fileSearch = controller;
     // True when the search ended without an answer to publish. A newer search owns `fileSearch`
     // (it is set to a different controller): stay silent, the webview waits for that one. Otherwise
     // the server went away (`stopStream` cleared it and swapped the client): answer with an error,
     // or the popup would keep saying "Searching…" for a request nobody will resolve.
     const abandoned = (): boolean => {
       if (!controller.signal.aborted && client === this.client) return false;
-      if (this.fileSearch === undefined || this.fileSearch === controller) {
-        this.post({
+      if (pane.fileSearch === undefined || pane.fileSearch === controller) {
+        pane.post({
           type: 'files.found',
           requestId,
           query,
@@ -2324,14 +2501,14 @@ export class ChatController {
         this.offeredUris.delete(oldest.value);
       }
       this.log.info(`file search: ${String(files.length)} results`);
-      this.post({ type: 'files.found', requestId, query, files });
+      pane.post({ type: 'files.found', requestId, query, files });
     } catch (error) {
       if (abandoned()) return;
       const info = toErrorInfo(error, this.secrets);
       this.log.warn(`file search failed: ${info.code}`);
-      this.post({ type: 'files.found', requestId, query, files: [], error: info });
+      pane.post({ type: 'files.found', requestId, query, files: [], error: info });
     } finally {
-      if (this.fileSearch === controller) this.fileSearch = undefined;
+      if (pane.fileSearch === controller) pane.fileSearch = undefined;
     }
   }
 
@@ -2386,6 +2563,7 @@ export class ChatController {
 
   /** `permission.reply`: answers the request; never throws, the outcome is a `request.result`. */
   private async answerPermission(
+    pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'permission.reply' }>,
   ): Promise<void> {
     try {
@@ -2395,9 +2573,9 @@ export class ChatController {
         message.decision,
         message.message,
       );
-      this.result(message.requestId);
+      this.result(pane, message.requestId);
     } catch (error) {
-      this.result(message.requestId, error);
+      this.result(pane, message.requestId, error);
       await this.healIfStale(error);
     }
   }
@@ -2432,12 +2610,15 @@ export class ChatController {
    * in the 3 s after it), `{ q0: "A" }` (a plain string) was accepted and the turn then ended
    * `succeeded`. A `FormInvalidAnswerError` and `form.cancel` were never provoked on a real server.
    */
-  private async answerForm(message: Extract<WebviewToHost, { type: 'form.reply' }>): Promise<void> {
+  private async answerForm(
+    pane: ChatPane,
+    message: Extract<WebviewToHost, { type: 'form.reply' }>,
+  ): Promise<void> {
     const client = this.client;
-    if (client === undefined) return this.result(message.requestId, unavailable());
+    if (client === undefined) return this.result(pane, message.requestId, unavailable());
     const problem = this.checkPending('form', message.formID, message.sessionID);
     if (problem !== undefined) {
-      this.result(message.requestId, problem);
+      this.result(pane, message.requestId, problem);
       return this.healIfStale(problem);
     }
     try {
@@ -2447,9 +2628,9 @@ export class ChatController {
         answer: message.answer,
       });
       this.log.info(`form reply sent for ${message.formID}`);
-      this.result(message.requestId);
+      this.result(pane, message.requestId);
     } catch (error) {
-      this.result(message.requestId, error);
+      this.result(pane, message.requestId, error);
       await this.healIfStale(error);
     }
   }
@@ -2462,13 +2643,14 @@ export class ChatController {
    * one is flagged in the memory of answered requests (`withMessage`), like a rejection's feedback.
    */
   private async cancelForm(
+    pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'form.cancel' }>,
   ): Promise<void> {
     const client = this.client;
-    if (client === undefined) return this.result(message.requestId, unavailable());
+    if (client === undefined) return this.result(pane, message.requestId, unavailable());
     const problem = this.checkPending('form', message.formID, message.sessionID);
     if (problem !== undefined) {
-      this.result(message.requestId, problem);
+      this.result(pane, message.requestId, problem);
       return this.healIfStale(problem);
     }
     const note =
@@ -2482,10 +2664,10 @@ export class ChatController {
         ...(note === undefined ? {} : { message: note }),
       });
       this.log.info(`form cancel sent for ${message.formID}`);
-      this.result(message.requestId);
+      this.result(pane, message.requestId);
     } catch (error) {
       if (note !== undefined) this.resolutions.unmark('form', message.formID);
-      this.result(message.requestId, error);
+      this.result(pane, message.requestId, error);
       await this.healIfStale(error);
     }
   }
@@ -2535,10 +2717,10 @@ export class ChatController {
    * `warn` log line. Stops at the first failed removal, so the count in the message is what really
    * went away. The rules' resources are never logged.
    */
-  private async manageSavedPermissions(): Promise<void> {
+  private async manageSavedPermissions(pane: ChatPane): Promise<void> {
     const client = this.client;
     if (client === undefined) {
-      this.post({
+      pane.post({
         type: 'notice',
         level: 'warning',
         error: { code: 'ServerUnavailable', message: unavailable().message },
@@ -2549,7 +2731,7 @@ export class ChatController {
     try {
       const saved = await client.permission.saved.list();
       if (saved.length === 0) {
-        this.post({
+        pane.post({
           type: 'notice',
           level: 'info',
           error: { code: 'NoSavedPermissions', message: 'This project has no saved permissions' },
@@ -2570,7 +2752,7 @@ export class ChatController {
       }
       if (removed > 0) {
         this.log.info(`revoked ${String(removed)} saved permission(s)`);
-        this.post({
+        pane.post({
           type: 'notice',
           level: 'info',
           error: {
@@ -2584,12 +2766,14 @@ export class ChatController {
       this.log.warn(
         `managing saved permissions failed after ${String(removed)} removal(s): ${info.code}: ${info.message}`,
       );
-      this.post({ type: 'notice', level: 'warning', error: info });
+      pane.post({ type: 'notice', level: 'warning', error: info });
     }
   }
 
   /**
-   * Handles one VALIDATED webview message (the caller ran `isWebviewToHost`).
+   * Handles one VALIDATED webview message (the caller ran `isWebviewToHost`) from the pane
+   * `paneId`. A message from a pane that is not attached (closed, or never attached) is dropped
+   * with a `warn` log `dropped a <type> from unknown pane <n>` and resolves without answering.
    *
    * `prompt.send` creates a session when none is open (with the model and agent the webview chose,
    * issues #23/#24), then calls `session.prompt` with the
@@ -2609,61 +2793,66 @@ export class ChatController {
    * `permissions.manage` runs the saved-permissions manager; `server.restart` and `logs.show` go
    * to `deps.server`.
    */
-  handle(message: WebviewToHost): Promise<void> {
-    return this.run(message);
+  handle(paneId: number, message: WebviewToHost): Promise<void> {
+    const pane = this.paneById(paneId);
+    if (pane === undefined) {
+      this.log.warn(`dropped a ${message.type} from unknown pane ${String(paneId)}`);
+      return Promise.resolve();
+    }
+    return this.run(pane, message);
   }
 
   /** Dispatch body of {@link handle}; kept apart so `dispatch` can return a Promise. */
-  private async run(message: WebviewToHost): Promise<void> {
+  private async run(pane: ChatPane, message: WebviewToHost): Promise<void> {
     const pending: Promise<void>[] = [];
     dispatch<WebviewToHost>(message, {
       ready: () => {
-        pending.push(this.onWebviewReady());
+        pending.push(this.onPaneReady(pane.id));
       },
       'session.new': (m) => {
-        pending.push(this.newSession(m.requestId));
+        pending.push(this.newSession(pane, m.requestId));
       },
       'session.open': (m) => {
-        pending.push(this.openRequested(m.requestId, m.sessionID));
+        pending.push(this.openRequested(pane, m.requestId, m.sessionID));
       },
       'sessions.query': (m) => {
-        pending.push(this.querySessions(m));
+        pending.push(this.querySessions(pane, m));
       },
       'session.rename': (m) => {
-        pending.push(this.renameSession(m));
+        pending.push(this.renameSession(pane, m));
       },
       'session.delete': (m) => {
-        pending.push(this.deleteSession(m));
+        pending.push(this.deleteSession(pane, m));
       },
       'session.fork': (m) => {
-        pending.push(this.forkSession(m));
+        pending.push(this.forkSession(pane, m));
       },
       'prompt.send': (m) => {
-        pending.push(this.sendPrompt(m));
+        pending.push(this.sendPrompt(pane, m));
       },
       'session.abort': (m) => {
-        pending.push(this.abort(m.requestId, m.sessionID));
+        pending.push(this.abort(pane, m.requestId, m.sessionID));
       },
       'permission.reply': (m) => {
-        pending.push(this.answerPermission(m));
+        pending.push(this.answerPermission(pane, m));
       },
       'form.reply': (m) => {
-        pending.push(this.answerForm(m));
+        pending.push(this.answerForm(pane, m));
       },
       'form.cancel': (m) => {
-        pending.push(this.cancelForm(m));
+        pending.push(this.cancelForm(pane, m));
       },
       'attachments.pick': (m) => {
-        pending.push(this.pickAttachments(m.requestId));
+        pending.push(this.pickAttachments(pane, m.requestId));
       },
       'attachments.fromEditor': (m) => {
-        pending.push(this.attachFromEditor(m.requestId));
+        pending.push(this.attachFromEditor(pane, m.requestId));
       },
       'attachments.drop': (m) => {
-        pending.push(this.dropFiles(m.requestId, m.uris, true));
+        pending.push(this.dropFiles(pane, m.requestId, m.uris, true));
       },
       'attachments.image': (m) => {
-        pending.push(this.attachImage(m.requestId, m.mime, m.data));
+        pending.push(this.attachImage(pane, m.requestId, m.mime, m.data));
       },
       // Sergio's decision of 23/10/2026 (S5): removing a chip frees the image. Only `PastedImages`
       // can forget, and it knows only the uris it issued; any other uri is a no-op.
@@ -2671,10 +2860,10 @@ export class ChatController {
         this.images.forget(m.uri);
       },
       'files.search': (m) => {
-        pending.push(this.searchFiles(m));
+        pending.push(this.searchFiles(pane, m));
       },
       'permissions.manage': () => {
-        pending.push(this.manageSavedPermissions());
+        pending.push(this.manageSavedPermissions(pane));
       },
       'server.restart': () => {
         this.deps.server.restart();
@@ -2684,34 +2873,36 @@ export class ChatController {
       },
       'editor.open': (m) => {
         pending.push(
-          this.editorAction(m.type, () =>
+          this.editorAction(pane, m.type, () =>
             this.deps.editor.open(m.path, m.line, m.column, this.server?.folder),
           ),
         );
       },
       'session.diff.open': (m) => {
-        pending.push(this.openChangedFile(m.sessionID, m.path));
+        pending.push(this.openChangedFile(pane, m.sessionID, m.path));
       },
       'session.revert.stage': (m) => {
-        pending.push(this.stageRevert(m));
+        pending.push(this.stageRevert(pane, m));
       },
       'session.revert.clear': (m) => {
-        pending.push(this.clearRevert(m));
+        pending.push(this.clearRevert(pane, m));
       },
       'session.revert.commit': (m) => {
-        pending.push(this.commitRevert(m));
+        pending.push(this.commitRevert(pane, m));
       },
       'session.revert.open': (m) => {
-        pending.push(this.openRevertedFile(m.sessionID, m.path));
+        pending.push(this.openRevertedFile(pane, m.sessionID, m.path));
       },
       'editor.insert': (m) => {
-        pending.push(this.editorAction(m.type, () => this.deps.editor.insert(m.text)));
+        pending.push(this.editorAction(pane, m.type, () => this.deps.editor.insert(m.text)));
       },
       'editor.newFile': (m) => {
-        pending.push(this.editorAction(m.type, () => this.deps.editor.newFile(m.text, m.language)));
+        pending.push(
+          this.editorAction(pane, m.type, () => this.deps.editor.newFile(m.text, m.language)),
+        );
       },
       'clipboard.write': (m) => {
-        pending.push(this.editorAction(m.type, () => this.deps.editor.copy(m.text)));
+        pending.push(this.editorAction(pane, m.type, () => this.deps.editor.copy(m.text)));
       },
       'chat.focusChanged': (m) => {
         this.deps.ui.setChatFocused(m.focused);
@@ -2735,14 +2926,14 @@ export class ChatController {
    * running server: the snapshot is how the webview learns it, and the button is disabled without
    * one.
    */
-  private async newSession(requestId: string): Promise<void> {
-    if (this.client === undefined) return this.result(requestId, unavailable());
+  private async newSession(pane: ChatPane, requestId: string): Promise<void> {
+    if (this.client === undefined) return this.result(pane, requestId, unavailable());
     try {
-      await this.forgetOpen();
-      await this.resync();
-      this.result(requestId);
+      await this.forgetOpen(pane);
+      await this.resync([pane]);
+      this.result(pane, requestId);
     } catch (error) {
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -2751,16 +2942,16 @@ export class ChatController {
    * row the user clicked is stale (deleted by another client, or an event was lost), so it is also
    * reported as `session.removed` to heal the list.
    */
-  private async openRequested(requestId: string, sessionID: string): Promise<void> {
+  private async openRequested(pane: ChatPane, requestId: string, sessionID: string): Promise<void> {
     const client = this.client;
-    if (client === undefined) return this.result(requestId, unavailable());
+    if (client === undefined) return this.result(pane, requestId, unavailable());
     try {
       await client.session.get({ sessionID });
-      await this.openSession(sessionID);
-      this.result(requestId);
+      await this.openSession(pane, sessionID);
+      this.result(pane, requestId);
     } catch (error) {
       this.healMissing(error, sessionID);
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -2783,23 +2974,24 @@ export class ChatController {
    * planner spike only (Windows 11, opencode 2.0.32, 21/10/2026).
    */
   private async querySessions(
+    pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'sessions.query' }>,
   ): Promise<void> {
     const { requestId } = message;
     const client = this.client;
     const server = this.server;
     if (client === undefined || server === undefined) {
-      return this.result(requestId, unavailable());
+      return this.result(pane, requestId, unavailable());
     }
     try {
-      const query = this.browser.query(message.search, message.more, server.folder);
+      const query = pane.browser.query(message.search, message.more, server.folder);
       const answer = await client.session.list(query.input);
       // The server changed while we waited: the page belongs to another server, but the webview
       // must still hear back or its list stays "loading" (review S3).
-      if (client !== this.client) return this.result(requestId, unavailable());
+      if (client !== this.client) return this.result(pane, requestId, unavailable());
       const page = query.accept(answer);
       this.translator.mirror(page.rows);
-      this.post({
+      pane.post({
         type: 'sessions.page',
         requestId,
         search: message.search,
@@ -2808,10 +3000,10 @@ export class ChatController {
         hasMore: page.hasMore,
       });
       this.log.info(`sessions page (${String(page.rows.length)}, more: ${String(message.more)})`);
-      this.result(requestId);
+      this.result(pane, requestId);
     } catch (error) {
-      if (tagOf(error) === 'InvalidCursorError') this.browser.reset();
-      this.result(requestId, error);
+      if (tagOf(error) === 'InvalidCursorError') pane.browser.reset();
+      this.result(pane, requestId, error);
     }
   }
 
@@ -2824,14 +3016,15 @@ export class ChatController {
    * `session.removed`. Logs the id, never the title.
    */
   private async renameSession(
+    pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'session.rename' }>,
   ): Promise<void> {
     const { requestId, sessionID } = message;
     const client = this.client;
-    if (client === undefined) return this.result(requestId, unavailable());
+    if (client === undefined) return this.result(pane, requestId, unavailable());
     const title = message.title.trim();
     if (title === '' || title.length > MAX_SESSION_TITLE_LENGTH) {
-      return this.result(requestId, {
+      return this.result(pane, requestId, {
         _tag: 'InvalidTitle',
         message: `A session title needs 1 to ${String(MAX_SESSION_TITLE_LENGTH)} characters`,
       });
@@ -2839,10 +3032,10 @@ export class ChatController {
     try {
       await client.session.update({ sessionID, title });
       this.log.info(`session renamed ${sessionID}`);
-      this.result(requestId);
+      this.result(pane, requestId);
     } catch (error) {
       this.healMissing(error, sessionID);
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -2861,11 +3054,12 @@ export class ChatController {
    * do). Logs ids only.
    */
   private async deleteSession(
+    pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'session.delete' }>,
   ): Promise<void> {
     const { requestId, sessionID } = message;
     const client = this.client;
-    if (client === undefined) return this.result(requestId, unavailable());
+    if (client === undefined) return this.result(pane, requestId, unavailable());
     try {
       const [info, active] = await Promise.all([
         client.session.get({ sessionID }),
@@ -2877,7 +3071,7 @@ export class ChatController {
       });
       if (!confirmed) {
         this.log.info(`session delete cancelled ${sessionID}`);
-        return this.result(requestId);
+        return this.result(pane, requestId);
       }
       this.deleting.add(sessionID);
       try {
@@ -2888,10 +3082,10 @@ export class ChatController {
       }
       this.log.info(`session deleted ${sessionID}`);
       this.publish([{ type: 'session.removed', sessionID }]);
-      this.result(requestId);
+      this.result(pane, requestId);
     } catch (error) {
       this.healMissing(error, sessionID);
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -2910,23 +3104,24 @@ export class ChatController {
    * result is `ServerUnavailable`. Logs ids only (the stable line `session forked <a> -> <b>`).
    */
   private async forkSession(
+    pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'session.fork' }>,
   ): Promise<void> {
     const { requestId, sessionID, messageID } = message;
     const client = this.client;
-    if (client === undefined) return this.result(requestId, unavailable());
+    if (client === undefined) return this.result(pane, requestId, unavailable());
     try {
       const info = await client.session.fork({ sessionID, before: messageID });
-      if (client !== this.client) return this.result(requestId, unavailable());
+      if (client !== this.client) return this.result(pane, requestId, unavailable());
       const row = toSessionSummary(info);
       this.translator.mirror([row]);
       this.publish([{ type: 'session.upserted', session: row }]);
       this.log.info(`session forked ${sessionID} -> ${info.id}`);
-      await this.openSession(info.id);
-      this.result(requestId);
+      await this.openSession(pane, info.id);
+      this.result(pane, requestId);
     } catch (error) {
       this.healMissing(error, sessionID);
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 
@@ -3003,11 +3198,12 @@ export class ChatController {
    * refusing an unlisted variant against a real server, macOS and Linux (UNVERIFIED).
    */
   private async sendPrompt(
+    pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'prompt.send' }>,
   ): Promise<void> {
     const { requestId } = message;
     const client = this.client;
-    if (client === undefined) return this.result(requestId, unavailable());
+    if (client === undefined) return this.result(pane, requestId, unavailable());
     // The `data:` URLs are taken NOW, before any await: an image evicted or forgotten while the
     // catalog or the session loads must not leave its raw `pasted-image:` uri for the server
     // (review-2 of 23/10/2026, S8).
@@ -3024,7 +3220,7 @@ export class ChatController {
       )
     ) {
       this.log.warn(`prompt ${requestId} rejected: an attachment was not emitted by the host`);
-      return this.result(requestId, {
+      return this.result(pane, requestId, {
         _tag: 'AttachmentRejected',
         message: 'Only files chosen in the chat can be sent',
       });
@@ -3035,9 +3231,9 @@ export class ChatController {
       let catalog: Catalog | undefined;
       if (model !== undefined || agent !== undefined) {
         catalog = await this.ensureCatalog();
-        if (client !== this.client) return this.result(requestId, unavailable());
+        if (client !== this.client) return this.result(pane, requestId, unavailable());
         if (catalog === undefined) {
-          return this.result(requestId, {
+          return this.result(pane, requestId, {
             _tag: 'CatalogUnavailable',
             message:
               'The models and agents of the server could not be read. Try again in a moment.',
@@ -3047,10 +3243,10 @@ export class ChatController {
         if (problem !== undefined) {
           this.log.warn(`prompt ${requestId} rejected: ${problem._tag}`);
           void this.loadCatalog();
-          return this.result(requestId, problem);
+          return this.result(pane, requestId, problem);
         }
       }
-      let sessionID = message.sessionID ?? this.open;
+      let sessionID = message.sessionID ?? pane.sessionID;
       if (sessionID === undefined) {
         sessionID = (
           await client.session.create({
@@ -3064,9 +3260,9 @@ export class ChatController {
             `model selected ${model.providerID}/${model.id} for ${sessionID}${variantSuffix(model)}`,
           );
         }
-        await this.openSession(sessionID);
+        await this.openSession(pane, sessionID);
       } else {
-        if (sessionID !== this.open) await this.openSession(sessionID);
+        if (sessionID !== pane.sessionID) await this.openSession(pane, sessionID);
         if (catalog !== undefined) {
           await this.applySelection(client, sessionID, model, agent);
         }
@@ -3074,7 +3270,7 @@ export class ChatController {
       // Issue #32: a prompt sent with a revert prepared makes the server COMMIT it (`session.ts`
       // @843a6c51 L164-165), without asking; the banner says so. The host forgets the revert as
       // soon as the prompt is accepted (the event does it too).
-      const committing = this.reverts.boundary(sessionID) !== undefined;
+      const committing = pane.reverts.boundary(sessionID) !== undefined;
       const admitted = await client.session.prompt({
         sessionID,
         text: message.text,
@@ -3097,11 +3293,11 @@ export class ChatController {
       });
       this.log.info(`prompt accepted for ${sessionID} (input ${admitted.id})`);
       for (const file of message.files) this.images.forget(file.uri);
-      if (committing) this.afterCommit(sessionID);
-      this.result(requestId);
+      if (committing) this.afterCommit([pane], sessionID);
+      this.result(pane, requestId);
       if (model !== undefined) await this.rememberModel(model);
     } catch (error) {
-      this.result(requestId, error);
+      this.result(pane, requestId, error);
     }
   }
 

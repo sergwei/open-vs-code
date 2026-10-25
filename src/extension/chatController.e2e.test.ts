@@ -26,12 +26,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ModelRef, Part } from '../shared/model';
-import type { HostToWebview } from '../shared/protocol';
+import type { HostToWebview, WebviewToHost } from '../shared/protocol';
 import { ChatController } from './chatController';
 import { createOpencodeClient } from './opencodeClient';
 import { startServer, stopServer, type RunningServer, type ServerLog } from './opencodeServer';
 import type { PendingSummary } from './pendingRequests';
 import type { ServerState } from './serverManager';
+import { onePane, type OnePaneController } from './test-fixtures/onePane';
 
 const FIXTURE = fileURLToPath(new URL('./test-fixtures/fake-opencode.mjs', import.meta.url));
 
@@ -44,7 +45,7 @@ const quiet: ServerLog = {
 
 const servers: RunningServer[] = [];
 const folders: string[] = [];
-const controllers: ChatController[] = [];
+const controllers: Array<{ dispose(): void }> = [];
 
 afterEach(async () => {
   // Controllers first: their reconnection loop must not outlive the server it talks to, even if
@@ -85,7 +86,7 @@ async function boot(
   const remembered: Array<string | undefined> = [];
   const attention: Array<readonly PendingSummary[]> = [];
   let lastModel: ModelRef | undefined;
-  const controller = new ChatController({
+  const core = new ChatController({
     createClient: createOpencodeClient,
     editor: {
       open: () => Promise.resolve(),
@@ -98,7 +99,6 @@ async function boot(
         Promise.resolve({ refs: [], skipped: { folders: 0, outside: 0, remote: 0, missing: 0 } }),
       openDiff: () => Promise.resolve('diff'),
     },
-    post: (message) => posted.push(message),
     log: quiet,
     memory: {
       get: () => undefined,
@@ -125,6 +125,8 @@ async function boot(
     server: { restart: () => undefined, showLogs: () => undefined },
     ui: { setChatFocused: () => undefined, focusView: () => undefined },
   });
+  // Written when the host had one webview: `onePane` keeps the calls of the cases below.
+  const controller = onePane(core, (message) => posted.push(message));
   controllers.push(controller);
   const state: ServerState = {
     kind: 'running',
@@ -138,7 +140,7 @@ async function boot(
       source: 'spawned',
     },
   };
-  return { controller, posted, remembered, state, attention };
+  return { controller, core, posted, remembered, state, attention };
 }
 
 describe('chat over HTTP and SSE against the synthetic server', () => {
@@ -874,7 +876,7 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
 
   /** Sends `text` in the open session and waits for the turn to end (`idleCount` idles so far). */
   async function turn(
-    controller: ChatController,
+    controller: OnePaneController,
     posted: HostToWebview[],
     text: string,
     idleCount: number,
@@ -1061,7 +1063,7 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
 
   /** Sends a prompt with a choice and waits for the `idleCount`-th idle. */
   async function turnWith(
-    controller: ChatController,
+    controller: OnePaneController,
     posted: HostToWebview[],
     idleCount: number,
     choice: { model?: ModelRef; agent?: string; sessionID?: string },
@@ -1675,5 +1677,59 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     expect(last?.type === 'snapshot' ? last.snapshot.open?.messages : undefined).toEqual([]);
     expect(last?.type === 'snapshot' ? last.snapshot.open?.revert : 'missing').toBeUndefined();
     expect(reverts()).toHaveLength(3);
+  }, 30_000);
+});
+
+// E9-chat-editor-tabs, phase 1 (#77): the routing between panes over the real client and the real
+// SSE loop. The server is the synthetic fixture (a second pane is the only new thing), so this
+// proves our routing against the client's own stream code, NOT that a real opencode interleaves
+// two sessions' events this way.
+describe('two panes over HTTP and SSE against the synthetic server', () => {
+  it('streams two prompts at once, each pane receiving only the content of its own session', async () => {
+    const { controller, core, posted, state } = await boot('ok');
+    const second: HostToWebview[] = [];
+    const secondPane = core.attachPane({ post: (message) => second.push(message) });
+    core.onServerState(state);
+    await waitUntil(
+      () => posted.some((m) => m.type === 'connection.state' && m.connection.state === 'connected'),
+      'connected',
+    );
+    const prompt = (requestId: string): WebviewToHost => ({
+      type: 'prompt.send',
+      requestId,
+      text: 'Reply with exactly: hello there',
+      delivery: 'queue',
+      files: [],
+    });
+    // The same requestId in both panes on purpose: each result must reach its own pane only.
+    await Promise.all([controller.handle(prompt('r1')), core.handle(secondPane.id, prompt('r1'))]);
+    const firstSession = controller.pane.sessionID ?? '';
+    const secondSession = secondPane.sessionID ?? '';
+    expect(firstSession).toMatch(/^ses_/);
+    expect(secondSession).toMatch(/^ses_/);
+    expect(firstSession).not.toBe(secondSession);
+    const idle = (feed: HostToWebview[], sessionID: string): boolean =>
+      feed.some(
+        (m) => m.type === 'session.status' && m.sessionID === sessionID && m.status.type === 'idle',
+      );
+    await waitUntil(
+      () => idle(posted, firstSession) && idle(second, secondSession),
+      'both turns to finish',
+    );
+    for (const [feed, own] of [
+      [posted, firstSession],
+      [second, secondSession],
+    ] as const) {
+      const scoped = feed.flatMap((m) =>
+        m.type === 'message.upserted' || m.type === 'part.upserted' || m.type === 'part.delta'
+          ? [m.sessionID]
+          : [],
+      );
+      expect(scoped.length).toBeGreaterThan(0);
+      expect(new Set(scoped)).toEqual(new Set([own]));
+      expect(feed.filter((m) => m.type === 'request.result')).toEqual([
+        { type: 'request.result', requestId: 'r1' },
+      ]);
+    }
   }, 30_000);
 });
