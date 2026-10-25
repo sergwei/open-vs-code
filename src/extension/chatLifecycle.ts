@@ -107,7 +107,8 @@ function parseReply(
 }
 
 /**
- * Wires the chat (issues #9/#14) into VS Code: controller, view provider, server-state
+ * Wires the chat (issues #9/#14) into VS Code: controller, view provider (attached to the
+ * controller as pane 1, the only chat surface until the editor-tab phases of #77), server-state
  * subscription, the editor actions of the chat (`editorActions.ts`, phase 2), the attention
  * feature with its internal commands (issue #19), the saved-permissions command (issue #18), the
  * native confirmation of a session delete (`sessionUi.ts`, issue #20), the model preferences of
@@ -203,10 +204,6 @@ export function registerChat(
   });
   const controller = new ChatController({
     createClient: createOpencodeClient,
-    post: (message) => {
-      view.provider.post(message);
-    },
-    webviewReady: () => view.provider.canDeliver,
     log,
     editor: createEditorActions(log),
     memory: {
@@ -247,14 +244,22 @@ export function registerChat(
       },
     },
   });
+  // The side-bar view is the only chat surface for now (E9 phase 1): pane 1. Its callbacks read
+  // `view` lazily, like the attention feature above.
+  const pane = controller.attachPane({
+    post: (message) => {
+      view.provider.post(message);
+    },
+    canDeliver: () => view.provider.canDeliver,
+  });
   const view = registerChatView(context.extensionUri, channel, {
     onReady: () => {
-      void controller.onWebviewReady().catch((error: unknown) => {
+      void controller.onPaneReady(pane.id).catch((error: unknown) => {
         log.error(`answering webview ready failed: ${String(error)}`);
       });
     },
     onMessage: (message) => {
-      void controller.handle(message).catch((error: unknown) => {
+      void controller.handle(pane.id, message).catch((error: unknown) => {
         log.error(`handling ${message.type} failed: ${String(error)}`);
       });
     },
@@ -266,7 +271,7 @@ export function registerChat(
   /** Reveals the chat (the view's generated focus command) and relays `command` to its webview. */
   const runInChat = async (command: UiCommand): Promise<void> => {
     await vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
-    controller.runUiCommand(command);
+    controller.runUiCommand(pane.id, command);
   };
 
   const disposables: vscode.Disposable[] = [
@@ -290,7 +295,7 @@ export function registerChat(
     { dispose: () => controller.dispose() },
     { dispose: () => attention.dispose() },
     vscode.commands.registerCommand(MANAGE_PERMISSIONS_COMMAND_ID, async () => {
-      await controller.handle({ type: 'permissions.manage' });
+      await controller.handle(pane.id, { type: 'permissions.manage' });
     }),
     // Issue #35.
     vscode.commands.registerCommand(OPEN_CHAT_COMMAND_ID, () => runInChat('prompt.focus')),
@@ -313,7 +318,7 @@ export function registerChat(
           .filter((item): item is vscode.Uri => item instanceof vscode.Uri)
           .map((uri) => uri.toString());
         await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
-        await controller.addToChat(uris);
+        await controller.addToChat(pane.id, uris);
       },
     ),
     vscode.commands.registerCommand(SHOW_REQUEST_COMMAND_ID, async (raw: unknown) => {
@@ -323,7 +328,7 @@ export function registerChat(
         return;
       }
       await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
-      controller.focusRequest(target);
+      controller.focusRequest(pane.id, target);
     }),
     vscode.commands.registerCommand(REPLY_PERMISSION_COMMAND_ID, async (raw: unknown) => {
       const reply = parseReply(raw);
@@ -352,7 +357,7 @@ export function registerChat(
           log.warn('injected message rejected by isWebviewToHost');
           return;
         }
-        await controller.handle(raw);
+        await controller.handle(pane.id, raw);
       }),
     );
   }

@@ -67,6 +67,7 @@ import type { EventStreamOptions } from './eventStream';
 import type { ChatApi } from './opencodeClient';
 import type { PendingSummary } from './pendingRequests';
 import type { ServerState } from './serverManager';
+import { onePane } from './test-fixtures/onePane';
 
 const SERVER = {
   url: 'http://127.0.0.1:43211',
@@ -635,8 +636,6 @@ function setup(
     },
     createClient: () => api,
     editor,
-    post: (message) => posted.push(message),
-    webviewReady: () => view.ready,
     log: {
       info: (m) => logs.push(`info: ${m}`),
       warn: (m) => logs.push(`warn: ${m}`),
@@ -696,7 +695,11 @@ function setup(
       });
     }) as ChatControllerDeps['runStream'],
   };
-  const controller = new ChatController(deps);
+  // The tests below were written when the host had one webview: `onePane` keeps their calls.
+  const controller = onePane(new ChatController(deps), {
+    post: (message) => posted.push(message),
+    canDeliver: () => view.ready,
+  });
   const snapshots = (): Snapshot[] =>
     posted.flatMap((m) => (m.type === 'snapshot' ? [m.snapshot] : []));
   return {

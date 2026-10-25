@@ -21,8 +21,8 @@
 //   - `session.usage.updated` (issue #25) carries the ACCUMULATED cost and tokens of a session and
 //     is volatile (no `durable`). A MIRRORED row becomes a `session.upserted` with the new `usage`
 //     and an untouched `updatedAt` (usage is not activity: the title generation also publishes
-//     it); a row it does not know gives `[]`. Either way the latest usage is remembered until the
-//     next `beginResync`, so `mergeUsage` can overlay it on REST rows read before it arrived.
+//     it); a row it does not know gives `[]`. Either way the latest usage is remembered (bounded),
+//     so `mergeUsage` can overlay it on the REST rows of a resync that began before it arrived.
 //     VERIFIED by the planner spike (opencode 2.0.32, Windows 11, 22/10/2026); not re-run here:
 //     the totals of `usage.updated` equal `session.get` and `session.list` after a turn
 //     (plan line "tras el turno `usage.updated` = `GET` = `list` = `{input:4951, output:4,
@@ -63,6 +63,8 @@ import {
 
 /** Assistant message as the translator tracks it. */
 type AssistantTracker = {
+  /** The session the message belongs to: seeding, pruning and merging work per session. */
+  sessionID: string;
   info: Extract<MessageInfo, { kind: 'assistant' }>;
   /** Next position in `content[]`; advances on `text.started`, `reasoning.started`, `tool.input.started`. */
   count: number;
@@ -81,8 +83,9 @@ type AssistantTracker = {
   origin: 'seed' | 'stream';
 };
 
-/** Fresh tracker for an assistant message that the stream has just announced. */
-const newTracker = (info: AssistantTracker['info']): AssistantTracker => ({
+/** Fresh tracker for an assistant message of `sessionID` that the stream has just announced. */
+const newTracker = (sessionID: string, info: AssistantTracker['info']): AssistantTracker => ({
+  sessionID,
   info,
   count: 0,
   lastText: undefined,
@@ -93,10 +96,37 @@ const newTracker = (info: AssistantTracker['info']): AssistantTracker => ({
 });
 
 /** What `enqueued` told us about a user prompt, kept until its `delivered`. */
-type PendingUser = { text: string; files: ReturnType<typeof toAttachments> };
+type PendingUser = {
+  sessionID: string;
+  text: string;
+  files: ReturnType<typeof toAttachments>;
+};
+
+/** A user message the stream delivered, with the session it belongs to. */
+type LiveUser = {
+  sessionID: string;
+  user: Extract<MessageInfo, { kind: 'user' }>;
+};
 
 /** Bound on the per-session statuses remembered between two resyncs. Our own choice. */
 const MAX_LIVE_STATUSES = 256;
+
+/**
+ * Bound on the rows the mirror of sessions may hold. It matters when `seed` only adds to the
+ * mirror (several panes: the seed of one must not forget the rows another needs) or when pages of
+ * the session list are mirrored between two seeds. Our own choice: far above the 50 newest rows of
+ * one snapshot plus the lineage of a handful of panes; the oldest inserted row is evicted first.
+ */
+const MAX_MIRROR_ROWS = 1000;
+
+/**
+ * Opaque stamp of one resync, given by {@link EventTranslator.beginResync}: the statuses and totals
+ * the stream produced AFTER it. Two overlapping resyncs each keep their own stamp, so the second
+ * one starting cannot erase what the first still has to overlay (R2 of the E9 plan).
+ */
+export interface ResyncToken {
+  readonly since: number;
+}
 
 /**
  * Copies into `target` the longer text of each `text`/`reasoning` block of `source`, block by
@@ -136,17 +166,30 @@ const MAX_PENDING_INBOX = 64;
 /** What {@link EventTranslator.seed} needs from the REST snapshot. */
 export interface TranslatorSeed {
   sessions: SessionSummary[];
-  /** Messages of the OPEN session as REST returned them (any order). */
+  /** Messages of the session `sessionID` as REST returned them (any order). */
   messages: SessionMessageInfo[];
+  /**
+   * The session `messages` belong to. Optional only for the single-session callers: absent means
+   * "the one tracked session", or none when zero or several are tracked.
+   */
+  sessionID?: string | undefined;
+  /**
+   * True when the mirror must only be added to. Default (false): it is replaced by `sessions`,
+   * which is what bounds its size when one surface is served.
+   */
+  merge?: boolean | undefined;
 }
 
 /** The translator returned by {@link createEventTranslator}. */
 export interface EventTranslator {
   /**
-   * Replaces the mirror of sessions and MERGES the REST messages of the open session into what the
+   * Replaces the mirror of sessions and MERGES the REST messages of one session into what the
    * stream already built (emptying it lost everything that arrived between the REST reads and
-   * this call: review BLOCKER, 20/10/2026). Contract:
-   *  - Records `restNewest`, the newest `time.created` among the messages passed.
+   * this call: review BLOCKER, 20/10/2026). The mirror is replaced as always, or only added to
+   * when `merge` is set (the seed of one pane must not forget the rows of another). Everything
+   * below concerns the session of the seed
+   * (`TranslatorSeed.sessionID`) and never touches the trackers of another one. Contract:
+   *  - Records `restNewest` of that session, the newest `time.created` among the messages passed.
    *  - For each REST assistant message: if the stream's tracker has MORE blocks it is kept; if it
    *    has the same number, REST's tracker wins but keeps the longer text of each `text` and
    *    `reasoning` block; otherwise REST's wins.
@@ -180,40 +223,47 @@ export interface EventTranslator {
    */
   mergeLive(open: OpenSession): OpenSession;
   /**
-   * Marks the start of a resync: forgets the statuses and the usage remembered so far. Call it
-   * BEFORE the REST reads, so {@link EventTranslator.mergeStatuses} and
-   * {@link EventTranslator.mergeUsage} only hold what the stream said since then.
+   * Marks the start of a resync and returns its stamp. Call it BEFORE the REST reads and hand the
+   * stamp to {@link EventTranslator.mergeStatuses} and {@link EventTranslator.mergeUsage}, which
+   * then overlay only what the stream said after THAT stamp. Nothing is forgotten here: a second
+   * resync starting while the first is still reading used to wipe the overlays the first one
+   * needed, and the first then published a stale `busy` (Send blocked) or older totals (R2 of the
+   * E9 plan). What the stream said stays remembered, bounded, until newer entries evict it.
    */
-  beginResync(): void;
+  beginResync(): ResyncToken;
   /**
    * Returns `rows` with the `usage` of each session replaced by the latest `session.usage.updated`
-   * the stream delivered since `beginResync`, for the rows it saw. The REST rows were read before
-   * publication and the totals only grow, so a newer streamed value must win (rule "the snapshot is
-   * a photo" of opencode-api §4). Rows it did not see, and every other field, come back untouched;
-   * returns `rows` itself when the stream said nothing.
+   * the stream delivered after `token` (default: the newest stamp), for the rows it saw. The REST
+   * rows were read before publication and the totals only grow, so a newer streamed value must
+   * win (rule "the snapshot is a photo" of opencode-api §4). Rows it did not see, and every other
+   * field, come back untouched; returns `rows` itself when the stream said nothing since.
    */
-  mergeUsage(rows: SessionSummary[]): SessionSummary[];
+  mergeUsage(rows: SessionSummary[], token?: ResyncToken): SessionSummary[];
   /**
    * Overlays on `statuses` (read from REST, possibly before the stream moved on) the latest status
-   * the stream derived from `session.execution.*` / `retry.scheduled` since `beginResync`.
-   * Without it a `succeeded` that arrives during the reads is overwritten by a stale `busy`, and
-   * the UI would keep "Working…" with Send disabled.
+   * the stream derived from `session.execution.*` / `retry.scheduled` after `token` (default: the
+   * newest stamp). Without it a `succeeded` that arrives during the reads is overwritten by a
+   * stale `busy`, and the UI would keep "Working…" with Send disabled.
    */
-  mergeStatuses(statuses: Snapshot['statuses']): Snapshot['statuses'];
+  mergeStatuses(statuses: Snapshot['statuses'], token?: ResyncToken): Snapshot['statuses'];
   /**
    * Forgets the live user and assistant messages whose id is `messageID` or later (issue #32): a
    * committed revert deleted them on the server, and `mergeLive` would otherwise bring them back
    * as "in flight" (they are newer than whatever REST still lists). Ids ascend, so "later" is a
    * string comparison (`schema/src/session-message.ts` @843a6c51 L27, read). Call it when the
    * `committed` event arrives, BEFORE the messages of the prompt that may follow it. Does not touch
-   * the inbox payloads that were not delivered yet.
+   * the inbox payloads that were not delivered yet. With `sessionID` only that session's messages
+   * go: ids of two sessions interleave, so a boundary of one must not erase the other's.
    */
-  forgetFrom(messageID: string): void;
+  forgetFrom(messageID: string, sessionID?: string): void;
   /**
-   * Changes the session whose messages and parts are forwarded, and clears message state.
-   * Permissions and forms are NOT tied to it: they are forwarded for every session (phase 3), and
-   * the snapshot carries them at `Snapshot.requests`, outside `OpenSession`.
+   * Sets the sessions whose messages and parts are forwarded (one per chat surface) and clears the
+   * message state of the ones that stopped being tracked; state of a session that stays tracked is
+   * kept. Permissions and forms are NOT tied to it: they are forwarded for every session (phase
+   * 3), and the snapshot carries them at `Snapshot.requests`, outside `OpenSession`.
    */
+  setTracked(sessionIDs: readonly string[]): void;
+  /** Single-session shorthand of {@link EventTranslator.setTracked}: tracks `sessionID`, or nothing. */
   setOpen(sessionID: string | undefined): void;
   /**
    * Translates one event into zero or more protocol messages, in order. Never throws on unknown
@@ -246,27 +296,52 @@ export interface EventTranslator {
  * `eventTranslator.test.ts` with hand-built events (numbers copied from the planner's spike); that
  * the real server sends the event is covered only by the opt-in `realOpencode.test.ts` (its
  * "streams a real prompt to the end" asserts the log line `usage updated for ses_…`).
+ * E9-chat-editor-tabs phase 1 (#77) made it multi-session: `setTracked` follows one session per
+ * chat surface, the message state is kept per session, and `beginResync` hands out a stamp
+ * instead of clearing what the stream said (see {@link ResyncToken}). VERIFIED by the
+ * `eventTranslator.multiSession.test.ts` checks "give each its own parts and deltas, addressed to
+ * its own session" and "keeps the idle that arrived after the first resync began although a
+ * second one began later" (fabricated events, Windows 11, 25/10/2026); not observed with a real
+ * server interleaving two sessions.
  */
 export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslator {
   const sessions = new Map<string, SessionSummary>();
   const assistants = new Map<string, AssistantTracker>();
   const pendingUsers = new Map<string, PendingUser>();
   /** User messages the stream delivered, kept (bounded) so `mergeLive` can restore them. */
-  const liveUsers = new Map<string, Extract<MessageInfo, { kind: 'user' }>>();
-  /** Latest status the stream derived per session since `beginResync`, to override a stale snapshot. */
-  const liveStatuses = new Map<string, SessionStatus>();
+  const liveUsers = new Map<string, LiveUser>();
+  /** Counts every status and usage entry written, so a resync stamp is a position in that order. */
+  let sequence = 0;
+  /** The stamp of the newest `beginResync`; the default of the merges. */
+  let lastResync: ResyncToken = { since: 0 };
   /**
-   * Latest accumulated usage the stream gave per session since `beginResync` (bounded like
-   * `liveStatuses`), to override a stale REST row. Remembered even for sessions not mirrored.
+   * Latest status the stream derived per session, with the position it was written at; a resync
+   * overlays the ones written after its stamp, to override a stale snapshot. Bounded by eviction.
    */
-  const liveUsage = new Map<string, SessionUsage>();
-  /** `time.created` of the newest message of the last REST read, `undefined` when it was empty. */
-  let restNewest: number | undefined;
-  let open: string | undefined;
+  const liveStatuses = new Map<string, { status: SessionStatus; at: number }>();
+  /**
+   * Latest accumulated usage the stream gave per session (bounded like `liveStatuses`), to
+   * override a stale REST row. Remembered even for sessions not mirrored.
+   */
+  const liveUsage = new Map<string, { usage: SessionUsage; at: number }>();
+  /** `time.created` of the newest message of the last REST read of each session, by session. */
+  const restNewest = new Map<string, number | undefined>();
+  /** The sessions whose messages are forwarded (one per chat surface). */
+  let tracked = new Set<string>();
 
-  /** The tracker of an assistant message of the open session, if we know it. */
+  /** The tracker of an assistant message of a tracked session, if we know it. */
   const assistantOf = (sessionID: string, messageID: string): AssistantTracker | undefined =>
-    sessionID === open ? assistants.get(messageID) : undefined;
+    tracked.has(sessionID) ? assistants.get(messageID) : undefined;
+
+  /** Adds to the mirror of sessions, evicting the oldest row beyond {@link MAX_MIRROR_ROWS}. */
+  const mirrorRow = (row: SessionSummary): void => {
+    sessions.delete(row.id);
+    sessions.set(row.id, row);
+    if (sessions.size > MAX_MIRROR_ROWS) {
+      const oldest = sessions.keys().next();
+      if (!oldest.done) sessions.delete(oldest.value);
+    }
+  };
 
   const status = (sessionID: string, value: SessionStatus): HostToWebview[] => {
     if (liveStatuses.size >= MAX_LIVE_STATUSES) {
@@ -274,7 +349,7 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
       if (!oldest.done) liveStatuses.delete(oldest.value);
     }
     liveStatuses.delete(sessionID); // re-insert at the end so the oldest is evicted first
-    liveStatuses.set(sessionID, value);
+    liveStatuses.set(sessionID, { status: value, at: ++sequence });
     return [{ type: 'session.status', sessionID, status: value }];
   };
 
@@ -292,11 +367,15 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
   });
 
   /** Builds the tracker of one REST assistant message (counters and open blocks come from `content[]`). */
-  const trackerFromMessage = (info: SessionMessageInfo): AssistantTracker | undefined => {
+  const trackerFromMessage = (
+    sessionID: string,
+    info: SessionMessageInfo,
+  ): AssistantTracker | undefined => {
     if (info.type !== 'assistant') return undefined;
     const mapped = toAssistantMessage(info, secrets);
     if (mapped.message.kind !== 'assistant') return undefined;
     const tracker: AssistantTracker = {
+      sessionID,
       info: mapped.message,
       count: mapped.parts.length,
       lastText: undefined,
@@ -333,34 +412,44 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
 
   return {
     beginResync() {
-      liveStatuses.clear();
-      liveUsage.clear();
+      lastResync = { since: sequence };
+      return lastResync;
     },
 
-    mergeUsage(rows) {
-      if (liveUsage.size === 0) return rows;
+    mergeUsage(rows, token = lastResync) {
+      if (![...liveUsage.values()].some((entry) => entry.at > token.since)) return rows;
       return rows.map((row) => {
-        const usage = liveUsage.get(row.id);
-        return usage === undefined ? row : { ...row, usage };
+        const entry = liveUsage.get(row.id);
+        return entry === undefined || entry.at <= token.since
+          ? row
+          : { ...row, usage: entry.usage };
       });
     },
 
-    mergeStatuses(statuses) {
-      if (liveStatuses.size === 0) return statuses;
-      return { ...statuses, ...Object.fromEntries(liveStatuses) };
+    mergeStatuses(statuses, token = lastResync) {
+      const newer = [...liveStatuses].filter(([, entry]) => entry.at > token.since);
+      if (newer.length === 0) return statuses;
+      return {
+        ...statuses,
+        ...Object.fromEntries(newer.map(([id, entry]) => [id, entry.status])),
+      };
     },
 
-    seed({ sessions: rows, messages }) {
-      sessions.clear();
-      for (const row of rows) sessions.set(row.id, row);
+    seed({ sessions: rows, messages, sessionID: given, merge }) {
+      // The mirror is replaced, as it always was, unless the caller serves several panes: then the
+      // seed of one only adds, or it would forget the lineage rows another pane shows.
+      if (merge !== true) sessions.clear();
+      for (const row of rows) mirrorRow(row);
+      const sessionID = given ?? (tracked.size === 1 ? [...tracked][0] : undefined) ?? '';
       const listed = new Set(messages.map((message) => message.id));
-      restNewest = messages.reduce<number | undefined>(
+      const newestRest = messages.reduce<number | undefined>(
         (max, message) =>
           max === undefined ? message.time.created : Math.max(max, message.time.created),
         undefined,
       );
+      restNewest.set(sessionID, newestRest);
       for (const message of messages) {
-        const fromRest = trackerFromMessage(message);
+        const fromRest = trackerFromMessage(sessionID, message);
         if (fromRest === undefined) continue;
         // Keep the stream's tracker when it already has MORE blocks than REST had when it was
         // read; with the same number, REST wins but keeps the longer text of each block (the
@@ -374,22 +463,23 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
       // `mergeLive` must not bring it back at the end of the chat, and the maps stay bounded.
       // A tracker that came from a previous seed is dropped whatever its date, because REST
       // itself once listed it; one born in the stream is only dropped when it is OLDER than
-      // REST's newest message, since a newer one is a message in flight REST has not seen.
+      // REST's newest message, since a newer one is a message in flight REST has not seen. Only
+      // the seeded session's own trackers are pruned: another session's are not REST's to judge.
       for (const [id, tracker] of assistants) {
-        if (listed.has(id)) continue;
-        const older = restNewest !== undefined && tracker.info.createdAt < restNewest;
+        if (tracker.sessionID !== sessionID || listed.has(id)) continue;
+        const older = newestRest !== undefined && tracker.info.createdAt < newestRest;
         if (tracker.origin === 'seed' || older) assistants.delete(id);
       }
-      if (restNewest !== undefined) {
-        const newest = restNewest;
-        for (const [id, user] of liveUsers) {
-          if (listed.has(id) || user.createdAt < newest) liveUsers.delete(id);
+      if (newestRest !== undefined) {
+        for (const [id, live] of liveUsers) {
+          if (live.sessionID !== sessionID) continue;
+          if (listed.has(id) || live.user.createdAt < newestRest) liveUsers.delete(id);
         }
       }
     },
 
     mirror(rows) {
-      for (const row of rows) sessions.set(row.id, row);
+      for (const row of rows) mirrorRow(row);
     },
 
     mergeLive(snapshot) {
@@ -397,15 +487,18 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
       const extraMessages: MessageInfo[] = [];
       const parts = { ...snapshot.parts };
       let changed = false;
+      const newestRest = restNewest.get(snapshot.sessionID);
       /** True when the item is newer than the newest message REST returned (so, in flight). */
       const isNewer = (createdAt: number): boolean =>
-        restNewest === undefined || createdAt >= restNewest;
-      for (const user of liveUsers.values()) {
+        newestRest === undefined || createdAt >= newestRest;
+      for (const { sessionID, user } of liveUsers.values()) {
+        if (sessionID !== snapshot.sessionID) continue;
         if (known.has(user.id) || !isNewer(user.createdAt)) continue;
         extraMessages.push(user);
         changed = true;
       }
       for (const tracker of assistants.values()) {
+        if (tracker.sessionID !== snapshot.sessionID) continue;
         const id = tracker.info.id;
         if (!known.has(id)) {
           if (!isNewer(tracker.info.createdAt)) continue;
@@ -422,17 +515,36 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
       return { ...snapshot, messages: [...snapshot.messages, ...extraMessages], parts };
     },
 
-    forgetFrom(messageID) {
-      for (const id of [...assistants.keys()]) if (id >= messageID) assistants.delete(id);
-      for (const id of [...liveUsers.keys()]) if (id >= messageID) liveUsers.delete(id);
+    forgetFrom(messageID, sessionID) {
+      for (const [id, tracker] of [...assistants]) {
+        if (id >= messageID && (sessionID === undefined || tracker.sessionID === sessionID)) {
+          assistants.delete(id);
+        }
+      }
+      for (const [id, live] of [...liveUsers]) {
+        if (id >= messageID && (sessionID === undefined || live.sessionID === sessionID)) {
+          liveUsers.delete(id);
+        }
+      }
+    },
+
+    setTracked(sessionIDs) {
+      const next = new Set(sessionIDs);
+      for (const [id, tracker] of [...assistants]) {
+        if (!next.has(tracker.sessionID)) assistants.delete(id);
+      }
+      for (const [id, pending] of [...pendingUsers]) {
+        if (!next.has(pending.sessionID)) pendingUsers.delete(id);
+      }
+      for (const [id, live] of [...liveUsers]) {
+        if (!next.has(live.sessionID)) liveUsers.delete(id);
+      }
+      for (const id of [...restNewest.keys()]) if (!next.has(id)) restNewest.delete(id);
+      tracked = next;
     },
 
     setOpen(sessionID) {
-      if (sessionID === open) return;
-      open = sessionID;
-      assistants.clear();
-      pendingUsers.clear();
-      liveUsers.clear();
+      this.setTracked(sessionID === undefined ? [] : [sessionID]);
     },
 
     translate(event) {
@@ -492,7 +604,7 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
             if (!oldest.done) liveUsage.delete(oldest.value);
           }
           liveUsage.delete(data.sessionID); // re-insert at the end so the oldest is evicted first
-          liveUsage.set(data.sessionID, usage);
+          liveUsage.set(data.sessionID, { usage, at: ++sequence });
           const row = sessions.get(data.sessionID);
           if (row === undefined) return []; // not mirrored: a snapshot will bring the full row
           const next: SessionSummary = { ...row, usage };
@@ -523,12 +635,13 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
 
         case 'session.inbox.enqueued': {
           const { data } = event;
-          if (data.sessionID !== open || data.item.type !== 'user') return [];
+          if (!tracked.has(data.sessionID) || data.item.type !== 'user') return [];
           if (pendingUsers.size >= MAX_PENDING_INBOX) {
             const oldest = pendingUsers.keys().next();
             if (!oldest.done) pendingUsers.delete(oldest.value);
           }
           pendingUsers.set(data.inboxID, {
+            sessionID: data.sessionID,
             text: data.item.payload.text,
             files: toAttachments(data.item.payload.files),
           });
@@ -537,7 +650,7 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
         case 'session.inbox.delivered': {
           const { data } = event;
           const pending = pendingUsers.get(data.inboxID);
-          if (data.sessionID !== open || pending === undefined) return [];
+          if (!tracked.has(data.sessionID) || pending === undefined) return [];
           pendingUsers.delete(data.inboxID);
           const user: Extract<MessageInfo, { kind: 'user' }> = {
             kind: 'user',
@@ -550,13 +663,13 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
             const oldest = liveUsers.keys().next();
             if (!oldest.done) liveUsers.delete(oldest.value);
           }
-          liveUsers.set(user.id, user);
+          liveUsers.set(user.id, { sessionID: data.sessionID, user });
           return [upsertMessage(data.sessionID, user)];
         }
 
         case 'session.step.started': {
           const { data } = event;
-          if (data.sessionID !== open) return [];
+          if (!tracked.has(data.sessionID)) return [];
           const info: AssistantTracker['info'] = {
             kind: 'assistant',
             id: data.assistantMessageID,
@@ -566,7 +679,7 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
           };
           const existing = assistants.get(info.id);
           if (existing === undefined) {
-            assistants.set(info.id, newTracker(info));
+            assistants.set(info.id, newTracker(data.sessionID, info));
           } else {
             existing.info = { ...existing.info, ...info };
           }
