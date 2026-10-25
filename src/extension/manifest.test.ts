@@ -166,14 +166,18 @@ describe('@types/vscode versus engines.vscode', () => {
 
 /**
  * Protects the contributed settings (issue #38) from drifting between `ids.ts`, the manifest and
- * the descriptions the Settings editor renders. Each test defends against one regression:
+ * the descriptions the Settings editor renders. Six tests, each defending against one regression:
  * renaming a setting on one side only (the constant and the manifest disagree and nothing fails
  * at runtime); a setting without type, default, explicit scope or description; two settings
- * sharing an `order` (the editor then picks the order itself); a `#id#` link to a setting that
- * does not exist (the editor paints it as plain text); and a `**OpenCode: X**` command quoted in
- * a description that was renamed or removed (issue #35 may rename commands).
+ * sharing an `order` (the editor then picks the order itself); a `#id#` link written without
+ * both backticks (`` `#id#` ``; bare, the editor showed the literal text, see the note on that
+ * test); a `` `#id#` `` link to a setting that does not exist (HYPOTHESIS: the editor would not
+ * paint a working link; never rendered, it would take a broken id in a `test:visual` run); and a
+ * `**OpenCode: X**` command quoted in a description that was renamed or removed (issue #35 may
+ * rename commands).
  * The data is the REAL package.json, not a fabricated fixture. How the Settings editor RENDERS
- * the descriptions is not covered here: that is `test:visual` step 21.
+ * the descriptions is not covered here: that is `test:visual` step 21, which sees only the good
+ * backtick form.
  */
 describe('contributes.configuration', () => {
   const properties = manifest.contributes.configuration.properties;
@@ -203,13 +207,15 @@ describe('contributes.configuration', () => {
     expect(new Set(orders).size).toBe(orders.length);
   });
 
-  // The Settings editor links `#id#` only when it is wrapped in backticks (VS Code 1.143.1,
-  // `test:visual` step 21: the bare form was painted as the literal text, 0 links).
+  // VERIFIED once by hand over CDP (VS Code 1.143.1, Windows 11, 2026-10-25), not a check of
+  // `test:visual`: with the bare form the Settings editor showed the literal text and 0 links.
+  // Step 21 only checks the backtick form ("the #id# link of the first setting is painted as a
+  // link"). A link with a single backtick is also rejected: both backticks or none.
   it('writes every #id# link between backticks', () => {
     const bare = entries.flatMap(([id, s]) =>
-      [...(s.markdownDescription ?? '').matchAll(/(?<!`)#[\w.]+#(?!`)/g)].map(
-        (m) => `${id}: ${m[0]}`,
-      ),
+      [...(s.markdownDescription ?? '').matchAll(/`?#[\w.]+#`?/g)]
+        .filter((m) => !(m[0].startsWith('`') && m[0].endsWith('`')))
+        .map((m) => `${id}: ${m[0]}`),
     );
     expect(bare).toEqual([]);
   });
