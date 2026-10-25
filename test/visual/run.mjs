@@ -4545,20 +4545,19 @@ try {
    *
    * Protects against: `order` ignored by the editor; a label that changes ("Open Vs Code: …" is
    * what VS Code derives from the extension name, and the plan hoped for no prefix); a `#id#`
-   * link painted as plain text; a description that lost its Markdown. Reads the editor's own DOM
-   * (`.settings-editor`, `.setting-item`, `.setting-item-label`, `.setting-item-category`,
+   * link that is not painted as a link; a description that lost its Markdown. Reads the editor's
+   * own DOM (`.settings-editor`, `.setting-item`, `.setting-item-label`, `.setting-item-category`,
    * `.setting-item-description`), which is internal to VS Code and may move in another version:
    * when a selector finds nothing, the check says how many rows it found instead of timing out
    * silently. The expected first sentences are copied from `package.json`; the labels are the
    * ones VS Code really showed, and each one is printed in its own line.
    *
-   * What was seen (VS Code 1.143.1, Windows 11, 2026-10-25): with one category (`title`
-   * "OpenCode") the labels carry the prefix, "Open Vs Code: Opencode Path", "Open Vs Code: Server
-   * Url", "Open Vs Code: Default Model". Adding an `id` to the category (`"openVsCode"`) did NOT
-   * change them, so it was not kept. A `#id#` is painted as a link ONLY between backticks
-   * (`` `#openVsCode.serverUrl#` ``); bare, the editor showed the literal text and 0 links. The
-   * link text is the target's label ("Open Vs Code: Server Url"), and a real mouse click on it
-   * focuses that setting.
+   * What was seen, VERIFIED once by hand in throwaway experiments over CDP (VS Code 1.143.1,
+   * Windows 11, 2026-10-25), NOT checks of this step and no longer reproducible from the repo:
+   * adding an `id` to the category (`"openVsCode"`) did NOT change the labels, so it was not
+   * kept; a bare `#id#` (no backticks) showed as the literal text with 0 links. What this step
+   * does check is the backtick form (`` `#openVsCode.serverUrl#` ``): its link text is the
+   * target's label ("Open Vs Code: Server Url") and a real mouse click on it focuses that setting.
    * VERIFIED in `npm run test:visual` on Windows 11, VS Code 1.143.1 (2026-10-25): the checks
    * "the Settings editor lists exactly 3 settings for the extension (3; selector
    * .settings-editor .setting-item)", "the #id# link of the first setting is painted as a link
@@ -4633,17 +4632,21 @@ try {
       const target = page.locator('.settings-editor .setting-item-description a').first();
       const box = await target.boundingBox({ timeout: 5_000 }).catch(() => null);
       if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-      await sleep(1_000);
-      const focused = await page.evaluate(() => {
-        const active = globalThis.document.activeElement?.closest('.setting-item');
-        const marked = globalThis.document.querySelector('.settings-editor .setting-item.focused');
-        const row = active ?? marked;
-        return row?.querySelector('.setting-item-label')?.textContent?.trim() ?? '';
-      });
-      check(
-        focused === (rows[1]?.label ?? '?'),
-        `clicking the link focuses the second setting ("${focused}")`,
-      );
+      // Waits for the condition (focus inside the second row), not a fixed time; if the click did
+      // nothing the focus stays in row 1 and the read after the deadline fails the check below.
+      // Only `activeElement` is read: a `.setting-item.focused` class was never seen to exist.
+      const readFocused = () =>
+        page.evaluate(() => {
+          const row = globalThis.document.activeElement?.closest('.setting-item');
+          return row?.querySelector('.setting-item-label')?.textContent?.trim() ?? '';
+        });
+      const secondLabel = rows[1]?.label ?? '?';
+      const focused =
+        (await waitFor(
+          async () => ((await readFocused()) === secondLabel ? secondLabel : undefined),
+          5_000,
+        )) ?? (await readFocused());
+      check(focused === secondLabel, `clicking the link focuses the second setting ("${focused}")`);
       await shot('21b-settings-link');
     }
     await page.keyboard.press('Control+W');

@@ -330,15 +330,17 @@ describe('external server', function () {
       vscode.workspace.fs.delete(vscodeDir, { recursive: true, useTrash: false });
 
     await removeVscodeDir().then(undefined, () => undefined);
-    await assert.rejects(
-      Promise.resolve(
-        config().update(SERVER_URL_KEY, probeUrl, vscode.ConfigurationTarget.Workspace),
-      ),
-      'writing a machine-scoped setting in the Workspace scope should be refused',
-    );
     const before = config().get<string>(SERVER_URL_KEY);
     log.mark();
     try {
+      // Inside the try: if the scope regresses the write SUCCEEDS and creates the file, and the
+      // `finally` must remove it from the workspace shared through os.tmpdir().
+      await assert.rejects(
+        Promise.resolve(
+          config().update(SERVER_URL_KEY, probeUrl, vscode.ConfigurationTarget.Workspace),
+        ),
+        'writing a machine-scoped setting in the Workspace scope should be refused',
+      );
       await vscode.workspace.fs.createDirectory(vscodeDir);
       const content = JSON.stringify({
         [`${CONFIG_SECTION}.${SERVER_URL_KEY}`]: probeUrl,
