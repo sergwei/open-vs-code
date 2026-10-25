@@ -4653,6 +4653,153 @@ try {
     await sleep(500);
   };
   await step('21 settings UI (issue #38)', settingsUi);
+  // Step 22 (issue #35): the palette commands and the two default keys, with the REAL keyboard in a
+  // real VS Code. Keys: Ctrl+Alt+P (Cmd+Alt+P on macOS) Focus Prompt, toggling back to the editor
+  // when the chat has the focus; Ctrl+Alt+N New Session, bound only while the chat has the focus.
+  // Stop Response runs from the palette. HYPOTHESES this step settles: that a keydown with the
+  // focus INSIDE the iframe reaches the workbench keybinding service, that the context key
+  // `openVsCode.chatFocused` follows the webview's focus/blur, and that hiding the chat with Ctrl+B
+  // while it holds the focus leaves the key false (a mutation without the reset must fail it).
+  // Windows only for the key presses (`Control+Alt`): Playwright's AltGr handling
+  // on other systems is not modelled here.
+  await step('22 palette commands and keyboard shortcuts (issue #35)', async () => {
+    const modifier = process.platform === 'darwin' ? 'Meta+Alt' : 'Control+Alt';
+    const promptState = () =>
+      web.inDoc((doc) => {
+        const field = doc.querySelector('textarea.prompt-text');
+        return {
+          active: field !== null && doc.activeElement === field,
+          focused: field !== null && doc.activeElement === field && doc.hasFocus(),
+          value: field?.value ?? '',
+          messages: doc.querySelectorAll('[role="log"] > *').length,
+          live:
+            doc
+              .querySelector('.status-bar .visually-hidden[aria-live="polite"]')
+              ?.textContent?.trim() ?? '',
+          stopNotes: doc.querySelectorAll('.stopped-note').length,
+        };
+      });
+    const editorHasFocus = () =>
+      page.evaluate(() => globalThis.document.activeElement?.closest('.monaco-editor') != null);
+    const sessionCount = () =>
+      JSON.parse(fs.readFileSync(vscode.stateFile, 'utf8')).sessions?.length ?? 0;
+
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    // Focus in a text editor: quick open the sample file.
+    await page.keyboard.press('ControlOrMeta+p');
+    await sleep(500);
+    await page.keyboard.type('src/sample.ts');
+    await sleep(700);
+    await page.keyboard.press('Enter');
+    await sleep(1200);
+    check((await editorHasFocus()) === true, 'the focus is in the text editor (src/sample.ts)');
+
+    // --- Focus Prompt from the editor, then the toggle back ------------------------------------
+    await page.keyboard.press(`${modifier}+p`);
+    const focusedChat = await waitFor(async () => (await promptState()).focused, 8_000, 250);
+    check(focusedChat === true, `${modifier}+P from the editor puts the caret in the prompt box`);
+    await shot('22a-focus-prompt');
+    await sleep(600);
+    await page.keyboard.press(`${modifier}+p`);
+    const backInEditor = await waitFor(editorHasFocus, 8_000, 250);
+    check(backInEditor === true, `${modifier}+P again returns the focus to the editor`);
+    check((await promptState()).focused === false, 'and the prompt box no longer has the focus');
+
+    // --- Hide the chat WHILE IT HOLDS THE FOCUS, then Focus Prompt must show it again -----------
+    // The `blur` of a hidden element does not always fire, so the reset of `chatFocused` in
+    // `onVisibilityChange(false)` is the only thing that stops a stale `true` from turning the
+    // next Focus Prompt into "go back to the editor". The press must therefore start inside the
+    // chat; the editor is clicked afterwards only so the key's `editorTextFocus` is true.
+    await page.keyboard.press(`${modifier}+p`);
+    const inChatAgain = await waitFor(async () => (await promptState()).focused, 8_000, 250);
+    check(inChatAgain === true, `${modifier}+P brings the focus back into the chat`);
+    await page.keyboard.press('Control+b');
+    await sleep(800);
+    await page.locator('.monaco-editor .view-lines').first().click();
+    await sleep(300);
+    await page.keyboard.press(`${modifier}+p`);
+    await sleep(1500);
+    await openChat();
+    const reopened = await waitFor(async () => (await promptState()).active, 10_000, 300);
+    check(
+      reopened === true,
+      'after Ctrl+B hid the chat while it had the focus, Focus Prompt shows it and the prompt box is the active element of the new document (the context key was reset)',
+    );
+    // `doc.hasFocus()` is false in this new document although the workbench holds focus on its iframe
+    // (seen in this step), so the proof is the real keyboard: a typed letter must land in the box.
+    await page.keyboard.type('q');
+    await sleep(300);
+    check(
+      (await promptState()).value === 'q',
+      'and a real keystroke typed right after lands in the prompt box',
+    );
+    await page.keyboard.press('Backspace');
+    await shot('22b-focus-after-hide');
+
+    // --- New Session by key, only with the chat focused: the draft stays, nothing is created ----
+    await page.keyboard.type('half written draft');
+    const sessionsBefore = sessionCount();
+    const beforeNew = await promptState();
+    check(
+      beforeNew.messages > 0,
+      `the view has messages before ${modifier}+N is pressed (${beforeNew.messages})`,
+    );
+    await page.keyboard.press(`${modifier}+n`);
+    await sleep(1500);
+    const afterNew = await promptState();
+    check(afterNew.messages === 0, `${modifier}+N leaves the empty view (${afterNew.messages})`);
+    check(
+      afterNew.value === 'half written draft' && afterNew.focused,
+      `the draft is kept and the prompt keeps the focus (${JSON.stringify(afterNew.value)})`,
+    );
+    check(
+      sessionCount() === sessionsBefore,
+      `and no session was created (${String(sessionsBefore)} before and after)`,
+    );
+    await shot('22c-new-session');
+
+    // --- Stop Response from the palette while a turn runs --------------------------------------
+    await send('Count from 1 to 400, one number per line. Do not use tools. LONG');
+    check((await waitFor(isBusy, 30_000, 300)) === true, 'a LONG turn is running');
+    await page.keyboard.press(`${modifier}+p`); // focus to the editor, so Stop acts from outside
+    await sleep(600);
+    await command('OpenCode: Stop Response');
+    check(await waitIdle(30_000), 'Stop Response interrupts the turn');
+    const stopped = await promptState();
+    check(stopped.stopNotes >= 1, 'a neutral "Stopped" note is in the conversation');
+    check(stopped.live === 'Stopped', `the live region says "Stopped" (${stopped.live})`);
+    await shot('22d-stop-response');
+
+    // --- Stop Response with nothing running: the notice, readable in the four themes -----------
+    const THEMES = [
+      ['light', 'Default Light Modern'],
+      ['dark', 'Default Dark Modern'],
+      ['hc-dark', 'Default High Contrast'],
+      ['hc-light', 'Default High Contrast Light'],
+    ];
+    for (const [name, theme] of THEMES) {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+      await command('OpenCode: Stop Response');
+      const shown = await waitFor(
+        async () =>
+          (await web.inDoc((doc) => doc.body.innerText.includes('No response is running'))) ===
+          true,
+        8_000,
+        300,
+      );
+      check(shown === true, `Stop Response with no turn says "No response is running" in ${name}`);
+      const look = await web.inDoc(measureText, { notice: '.status-bar .alert .alert-text' });
+      check(
+        look.notice !== null && look.notice !== undefined && look.notice.ratio >= 4.5,
+        `the notice has contrast >= 4.5 in ${name} (${look.notice ? look.notice.ratio.toFixed(2) : 'not found'})`,
+      );
+      await shot(`22e-nothing-to-stop-${name}`);
+    }
+    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
+    await page.waitForTimeout(1500);
+    assertNoWebviewErrors('palette commands and shortcuts');
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
