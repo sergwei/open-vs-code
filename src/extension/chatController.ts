@@ -89,6 +89,7 @@ import {
   type PromptMention,
   type Sender,
   type Snapshot,
+  type UiCommand,
   type WebviewToHost,
 } from '../shared/protocol';
 import { createEventTranslator, type EventTranslator } from './eventTranslator';
@@ -175,6 +176,19 @@ export interface ServerCommands {
   restart(): void;
   /** Shows the OpenCode output channel. */
   showLogs(): void;
+}
+
+/** What the controller tells the VS Code side about the chat's keyboard focus (issue #35). */
+export interface ChatUi {
+  /** The webview gained (`true`) or lost (`false`) the keyboard focus; mirrored into a context key. */
+  setChatFocused(focused: boolean): void;
+  /**
+   * Hands the keyboard to the chat view's iframe again. Asked after a `ui.command` that had to wait
+   * for a new document. HYPOTHESIS (see `registerChat`): the focus given while the document was
+   * loading went nowhere. Seen once in a `test:visual` step 22 run without this call (the new
+   * document had `hasFocus()` false); not a check, and its necessity was not proven.
+   */
+  focusView(): void;
 }
 
 /** Where `ui.focus` points: a pending request of any session. */
@@ -289,6 +303,7 @@ export interface ChatControllerDeps {
   };
   preferences: ModelPreferences;
   server: ServerCommands;
+  ui: ChatUi;
   /** The SSE loop; replaced in tests. */
   runStream?: typeof runEventStream;
 }
@@ -540,6 +555,8 @@ export class ChatController {
   private readonly deleting = new Set<string>();
   /** A focus request the webview may have missed, repeated after its next snapshot. */
   private focusRequested: { target: FocusTarget; at: number } | undefined;
+  /** `ui.command`s the webview could not receive yet; see {@link runUiCommand}. */
+  private keptUiCommands: Array<{ command: UiCommand; at: number }> = [];
   private generation = 0;
   private disposed = false;
   /** Models, providers and agents of the CURRENT server; `undefined` until the first load succeeds. */
@@ -597,12 +614,17 @@ export class ChatController {
       : { url: this.server.url, password: this.server.password };
   }
 
+  /** True while a `post` would reach the webview (`deps.webviewReady`, absent meaning always). */
+  private canPost(): boolean {
+    return this.deps.webviewReady === undefined || this.deps.webviewReady();
+  }
+
   /**
    * Posts a message of "Add to OpenCode Chat": delivered now if the webview can take it, else kept
    * for {@link flushUndeliveredMenu} (called when the next document says `ready`).
    */
   private postOrKeep(message: HostToWebview): void {
-    if (this.deps.webviewReady === undefined || this.deps.webviewReady()) {
+    if (this.canPost()) {
       this.post(message);
       return;
     }
@@ -1099,9 +1121,10 @@ export class ChatController {
    * first `ui.focus` went nowhere) it is sent again after the snapshot, as long as it is fresher
    * than {@link FOCUS_REQUEST_TTL_MS}. The cached catalog, if any, is sent right after the snapshot
    * (a new document starts without one; the load that produced it already went to the old
-   * document or was dropped). Last, the chips and notices that "Add to OpenCode Chat" produced
+   * document or was dropped). Then the chips and notices that "Add to OpenCode Chat" produced
    * while the view was hidden ({@link postOrKeep}) go out, after the snapshot so nothing empties
-   * them.
+   * them. Last, the `ui.command`s of issue #35 that waited for this document
+   * ({@link runUiCommand}), so New Session or Stop act on the state the snapshot just set.
    */
   async onWebviewReady(): Promise<void> {
     this.log.info('webview ready');
@@ -1109,6 +1132,7 @@ export class ChatController {
     if (this.client === undefined) {
       this.post({ type: 'snapshot', snapshot: EMPTY_SNAPSHOT });
       this.flushUndeliveredMenu();
+      this.flushUiCommands();
       return;
     }
     await this.resync();
@@ -1119,6 +1143,70 @@ export class ChatController {
       this.post({ type: 'ui.focus', target: requested.target });
     }
     this.flushUndeliveredMenu();
+    this.flushUiCommands();
+  }
+
+  /**
+   * Relays a palette or keyboard command to the webview as `ui.command` (issue #35), which runs
+   * the same code as the matching button. With the webview able to take it, it goes out now and
+   * is NOT kept: unlike {@link focusRequest}, repeating it after the next `ready` would run New
+   * Session or Stop a second time. With the view hidden (revealing it loads a new document and a
+   * message sent before its `ready` is dropped) it is kept at most once per command (see
+   * {@link keepUiCommand}), and {@link flushUiCommands} sends it after the snapshot, the
+   * catalog and any `ui.focus` of that `ready`, as long as it is younger than
+   * {@link FOCUS_REQUEST_TTL_MS}. A command already waiting is not queued twice.
+   * VERIFIED against a real VS Code (Windows 11, 25/10/2026): with the chat hidden by Ctrl+B the
+   * log shows `ui command prompt.focus: kept for the next ready`, then `webview ready`, then
+   * `ui command prompt.focus: sent after ready`, and the `test:visual` step 22 check "and a real
+   * keystroke typed right after lands in the prompt box" passed. Not observed: a kept
+   * `session.new` or `session.stop` in a real window (unit tests only).
+   */
+  runUiCommand(command: UiCommand): void {
+    if (this.canPost()) {
+      this.log.info(`ui command ${command}: sent`);
+      this.post({ type: 'ui.command', command });
+      return;
+    }
+    this.log.info(`ui command ${command}: kept for the next ready`);
+    this.keepUiCommand(command, Date.now());
+  }
+
+  /**
+   * Queues `command` unless it already waits; `at` is when the user asked, not when it was re-kept.
+   * No size cap: one entry per {@link UiCommand} at most, so the queue is bounded by the union.
+   */
+  private keepUiCommand(command: UiCommand, at: number): void {
+    if (this.keptUiCommands.some((kept) => kept.command === command)) return;
+    this.keptUiCommands.push({ command, at });
+  }
+
+  /**
+   * Sends what {@link runUiCommand} kept, in the order asked, dropping what is older than
+   * {@link FOCUS_REQUEST_TTL_MS}. Each goes through the same gate as a fresh command, so a view
+   * hidden again during the resync keeps it instead of losing it (same trap as
+   * {@link flushUndeliveredMenu}). When at least one went out it also asks `ui.focusView`.
+   * HYPOTHESIS (same as `registerChat`): the focus given by the reveal landed on an iframe whose
+   * document did not exist yet. Seen once in a `test:visual` step 22 run WITHOUT the second focus
+   * (the new document had `hasFocus()` false); that run is not a check, and the run without
+   * `focusView` was not repeated to prove it is needed.
+   */
+  private flushUiCommands(): void {
+    const kept = this.keptUiCommands;
+    this.keptUiCommands = [];
+    const now = Date.now();
+    let posted = false;
+    for (const { command, at } of kept) {
+      if (now - at > FOCUS_REQUEST_TTL_MS) continue;
+      if (this.canPost()) {
+        this.log.info(`ui command ${command}: sent after ready`);
+        this.post({ type: 'ui.command', command });
+        posted = true;
+      } else {
+        this.keepUiCommand(command, at);
+      }
+    }
+    // HYPOTHESIS: the reveal that preceded the command focused an iframe with no document yet.
+    if (posted) this.deps.ui.focusView();
   }
 
   /**
@@ -2624,6 +2712,9 @@ export class ChatController {
       },
       'clipboard.write': (m) => {
         pending.push(this.editorAction(m.type, () => this.deps.editor.copy(m.text)));
+      },
+      'chat.focusChanged': (m) => {
+        this.deps.ui.setChatFocused(m.focused);
       },
       'webview.log': (m) => {
         this.log[m.level === 'warn' ? 'warn' : m.level === 'error' ? 'error' : 'info'](

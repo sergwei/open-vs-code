@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { isWebviewToHost } from '../shared/protocol';
+import { isWebviewToHost, type UiCommand } from '../shared/protocol';
 import { createAttention } from './attention';
 import { ChatController, type FocusTarget } from './chatController';
 import { registerChatView } from './chatViewProvider';
@@ -7,13 +7,19 @@ import { createEditorActions } from './editorActions';
 import type { ModelRef } from '../shared/model';
 import {
   ADD_TO_CHAT_COMMAND_ID,
+  CHAT_FOCUSED_CONTEXT_KEY,
+  CHAT_VIEW_ID,
   CONFIG_SECTION,
   DEFAULT_MODEL_KEY,
   DEFAULT_MODEL_SETTING,
+  FOCUS_PROMPT_COMMAND_ID,
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
   MANAGE_PERMISSIONS_COMMAND_ID,
+  NEW_SESSION_COMMAND_ID,
+  OPEN_CHAT_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
   SHOW_REQUEST_COMMAND_ID,
+  STOP_RESPONSE_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from './ids';
 import { createOpencodeClient } from './opencodeClient';
@@ -141,6 +147,30 @@ function parseReply(
  * selected `file:` URIs to `controller.addToChat`. UNVERIFIED in a real window: the menu entry
  * itself (the integration suite calls the command with URIs, it cannot right-click).
  *
+ * Issue #35 registers the four palette commands (Open Chat, Focus Prompt, New Session, Stop
+ * Response). Each one first reveals the chat with the command VS Code generates for the view
+ * (`openVsCode.chat.focus`), which also hands the keyboard to the iframe, and then asks the
+ * webview through `controller.runUiCommand` to do what its button does. Focus Prompt is a toggle:
+ * with the chat focused it returns the focus to the editor instead. The `chatFocused` flag comes
+ * from the webview (`chat.focusChanged`) and is mirrored into the context key
+ * `openVsCode.chatFocused` that the keybindings' `when` clauses read; it is reset when the view
+ * hides or is disposed, because `blur` does not always fire for a hidden element. The `when` of
+ * the New Session key is that context key, so the key works only inside the chat.
+ * VERIFIED by `test:visual` step 22 (real VS Code, Windows 11, 25/10/2026, real keyboard, checks
+ * "Control+Alt+P from the editor puts the caret in the prompt box", "Control+Alt+P again returns
+ * the focus to the editor", "after Ctrl+B hid the chat while it had the focus, Focus Prompt shows
+ * it and the prompt box is the active element of the new document (the context key was reset)" and
+ * "Control+Alt+N leaves the empty view (0)"): the keys reach the host with the focus inside the
+ * iframe, the toggle works and the context key is false after the chat was hidden while focused.
+ * The hide check was also run with the reset of `onVisibilityChange(false)` temporarily removed
+ * (25/10/2026): it failed ("the chat webview target did not appear", the key went back to the
+ * editor), so it does cover that reset. Not observed: macOS and Linux (keys
+ * pressed only as `Control+Alt`), a keyboard layout where Ctrl+Alt+P or +N types a character.
+ * HYPOTHESIS: `focusView` (a second `openVsCode.chat.focus` after a kept command went out) is what
+ * makes the first keystroke land in a freshly created document; in that run the document reported
+ * `hasFocus()` false while a typed letter still reached the box, and the run without the second
+ * focus was not repeated to prove it is needed.
+ *
  * The two internal commands (`SHOW_REQUEST_COMMAND_ID`, `REPLY_PERMISSION_COMMAND_ID`) are always
  * registered and not contributed: they are the targets of the links of an attention
  * notification. They validate their argument and refuse `always`. A rejected argument logs a
@@ -152,6 +182,12 @@ export function registerChat(
   manager: ServerManager,
 ): vscode.Disposable {
   const log = safeLog(channel);
+  // Whether the chat webview holds the keyboard focus; the source of truth for the toggle.
+  let chatFocused = false;
+  const setChatFocused = (focused: boolean): void => {
+    chatFocused = focused;
+    void vscode.commands.executeCommand('setContext', CHAT_FOCUSED_CONTEXT_KEY, focused);
+  };
   // `view` is assigned below; the attention feature and the controller only use it later, from
   // events and from VS Code callbacks, never during this function.
   const attention = createAttention({
@@ -204,6 +240,12 @@ export function registerChat(
         channel.show();
       },
     },
+    ui: {
+      setChatFocused,
+      focusView: () => {
+        void vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
+      },
+    },
   });
   const view = registerChatView(context.extensionUri, channel, {
     onReady: () => {
@@ -218,8 +260,14 @@ export function registerChat(
     },
     onVisibilityChange: (visible) => {
       attention.onVisibility(visible);
+      if (!visible && chatFocused) setChatFocused(false);
     },
   });
+  /** Reveals the chat (the view's generated focus command) and relays `command` to its webview. */
+  const runInChat = async (command: UiCommand): Promise<void> => {
+    await vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
+    controller.runUiCommand(command);
+  };
 
   const disposables: vscode.Disposable[] = [
     view.disposable,
@@ -244,6 +292,17 @@ export function registerChat(
     vscode.commands.registerCommand(MANAGE_PERMISSIONS_COMMAND_ID, async () => {
       await controller.handle({ type: 'permissions.manage' });
     }),
+    // Issue #35.
+    vscode.commands.registerCommand(OPEN_CHAT_COMMAND_ID, () => runInChat('prompt.focus')),
+    vscode.commands.registerCommand(FOCUS_PROMPT_COMMAND_ID, async () => {
+      if (chatFocused) {
+        await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+        return;
+      }
+      await runInChat('prompt.focus');
+    }),
+    vscode.commands.registerCommand(NEW_SESSION_COMMAND_ID, () => runInChat('session.new')),
+    vscode.commands.registerCommand(STOP_RESPONSE_COMMAND_ID, () => runInChat('session.stop')),
     // Issue #30: the Explorer passes (clicked item, all selected items). The strings go through
     // the same host checks as a drop (`dropFiles`), minus the `file.find` one.
     vscode.commands.registerCommand(

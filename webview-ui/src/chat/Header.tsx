@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, on, Show } from 'solid-js';
 import type { SessionSummary } from '../../../src/shared/model';
 import { changedFilesSummary } from '../changes/changedFileText';
 import { ChangedFilesList } from '../changes/ChangedFilesList';
@@ -50,11 +50,22 @@ const PICKER_ID = 'session-picker';
 export function Header(props: {
   store: ChatStore;
   onNewSession(): void;
+  /** Grows each time the host's New Session command runs (issue #35); the session list closes, as on the button. */
+  closePickerRequest: number;
   onOpenSession(sessionID: string): void;
   onOpenChangedFile: (path: string) => void;
 }) {
   const state = props.store.state;
   const [pickerOpen, setPickerOpen] = createSignal(false);
+  createEffect(
+    on(
+      () => props.closePickerRequest,
+      () => {
+        setPickerOpen(false);
+      },
+      { defer: true },
+    ),
+  );
   let trigger: HTMLButtonElement | undefined;
   const connected = () => state.connection.state === 'connected';
   // A panel left open when the connection drops closes, and does not reappear on reconnecting.

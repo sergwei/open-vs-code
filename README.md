@@ -90,7 +90,9 @@ The extension is not on the Marketplace yet; issue #43 will publish it there. Un
    **Chat** view.
 2. The extension starts `opencode serve` for the workspace folder, on `127.0.0.1` with a random port
    and a random password, and stops it when the window closes.
-3. Type a prompt and press Enter. Press Escape or **Stop** to interrupt a turn.
+3. Type a prompt and press Enter. Press Escape or **Stop** to interrupt a turn. From the editor,
+   press Ctrl+Alt+P (Cmd+Alt+P on macOS) to jump to the prompt; press it again to come back to the
+   editor (see [Keyboard shortcuts](#keyboard-shortcuts)).
 
 In a multi-root workspace, choose the folder opencode works in with **OpenCode: Select Workspace
 Folder**.
@@ -116,7 +118,24 @@ Chat**, which lives in the Explorer's right-click menu.
 | **OpenCode: Manage Saved Permissions** | Lists the permissions you chose to always allow and lets you revoke them. |
 | **OpenCode: Set Server Password** | Stores the password of the server in `openVsCode.serverUrl` in VS Code's SecretStorage. |
 | **OpenCode: Forget Server Password** | Deletes that stored password. |
+| **OpenCode: Open Chat** | Shows the chat and puts the caret in the prompt. |
+| **OpenCode: Focus Prompt** | Puts the caret in the prompt; pressed again while the chat has the focus, it returns to the editor. |
+| **OpenCode: New Session** | Same as the **New session** button: the next prompt starts a new session and your draft is kept. |
+| **OpenCode: Stop Response** | Same as **Stop**: interrupts the running turn. Run from the editor it also shows the chat; with no turn running it only says "No response is running". |
 | **Add to OpenCode Chat** | Explorer right-click menu: attaches the selected files to the prompt. |
+
+## Keyboard shortcuts
+
+Two commands have a default shortcut. Change them in **File > Preferences > Keyboard Shortcuts**
+(search for "OpenCode"); the other commands have none by default and you can bind them there too.
+
+| Windows / Linux | macOS | Command | Works when |
+| --- | --- | --- | --- |
+| `Ctrl+Alt+P` | `Cmd+Alt+P` | OpenCode: Focus Prompt | the editor or the chat has the focus |
+| `Ctrl+Alt+N` | `Cmd+Alt+N` | OpenCode: New Session | the chat has the focus |
+
+On Windows, Ctrl+Alt is the same as AltGr: if your keyboard layout types a character with AltGr+P
+or AltGr+N, rebind the shortcut in Keyboard Shortcuts or it will run the command instead of typing.
 
 ## Using a server you started
 
@@ -139,6 +158,9 @@ always `opencode`.
   ([microsoft/vscode#339036](https://github.com/microsoft/vscode/issues/339036), open; this
   project has not been able to reproduce a real drag in its own tests). It is reported to work up
   to 1.139. **Add to OpenCode Chat**, Attach and `@` mentions work in every version.
+- The default shortcuts use Ctrl+Alt (Cmd+Alt on macOS), which is AltGr on Windows; see
+  [Keyboard shortcuts](#keyboard-shortcuts) to rebind them. They are checked against the default
+  shortcuts of VS Code, not against those of your desktop environment or other extensions.
 - Not yet: slash commands (issue #33).
 - Mostly tested on Windows; CI builds and tests on Windows, macOS and Linux.
 

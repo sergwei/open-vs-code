@@ -129,6 +129,11 @@ interface LastRevert {
  * draft is empty (the same rule as the fork), and gets the focus. While a revert request is in
  * flight, or the session is busy, the revert buttons are `aria-disabled`.
  *
+ * Issue #35: a `ui.command` from the host (palette or keys) runs the code of the matching button
+ * (`prompt.focus`, `session.new` -> {@link newSession}, `session.stop` -> {@link stop}); Stop with
+ * no running turn raises the info notice "No response is running" instead of doing nothing. The
+ * window's `focus`/`blur` and its value at mount go to the host as `chat.focusChanged`.
+ *
  * Decisions: Send is disabled while the session is busy and Stop takes its place (plan decision
  * 6; `steer`/`queue` while busy is not offered); every prompt goes with `delivery: 'queue'`;
  * Retry resends the text of the last user message of the open session, with the attachments of
@@ -551,6 +556,57 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     focusInput?.();
   };
 
+  // Host commands (palette and keys, issue #35) run the code of the matching button, so every
+  // invariant of the button holds: Send locked while the request is in flight, "Stopped" announced.
+  // `New Session` is ignored while disconnected, like its disabled button; `Stop Response` with no
+  // turn running says so instead of staying silent, because from the palette nothing else tells
+  // the user the command did anything. It reads the queue length BEFORE any early return so the
+  // effect keeps it as its dependency, then takes the WHOLE queue and runs it in order: several
+  // commands can land in one frame (Stop and Focus Prompt kept for the same `ready`), and each must
+  // run. New Session also closes the session list, as its button does.
+  const [closePickerRequest, setClosePickerRequest] = createSignal(0);
+  createEffect(() => {
+    if (state.uiCommands.length === 0) return;
+    untrack(() => {
+      for (const command of props.store.takeUiCommands()) {
+        switch (command) {
+          case 'prompt.focus':
+            focusInput?.();
+            break;
+          case 'session.new':
+            setClosePickerRequest((count) => count + 1);
+            if (connected()) newSession();
+            else focusInput?.();
+            break;
+          case 'session.stop':
+            if (busy()) stop();
+            else
+              props.store.notify('info', {
+                code: 'NothingToStop',
+                message: 'No response is running',
+              });
+            break;
+        }
+      }
+    });
+  });
+
+  // Tells the host whether this document has the keyboard focus (issue #35): it mirrors it into the
+  // `openVsCode.chatFocused` context key for the keybindings. The initial value goes out now
+  // because a document opened by a command may already hold the focus and fire no `focus` event.
+  const sendFocus = (focused: boolean) => () => {
+    props.send({ type: 'chat.focusChanged', focused });
+  };
+  const onWindowFocus = sendFocus(true);
+  const onWindowBlur = sendFocus(false);
+  window.addEventListener('focus', onWindowFocus);
+  window.addEventListener('blur', onWindowBlur);
+  onCleanup(() => {
+    window.removeEventListener('focus', onWindowFocus);
+    window.removeEventListener('blur', onWindowBlur);
+  });
+  props.send({ type: 'chat.focusChanged', focused: document.hasFocus() });
+
   /**
    * Asks the host to fork the open session before `message` (a user message). The text and the
    * attachments it carried that this document knows are kept for the refill once the host answers
@@ -643,6 +699,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
         <Header
           store={props.store}
           onNewSession={newSession}
+          closePickerRequest={closePickerRequest()}
           onOpenSession={openSession}
           onOpenChangedFile={openChangedFile}
         />

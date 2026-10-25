@@ -81,6 +81,7 @@ import {
   type ConnectionState,
   type Handlers,
   type HostToWebview,
+  type UiCommand,
 } from '../../../src/shared/protocol';
 import { describeRequest, outcomeLabel } from '../requests/permissionText';
 import { applyPage, removeRow, upsertRow } from '../sessions/browserRows';
@@ -238,6 +239,13 @@ export interface ChatState {
   requestErrors: { [askId: string]: ErrorInfo };
   /** A `ui.focus` the dock has not carried out yet (the card may not exist yet). */
   focusTarget: FocusTarget | undefined;
+  /**
+   * The `ui.command`s (issue #35) `App` has not run yet, oldest first. A QUEUE, not one slot:
+   * `listenHost` applies every message of a frame inside one `batch`, so with a single slot the
+   * second command of a frame would overwrite the first before the effect that runs them could
+   * see it (a Stop lost behind a Focus Prompt). `seq` grows with every message.
+   */
+  uiCommands: { command: UiCommand; seq: number }[];
   /** `requestId`s sent and not answered yet; the input stays disabled while any is in flight. */
   pending: string[];
   notices: Notice[];
@@ -318,6 +326,8 @@ export interface ChatStore {
   clearResolved: () => void;
   /** Forgets the pending `ui.focus` target (the dock carried it out). */
   clearFocusTarget: () => void;
+  /** Empties the queue of `ui.command`s and returns them, oldest first, as plain values. */
+  takeUiCommands: () => UiCommand[];
   /** Picks the model for the next prompt of the open session (no message goes to the host). */
   selectModel: (model: ModelRef) => void;
   /** Picks the agent for the next prompt of the open session (no message goes to the host). */
@@ -373,6 +383,7 @@ export function createChatStore(): ChatStore {
     replying: {},
     requestErrors: {},
     focusTarget: undefined,
+    uiCommands: [],
     pending: [],
     notices: [],
     draftFiles: [],
@@ -384,6 +395,7 @@ export function createChatStore(): ChatStore {
   let messageIndex = new Map<string, number>();
   let partIndex = new Map<string, Map<string, number>>();
   let noticeCounter = 0;
+  let uiCommandCounter = 0;
 
   /** Rebuilds both indexes from the current store contents. */
   const rebuildIndexes = (): void => {
@@ -798,6 +810,13 @@ export function createChatStore(): ChatStore {
       setState('focusTarget', m.target);
     },
 
+    'ui.command': (m) => {
+      setState('uiCommands', state.uiCommands.length, {
+        command: m.command,
+        seq: ++uiCommandCounter,
+      });
+    },
+
     'session.diff': (m) => {
       // Only the open session's list is shown; the host sends the list of a session it just left
       // when a load finishes late, and that must not replace the one of the session on screen.
@@ -905,6 +924,11 @@ export function createChatStore(): ChatStore {
     },
     clearFocusTarget: () => {
       setState('focusTarget', undefined);
+    },
+    takeUiCommands: () => {
+      const taken = state.uiCommands.map((entry) => entry.command);
+      setState('uiCommands', []);
+      return taken;
     },
     selectModel: (model) => {
       setState('selection', { sessionID: state.open.sessionID, model });

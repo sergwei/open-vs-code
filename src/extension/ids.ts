@@ -106,3 +106,25 @@ export const SESSION_DIFF_SCHEME = 'openvscode-diff';
 
 /** Display name of the log output channel. */
 export const LOG_CHANNEL_NAME = 'OpenCode';
+
+/** Command id of "OpenCode: Open Chat" (contributed; issue #35): shows the chat, caret in the prompt. */
+export const OPEN_CHAT_COMMAND_ID = 'openVsCode.openChat';
+
+/**
+ * Command id of "OpenCode: Focus Prompt" (contributed; issue #35): like Open Chat, but pressed
+ * again with the chat focused it gives the focus back to the editor (a toggle).
+ */
+export const FOCUS_PROMPT_COMMAND_ID = 'openVsCode.focusPrompt';
+
+/** Command id of "OpenCode: New Session" (contributed; issue #35): runs the chat's "New session" button. */
+export const NEW_SESSION_COMMAND_ID = 'openVsCode.newSession';
+
+/** Command id of "OpenCode: Stop Response" (contributed; issue #35): runs the chat's "Stop" button. */
+export const STOP_RESPONSE_COMMAND_ID = 'openVsCode.stopResponse';
+
+/**
+ * Context key that is `true` while the chat webview has the keyboard focus (issue #35). Not a
+ * contributed id: it is set with `setContext` and read by the `when` clauses of the keybindings
+ * in package.json, where it is written out by hand.
+ */
+export const CHAT_FOCUSED_CONTEXT_KEY = 'openVsCode.chatFocused';

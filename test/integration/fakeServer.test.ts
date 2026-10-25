@@ -34,9 +34,11 @@ import { toEditorRef } from '../../src/extension/fileMentions';
 import {
   ADD_TO_CHAT_COMMAND_ID,
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
+  NEW_SESSION_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
   RESTART_SERVER_COMMAND_ID,
   SESSION_DIFF_SCHEME,
+  STOP_RESPONSE_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
 import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
@@ -232,6 +234,54 @@ describe('fake server', function () {
     await sleep(SETTLE_MS);
     log.assertAbsent('turn finished: succeeded');
     assert.strictEqual(countOf(log, 'turn finished:'), 1, `log:\n${log.added()}`);
+  });
+
+  /**
+   * "OpenCode: Stop Response" interrupts a running turn through the webview (issue #35).
+   *
+   * Protects the whole round trip host command -> `ui.command` -> the webview runs the Stop button
+   * -> `session.abort` back to the host, in a real VS Code with a live webview: the other abort
+   * case injects the message and never touches the iframe. The command is the only trigger, so
+   * `abort requested for <session>` in the log means the webview sent it. The fixture is
+   * synthetic (a SLOW turn of about 5 s); the real opencode is not involved.
+   */
+  it('Stop Response aborts the running turn through the webview', async function () {
+    const log = await openLogCursor();
+    await sendPrompt(log, 'SLOW: count to a hundred');
+    const sessionID = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+    assert.ok(sessionID, `no session id in the log:\n${log.added()}`);
+    await sleep(1_000);
+    await vscode.commands.executeCommand(STOP_RESPONSE_COMMAND_ID);
+    await log.waitFor(`abort requested for ${sessionID} (interrupted: true)`, 10_000);
+    await log.waitFor(`turn finished: interrupted for ${sessionID}`, 15_000);
+    await sleep(SETTLE_MS);
+    log.assertAbsent('turn finished: succeeded');
+  });
+
+  /**
+   * "OpenCode: New Session" makes the next prompt start another session (issue #35).
+   *
+   * Protects that the command reaches the webview and ends in the lazy `session.new` of the host:
+   * without it the injected prompt (no `sessionID`) goes to the open session, which the first half
+   * asserts so the second half cannot pass by luck. Synthetic fixture.
+   */
+  it('New Session makes the next prompt create another session', async function () {
+    const before = await openLogCursor();
+    await sendPrompt(before, 'say hello');
+    const first = /prompt accepted for (ses_\S+)/.exec(before.added())?.[1];
+    await before.waitFor('turn finished:', TURN_WAIT_MS);
+    const again = await openLogCursor();
+    await sendPrompt(again, 'say hello again');
+    assert.strictEqual(/prompt accepted for (ses_\S+)/.exec(again.added())?.[1], first);
+    await again.waitFor('turn finished:', TURN_WAIT_MS);
+    await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
+    await sleep(SETTLE_MS);
+    const after = await openLogCursor();
+    await sendPrompt(after, 'say hello in a new session');
+    const second = /prompt accepted for (ses_\S+)/.exec(after.added())?.[1];
+    assert.ok(second, `no session id in the log:\n${after.added()}`);
+    assert.notStrictEqual(second, first);
+    await after.waitFor('turn finished:', TURN_WAIT_MS);
   });
 
   /**

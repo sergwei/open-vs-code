@@ -21,6 +21,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `openVsCode.serverUrl`, with its password kept in VS Code's SecretStorage (issue #11).
 - Chat view in the Activity Bar with a prompt box, streaming replies and a status line inside the
   chat that shows the connection state (issues #12, #13, #14).
+- Command Palette commands Open Chat, Focus Prompt, New Session and Stop Response, with default
+  shortcuts Ctrl+Alt+P / Cmd+Alt+P (Focus Prompt, toggles back to the editor) and Ctrl+Alt+N /
+  Cmd+Alt+N (New Session, only with the chat focused); both can be rebound (issue #35).
 - Attach files by right-clicking them in the Explorer (**Add to OpenCode Chat**) or by dragging
   them onto the prompt box **while holding Shift**, and paste images (PNG, JPEG, GIF, WebP, up to
   10 MiB) with Ctrl/Cmd+V (issue #30). An image dropped from the system's file manager is attached

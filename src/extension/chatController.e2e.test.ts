@@ -123,6 +123,7 @@ async function boot(
       },
     },
     server: { restart: () => undefined, showLogs: () => undefined },
+    ui: { setChatFocused: () => undefined, focusView: () => undefined },
   });
   controllers.push(controller);
   const state: ServerState = {
