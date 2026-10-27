@@ -470,8 +470,20 @@ button.secondary:hover:not(:disabled),
   flex: 1;
   min-width: 0;
   display: flex;
+  /*
+   * Shrinks first, wraps last. The argument, second argument and result start from a zero basis
+   * (see below), so a line is only broken when the fixed parts (chevron, title, separators, status
+   * chip) plus the 4ch minimum of each variable part do not fit; before that they just shrink with
+   * an ellipsis, as the header always did. Without the zero basis `flex-wrap` breaks lines by the
+   * full content width, before anything shrinks: at the default side bar width the Edit, Write,
+   * Grep and Fetch headers and the failed card's became two lines (Shell, Glob and mcp_echo stayed
+   * on one). With the side bar dragged to exactly 270 px (HYPOTHESIS that this was the width of
+   * the failing runs) the old nowrap header overflowed by 14 px over the "Open" link. A wrapped
+   * header loses nothing; it only grows a second line.
+   */
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 6px;
+  gap: 2px 6px;
   padding: 3px 4px;
   color: var(--vscode-descriptionForeground);
   background: transparent;
@@ -520,21 +532,17 @@ button.secondary:hover:not(:disabled),
 }
 
 /*
- * In a narrow side bar the long argument (a path, a command) gives way first, so the status word and
- * the short result ("done", "exit 1", "+1 -1") stay readable: flex-shrink 20 for the argument, 4
- * for the second argument, 1 for the result (also capped at 60%) and none for the status word.
+ * Zero basis, grow 1, capped at the content width: each part takes its text when the line has room
+ * and otherwise shares what the status word and the separators leave, down to its 4ch minimum
+ * (then the line wraps, see `.tool-toggle`). The three share equally; the old shrink weights (20
+ * for the argument, 4 for the second one, 1 for the result) made the long argument give way first,
+ * which no longer applies, and neither does the old 60% cap on the result.
  */
-.tool-arg {
-  flex: 0 20 auto;
-}
-
-.tool-detail {
-  flex: 0 4 auto;
-}
-
+.tool-arg,
+.tool-detail,
 .tool-result {
-  flex: 0 1 auto;
-  max-width: 60%;
+  flex: 1 1 0;
+  max-width: max-content;
 }
 
 /*
@@ -547,9 +555,9 @@ button.secondary:hover:not(:disabled),
 }
 
 /*
- * The status word never shrinks, so a long result (the first line of an error) is the one that
- * gives way once the argument is at its minimum: a result with shrink 0 ran over the "Open" link
- * in the narrow side bar (seen in a capture of the 22/10/2026 step 15 run).
+ * The status word never shrinks. A result with shrink 0 ran over the "Open" link on 22/10/2026,
+ * and shrinking alone still overflowed by 14 px on 27/10/2026, measured with the side bar dragged
+ * to exactly 270 px (HYPOTHESIS: that this was the width of the failing runs); the parts around it shrink, and when they reach their minimum `.tool-toggle` wraps.
  */
 .tool-status {
   flex: none;
