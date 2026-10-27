@@ -29,24 +29,26 @@ affiliated with opencode or with Microsoft.
 
   ![A forked session with a "Forked from" crumb above the first exchange and the Fork from here button on the message](docs/images/fork-session.png)
 
-- **Model, agent and reasoning variant** pickers: choose the model, switch between Build and Plan,
-  and pick a reasoning variant when the model offers them.
+- **One chip for agent and model:** the prompt bar shows "agent · model" (with the reasoning level
+  and a connection dot); it opens a panel where you choose the agent (Build, Plan…), the model and,
+  when the model offers them, a reasoning variant.
 
   ![The model picker open above the prompt box, with a search field and a list of models grouped by provider](docs/images/model-picker.png)
 
 - **Collapsible tool cards** for shell, read, grep and edit calls, with diffs for edits.
-- **`@` mentions** to add files to the prompt, and an "Add selection" button that attaches the
-  editor selection.
+- **`@` mentions** to add files to the prompt, and a "+" menu in the prompt bar with **Add
+  selection** (attaches the editor selection), **Attach file…**, **Attach image…** and **Mention a
+  file**.
 - **Drop files and paste images (issue #30):** right-click files in the Explorer and choose
   **Add to OpenCode Chat** (works in every VS Code version), or drag them from the Explorer onto the
   prompt box **while holding Shift** (VS Code only delivers a drop to a side-bar view with Shift
   held). Only regular files inside the workspace folder are
   added, and a dropped file must also be one that opencode lists (what git ignores, `.env`
-  included, cannot be dropped: use Attach for that); folders and anything else are skipped with
+  included, cannot be dropped: use "Attach file…" in the "+" menu for that); folders and anything else are skipped with
   one notice that counts them. Paste an image (PNG, JPEG, GIF or WebP, up to 10 MiB) with
   Ctrl/Cmd+V to attach it, with a thumbnail on its chip; an image dropped from your system's file
   manager is attached the same way, and any other file dropped from there is refused with a notice
-  (drop it from the VS Code Explorer, or use Attach). If the selected model cannot read images,
+  (drop it from the VS Code Explorer, or use "Attach file…"). If the selected model cannot read images,
   the chat says so and opencode tells the model. **Retry, "Fork from here" and "Revert from here"
   re-attach files but not pasted images**: paste them again.
 - **Context and cost:** a line under the session title shows how much of the model's context the
