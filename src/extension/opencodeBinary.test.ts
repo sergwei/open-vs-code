@@ -8,11 +8,14 @@ import { OPENCODE_PATH_SETTING } from './ids';
 import {
   describeDetection,
   detectOpencodeBinary,
+  diagnoseDetection,
   findOnPath,
   nodeDeps,
   parseOpencodeVersion,
   resolveCmdShim,
   type BinaryDeps,
+  type DetectionAttempt,
+  type DetectionResult,
   type VersionRun,
 } from './opencodeBinary';
 
@@ -404,6 +407,76 @@ describe('describeDetection', () => {
     expect(
       describeDetection({ kind: 'invalid-setting', value: 'x', reason: 'r', attempts: [] }).notify,
     ).toBe('actions');
+  });
+});
+
+// E2 (issue #85). Provenance: the results are built by hand with the five `kind`s of
+// `DetectionResult` and attempts shaped like the ones `detectOpencodeBinary` pushes (and the
+// tests above confirm); not the output of a real detection.
+describe('diagnoseDetection', () => {
+  const binary = { path: '/bin/oc', source: 'opencode' as const, version: '1.19.3' };
+  const attempts: DetectionAttempt[] = [
+    { label: 'opencode2', outcome: 'not-on-path', detail: 'no opencode2 in PATH' },
+    { label: 'opencode', path: '/bin/oc', outcome: 'unsupported', detail: 'version 1.19.3' },
+  ];
+
+  it('keeps every attempt, in order, for each of the five kinds of result', () => {
+    const results: DetectionResult[] = [
+      { kind: 'not-found', attempts },
+      { kind: 'unsupported', binary, attempts },
+      { kind: 'unknown-version', binary, output: 'local', attempts },
+      { kind: 'invalid-setting', value: '/x', reason: 'r', attempts },
+      { kind: 'ok', binary: { ...binary, version: '2.0.32' }, attempts },
+    ];
+    for (const result of results) {
+      expect(diagnoseDetection(result, ''), result.kind).toEqual({
+        checks: [
+          { source: 'opencode2', outcome: 'not-on-path', detail: 'no opencode2 in PATH' },
+          { source: 'opencode', path: '/bin/oc', outcome: 'unsupported', detail: 'version 1.19.3' },
+        ],
+      });
+    }
+  });
+
+  it('carries the setting path only when it is not empty', () => {
+    const result: DetectionResult = { kind: 'not-found', attempts: [] };
+    expect(diagnoseDetection(result, '/my/opencode')).toEqual({
+      settingPath: '/my/opencode',
+      checks: [],
+    });
+    expect(diagnoseDetection(result, '')).not.toHaveProperty('settingPath');
+  });
+
+  // Protects the guide from saying "openVsCode.opencodePath is not set." for a setting that points
+  // at an opencode v1 (review B1): the kind is `unsupported`, so the caller passes no setting path.
+  // Synthetic attempts.
+  it('takes the setting path from a setting attempt when the caller passes none', () => {
+    const result: DetectionResult = {
+      kind: 'unsupported',
+      binary: { source: 'setting', path: 'C:/v1/opencode.exe', version: '1.19.3' },
+      attempts: [
+        {
+          label: 'setting',
+          path: 'C:/v1/opencode.exe',
+          outcome: 'unsupported',
+          detail: 'version 1.19.3',
+        },
+      ],
+    };
+    expect(diagnoseDetection(result, '')).toMatchObject({ settingPath: 'C:/v1/opencode.exe' });
+  });
+
+  it('cuts a detail longer than 300 characters and leaves a shorter one alone', () => {
+    const result: DetectionResult = {
+      kind: 'not-found',
+      attempts: [
+        { label: 'setting', outcome: 'run-failed', detail: 'x'.repeat(500) },
+        { label: 'setting', outcome: 'run-failed', detail: 'y'.repeat(300) },
+      ],
+    };
+    const [long, exact] = diagnoseDetection(result, '').checks;
+    expect(long?.detail).toHaveLength(300);
+    expect(exact?.detail).toHaveLength(300);
   });
 });
 

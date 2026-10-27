@@ -8,7 +8,22 @@
 // system (symlinks are not resolved by design).
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { resolveInsideFolder, toAttachmentName } from './pathPolicy';
+import { hasImageExtension, resolveInsideFolder, toAttachmentName } from './pathPolicy';
+
+// E2 (issue #85, decision P11). Fabricated names: they pin the extension list and the case rule.
+describe('hasImageExtension', () => {
+  it('accepts png, jpg, jpeg, gif and webp in any case', () => {
+    for (const name of ['a.png', 'C:\\x\\B.JPG', '/x/c.jpeg', 'd.Gif', 'e.webp']) {
+      expect(hasImageExtension(name), name).toBe(true);
+    }
+  });
+
+  it('rejects other types, no extension, and an image name as a mere suffix', () => {
+    for (const name of ['a.bmp', 'a.avif', 'a.svg', 'a.png.txt', 'png', '', 'a.']) {
+      expect(hasImageExtension(name), name).toBe(false);
+    }
+  });
+});
 
 describe('resolveInsideFolder (win32)', () => {
   const folder = 'C:\\ws';

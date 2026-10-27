@@ -104,6 +104,13 @@ export const TEST_SET_SERVER_PASSWORD_COMMAND_ID = 'openVsCode.test.setServerPas
  */
 export const SESSION_DIFF_SCHEME = 'openvscode-diff';
 
+/**
+ * Page "Install guide" of the setup guide opens (E2, issue #85, decision P4): the npm page of the
+ * v2 CLI package, which names the pinned `@opencode/cli`. External, so it can change; HYPOTHESIS
+ * that the page stays at that address (check by opening it).
+ */
+export const INSTALL_GUIDE_URL = 'https://www.npmjs.com/package/@opencode/cli';
+
 /** Display name of the log output channel. */
 export const LOG_CHANNEL_NAME = 'OpenCode';
 

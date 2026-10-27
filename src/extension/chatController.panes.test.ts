@@ -20,6 +20,7 @@ import { ChatController, type ChatControllerDeps } from './chatController';
 import type { ChatPane } from './chatPane';
 import type { EventStreamOptions } from './eventStream';
 import type { ChatApi } from './opencodeClient';
+import { noSetup } from './test-fixtures/noSetup';
 
 const SERVER = {
   url: 'http://127.0.0.1:43211',
@@ -137,6 +138,7 @@ function setup(count = 2, sessions: string[] = ['ses_a', 'ses_b']) {
       setLastModel: () => Promise.resolve(),
     },
     server: { restart: () => undefined, showLogs: () => undefined },
+    setup: noSetup,
     ui: { setChatFocused: () => undefined, focusView: () => undefined },
     runStream: ((options: EventStreamOptions<V2Event>) => {
       streams.push(options);

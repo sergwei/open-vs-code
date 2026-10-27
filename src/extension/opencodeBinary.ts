@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import type { BinaryCheck, BinaryDiagnosis } from '../shared/protocol';
 
 /** Where the chosen executable came from. */
 export type BinarySource = 'setting' | 'opencode2' | 'opencode';
@@ -26,11 +27,24 @@ export interface BinaryDeps {
   runVersion(p: string): Promise<VersionRun>;
 }
 
-/** One candidate that was looked at, for the log. */
+/**
+ * One candidate that was looked at, for the log and, since E2 (issue #85), for the chat's setup
+ * guide through {@link diagnoseDetection}. `label` and `outcome` are closed unions (they were
+ * plain strings) so the diagnosis crosses to the webview without a cast; every value is one
+ * `detectOpencodeBinary` pushes itself.
+ */
 export interface DetectionAttempt {
-  label: string;
+  label: BinarySource;
   path?: string;
-  outcome: string;
+  outcome:
+    | 'invalid'
+    | 'not-on-path'
+    | 'skipped'
+    | 'duplicate'
+    | 'run-failed'
+    | 'unknown-version'
+    | 'ok'
+    | 'unsupported';
   detail: string;
 }
 
@@ -353,6 +367,42 @@ export function describeDetection(result: DetectionResult): DetectionDescription
         notify: 'actions',
       };
   }
+}
+
+/** Longest `detail` the diagnosis carries: the same 300-character cap `nodeDeps` puts on stderr. */
+const MAX_CHECK_DETAIL = 300;
+
+/**
+ * Turns the attempts of a failed detection into the {@link BinaryDiagnosis} the chat shows, so the
+ * setup guide can say what was searched and where (E2, issue #85, plan section 5).
+ *
+ * Pure. `settingPath` is the trimmed `openVsCode.opencodePath` the caller knows was set; when it
+ * is empty but an attempt came from the setting (`label === 'setting'`, e.g. a setting that points
+ * at an opencode v1, which the caller does not report as `invalid-setting`), that attempt's path
+ * is used instead, so the guide never says the setting "is not set" while listing its value. It is
+ * omitted only when neither exists. Every attempt becomes one check in the same order;
+ * `detail` is cut to 300 characters (the cap `nodeDeps` already applies to stderr, so nothing
+ * normally changes). Paths and details are text for the webview to print, never markup, and they
+ * carry no port or password (architecture rule 1). `result.kind` does not change the output: the
+ * attempts already hold what each kind was decided from.
+ * VERIFIED by unit tests with literal attempts (synthetic, not a real detection). VERIFIED on
+ * Windows 11 with VS Code 1.143.1 (27/10/2026): the visual check "step 1 says which
+ * openVsCode.opencodePath value was searched (the missing file)" passed with a real detection of a
+ * missing setting file. Not observed in a real window: a setting that points at a v1 binary.
+ */
+export function diagnoseDetection(result: DetectionResult, settingPath: string): BinaryDiagnosis {
+  const checks: BinaryCheck[] = result.attempts.map((attempt) => ({
+    source: attempt.label,
+    ...(attempt.path === undefined ? {} : { path: attempt.path }),
+    outcome: attempt.outcome,
+    detail:
+      attempt.detail.length > MAX_CHECK_DETAIL
+        ? attempt.detail.slice(0, MAX_CHECK_DETAIL)
+        : attempt.detail,
+  }));
+  const fromAttempt = result.attempts.find((a) => a.label === 'setting' && a.path !== undefined);
+  const effective = settingPath !== '' ? settingPath : (fromAttempt?.path ?? '');
+  return { ...(effective === '' ? {} : { settingPath: effective }), checks };
 }
 
 /**

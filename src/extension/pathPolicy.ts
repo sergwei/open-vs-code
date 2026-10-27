@@ -65,3 +65,24 @@ export function toAttachmentName(folder: string, fsPath: string, impl: PathImpl 
   if (!isInside(relative, impl)) return impl.basename(fsPath);
   return relative.split(impl.sep).join('/');
 }
+
+/**
+ * The extensions "Attach image…" offers and accepts (E2, decision P11): the four types the model
+ * receives as media (`IMAGE_MIMES` of `src/shared`: png, jpeg, gif, webp), with `jpg` for jpeg.
+ * Lower case, no dot.
+ */
+export const IMAGE_EXTENSIONS: readonly string[] = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
+
+/**
+ * True when `fsPath` ends in one of {@link IMAGE_EXTENSIONS}, compared case-insensitively.
+ *
+ * The check is by extension only, not by content: a dialog filter is a hint the user can
+ * override with "All files", so the host applies this too (plan section 12, P11: "validar el tipo
+ * en el host"). The server then detects the real type from the bytes. VERIFIED by
+ * `pathPolicy.test.ts` with literal names (synthetic).
+ */
+export function hasImageExtension(fsPath: string): boolean {
+  const dot = fsPath.lastIndexOf('.');
+  if (dot < 0) return false;
+  return IMAGE_EXTENSIONS.includes(fsPath.slice(dot + 1).toLowerCase());
+}

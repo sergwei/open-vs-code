@@ -98,7 +98,41 @@ export type PromptMention = { start: number; end: number; text: string };
 /** A file travelling in `prompt.send`: the emitted reference plus, optionally, its `@` mention. */
 export type PromptFileRef = AttachmentRef & { mention?: PromptMention };
 
-/** Lifecycle of the opencode server as the host sees it. */
+/**
+ * One candidate the binary detection looked at (E2, issue #85): where it came from (`source`: the
+ * `openVsCode.opencodePath` setting, or the `opencode2` / `opencode` lookup in PATH), the file if
+ * there was one, what happened (`outcome`) and a short text for the user. Mirrors
+ * `DetectionAttempt` of the host; it is data to print, never markup.
+ */
+export type BinaryCheck = {
+  source: 'setting' | 'opencode2' | 'opencode';
+  path?: string;
+  outcome:
+    | 'ok'
+    | 'not-on-path'
+    | 'invalid'
+    | 'run-failed'
+    | 'unknown-version'
+    | 'unsupported'
+    | 'skipped'
+    | 'duplicate';
+  detail: string;
+};
+
+/**
+ * What the failed binary detection found, so the setup guide can say what was searched and where:
+ * the value of `openVsCode.opencodePath` when it was set and some attempt used it (an invalid
+ * value, or a valid file that turned out to be opencode v1; absent otherwise) and every check in
+ * the order it ran. Holds no port or password (architecture rule 1).
+ */
+export type BinaryDiagnosis = { settingPath?: string; checks: BinaryCheck[] };
+
+/**
+ * Lifecycle of the opencode server as the host sees it. `binary` is only present on an
+ * `unavailable` that came from the binary detection (`binary-missing`, or `unsupported-version`
+ * of a binary that answered `--version`); the `unsupported-version` found through `/api/info`
+ * after the server started has none, which is how the webview tells step 1 from step 2.
+ */
 export type ConnectionState =
   | { state: 'starting' }
   | { state: 'connected'; serverVersion: string }
@@ -115,8 +149,23 @@ export type ConnectionState =
         | 'unauthorized'
         | 'invalid-url';
       error: ErrorInfo;
+      binary?: BinaryDiagnosis;
     }
   | { state: 'stopped' };
+
+/**
+ * Setup actions of the guide and the error card (E2, issue #85, decisions P4/P14/P15): choose the
+ * opencode binary with a file dialog, open the settings of the binary path or of the server
+ * address, set the server password, open the install page (the npm page of `@opencode/cli`) and
+ * open a folder.
+ */
+export type SetupAction =
+  | 'binary.choose'
+  | 'binary.settings'
+  | 'server.settings'
+  | 'server.password'
+  | 'install.guide'
+  | 'folder.open';
 
 /**
  * Full state of the session the user has open. `parts` is keyed by message id.
@@ -272,7 +321,11 @@ export type HostToWebview =
  * `crypto`) and echoed by the host in `request.result`. `delivery` is mandatory on
  * `prompt.send` because opencode's default (`steer`) injects the prompt into the running turn.
  * `server.restart` and `logs.show` (phase 3, issue #10) have no `requestId`: the outcome of a
- * restart is the connection state, and the log channel has nothing to answer.
+ * restart is the connection state, and the log channel has nothing to answer. `setup.action`
+ * (E2, issue #85) is the same: a button of the setup guide or the error card, whose outcome is the
+ * next `connection.state` (a failure to write the setting arrives as a `notice`).
+ * `attachments.pick` may carry `kind: 'image'` (decision P11): the host's dialog then filters by
+ * image extensions; absent or `file` is the plain picker.
  * `session.new` is LAZY (issue #20, decision of 21/10/2026): it creates nothing on the server, it
  * only makes the host forget the open session so the view is empty; the first `prompt.send`
  * without `sessionID` creates the session. `sessions.query` asks for a page of the session list
@@ -353,7 +406,7 @@ export type WebviewToHost =
     }
   | { type: 'form.reply'; requestId: string; sessionID: string; formID: string; answer: FormAnswer }
   | { type: 'form.cancel'; requestId: string; sessionID: string; formID: string; message?: string }
-  | { type: 'attachments.pick'; requestId: string }
+  | { type: 'attachments.pick'; requestId: string; kind?: 'file' | 'image' }
   | { type: 'attachments.fromEditor'; requestId: string }
   | { type: 'attachments.drop'; requestId: string; uris: string[] }
   | { type: 'attachments.image'; requestId: string; mime: string; data: string }
@@ -362,6 +415,7 @@ export type WebviewToHost =
   | { type: 'permissions.manage' }
   | { type: 'server.restart' }
   | { type: 'logs.show' }
+  | { type: 'setup.action'; action: SetupAction }
   | { type: 'editor.open'; path: string; line?: number; column?: number }
   | { type: 'session.diff.open'; sessionID: string; path: string }
   | { type: 'session.revert.stage'; requestId: string; sessionID: string; messageID: string }
@@ -487,6 +541,14 @@ function isOneOf(options: readonly string[]): (value: unknown) => boolean {
 const isDecision = isOneOf(['once', 'always', 'reject']);
 const isDelivery = isOneOf(['steer', 'queue']);
 const isLogLevel = isOneOf(['info', 'warn', 'error']);
+const isSetupAction = isOneOf([
+  'binary.choose',
+  'binary.settings',
+  'server.settings',
+  'server.password',
+  'install.guide',
+  'folder.open',
+] satisfies SetupAction[]);
 
 /** True for `{ uri, name }` with both non-empty: an unnamed attachment cannot be shown to the user. */
 function isAttachmentRef(value: unknown): boolean {
@@ -658,7 +720,10 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
     isNonEmptyString(field(m, 'sessionID')) &&
     isNonEmptyString(field(m, 'formID')) &&
     isOptional(field(m, 'message'), isString),
-  'attachments.pick': requestOnly,
+  // `kind` (E2, decision P11): absent means a plain file; `image` filters the dialog to images.
+  'attachments.pick': (m) =>
+    isNonEmptyString(field(m, 'requestId')) &&
+    isOptional(field(m, 'kind'), isOneOf(['file', 'image'])),
   'attachments.fromEditor': requestOnly,
   'attachments.drop': (m) => {
     const uris = field(m, 'uris');
@@ -699,6 +764,7 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
   'permissions.manage': noFields,
   'server.restart': noFields,
   'logs.show': noFields,
+  'setup.action': (m) => isSetupAction(field(m, 'action')),
   'editor.open': (m) =>
     isNonEmptyString(field(m, 'path')) &&
     isOptional(field(m, 'line'), isPositiveInteger) &&

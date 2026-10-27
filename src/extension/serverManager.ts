@@ -22,7 +22,8 @@ import {
   sameTarget,
   type ServerTarget,
 } from './externalServer';
-import { describeDetection, type DetectionResult } from './opencodeBinary';
+import type { BinaryDiagnosis } from '../shared/protocol';
+import { describeDetection, diagnoseDetection, type DetectionResult } from './opencodeBinary';
 import {
   checkServerVersion,
   safeLog,
@@ -102,6 +103,11 @@ export type ServerState =
       message: string;
       retryInMs?: number;
       attempt?: number;
+      /**
+       * What the binary detection tried (E2, issue #85). Set ONLY by {@link ServerManager.onDetection}
+       * for `binary-missing` / `unsupported-version`; a launch or a restart never carries it over.
+       */
+      binary?: BinaryDiagnosis;
     }
   | { kind: 'stopping' }
   | { kind: 'stopped' };
@@ -466,7 +472,11 @@ export class ServerManager {
    * an `unavailable` state and the log. A usable result is remembered as the binary the next
    * restart uses, even when it cannot be launched right now. With an external target (issue #11)
    * a detection launches nothing and changes no state: a usable path is only remembered, so a
-   * later switch back to `spawn` can use it, and a missing binary is not an error.
+   * later switch back to `spawn` can use it, and a missing binary is not an error. An unusable
+   * result becomes `unavailable` WITH `binary` (E2, issue #85: the attempts and the setting path,
+   * so the chat can say what was searched); every other `unavailable` in this file is built
+   * without it, which is what keeps a later `start-failed` from showing step 1 as failed.
+   * VERIFIED by unit tests with fabricated detections (synthetic, not a real run).
    */
   onDetection(result: DetectionResult): void {
     if (this.disposed) return;
@@ -499,6 +509,7 @@ export class ServerManager {
         kind: 'unavailable',
         reason: result.kind === 'unsupported' ? 'unsupported-version' : 'binary-missing',
         message: describeDetection(result).message,
+        binary: diagnoseDetection(result, result.kind === 'invalid-setting' ? result.value : ''),
       });
     } else if (kind === 'running') {
       this.deps.log.warn(

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { registerBinaryDetection } from './binaryDetection';
 import { registerChat } from './chatLifecycle';
+import { createChatSurfaceGate } from './chatSurfaceGate';
 import { LOG_CHANNEL_NAME, SHOW_LOGS_COMMAND_ID } from './ids';
 import { registerServerLifecycle } from './serverLifecycle';
 import type { ServerManager } from './serverManager';
@@ -59,10 +60,17 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  const lifecycle = registerServerLifecycle(context, channel);
+  // Closed until the chat attaches (P3=2): the lifecycle and the detection are registered first.
+  const gate = createChatSurfaceGate();
+  const lifecycle = registerServerLifecycle(context, channel, gate);
   serverManager = lifecycle.manager;
-  context.subscriptions.push(registerChat(context, channel, lifecycle.manager));
-  registerBinaryDetection(context, channel, lifecycle.onDetection);
+  context.subscriptions.push(registerChat(context, channel, lifecycle.manager, gate));
+  registerBinaryDetection(
+    context,
+    channel,
+    lifecycle.onDetection,
+    () => gate.isShowing() && lifecycle.manager.state.kind === 'unavailable',
+  );
 
   const { version } = context.extension.packageJSON as { version?: unknown };
   channel.info(`open-vs-code ${String(version)} activated`);

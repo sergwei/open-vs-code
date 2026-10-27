@@ -32,6 +32,7 @@ import { createOpencodeClient } from './opencodeClient';
 import { startServer, stopServer, type RunningServer, type ServerLog } from './opencodeServer';
 import type { PendingSummary } from './pendingRequests';
 import type { ServerState } from './serverManager';
+import { noSetup } from './test-fixtures/noSetup';
 import { onePane, type OnePaneController } from './test-fixtures/onePane';
 
 const FIXTURE = fileURLToPath(new URL('./test-fixtures/fake-opencode.mjs', import.meta.url));
@@ -123,6 +124,7 @@ async function boot(
       },
     },
     server: { restart: () => undefined, showLogs: () => undefined },
+    setup: noSetup,
     ui: { setChatFocused: () => undefined, focusView: () => undefined },
   });
   // Written when the host had one webview: `onePane` keeps the calls of the cases below.
