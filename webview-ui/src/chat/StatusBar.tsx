@@ -1,36 +1,19 @@
 import { For, Match, Show, Switch } from 'solid-js';
-import type { ConnectionState } from '../../../src/shared/protocol';
 import type { Activity } from '../store/activity';
 import type { ChatState } from '../store/chatStore';
-import { useSend } from './hostContext';
-
-/** Short text of the connection to the host's opencode server. */
-function describeConnection(connection: ConnectionState): string {
-  switch (connection.state) {
-    case 'starting':
-      return 'Starting…';
-    case 'connected':
-      return 'Connected';
-    case 'reconnecting':
-      return `Reconnecting (${String(connection.attempt)})`;
-    case 'unavailable':
-      return `Unavailable: ${connection.error.message}`;
-    case 'stopped':
-      return 'Stopped';
-  }
-}
+import { describeConnection } from './connectionView';
 
 /**
- * The strip between the conversation and the input (issues #16/#17): connection, what the
- * assistant is doing, the error of the session with Retry, dismissible notices and the live
- * region for screen readers.
+ * The strip between the conversation and the input (issues #16/#17): what the assistant is doing,
+ * the error of the session with Retry, dismissible notices and the live regions for screen readers.
  *
- * The connection line is always there ("Connected" included) and is styled as a banner for every
- * other state. Phase 3 (issue #10) gives it buttons, through `useSend()` and the new protocol
- * messages `server.restart` and `logs.show`: `Unavailable` offers "Restart server" and "Show
- * logs" (it still adds the hint where the full log is), and `Reconnecting` offers "Show logs" (the
- * host is already retrying, so no restart there). Phase 2 had discarded those buttons because
- * they needed new messages; the plan of phase 3 reverses that. The "Waiting for permission" lines
+ * E2 (issue #85, P10=1) removed the visible connection line and its Restart server / Show logs
+ * buttons (issue #10): the failure now has its own error card in the conversation and the setup
+ * guide (`ConnectionCard`, `SetupGuide`), and the connection dot lives in the chip
+ * (`AgentModelMenu`). What stays is a visually hidden `role="status"` with the connection text (`.connection-status`),
+ * so a screen reader still hears the changes, next to the turn announcement. The `alert` and
+ * the notices share their row with a button only when both fit: the CSS wraps them (bug #1294).
+ * The "Waiting for permission" lines
  * of phase 1 are gone: the `RequestDock` shows the requests. The activity spinner is CSS and
  * turns into a static "…" under reduced motion. Errors (`role="alert"`) interrupt a screen
  * reader, so only errors use it; info and warnings are plain text. `announcement` is computed by
@@ -53,7 +36,6 @@ export function StatusBar(props: {
   onRetry(): void;
   onDismiss(id: number): void;
 }) {
-  const send = useSend();
   const connection = () => props.state.connection;
   const isWorking = () =>
     props.activity.kind !== 'idle' &&
@@ -61,42 +43,8 @@ export function StatusBar(props: {
     props.activity.kind !== 'error';
   return (
     <div class="status-bar">
-      <div class="connection-row">
-        <div
-          class="connection"
-          classList={{ 'connection-problem': connection().state !== 'connected' }}
-          role="status"
-          data-state={connection().state}
-        >
-          {describeConnection(connection())}
-          <Show when={connection().state === 'unavailable'}>
-            <span class="connection-hint"> — see Output → OpenCode for details</span>
-          </Show>
-        </div>
-        <Show when={connection().state === 'unavailable' || connection().state === 'reconnecting'}>
-          <div class="connection-actions">
-            <Show when={connection().state === 'unavailable'}>
-              <button
-                type="button"
-                class="secondary"
-                onClick={() => {
-                  send({ type: 'server.restart' });
-                }}
-              >
-                Restart server
-              </button>
-            </Show>
-            <button
-              type="button"
-              class="secondary"
-              onClick={() => {
-                send({ type: 'logs.show' });
-              }}
-            >
-              Show logs
-            </button>
-          </div>
-        </Show>
+      <div class="connection-status visually-hidden" role="status" data-state={connection().state}>
+        {describeConnection(connection())}
       </div>
 
       <Switch>

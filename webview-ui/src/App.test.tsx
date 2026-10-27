@@ -339,8 +339,10 @@ describe('sending', () => {
   it('sends the files chosen with Attach and lets a chip be removed first', () => {
     const h = start();
     h.apply(...openSession([user('m1', 'hi')]));
-    h.button('Attach').click();
+    h.button('Add context').click();
+    h.button('Attach file…').click();
     expect(h.sent).toMatchObject([{ type: 'attachments.pick' }]);
+    expect(h.sent[0]).not.toHaveProperty('kind');
     const pickRequest = h.sent[0];
     const requestId = pickRequest && 'requestId' in pickRequest ? pickRequest.requestId : '';
     h.apply(
@@ -499,66 +501,95 @@ describe('errors and retry', () => {
 });
 
 describe('connection states', () => {
+  // E2 (issue #85): the visible connection line is gone (P10=1); the hidden live region keeps the text.
   it.each([
     [{ state: 'starting' }, 'Starting'],
     [{ state: 'reconnecting', attempt: 2 }, 'Reconnecting (2)'],
     [{ state: 'stopped' }, 'Stopped'],
     [{ state: 'connected', serverVersion: '2.0.32' }, 'Connected'],
-  ] as const)('shows %j as "%s"', (connection, text) => {
+  ] as const)('announces %j as "%s" in the hidden live region', (connection, text) => {
     const h = start();
     h.apply({ type: 'connection.state', connection });
-    expect(must(h.container, '.connection').textContent).toContain(text);
+    const region = must(h.container, '.connection-status');
+    expect(region.textContent).toContain(text);
+    expect(region.classList.contains('visually-hidden')).toBe(true);
+    expect(h.container.querySelector('.connection-row')).toBeNull();
   });
 
-  it('shows Unavailable with the message and where to find the log', () => {
-    const h = start();
-    h.apply({
-      type: 'connection.state',
-      connection: {
-        state: 'unavailable',
-        reason: 'binary-missing',
-        error: { code: 'binary-missing', message: 'opencode was not found' },
-      },
+  const unavailable = (
+    reason: 'binary-missing' | 'exited' | 'start-failed' | 'no-workspace',
+    message: string,
+  ): HostToWebview => ({
+    type: 'connection.state',
+    connection: { state: 'unavailable', reason, error: { code: reason, message } },
+  });
+
+  describe('setup guide and connection card (E2, issue #85)', () => {
+    it('shows the guide, and not the header or the prompt box, after a failure with no conversation', () => {
+      const h = start();
+      h.apply(unavailable('binary-missing', 'opencode was not found'));
+      expect(must(h.container, '.setup-guide h2').textContent).toBe('Set up opencode');
+      expect(h.container.querySelector('.chat-header')).toBeNull();
+      expect(h.container.querySelector('textarea')).toBeNull();
+      expect(must(h.container, '.app').getAttribute('data-connection')).toBe('unavailable');
+      h.button('Show logs').click();
+      expect(h.sent).toEqual([{ type: 'logs.show' }]);
     });
-    const banner = must(h.container, '.connection');
-    expect(banner.textContent).toContain('Unavailable: opencode was not found');
-    expect(banner.textContent).toContain('Output → OpenCode');
-    expect(must<HTMLButtonElement>(h.container, '.chat-header button:last-child').disabled).toBe(
-      true,
-    );
-  });
 
-  // Phase 3 (issue #10): the banner has buttons that talk to the host.
-  it('Unavailable offers Restart server and Show logs, and each posts its message', () => {
-    const h = start();
-    h.apply({
-      type: 'connection.state',
-      connection: {
-        state: 'unavailable',
-        reason: 'exited',
-        error: { code: 'exited', message: 'The server exited' },
-      },
+    it('keeps the guide through the next starting and drops it at connected (P1=1)', () => {
+      const h = start();
+      h.apply(unavailable('start-failed', 'could not start'));
+      h.apply({ type: 'connection.state', connection: { state: 'starting' } });
+      expect(h.container.querySelector('.setup-guide')).not.toBeNull();
+      h.apply(connected);
+      expect(h.container.querySelector('.setup-guide')).toBeNull();
+      expect(h.container.querySelector('textarea')).not.toBeNull();
     });
-    h.button('Restart server').click();
-    h.button('Show logs').click();
-    expect(h.sent).toEqual([{ type: 'server.restart' }, { type: 'logs.show' }]);
-  });
 
-  it('Reconnecting offers only Show logs (the host is already retrying)', () => {
-    const h = start();
-    h.apply({ type: 'connection.state', connection: { state: 'reconnecting', attempt: 1 } });
-    expect(h.container.textContent).toContain('Reconnecting (1)');
-    h.button('Show logs').click();
-    expect(h.sent).toEqual([{ type: 'logs.show' }]);
-    expect(() => h.button('Restart server')).toThrow();
-  });
+    it('never shows the guide in a normal start (starting then connected)', () => {
+      const h = start();
+      h.apply({ type: 'connection.state', connection: { state: 'starting' } });
+      expect(h.container.querySelector('.setup-guide')).toBeNull();
+      h.apply(connected);
+      expect(h.container.querySelector('.setup-guide')).toBeNull();
+    });
 
-  it('Connected and Starting show no buttons in the banner', () => {
-    const h = start();
-    h.apply(connected);
-    expect(h.container.querySelector('.connection-actions')).toBeNull();
-    h.apply({ type: 'connection.state', connection: { state: 'starting' } });
-    expect(h.container.querySelector('.connection-actions')).toBeNull();
+    it('shows the card at the end of the conversation, keeps the history and never takes the focus', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hello there'), assistant('m2')]));
+      h.apply(unavailable('exited', 'The server exited'));
+      const log = must(h.container, '[role="log"]');
+      expect(log.textContent).toContain('hello there');
+      const card = must(log, '.connection-card');
+      expect(card.getAttribute('role')).toBe('alert');
+      expect(card.textContent).toContain('opencode stopped');
+      expect(h.container.querySelector('.setup-guide')).toBeNull();
+      expect(card.contains(document.activeElement)).toBe(false);
+      h.button('Restart').click();
+      expect(h.sent).toEqual([{ type: 'server.restart' }]);
+      expect(h.textarea().placeholder).toBe('Waiting for opencode…');
+      expect(h.textarea().disabled).toBe(false);
+      expect(h.textarea().readOnly).toBe(false);
+    });
+
+    it('reconnecting is a neutral status card with only Show logs', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hello there'), assistant('m2')]));
+      h.apply({ type: 'connection.state', connection: { state: 'reconnecting', attempt: 1 } });
+      const card = must(h.container, '.connection-card');
+      expect(card.getAttribute('role')).toBe('status');
+      expect(card.textContent).toContain('Reconnecting to opencode (attempt 1)…');
+      expect(card.querySelectorAll('button')).toHaveLength(1);
+    });
+
+    it('no folder is a simple card with Open folder, not the guide (P15=2)', () => {
+      const h = start();
+      h.apply(unavailable('no-workspace', 'No folder'));
+      expect(h.container.querySelector('.setup-guide')).toBeNull();
+      expect(must(h.container, '.connection-card').textContent).toContain('Open a folder to start');
+      h.button('Open folder').click();
+      expect(h.sent).toEqual([{ type: 'setup.action', action: 'folder.open' }]);
+    });
   });
 });
 
@@ -1276,8 +1307,14 @@ describe('model and agent selectors (issues #23/#24)', () => {
       },
     },
   ];
-  const trigger = (h: Harness) => must<HTMLButtonElement>(h.container, 'button.model-trigger');
-  const radio = (h: Harness, id: string) => must<HTMLInputElement>(h.container, `#agent-${id}`);
+  const trigger = (h: Harness) => must<HTMLButtonElement>(h.container, 'button.agent-model-chip');
+  /** The agent the chip names (the text before the first " · "). */
+  const agentOf = (h: Harness) => trigger(h).textContent.split(' · ')[0];
+  /** Opens the chip's panel and presses the agent row of `id`. */
+  const pickAgent = (h: Harness, id: string) => {
+    trigger(h).click();
+    must<HTMLButtonElement>(h.container, `button[data-agent="${id}"]`).click();
+  };
   const lastSent = (h: Harness) => {
     const message = h.sent.at(-1);
     if (message?.type !== 'prompt.send') throw new Error('the last message is not a prompt.send');
@@ -1290,6 +1327,8 @@ describe('model and agent selectors (issues #23/#24)', () => {
     expect(trigger(h).getAttribute('aria-disabled')).toBe('true');
     trigger(h).click();
     expect(h.container.querySelector('.model-panel')).toBeNull();
+    // The Send button is still named, whatever the connection (icon button, E2 P9=1+b).
+    expect(h.button('Send').getAttribute('aria-label')).toBe('Send');
     h.type('hi');
     h.button('Send').click();
     const sent = lastSent(h);
@@ -1300,10 +1339,11 @@ describe('model and agent selectors (issues #23/#24)', () => {
   it('with no session shows Build and the default model, and a send carries the agent but not the default model', () => {
     const h = start();
     h.apply(connected, catalog);
-    expect(trigger(h).getAttribute('aria-label')).toBe('Model: Big Pickle (default)');
-    expect(trigger(h).textContent).toBe('Big Pickle (default)');
-    expect(radio(h, 'build').checked).toBe(true);
-    expect(radio(h, 'plan').checked).toBe(false);
+    expect(trigger(h).getAttribute('aria-label')).toBe(
+      'Agent and model: Build · Big Pickle (Connected)',
+    );
+    expect(trigger(h).textContent).toBe('Build · Big Pickle');
+    expect(agentOf(h)).toBe('Build');
     h.type('hi');
     h.button('Send').click();
     const sent = lastSent(h);
@@ -1318,7 +1358,7 @@ describe('model and agent selectors (issues #23/#24)', () => {
       ...catalog,
       catalog: { ...catalog.catalog, preferredModel: GLM },
     });
-    expect(trigger(h).textContent).toBe('GLM-5.3-Flash Free');
+    expect(trigger(h).textContent).toBe('Build · GLM-5.3-Flash Free');
     h.type('hi');
     h.button('Send').click();
     expect(lastSent(h).model).toEqual(GLM);
@@ -1330,9 +1370,9 @@ describe('model and agent selectors (issues #23/#24)', () => {
   it('sends a model and an agent that survive structuredClone (no store proxies inside)', () => {
     const h = start();
     h.apply(...withRow({ model: GLM, agent: 'plan' }), catalog);
-    radio(h, 'build').click();
+    pickAgent(h, 'build');
     trigger(h).click();
-    [...h.container.querySelectorAll<HTMLButtonElement>('button.model-option')][0]?.click();
+    [...h.container.querySelectorAll<HTMLButtonElement>('button[data-model]')][0]?.click();
     h.type('go');
     h.button('Send').click();
     expect(() => structuredClone(lastSent(h))).not.toThrow();
@@ -1413,15 +1453,14 @@ describe('model and agent selectors (issues #23/#24)', () => {
   it('picking an agent and a model sends nothing yet; the next prompt carries both', () => {
     const h = start();
     h.apply(...withRow({ model: PICKLE, agent: 'build' }), catalog);
-    radio(h, 'plan').click();
+    pickAgent(h, 'plan');
     trigger(h).click();
-    const glm = [...h.container.querySelectorAll<HTMLButtonElement>('button.model-option')].find(
+    const glm = [...h.container.querySelectorAll<HTMLButtonElement>('button[data-model]')].find(
       (b) => b.textContent.startsWith('GLM-5.3-Flash Free'),
     );
     glm?.click();
     expect(h.sent).toEqual([]);
-    expect(radio(h, 'plan').checked).toBe(true);
-    expect(trigger(h).textContent).toBe('GLM-5.3-Flash Free');
+    expect(trigger(h).textContent).toBe('Plan · GLM-5.3-Flash Free');
     h.type('go');
     h.button('Send').click();
     expect(lastSent(h)).toMatchObject({ sessionID: SES, model: GLM, agent: 'plan' });
@@ -1430,8 +1469,7 @@ describe('model and agent selectors (issues #23/#24)', () => {
   it('an open session shows and sends its own model and agent', () => {
     const h = start();
     h.apply(...withRow({ model: GLM, agent: 'plan' }), catalog);
-    expect(trigger(h).textContent).toBe('GLM-5.3-Flash Free');
-    expect(radio(h, 'plan').checked).toBe(true);
+    expect(trigger(h).textContent).toBe('Plan · GLM-5.3-Flash Free');
     h.type('go');
     h.button('Send').click();
     expect(lastSent(h)).toMatchObject({ model: GLM, agent: 'plan' });
@@ -1455,7 +1493,7 @@ describe('model and agent selectors (issues #23/#24)', () => {
       },
       catalog,
     );
-    radio(h, 'plan').click();
+    pickAgent(h, 'plan');
     h.button('Retry').click();
     expect(lastSent(h)).toMatchObject({ text: 'hi', agent: 'plan', model: PICKLE });
   });
@@ -1463,31 +1501,30 @@ describe('model and agent selectors (issues #23/#24)', () => {
   it('forgets the draft when another session opens, but keeps it across a snapshot of the same one', () => {
     const h = start();
     h.apply(...withRow({ agent: 'build' }), catalog);
-    radio(h, 'plan').click();
+    pickAgent(h, 'plan');
     h.apply(...withRow({ agent: 'build' }));
-    expect(radio(h, 'plan').checked).toBe(true);
+    expect(agentOf(h)).toBe('Plan');
     h.apply(...withRow({ agent: 'build' }, 'ses_2'));
-    expect(radio(h, 'build').checked).toBe(true);
-    expect(radio(h, 'plan').checked).toBe(false);
+    expect(agentOf(h)).toBe('Build');
   });
 
   it('keeps the draft of a session that does not exist yet until the first prompt creates it', () => {
     const h = start();
     h.apply(connected, catalog);
-    radio(h, 'plan').click();
-    expect(radio(h, 'plan').checked).toBe(true);
+    pickAgent(h, 'plan');
+    expect(agentOf(h)).toBe('Plan');
     h.type('hi');
     h.button('Send').click();
     expect(lastSent(h).agent).toBe('plan');
     // The host created the session: the snapshot opens it, and from then on its row speaks.
     h.apply(...withRow({ agent: 'plan' }, 'ses_new'));
-    expect(radio(h, 'plan').checked).toBe(true);
+    expect(agentOf(h)).toBe('Plan');
   });
 
   it('persists the pick with the session it belongs to, and restores it only for that session', () => {
     const first = start();
     first.apply(...withRow({ agent: 'build' }), catalog);
-    radio(first, 'plan').click();
+    pickAgent(first, 'plan');
     expect(first.saved.at(-1)).toMatchObject({ selection: { sessionID: SES, agent: 'plan' } });
 
     const same = start({
@@ -1497,7 +1534,7 @@ describe('model and agent selectors (issues #23/#24)', () => {
       selection: { sessionID: SES, agent: 'plan' },
     });
     same.apply(...withRow({ agent: 'build' }), catalog);
-    expect(radio(same, 'plan').checked).toBe(true);
+    expect(agentOf(same)).toBe('Plan');
 
     const other = start({
       draft: '',
@@ -1506,7 +1543,7 @@ describe('model and agent selectors (issues #23/#24)', () => {
       selection: { sessionID: SES, agent: 'plan' },
     });
     other.apply(...withRow({ agent: 'build' }, 'ses_2'), catalog);
-    expect(radio(other, 'build').checked).toBe(true);
+    expect(agentOf(other)).toBe('Build');
   });
 
   it('names the agent and model of each reply from the catalog', () => {
@@ -1520,25 +1557,38 @@ describe('model and agent selectors (issues #23/#24)', () => {
   it('shows a session model the server no longer offers as unavailable', () => {
     const h = start();
     h.apply(...withRow({ model: { providerID: 'opencode', id: 'retired' } }), catalog);
-    expect(trigger(h).textContent).toBe('opencode/retired (unavailable)');
+    expect(trigger(h).textContent).toBe('Build · opencode/retired (unavailable)');
   });
 
-  it('Enter on the agent switch does not send the prompt', () => {
+  it('Enter in the search box of the panel does not send the prompt', () => {
     const h = start();
     h.apply(...withRow({ agent: 'build' }), catalog);
     h.type('keep me');
+    trigger(h).click();
     const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
-    radio(h, 'build').dispatchEvent(event);
+    must(h.container, 'input[type="search"]').dispatchEvent(event);
     expect(event.defaultPrevented).toBe(true);
     expect(h.sent).toEqual([]);
+    expect(h.textarea().value).toBe('keep me');
   });
 
-  it('keeps the selectors in the prompt row, not in the header', () => {
+  it('keeps the combined chip in the prompt bar, not in the header, and no loose selectors', () => {
     const h = start();
     h.apply(...withRow(), catalog);
-    expect(h.container.querySelector('header .model-trigger, header .agent-toggle')).toBeNull();
-    expect(h.container.querySelector('.prompt-actions .model-trigger')).not.toBeNull();
-    expect(h.container.querySelector('.prompt-actions .agent-toggle')).not.toBeNull();
+    expect(h.container.querySelector('header .agent-model-chip')).toBeNull();
+    expect(
+      h.container.querySelector('.prompt-actions .prompt-selectors .agent-model-chip'),
+    ).not.toBeNull();
+    expect(h.container.querySelector('.agent-toggle, .model-trigger, .variant-trigger')).toBeNull();
+  });
+
+  it('draws Send and Stop as round icon buttons named by aria-label (P9=1+b)', () => {
+    const h = start();
+    h.apply(...withRow(), catalog);
+    const send = h.button('Send');
+    expect(send.textContent).toBe('');
+    expect(send.querySelector('svg')).not.toBeNull();
+    expect(send.type).toBe('submit');
   });
 });
 
@@ -1580,7 +1630,16 @@ describe('reasoning variant selector (issue #61)', () => {
         type: 'snapshot',
         snapshot: {
           sessions: [
-            { id, title: 'Work', createdAt: 1, updatedAt: 2, ...(model ? { model } : {}) },
+            // A COPY: the store keeps the object it is given and a later `session.upserted`
+            // reconciles INTO it, so the shared `GLM` constant would gain the variant for every
+            // later test (seen as "· high" in the name of an unrelated test, 27/10/2026).
+            {
+              id,
+              title: 'Work',
+              createdAt: 1,
+              updatedAt: 2,
+              ...(model ? { model: { ...model } } : {}),
+            },
           ],
           statuses: { [id]: { type: 'idle' } },
           open: { sessionID: id, messages: [user('m1', 'hi')], parts: {} },
@@ -1589,8 +1648,10 @@ describe('reasoning variant selector (issue #61)', () => {
         },
       },
     ] satisfies HostToWebview[];
-  const variantTrigger = (h: Harness) =>
-    h.container.querySelector<HTMLButtonElement>('button.variant-trigger');
+  const chip = (h: Harness) => must<HTMLButtonElement>(h.container, 'button.agent-model-chip');
+  /** What the chip shows for the reasoning level: "· low" at its end, nothing for Default. */
+  const levelShown = (h: Harness) => chip(h).textContent.split(' · ').slice(2).join(' · ');
+  const reasoningRows = (h: Harness) => h.container.querySelectorAll('.menu-reasoning button');
   const entry = (h: Harness, id: string) =>
     must<HTMLButtonElement>(h.container, `button.model-option[data-variant="${id}"]`);
   const lastSent = (h: Harness) => {
@@ -1599,19 +1660,24 @@ describe('reasoning variant selector (issue #61)', () => {
     return message;
   };
   const pickVariant = (h: Harness, id: string) => {
-    must<HTMLButtonElement>(h.container, 'button.variant-trigger').click();
+    chip(h).click();
     entry(h, id).click();
   };
 
-  it('is not there for a model without variants, and appears after the model button for one with', () => {
+  it('is not in the panel for a model without variants, and is there for one with', () => {
     const h = start();
     h.apply(...withRow(PICKLE), catalog);
-    expect(variantTrigger(h)).toBeNull();
+    chip(h).click();
+    expect(reasoningRows(h).length).toBe(0);
+    chip(h).click(); // closes
     h.apply(...withRow(GLM));
-    const row = must(h.container, '.prompt-selectors');
-    const classes = [...row.querySelectorAll('button')].map((b) => b.className.split(' ')[1]);
-    expect(classes.indexOf('variant-trigger')).toBe(classes.indexOf('model-trigger') + 1);
-    expect(variantTrigger(h)?.textContent).toBe('Reasoning: Default');
+    chip(h).click();
+    expect([...reasoningRows(h)].map((b) => b.querySelector('.model-name')?.textContent)).toEqual([
+      'Default',
+      'low',
+      'high',
+    ]);
+    expect(levelShown(h)).toBe('');
   });
 
   it('picking a variant sends nothing yet; the next prompt carries it, and it survives structuredClone', () => {
@@ -1619,7 +1685,7 @@ describe('reasoning variant selector (issue #61)', () => {
     h.apply(...withRow(GLM), catalog);
     pickVariant(h, 'high');
     expect(h.sent).toEqual([]);
-    expect(variantTrigger(h)?.textContent).toBe('Reasoning: high');
+    expect(levelShown(h)).toBe('high');
     h.type('go');
     h.button('Send').click();
     expect(lastSent(h).model).toEqual({ ...GLM, variant: 'high' });
@@ -1629,9 +1695,9 @@ describe('reasoning variant selector (issue #61)', () => {
   it('Default removes the variant: the model goes without the field, never "default"', () => {
     const h = start();
     h.apply(...withRow({ ...GLM, variant: 'low' }), catalog);
-    expect(variantTrigger(h)?.textContent).toBe('Reasoning: low');
+    expect(levelShown(h)).toBe('low');
     pickVariant(h, 'default');
-    expect(variantTrigger(h)?.textContent).toBe('Reasoning: Default');
+    expect(levelShown(h)).toBe('');
     h.type('go');
     h.button('Send').click();
     const model = lastSent(h).model;
@@ -1642,16 +1708,16 @@ describe('reasoning variant selector (issue #61)', () => {
   it('a variant set from outside (the TUI) is shown and kept by the next send', () => {
     const h = start();
     h.apply(...withRow({ ...GLM, variant: 'low' }), catalog);
-    expect(variantTrigger(h)?.textContent).toBe('Reasoning: low');
+    expect(levelShown(h)).toBe('low');
     h.type('go');
     h.button('Send').click();
     expect(lastSent(h).model).toEqual({ ...GLM, variant: 'low' });
   });
 
-  it('a variant that arrives live changes the control while there is no draft', () => {
+  it('a variant that arrives live changes the chip while there is no draft', () => {
     const h = start();
     h.apply(...withRow(GLM), catalog);
-    expect(variantTrigger(h)?.textContent).toBe('Reasoning: Default');
+    expect(levelShown(h)).toBe('');
     h.apply({
       type: 'session.upserted',
       session: {
@@ -1662,32 +1728,31 @@ describe('reasoning variant selector (issue #61)', () => {
         model: { ...GLM, variant: 'high' },
       },
     });
-    expect(variantTrigger(h)?.textContent).toBe('Reasoning: high');
+    expect(levelShown(h)).toBe('high');
   });
 
   it('a variant the catalog does not list shows as unavailable', () => {
     const h = start();
     h.apply(...withRow({ ...GLM, variant: 'ultra' }), catalog);
-    expect(variantTrigger(h)?.textContent).toBe('Reasoning: ultra (unavailable)');
+    expect(levelShown(h)).toBe('ultra (unavailable)');
   });
 
   it('choosing another model resets to Default; choosing the same one again keeps the variant', () => {
     const h = start();
     h.apply(...withRow(GLM), catalog);
     pickVariant(h, 'high');
-    const modelButton = () => must<HTMLButtonElement>(h.container, 'button.model-trigger');
     const pickModel = (name: string) => {
-      modelButton().click();
-      [...h.container.querySelectorAll<HTMLButtonElement>('button.model-option')]
+      chip(h).click();
+      [...h.container.querySelectorAll<HTMLButtonElement>('button[data-model]')]
         .find((b) => b.textContent.startsWith(name))
         ?.click();
     };
     pickModel('GLM-5.3-Flash Free');
-    expect(variantTrigger(h)?.textContent).toBe('Reasoning: high');
+    expect(levelShown(h)).toBe('high');
     pickModel('Big Pickle');
-    expect(variantTrigger(h)).toBeNull();
+    expect(chip(h).textContent).toBe('Build · Big Pickle');
     pickModel('GLM-5.3-Flash Free');
-    expect(variantTrigger(h)?.textContent).toBe('Reasoning: Default');
+    expect(levelShown(h)).toBe('');
   });
 
   it('Retry carries the variant and survives structuredClone', () => {
@@ -1720,14 +1785,17 @@ describe('reasoning variant selector (issue #61)', () => {
     expect(() => structuredClone(lastSent(h))).not.toThrow();
   });
 
-  it('is aria-disabled while disconnected and keeps its place in the prompt row', () => {
+  it('the chip is aria-disabled while disconnected, says why in its name, and keeps its place in the bar', () => {
     const h = start();
     h.apply(...withRow(GLM), catalog, {
       type: 'connection.state',
       connection: { state: 'reconnecting', attempt: 1 },
     });
-    expect(variantTrigger(h)?.getAttribute('aria-disabled')).toBe('true');
-    expect(h.container.querySelector('.prompt-actions .variant-trigger')).not.toBeNull();
+    expect(chip(h).getAttribute('aria-disabled')).toBe('true');
+    expect(chip(h).getAttribute('aria-label')).toBe(
+      'Agent and model: Build · GLM-5.3-Flash Free (Reconnecting)',
+    );
+    expect(h.container.querySelector('.prompt-actions .agent-model-chip')).not.toBeNull();
   });
 });
 
@@ -1905,6 +1973,7 @@ describe('@ mentions and the editor context (issues #28/#29)', () => {
   it('asks the host for the editor context and shows what comes back as chips', () => {
     const h = start();
     h.apply(connected);
+    h.button('Add context').click();
     h.button('Add selection').click();
     const request = h.sent[0];
     expect(request).toMatchObject({ type: 'attachments.fromEditor' });
@@ -1925,6 +1994,7 @@ describe('@ mentions and the editor context (issues #28/#29)', () => {
   it('shows why Add selection found nothing to add', () => {
     const h = start();
     h.apply(connected);
+    h.button('Add context').click();
     h.button('Add selection').click();
     const request = h.sent[0];
     h.apply({
@@ -1936,14 +2006,24 @@ describe('@ mentions and the editor context (issues #28/#29)', () => {
     expect(h.container.querySelector('.chip')).toBeNull();
   });
 
-  it('keeps Add selection inert, and aria-disabled, without a connection', () => {
+  it('keeps the "+" menu inert, and aria-disabled, without a connection', () => {
     const h = start();
-    const add = h.button('Add selection');
-    expect(add.getAttribute('aria-disabled')).toBe('true');
-    add.click();
+    const plus = h.button('Add context');
+    expect(plus.getAttribute('aria-disabled')).toBe('true');
+    expect(plus.hasAttribute('disabled')).toBe(false);
+    plus.click();
+    expect(h.container.querySelector('[role="menu"]')).toBeNull();
     expect(h.sent).toEqual([]);
     h.apply(connected);
-    expect(add.getAttribute('aria-disabled')).toBeNull();
+    expect(plus.getAttribute('aria-disabled')).toBeNull();
+  });
+
+  it('asks for an image picker with kind "image" from the "+" menu (decision P11=1)', () => {
+    const h = start();
+    h.apply(connected);
+    h.button('Add context').click();
+    h.button('Attach image…').click();
+    expect(h.sent).toMatchObject([{ type: 'attachments.pick', kind: 'image' }]);
   });
 
   it('opens a file of the conversation at the start of its range from its chip', () => {
@@ -2589,7 +2669,7 @@ describe('drop and paste (issue #30)', () => {
     });
     expect(h.sent).toEqual([]);
     expect(h.container.textContent).toContain(
-      'Drop files from the VS Code Explorer, or use Attach',
+      'Drop files from the VS Code Explorer, or use the + menu',
     );
   });
 });

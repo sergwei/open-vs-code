@@ -121,12 +121,14 @@ export function createWorkspace() {
  * (`opencode-xdg`, see {@link cleanEnv}) are wiped at start so every run begins from the same
  * state.
  *
- * `openVsCode.opencodePath` is the fixture (see {@link fakeEnv}); the fixture's state file lives in
+ * `openVsCode.opencodePath` is the fixture (see {@link fakeEnv}) unless `opencodePath` overrides it
+ * (E2 step 0 passes a path that does not exist); `startDown` starts with the fixture's `.down`
+ * marker in place; the fixture's state file lives in
  * `workDir` and is deleted at start like the profile. Returns `{ port, pid, stop, userDataDir,
  * xdgRoot, exited, stateFile }`; `stop()` kills the whole process tree (the server child of the
  * extension host included) and waits until the main process is gone.
  */
-export async function startVSCode({ repoRoot, workDir, workspace }) {
+export async function startVSCode({ repoRoot, workDir, workspace, opencodePath, startDown }) {
   const executable = await downloadAndUnzipVSCode('stable');
   const userDataDir = path.join(workDir, 'user-data');
   const extensionsDir = path.join(workDir, 'extensions');
@@ -136,14 +138,15 @@ export async function startVSCode({ repoRoot, workDir, workspace }) {
   fs.rmSync(xdgRoot, { recursive: true, force: true });
   const stateFile = path.join(workDir, 'fake-opencode-state.json');
   fs.rmSync(stateFile, { force: true });
+  // The marker a CRASH turn of the fixture leaves (`<state file>.down`): while it exists every
+  // start of the fixture fails. `startDown` creates it up front (E2 step 0: a server that cannot
+  // start even once the binary is found); the run deletes it to let the server come back.
+  const downMarker = `${stateFile}.down`;
+  fs.rmSync(downMarker, { force: true });
+  if (startDown === true) fs.writeFileSync(downMarker, 'down from the start\n');
   writeSettings(userDataDir, {
-    'openVsCode.opencodePath': path.join(
-      repoRoot,
-      'src',
-      'extension',
-      'test-fixtures',
-      'fake-opencode.mjs',
-    ),
+    'openVsCode.opencodePath':
+      opencodePath ?? path.join(repoRoot, 'src', 'extension', 'test-fixtures', 'fake-opencode.mjs'),
     'workbench.startupEditor': 'none',
     'workbench.colorTheme': 'Default Dark Modern',
     'security.workspace.trust.enabled': false,
@@ -156,7 +159,7 @@ export async function startVSCode({ repoRoot, workDir, workspace }) {
     // Windows 11 (21/10/2026): step 9 of `npm run test:visual` found the dialog in the DOM and
     // pressed Cancel and Delete with this setting. UNVERIFIED on macOS and Linux.
     'window.dialogStyle': 'custom',
-    // Step 13 (review #1015 S1) presses Attach, whose `showOpenDialog` would be the OS file dialog.
+    // Step 13 (review #1015 S1) presses the "Attach file…" item of the "+" menu, whose `showOpenDialog` would be the OS file dialog.
     // `files.simpleDialog.enable` draws VS Code's own dialog (a quick input) in the DOM instead.
     // VERIFIED by step 13 (Windows 11, VS Code 1.143.0, 21/10/2026): it applies to
     // `showOpenDialog` from an extension. UNVERIFIED on macOS and Linux.
@@ -201,5 +204,5 @@ export async function startVSCode({ repoRoot, workDir, workspace }) {
     }
     await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 10_000))]);
   };
-  return { port, pid, stop, userDataDir, xdgRoot, exited, stateFile };
+  return { port, pid, stop, userDataDir, xdgRoot, exited, stateFile, downMarker };
 }

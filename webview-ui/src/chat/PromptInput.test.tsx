@@ -7,8 +7,8 @@
 // text under the caret and Enter does nothing (no send, no pick) while that answer is pending,
 // Escape closes it WITHOUT stopping a busy turn, a mouse pick keeps the
 // focus in the textarea (a blur would close the popup before the click lands), and the ARIA
-// attributes of the combobox pattern exist only while it is open. Issue #29: the Add selection
-// button is `aria-disabled`, not `disabled`, so it keeps the focus.
+// attributes of the combobox pattern exist only while it is open. Issue #29: the "+" button that
+// holds Add selection is `aria-disabled`, not `disabled`, so it keeps the focus (E2 #85, phase 4).
 //
 // Provenance: key events synthesized in jsdom against a controlled textarea. jsdom has no
 // layout, so auto-grow and real caret movement are UNVERIFIED (F5 point 7); the real mouse and
@@ -35,7 +35,8 @@ function setup(
     history?: string[];
     files?: AttachmentRef[];
     draft?: string;
-    addSelectionDisabled?: boolean;
+    attachDisabled?: boolean;
+    waiting?: boolean;
     thumbs?: Record<string, string>;
   } = {},
 ) {
@@ -51,6 +52,7 @@ function setup(
     submit: vi.fn(),
     stop: vi.fn(),
     attach: vi.fn(),
+    attachImage: vi.fn(),
     remove: vi.fn(),
     addSelection: vi.fn(),
     mentionQuery: vi.fn<(query: string | undefined) => void>(),
@@ -58,6 +60,7 @@ function setup(
     drop: vi.fn<(content: DropContent) => void>(),
     pasteImages: vi.fn<(files: File[]) => void>(),
   };
+  let focusBox: (() => void) | undefined;
   mounted = mount(() => (
     <PromptInput
       draft={draft()}
@@ -65,20 +68,24 @@ function setup(
       history={history}
       files={options.files ?? []}
       busy={options.busy ?? false}
+      waiting={options.waiting ?? false}
       sendDisabled={false}
-      attachDisabled={false}
-      addSelectionDisabled={options.addSelectionDisabled ?? false}
+      attachDisabled={options.attachDisabled ?? false}
       fileSearch={search()}
       onMentionQuery={calls.mentionQuery}
       onMentionPick={calls.mentionPick}
       onSubmit={calls.submit}
       onStop={calls.stop}
       onAttach={calls.attach}
+      onAttachImage={calls.attachImage}
       onAddSelection={calls.addSelection}
       onRemoveFile={calls.remove}
       onDrop={calls.drop}
       onPasteImages={calls.pasteImages}
       thumbs={options.thumbs ?? {}}
+      onFocusReady={(focus) => {
+        focusBox = focus;
+      }}
     />
   ));
   const textarea = must<HTMLTextAreaElement>(mounted.container, 'textarea');
@@ -93,8 +100,32 @@ function setup(
     textarea.setSelectionRange(text.length, text.length);
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
   };
-  return { textarea, press, type, draft, setDraft, setSearch, calls };
+  const plus = must<HTMLButtonElement>(mounted.container, 'button[aria-label="Add context"]');
+  /** Opens the "+" menu the way the mouse does. */
+  const openMenu = (): void => {
+    plus.click();
+  };
+  return {
+    textarea,
+    press,
+    type,
+    draft,
+    setDraft,
+    setSearch,
+    calls,
+    plus,
+    openMenu,
+    focusBox: () => {
+      focusBox?.();
+    },
+  };
 }
+
+/** An item of the open "+" menu, by its visible name. */
+const menuItem = (name: string): HTMLButtonElement | undefined =>
+  [...(mounted?.container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])].find(
+    (b) => b.textContent === name,
+  );
 
 describe('sending', () => {
   it('sends on Enter and not on Shift+Enter', () => {
@@ -116,7 +147,26 @@ describe('sending', () => {
   it('has a form with a name and a Send button when idle', () => {
     setup();
     expect(mounted?.container.querySelector('form[aria-label="Send a message"]')).not.toBeNull();
-    expect(mounted?.container.querySelector('button[type="submit"]')?.textContent).toBe('Send');
+    const send = mounted?.container.querySelector('button[type="submit"]');
+    // E2 P9=1+b: a round icon button, named by its aria-label and with no text of its own.
+    expect(send?.getAttribute('aria-label')).toBe('Send');
+    expect(send?.textContent).toBe('');
+    expect(send?.querySelector('svg')).not.toBeNull();
+  });
+});
+
+describe('without a connection (E2, issue #85, P5=2)', () => {
+  it('shows the waiting placeholder and stays editable without a connection', () => {
+    const { textarea, type, draft } = setup({ waiting: true });
+    expect(textarea.placeholder).toBe('Waiting for opencode…');
+    expect(textarea.readOnly).toBe(false);
+    expect(textarea.disabled).toBe(false);
+    type('draft while waiting');
+    expect(draft()).toBe('draft while waiting');
+  });
+
+  it('keeps the normal placeholder when connected', () => {
+    expect(setup().textarea.placeholder).toContain('Ask opencode');
   });
 });
 
@@ -124,7 +174,9 @@ describe('busy', () => {
   it('shows Stop instead of Send', () => {
     setup({ busy: true });
     const container = mounted?.container ?? document.body;
-    const labels = [...container.querySelectorAll('button')].map((b) => b.textContent);
+    const labels = [...container.querySelectorAll('button')].map((b) =>
+      b.getAttribute('aria-label'),
+    );
     expect(labels).toContain('Stop');
     expect(labels).not.toContain('Send');
     expect(container.querySelector('button[type="submit"]')).toBeNull();
@@ -133,7 +185,7 @@ describe('busy', () => {
   it('calls onStop for the Stop button and for Escape, only while busy', () => {
     const busy = setup({ busy: true });
     const stopButton = [...(mounted?.container.querySelectorAll('button') ?? [])].find(
-      (b) => b.textContent === 'Stop',
+      (b) => b.getAttribute('aria-label') === 'Stop',
     );
     stopButton?.click();
     busy.press('Escape');
@@ -177,11 +229,9 @@ describe('history', () => {
 
 describe('attachments', () => {
   it('asks the host through onAttach', () => {
-    const { calls } = setup();
-    const attach = [...(mounted?.container.querySelectorAll('button') ?? [])].find(
-      (b) => b.textContent === 'Attach',
-    );
-    attach?.click();
+    const { calls, openMenu } = setup();
+    openMenu();
+    menuItem('Attach file…')?.click();
     expect(calls.attach).toHaveBeenCalledTimes(1);
   });
 
@@ -502,37 +552,77 @@ describe('the @ popup (issue #28)', () => {
   });
 });
 
-describe('Add selection (issue #29)', () => {
-  const button = () =>
-    [...(mounted?.container.querySelectorAll('button') ?? [])].find(
-      (b) => b.textContent === 'Add selection',
-    );
-
+describe('Add selection (issue #29), an item of the "+" menu', () => {
   // The tooltip is an approved wording (decision ui-texts of E7-file-context): pinned so it cannot
   // drift unnoticed.
   it('explains in its tooltip what it adds', () => {
-    setup();
-    expect(button()?.title).toBe(
+    const { openMenu } = setup();
+    openMenu();
+    expect(menuItem('Add selection')?.title).toBe(
       'Add the selected lines of the active editor, or the whole file when nothing is selected',
     );
   });
 
   it('asks the host through onAddSelection', () => {
-    const { calls } = setup();
-    button()?.click();
+    const { calls, openMenu } = setup();
+    openMenu();
+    menuItem('Add selection')?.click();
     expect(calls.addSelection).toHaveBeenCalledTimes(1);
   });
 
   // aria-disabled, not disabled: a disabled button that had the focus drops it to the body.
-  it('is aria-disabled, still focusable and inert while there is no server', () => {
-    const { calls } = setup({ addSelectionDisabled: true });
-    const add = button();
-    expect(add?.getAttribute('aria-disabled')).toBe('true');
-    expect(add?.disabled).toBe(false);
-    add?.focus();
-    expect(document.activeElement).toBe(add);
-    add?.click();
+  it('keeps the "+" button aria-disabled, still focusable and inert while there is no server', () => {
+    const { calls, plus } = setup({ attachDisabled: true });
+    expect(plus.getAttribute('aria-disabled')).toBe('true');
+    expect(plus.disabled).toBe(false);
+    plus.focus();
+    expect(document.activeElement).toBe(plus);
+    plus.click();
+    expect(mounted?.container.querySelector('[role="menu"]')).toBeNull();
     expect(calls.addSelection).not.toHaveBeenCalled();
+  });
+});
+
+// Mention a file (E2, issue #85, phase 4): the item writes the `@` and opens the popup by the SAME
+// path as typing it. Protects against an `@` written without telling the parent (no search, no popup)
+// and against one glued to a word, where `findMention` would not see a mention.
+describe('Mention a file, an item of the "+" menu', () => {
+  it('writes an @, focuses the box and asks for the files like typing does', () => {
+    const { calls, openMenu, textarea, draft } = setup();
+    openMenu();
+    menuItem('Mention a file')?.click();
+    expect(draft()).toBe('@');
+    expect(document.activeElement).toBe(textarea);
+    expect(calls.mentionQuery).toHaveBeenCalledWith('');
+    expect(mounted?.container.querySelector('.mention-popup')).not.toBeNull();
+  });
+
+  it('puts a space before the @ when the caret sits right after a word', () => {
+    const { calls, openMenu, type, draft } = setup();
+    type('look at');
+    openMenu();
+    menuItem('Mention a file')?.click();
+    expect(draft()).toBe('look at @');
+    expect(calls.mentionQuery).toHaveBeenLastCalledWith('');
+  });
+
+  // test:visual step 22 (27/10/2026): Ctrl+Alt+N with the menu open left it open, because the parent
+  // focused the box while the webview document did not own the focus, so no `focusout` fired.
+  it('closes an open "+" menu when the parent focuses the box, with no focusout', () => {
+    const { openMenu, focusBox, textarea } = setup();
+    openMenu();
+    expect(mounted?.container.querySelector('[role="menu"]')).not.toBeNull();
+    focusBox();
+    expect(mounted?.container.querySelector('[role="menu"]')).toBeNull();
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('asks for an image through onAttachImage', () => {
+    const { calls, openMenu } = setup();
+    openMenu();
+    menuItem('Attach image…')?.click();
+    expect(calls.attachImage).toHaveBeenCalledTimes(1);
+    expect(calls.attach).not.toHaveBeenCalled();
   });
 });
 
@@ -638,9 +728,9 @@ describe('drop and paste (issue #30)', () => {
     expect(form().querySelector('.chip-open')).toBeNull();
   });
 
-  it('puts the drop hint in the tooltip of Attach', () => {
-    setup();
-    const attach = [...form().querySelectorAll('button')].find((b) => b.textContent === 'Attach');
-    expect(attach?.title).toBe('Hold Shift to drop files from the Explorer');
+  it('puts the drop hint in the tooltip of the Attach file… item', () => {
+    const { openMenu } = setup();
+    openMenu();
+    expect(menuItem('Attach file…')?.title).toBe('Hold Shift to drop files from the Explorer');
   });
 });

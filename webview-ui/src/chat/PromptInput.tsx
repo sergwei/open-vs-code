@@ -2,8 +2,10 @@ import { createEffect, createSignal, For, on, Show, type JSX } from 'solid-js';
 import type { AttachmentRef } from '../../../src/shared/protocol';
 import { AttachmentOpenButton } from './AttachmentOpenButton';
 import { hasDropPayload, imagesOf, readDrop, type DropContent } from './dropData';
+import { SendIcon, StopIcon } from './icons';
 import { applyMention, findMention, type MentionToken } from './mentionQuery';
 import { MentionPopup, mentionStatus, optionId, type FileSearchView } from './MentionPopup';
+import { PlusMenu } from './PlusMenu';
 import type { PromptHistory } from './promptHistory';
 
 let requestCounter = 0;
@@ -25,7 +27,7 @@ export function nextRequestId(): string {
 }
 
 /**
- * The prompt box (issue #13): a growing textarea with Send / Stop, Attach, Add selection and
+ * The prompt box (issue #13): a growing textarea with Send / Stop, the "+" context menu and
  * attachment chips.
  *
  * The draft is CONTROLLED from outside (`draft` / `onDraft`), because the empty-state
@@ -39,8 +41,16 @@ export function nextRequestId(): string {
  * HYPOTHESIS that the Chromium of VS Code 1.105+ supports it (Chrome has it since 123); where
  * it does not, the box keeps its minimum height and still works. `onFocusReady` hands the parent
  * a function that focuses the textarea, used after sending, stopping or retrying.
- * The action row starts with the `selectors` slot (agent switch and model picker, E5), then Add
- * selection, Attach and Send/Stop; the row wraps in a narrow side bar (CSS `flex-wrap`).
+ * Without a connection (`waiting`, E2 P5=2) the textarea stays editable and its placeholder reads
+ * "Waiting for opencode…"; VERIFIED by `PromptInput.test.tsx` ("shows the waiting placeholder
+ * and stays editable without a connection").
+ * The action bar (E2, issue #85, phases 3 and 4) reads, left to right: the "+" button ({@link PlusMenu}:
+ * Add selection, Attach file…, Attach image… and Mention a file; `insertMention` writes the `@` and
+ * opens the popup by the same path as typing it),
+ * the `selectors` slot (the combined agent and model chip), a free space, and the round Send / Stop
+ * button. Send and Stop are icon buttons named by `aria-label` ("Send", "Stop"; decision P9=1+b of
+ * Sergio, 27/10/2026, Engram #1300), so a test or a script finds them by name, not by text. The row
+ * wraps in a narrow side bar (CSS `flex-wrap`), and under 200 px the chip takes a row of its own.
  *
  * Issue #28, the `@` mentions. Typing an `@` that starts a word opens the {@link MentionPopup} with
  * the files the parent searched (`fileSearch`); the parent is told the text to search through
@@ -72,7 +82,7 @@ export function nextRequestId(): string {
  * Shift to drop files from the Explorer" with `data-drop="active"` while it is over, and on `drop`
  * hands `readDrop(...)` to the parent. VS Code only delivers a drop to a sidebar webview with
  * Shift held (`WebviewWindowDragMonitor`, read in 1.105.0), and from 1.140 not at all
- * (microsoft/vscode#339036); the same hint is the tooltip of Attach. A paste with image files
+ * (microsoft/vscode#339036); the same hint is the tooltip of the "Attach file…" item. A paste with image files
  * (`imagesOf`) is cancelled and handed to `onPasteImages`; a text paste is left native. Chips of
  * pasted images show a thumbnail from `thumbs`.
  * VERIFIED on Windows 11, VS Code 1.143.1 (23/10/2026, `test:visual` step 20, a real Ctrl+V with
@@ -83,8 +93,8 @@ export function nextRequestId(): string {
  * observed (it is not delivered to webviews in 1.140+, microsoft/vscode#339036, not reproduced
  * here either), and neither was macOS or Linux.
  *
- * Add selection (issue #29, decision Q2): a separate button; it only calls `onAddSelection`, and
- * is `aria-disabled` (not `disabled`, so it keeps the focus) without a connection. The name of a
+ * Add selection (issue #29, decision Q2): an item of the "+" menu; it only calls `onAddSelection`,
+ * and is `aria-disabled` (not `disabled`, so it keeps the focus) without a connection. The name of a
  * chip is a button that opens the file ({@link AttachmentOpenButton}).
  * VERIFIED by `PromptInput.test.tsx` in jsdom (keys, ARIA, mousedown keeping the focus). VERIFIED
  * in a real VS Code 1.143.0 on Windows 11 (22/10/2026, `test:visual` step 16, real keyboard and
@@ -104,10 +114,15 @@ export function PromptInput(props: {
   history: PromptHistory;
   files: readonly AttachmentRef[];
   busy: boolean;
+  /**
+   * There is no connection to opencode (E2, issue #85, P5=2): the box stays EDITABLE so the draft
+   * keeps growing during a retry; only the placeholder changes to "Waiting for opencode…" (Send,
+   * Attach and the selectors are blocked through their own props).
+   */
+  waiting?: boolean;
   sendDisabled: boolean;
+  /** The "+" menu is blocked (`aria-disabled`) while there is no server to attach for. */
   attachDisabled: boolean;
-  /** Add selection is blocked (aria-disabled) while there is no server to attach for. */
-  addSelectionDisabled: boolean;
   /** The `@` popup's results, from the store. */
   fileSearch: FileSearchView;
   /** The text to search after an `@`, or `undefined` when the popup closed. Parent debounces. */
@@ -116,7 +131,10 @@ export function PromptInput(props: {
   onMentionPick(file: AttachmentRef): void;
   onSubmit(): void;
   onStop(): void;
+  /** "Attach file…" of the "+" menu. */
   onAttach(): void;
+  /** "Attach image…" of the "+" menu (host dialog filtered to images, decision P11=1). */
+  onAttachImage(): void;
   onAddSelection(): void;
   onRemoveFile(uri: string): void;
   /** Issue #30: something was dropped on the box; the parent decides what to do with each kind. */
@@ -127,8 +145,8 @@ export function PromptInput(props: {
   thumbs: Readonly<Record<string, string>>;
   onFocusReady?(focus: () => void): void;
   /**
-   * The agent and model selectors (issues #23/#24), drawn at the start of the action row. They are
-   * buttons and radios INSIDE this form, so their Enter must not submit it (each one cancels it).
+   * The combined agent and model chip (issues #23/#24, E2 #85), drawn between the context buttons
+   * and Send. It is a button INSIDE this form, so its search box must not submit it on Enter.
    */
   selectors?: JSX.Element;
 }) {
@@ -140,7 +158,14 @@ export function PromptInput(props: {
   const [announcement, setAnnouncement] = createSignal('');
   let announcementFlip = false;
 
+  /** Closes the "+" menu; set by the menu itself. */
+  let closePlusMenu: (() => void) | undefined;
+
+  // The parent focuses the box after sending, stopping, a new session (a shortcut of issue #35)...
+  // An open "+" menu closes then: when the webview document does not own the focus at that moment
+  // the browser fires no `focusout`, so the menu would stay open over the box (test:visual step 22).
   props.onFocusReady?.(() => {
+    closePlusMenu?.();
     textarea?.focus();
   });
 
@@ -243,6 +268,29 @@ export function PromptInput(props: {
       textarea?.focus();
       textarea?.setSelectionRange(written.caret, written.caret);
     });
+  };
+
+  /**
+   * "Mention a file" of the "+" menu: writes an `@` at the caret (with a space before it when it
+   * would stick to a word, because a mention only starts a word), moves the focus to the box and
+   * opens the popup by the SAME path as typing it (`findMention` + `applyToken`).
+   */
+  const insertMention = (): void => {
+    const field = textarea;
+    if (field === undefined) return;
+    const value = field.value;
+    const start = field.selectionStart;
+    const end = field.selectionEnd;
+    const before = value.slice(0, start);
+    const glue = before !== '' && !/\s$/.test(before) ? ' ' : '';
+    const text = `${before}${glue}@${value.slice(end)}`;
+    const caret = before.length + glue.length + 1;
+    props.history.reset();
+    props.onDraft(text);
+    field.value = text;
+    field.focus();
+    field.setSelectionRange(caret, caret);
+    applyToken(findMention(text, caret));
   };
 
   /** Re-reads the word under the caret after it moved (a click or a key), only to keep or close an open popup. */
@@ -411,7 +459,11 @@ export function PromptInput(props: {
         aria-activedescendant={
           status() === 'list' ? optionId(MENTION_LIST_ID, active()) : undefined
         }
-        placeholder="Ask opencode… (Enter to send, Shift+Enter for a new line)"
+        placeholder={
+          props.waiting
+            ? 'Waiting for opencode…'
+            : 'Ask opencode… (Enter to send, Shift+Enter for a new line)'
+        }
         value={props.draft}
         onInput={(event) => {
           const field = event.currentTarget;
@@ -438,37 +490,45 @@ export function PromptInput(props: {
         {announcement()}
       </div>
       <div class="prompt-actions">
-        <div class="prompt-selectors">{props.selectors}</div>
-        <button
-          type="button"
-          class="secondary"
-          aria-disabled={props.addSelectionDisabled ? 'true' : undefined}
-          title="Add the selected lines of the active editor, or the whole file when nothing is selected"
-          onClick={() => {
-            if (!props.addSelectionDisabled) props.onAddSelection();
-          }}
-        >
-          Add selection
-        </button>
-        <button
-          type="button"
-          class="secondary"
+        <PlusMenu
           disabled={props.attachDisabled}
-          title="Hold Shift to drop files from the Explorer"
-          onClick={() => props.onAttach()}
-        >
-          Attach
-        </button>
+          onAddSelection={() => {
+            props.onAddSelection();
+          }}
+          onAttachFile={() => {
+            props.onAttach();
+          }}
+          onAttachImage={() => {
+            props.onAttachImage();
+          }}
+          onMention={insertMention}
+          onCloseReady={(close) => {
+            closePlusMenu = close;
+          }}
+        />
+        <div class="prompt-selectors">{props.selectors}</div>
         <Show
           when={props.busy}
           fallback={
-            <button class="primary" type="submit" disabled={props.sendDisabled}>
-              Send
+            <button
+              class="primary send-button"
+              type="submit"
+              disabled={props.sendDisabled}
+              aria-label="Send"
+              title="Send"
+            >
+              <SendIcon />
             </button>
           }
         >
-          <button class="primary" type="button" onClick={() => props.onStop()}>
-            Stop
+          <button
+            class="primary send-button"
+            type="button"
+            aria-label="Stop"
+            title="Stop"
+            onClick={() => props.onStop()}
+          >
+            <StopIcon />
           </button>
         </Show>
       </div>

@@ -8,6 +8,7 @@ import {
   onMount,
   Show,
   Switch,
+  type JSX,
 } from 'solid-js';
 import type {
   Catalog,
@@ -156,6 +157,11 @@ export function MessageList(props: {
   onFork(message: UserMessage): void;
   onRevert(message: UserMessage): void;
   onOpenSession(sessionID: string): void;
+  /**
+   * Drawn after the last message INSIDE the `role="log"` (E2, issue #85: the connection card, so
+   * it scrolls with the history). Not a message: it adds one child to the log only while present.
+   */
+  trailing?: JSX.Element;
 }) {
   let list: HTMLDivElement | undefined;
   const [stick, setStick] = createSignal(true);
@@ -377,6 +383,7 @@ export function MessageList(props: {
             </ErrorBoundary>
           )}
         </For>
+        {props.trailing}
       </div>
       <Show when={!stick()}>
         <button type="button" class="secondary jump-latest" onClick={jumpToLatest}>

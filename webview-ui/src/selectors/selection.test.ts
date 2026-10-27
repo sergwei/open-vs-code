@@ -10,6 +10,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Catalog, ModelOption, SessionSummary } from '../../../src/shared/model';
 import {
+  agentChoices,
+  agentMeta,
+  chipLabel,
   compactModelSearch,
   effectiveAgent,
   effectiveModel,
@@ -252,6 +255,81 @@ describe('texts', () => {
     expect(replyMeta(catalog, 'general', { providerID: 'p', id: 'm', variant: 'low' })).toBe(
       'general · p/m · low',
     );
+  });
+});
+
+// E2 (issue #85, phase 3): the text of the combined chip and the rows of its Agent column. They
+// protect decision P7=1 of Sergio (27/10/2026): whatever is in use but not offered shows as
+// "(unavailable)" instead of disappearing. FABRICATED catalogs, as above.
+describe('chipLabel and agentChoices (E2, issue #85)', () => {
+  const withVariants: Catalog = {
+    ...catalog,
+    models: catalog.models.map((m) =>
+      m.id === 'glm-5.3-flash-free' ? { ...m, variants: ['low', 'high'] } : m,
+    ),
+  };
+  const model = (ref: { providerID: string; id: string; variant?: string }) =>
+    effectiveModel(input({ catalog: withVariants, hasSession: true, row: row({ model: ref }) }));
+
+  it('joins agent and model, and appends a variant only when it is not Default', () => {
+    expect(chipLabel(withVariants, 'build', model(GLM))).toBe('Build · GLM-5.3-Flash Free');
+    expect(chipLabel(withVariants, 'plan', model({ ...GLM, variant: 'low' }))).toBe(
+      'Plan · GLM-5.3-Flash Free · low',
+    );
+  });
+
+  it('never writes "(default)": a model that is only the server default reads as any other', () => {
+    expect(chipLabel(withVariants, 'build', effectiveModel(input({ catalog: withVariants })))).toBe(
+      'Build · Big Pickle',
+    );
+  });
+
+  it('marks an agent, a model and a variant the catalog lacks as unavailable', () => {
+    expect(chipLabel(withVariants, 'general', model(GLM))).toBe(
+      'general (unavailable) · GLM-5.3-Flash Free',
+    );
+    expect(chipLabel(withVariants, 'build', model({ providerID: 'p', id: 'gone' }))).toBe(
+      'Build · p/gone (unavailable)',
+    );
+    expect(chipLabel(withVariants, 'build', model({ ...GLM, variant: 'ultra' }))).toBe(
+      'Build · GLM-5.3-Flash Free · ultra (unavailable)',
+    );
+  });
+
+  it('falls back to the words "Agent" and "Model" while there is nothing to name', () => {
+    expect(chipLabel(undefined, undefined, undefined)).toBe('Agent · Model');
+  });
+
+  it('agentChoices lists the catalog in order and marks the current one', () => {
+    expect(agentChoices(catalog, 'plan')).toEqual([
+      { id: 'build', name: 'Build', current: false, unavailable: false },
+      { id: 'plan', name: 'Plan', current: true, unavailable: false },
+      { id: 'review', name: 'Reviewer', current: false, unavailable: false },
+    ]);
+    expect(agentChoices(undefined, 'plan')).toEqual([]);
+  });
+
+  it('agentChoices puts an effective agent the catalog lacks FIRST, current and unavailable', () => {
+    const rows = agentChoices(catalog, 'general');
+    expect(rows[0]).toEqual({
+      id: 'general',
+      name: 'general (unavailable)',
+      current: true,
+      unavailable: true,
+    });
+    expect(rows.slice(1).map((r) => r.id)).toEqual(['build', 'plan', 'review']);
+    expect(rows.filter((r) => r.current)).toHaveLength(1);
+  });
+
+  it('agentMeta is ONE string: "Current · <description>", or nothing', () => {
+    const base = { id: 'a', name: 'A', unavailable: false };
+    expect(agentMeta({ ...base, current: true, description: 'Reads the diff' })).toBe(
+      'Current · Reads the diff',
+    );
+    expect(agentMeta({ ...base, current: false, description: 'Reads the diff' })).toBe(
+      'Reads the diff',
+    );
+    expect(agentMeta({ ...base, current: false })).toBe('');
   });
 });
 

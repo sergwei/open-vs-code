@@ -269,6 +269,89 @@ export function agentLabel(catalog: Catalog | undefined, id: string): string {
   return catalog?.agents.find((agent: AgentOption) => agent.id === id)?.name ?? id;
 }
 
+/** Suffix of anything in use that the catalog does not offer. */
+const UNAVAILABLE = ' (unavailable)';
+
+/**
+ * The text of the combined chip of the prompt bar (E2, issue #85, phase 3): "Build · GLM-5.3-Flash
+ * Free", plus "· low" when the model carries a reasoning variant (Default adds nothing). Whatever is
+ * in use but is not in the catalog (the agent of a subagent session, a retired model, a variant the
+ * model no longer lists) is named with " (unavailable)" (decision P7=1 of Sergio, 27/10/2026, Engram
+ * #1300), so the chip never hides what the next prompt would carry. Without an agent or a model the
+ * words "Agent" / "Model" stand in. The server-default "(default)" mark of the old model button is
+ * NOT in the chip (it would cost width); the panel's "Current" entry still tells which is in use.
+ */
+export function chipLabel(
+  catalog: Catalog | undefined,
+  agent: string | undefined,
+  model: EffectiveModel | undefined,
+): string {
+  const agentText =
+    agent === undefined
+      ? 'Agent'
+      : `${agentLabel(catalog, agent)}${catalog !== undefined && !isSelectableAgent(catalog, agent) ? UNAVAILABLE : ''}`;
+  const fields = [agentText];
+  if (model === undefined) {
+    fields.push('Model');
+  } else {
+    fields.push(
+      `${modelLabel(model.ref, model.option)}${model.option === undefined ? UNAVAILABLE : ''}`,
+    );
+    const variant = model.ref.variant;
+    if (variant !== undefined) {
+      fields.push(
+        `${variant}${model.option?.variants.includes(variant) === true ? '' : UNAVAILABLE}`,
+      );
+    }
+  }
+  return fields.join(' · ');
+}
+
+/** One row of the Agent column: a selectable agent, or the effective one the catalog lacks. */
+export type AgentChoice = {
+  id: string;
+  name: string;
+  description?: string;
+  current: boolean;
+  /** True for the effective agent that is not selectable: shown, marked, and not pickable. */
+  unavailable: boolean;
+};
+
+/**
+ * The rows of the Agent column, in catalog order. An effective agent the catalog does not list (a
+ * subagent session's, decision P7=1) goes FIRST, marked unavailable, so the user sees why the host
+ * would refuse the send until a listed agent is picked. Without a catalog there is nothing.
+ */
+export function agentChoices(
+  catalog: Catalog | undefined,
+  effective: string | undefined,
+): AgentChoice[] {
+  if (catalog === undefined) return [];
+  const rows: AgentChoice[] = catalog.agents.map((agent) => ({
+    id: agent.id,
+    name: agent.name,
+    ...(agent.description === undefined ? {} : { description: agent.description }),
+    current: agent.id === effective,
+    unavailable: false,
+  }));
+  if (effective !== undefined && !isSelectableAgent(catalog, effective)) {
+    rows.unshift({
+      id: effective,
+      name: `${effective}${UNAVAILABLE}`,
+      current: true,
+      unavailable: true,
+    });
+  }
+  return rows;
+}
+
+/** "Current · <description>" for a row of the Agent column, as ONE string (lesson #926). */
+export function agentMeta(choice: AgentChoice): string {
+  return [choice.current ? 'Current' : undefined, choice.description]
+    .filter((field): field is string => field !== undefined && field !== '')
+    .join(' · ');
+}
+
 /**
  * "Plan · GLM-5.3-Flash Free" under an assistant reply: the agent and model that ANSWERED
  * (`session.step.started`), named from the catalog when it knows them and by id otherwise; a
