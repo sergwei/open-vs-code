@@ -235,6 +235,52 @@ describe('ServerManager', () => {
     });
   });
 
+  // E2 (issue #85). Fabricated detections and a fake start: they pin which states carry `binary`.
+  it('binary-missing and a detected v1 carry the diagnosis; start-failed and /api/info v1 do not', async () => {
+    const attempt = {
+      label: 'opencode2' as const,
+      outcome: 'not-on-path' as const,
+      detail: 'no opencode2 in PATH',
+    };
+    const { manager } = harness();
+    manager.setFolder(folderChoice);
+    manager.onDetection({ kind: 'not-found', attempts: [attempt] });
+    expect(manager.state).toMatchObject({
+      kind: 'unavailable',
+      reason: 'binary-missing',
+      binary: { checks: [{ source: 'opencode2', outcome: 'not-on-path' }] },
+    });
+    expect(manager.state).not.toHaveProperty('binary.settingPath');
+
+    const setting = harness();
+    setting.manager.setFolder(folderChoice);
+    setting.manager.onDetection({
+      kind: 'invalid-setting',
+      value: '/nope/opencode',
+      reason: 'the file does not exist',
+      attempts: [],
+    });
+    expect(setting.manager.state).toMatchObject({ binary: { settingPath: '/nope/opencode' } });
+
+    const old = harness();
+    old.manager.setFolder(folderChoice);
+    old.manager.onDetection({ ...unsupported, attempts: [{ ...attempt, outcome: 'unsupported' }] });
+    expect(old.manager.state).toMatchObject({
+      reason: 'unsupported-version',
+      binary: { checks: [{ outcome: 'unsupported' }] },
+    });
+
+    // A detection that finds a binary which then fails to start must not keep step 1 as failed.
+    const failed = harness({ start: () => Promise.reject(new Error('boom')) });
+    failed.manager.setFolder(folderChoice);
+    failed.manager.onDetection({ kind: 'not-found', attempts: [attempt] });
+    failed.manager.onDetection(okResult());
+    await vi.waitFor(() => {
+      expect(failed.manager.state).toMatchObject({ reason: 'start-failed' });
+    });
+    expect(failed.manager.state).not.toHaveProperty('binary');
+  });
+
   it('an unsupported detection is unsupported-version and /api/info with major 1 stops the server', async () => {
     const first = harness();
     first.manager.setFolder(folderChoice);
@@ -253,6 +299,8 @@ describe('ServerManager', () => {
       expect(manager.state.kind).toBe('unavailable');
     });
     expect(manager.state).toMatchObject({ reason: 'unsupported-version' });
+    // Found after the server started (step 2), so it has no detection diagnosis (E2).
+    expect(manager.state).not.toHaveProperty('binary');
     expect(stop).toHaveBeenCalledTimes(1);
   });
 

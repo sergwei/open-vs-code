@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { notifyUnlessChatShows, type ChatSurfaceGate } from './chatSurfaceGate';
 import type { DetectionResult } from './opencodeBinary';
 import { fetchServerInfo, safeLog, startServer, stopServer } from './opencodeServer';
 import {
@@ -109,7 +110,10 @@ async function runFailureAction(
  * folder listener are plain disposables in `context.subscriptions` (they hold no process).
  * External server (issue #11): the target the manager follows (own process or the server in
  * `openVsCode.serverUrl`) is read with `readServerTarget` and refreshed whenever the setting or
- * the stored password changes, so no reload is needed. `registerServerLifecycle` stays
+ * the stored password changes, so no reload is needed. E2 (issue #85, P3=2): the optional `gate`
+ * silences the failure notification while the chat is visible and ready (its card or guide shows
+ * the failure with the same buttons); without a gate, or with the chat hidden, it appears as
+ * before. UNVERIFIED in a real window (the decision itself is unit-tested). `registerServerLifecycle` stays
  * SYNCHRONOUS even though `secrets.get` is not: everything is registered at once and the target
  * is resolved right after, in the background. The alternative (making the function async, so the
  * target is known before the first detection) would have forced `activate`, and every caller,
@@ -137,6 +141,7 @@ async function runFailureAction(
 export function registerServerLifecycle(
   context: vscode.ExtensionContext,
   channel: vscode.LogOutputChannel,
+  gate?: ChatSurfaceGate,
 ): {
   manager: ServerManager;
   onDetection: (result: DetectionResult) => void;
@@ -177,9 +182,16 @@ export function registerServerLifecycle(
     previous = next;
     if (failure !== undefined) {
       const reason = next.kind === 'unavailable' ? next.reason : 'start-failed';
-      void vscode.window
-        .showErrorMessage(failure, ...failureActions(reason))
-        .then((choice) => runFailureAction(choice, manager, channel));
+      // E2 (issue #85, P3=2): while the chat is showing, its card or guide carries the same
+      // buttons, so the native notification would only duplicate them.
+      notifyUnlessChatShows(
+        () => gate?.isShowing() ?? false,
+        () => {
+          void vscode.window
+            .showErrorMessage(failure, ...failureActions(reason))
+            .then((choice) => runFailureAction(choice, manager, channel));
+        },
+      );
     }
   });
 

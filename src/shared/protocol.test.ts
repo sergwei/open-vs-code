@@ -278,6 +278,7 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   'permissions.manage': { type: 'permissions.manage' },
   'server.restart': { type: 'server.restart' },
   'logs.show': { type: 'logs.show' },
+  'setup.action': { type: 'setup.action', action: 'binary.choose' },
   'editor.open': { type: 'editor.open', path: 'src/a.ts', line: 3, column: 1 },
   'session.diff.open': { type: 'session.diff.open', sessionID: 's1', path: 'src/a.ts' },
   'session.revert.stage': {
@@ -316,6 +317,34 @@ describe('isWebviewToHost', () => {
     for (const sample of Object.values(WEBVIEW_SAMPLES)) {
       expect(isWebviewToHost(sample), sample.type).toBe(true);
     }
+  });
+
+  // E2 (issue #85, decisions P4/P11/P14/P15). Fabricated messages: they pin the guard, not how the
+  // host reacts to each action.
+  it('accepts each setup.action of the closed list and rejects anything else', () => {
+    for (const action of [
+      'binary.choose',
+      'binary.settings',
+      'server.settings',
+      'server.password',
+      'install.guide',
+      'folder.open',
+    ]) {
+      expect(isWebviewToHost({ type: 'setup.action', action }), action).toBe(true);
+    }
+    for (const action of ['rm -rf', '', 'toString', 'binary.choose ', 7, undefined, null]) {
+      expect(isWebviewToHost({ type: 'setup.action', action }), String(action)).toBe(false);
+    }
+    expect(isWebviewToHost({ type: 'setup.action' })).toBe(false);
+  });
+
+  it('accepts attachments.pick with no kind, file or image, and rejects another kind', () => {
+    const pick = { type: 'attachments.pick', requestId: 'r1' };
+    expect(isWebviewToHost(pick)).toBe(true);
+    expect(isWebviewToHost({ ...pick, kind: 'file' })).toBe(true);
+    expect(isWebviewToHost({ ...pick, kind: 'image' })).toBe(true);
+    expect(isWebviewToHost({ ...pick, kind: 'folder' })).toBe(false);
+    expect(isWebviewToHost({ ...pick, kind: 1 })).toBe(false);
   });
 
   it('accepts prompt.send without sessionID (the host creates the session)', () => {

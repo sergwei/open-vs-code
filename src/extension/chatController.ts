@@ -98,6 +98,7 @@ import {
   type OpenSession,
   type PendingAsks,
   type PromptMention,
+  type SetupAction,
   type Snapshot,
   type UiCommand,
   type WebviewToHost,
@@ -194,6 +195,27 @@ export interface ServerCommands {
   showLogs(): void;
 }
 
+/**
+ * What the controller needs from the VS Code side to run the buttons of the setup guide and the
+ * error card (E2, issue #85; implemented by `setupActions.ts`). `chooseBinary` rejects when the
+ * setting cannot be written: the controller turns that into a `warning` notice. The others are
+ * fire and forget, like {@link ServerCommands}.
+ */
+export interface SetupCommands {
+  /** File dialog, then writes the choice to `openVsCode.opencodePath`; resolves on cancel too. */
+  chooseBinary(): Promise<void>;
+  /** Opens Settings filtered to `openVsCode.opencodePath`. */
+  openBinarySettings(): void;
+  /** Opens Settings filtered to `openVsCode.serverUrl`. */
+  openServerSettings(): void;
+  /** Runs the existing "Set Server Password" command. */
+  setServerPassword(): void;
+  /** Opens the install page of opencode v2 in the browser. */
+  openInstallGuide(): void;
+  /** Opens VS Code's "Open Folder" dialog. */
+  openFolder(): void;
+}
+
 /** What the controller tells the VS Code side about the chat's keyboard focus (issue #35). */
 export interface ChatUi {
   /** The webview gained (`true`) or lost (`false`) the keyboard focus; mirrored into a context key. */
@@ -240,9 +262,10 @@ export interface EditorActions {
   /**
    * Shows the file picker; the returned `uri`s join the ones `prompt.send` accepts (with the ones
    * `files.search` listed and the ones `editorContext` returned: the host only sends what it
-   * emitted itself).
+   * emitted itself). `kind` `image` (E2, decision P11) filters the dialog to the image types and
+   * keeps only files with an image extension; absent or `file` is the plain picker.
    */
-  pickFiles(): Promise<AttachmentRef[]>;
+  pickFiles(kind?: 'file' | 'image'): Promise<AttachmentRef[]>;
   /**
    * Issue #30: turns the URIs of a drop (or of "Add to OpenCode Chat") into chips. Only regular
    * files inside `folder` come back in `refs`; the rest is counted in `skipped`. Rejects with
@@ -301,6 +324,8 @@ export interface ChatControllerDeps {
   };
   preferences: ModelPreferences;
   server: ServerCommands;
+  /** The buttons of the setup guide and the error card (E2, issue #85). */
+  setup: SetupCommands;
   ui: ChatUi;
   /** The SSE loop; replaced in tests. */
   runStream?: typeof runEventStream;
@@ -724,7 +749,10 @@ export class ChatController {
    * password, so a new password for the same server creates a new client. An `unavailable` that still has a restart
    * scheduled (`retryInMs`) is `reconnecting` with its attempt number, so the banner says
    * "Reconnecting (n)" instead of an error the manager is already healing. Leaving `running` drops
-   * the pending requests (they died with the server) and clears the badge.
+   * the pending requests (they died with the server) and clears the badge. An `unavailable` that
+   * carries `binary` (the detection's attempts, E2 issue #85) passes it on to the connection state
+   * as is, and one without it adds no field, so the webview can tell step 1 from step 2.
+   * VERIFIED by unit tests with fabricated states (synthetic).
    */
   onServerState(state: ServerState): void {
     if (this.disposed) return;
@@ -781,6 +809,7 @@ export class ChatController {
           state: 'unavailable',
           reason: state.reason,
           error: { code: state.reason, message: state.message },
+          ...(state.binary === undefined ? {} : { binary: state.binary }),
         });
         return;
       case 'stopping':
@@ -1951,6 +1980,41 @@ export class ChatController {
   }
 
   /**
+   * `setup.action` (E2, issue #85): runs the button of the setup guide or the error card through
+   * `deps.setup`. The action is a closed union the guard already checked, so there is nothing to
+   * whitelist. Only `binary.choose` can fail (it writes a setting): its failure becomes a
+   * `warning` notice like any editor action; the other actions are fire and forget and their
+   * outcome, if any, is the next `connection.state`. Logs `setup action: <action>`.
+   * VERIFIED on Windows 11, VS Code 1.143.1 (27/10/2026) for `binary.choose` and `server.restart`:
+   * the visual checks "Choose binary… through the real file dialog wrote the setting and step 1
+   * is done" and "Restart is pressed with the real mouse". The other actions were never clicked
+   * in a real window (UNVERIFIED, see `setupActions.ts`).
+   */
+  private async setupAction(pane: ChatPane, action: SetupAction): Promise<void> {
+    this.log.info(`setup action: ${action}`);
+    switch (action) {
+      case 'binary.choose':
+        await this.editorAction(pane, 'setup.action', () => this.deps.setup.chooseBinary());
+        return;
+      case 'binary.settings':
+        this.deps.setup.openBinarySettings();
+        return;
+      case 'server.settings':
+        this.deps.setup.openServerSettings();
+        return;
+      case 'server.password':
+        this.deps.setup.setServerPassword();
+        return;
+      case 'install.guide':
+        this.deps.setup.openInstallGuide();
+        return;
+      case 'folder.open':
+        this.deps.setup.openFolder();
+        return;
+    }
+  }
+
+  /**
    * `session.diff.open` (issue #31): opens the native diff of one row of "Changed files".
    *
    * The webview is untrusted, so the host opens a file only if it LISTED that `path` for that very
@@ -2228,11 +2292,16 @@ export class ChatController {
    * `attachments.pick`: shows the picker and answers with the files. Their `uri`s are remembered
    * in `pickedUris`: the webview is untrusted, and the server would read any `file://` it is
    * given and send it to the model provider, so `prompt.send` accepts only what came from here.
-   * A cancelled dialog is an empty list, not an error.
+   * A cancelled dialog is an empty list, not an error. `kind` (E2, decision P11) is handed to the
+   * picker: `image` filters the dialog and drops anything that is not an image by extension.
    */
-  private async pickAttachments(pane: ChatPane, requestId: string): Promise<void> {
+  private async pickAttachments(
+    pane: ChatPane,
+    requestId: string,
+    kind: 'file' | 'image',
+  ): Promise<void> {
     try {
-      const files = await this.deps.editor.pickFiles();
+      const files = await this.deps.editor.pickFiles(kind);
       for (const file of files) this.pickedUris.add(file.uri);
       pane.post({ type: 'attachments.picked', requestId, files });
       this.result(pane, requestId);
@@ -2791,7 +2860,8 @@ export class ChatController {
    * Phase 3: `permission.reply`, `form.reply` and `form.cancel` call the server (a reply that fails
    * because the request is gone also resyncs, since the snapshot tells the truth);
    * `permissions.manage` runs the saved-permissions manager; `server.restart` and `logs.show` go
-   * to `deps.server`.
+   * to `deps.server`. E2 (issue #85): `setup.action` goes to `deps.setup` and `attachments.pick`
+   * passes its `kind` (default `file`) to the picker.
    */
   handle(paneId: number, message: WebviewToHost): Promise<void> {
     const pane = this.paneById(paneId);
@@ -2843,7 +2913,7 @@ export class ChatController {
         pending.push(this.cancelForm(pane, m));
       },
       'attachments.pick': (m) => {
-        pending.push(this.pickAttachments(pane, m.requestId));
+        pending.push(this.pickAttachments(pane, m.requestId, m.kind ?? 'file'));
       },
       'attachments.fromEditor': (m) => {
         pending.push(this.attachFromEditor(pane, m.requestId));
@@ -2870,6 +2940,9 @@ export class ChatController {
       },
       'logs.show': () => {
         this.deps.server.showLogs();
+      },
+      'setup.action': (m) => {
+        pending.push(this.setupAction(pane, m.action));
       },
       'editor.open': (m) => {
         pending.push(

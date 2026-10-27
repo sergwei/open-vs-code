@@ -560,8 +560,8 @@ function fakeEditor(
     insert: (text) => run('insert', text),
     newFile: (text, language) => run('newFile', text, language),
     copy: (text) => run('copy', text),
-    pickFiles: () => {
-      calls.push(['pickFiles']);
+    pickFiles: (kind) => {
+      calls.push(['pickFiles', kind]);
       return options.failWith === undefined
         ? Promise.resolve(options.picked ?? [])
         : Promise.reject(options.failWith);
@@ -611,6 +611,9 @@ function setup(
   if (remembered !== undefined) stored.set(SERVER.folder, remembered);
   const attentionCalls: Array<readonly PendingSummary[]> = [];
   const serverCalls: string[] = [];
+  /** The `setup.action`s that reached `deps.setup`; `setupFailure` makes `chooseBinary` reject. */
+  const setupCalls: string[] = [];
+  let setupFailure: Error | undefined;
   const focusCalls: boolean[] = [];
   /** How many times the controller asked to give the keyboard to the chat iframe again. */
   const viewFocuses = { count: 0 };
@@ -680,6 +683,27 @@ function setup(
         serverCalls.push('showLogs');
       },
     },
+    setup: {
+      chooseBinary: () => {
+        setupCalls.push('binary.choose');
+        return setupFailure === undefined ? Promise.resolve() : Promise.reject(setupFailure);
+      },
+      openBinarySettings: () => {
+        setupCalls.push('binary.settings');
+      },
+      openServerSettings: () => {
+        setupCalls.push('server.settings');
+      },
+      setServerPassword: () => {
+        setupCalls.push('server.password');
+      },
+      openInstallGuide: () => {
+        setupCalls.push('install.guide');
+      },
+      openFolder: () => {
+        setupCalls.push('folder.open');
+      },
+    },
     ui: {
       setChatFocused: (focused) => {
         focusCalls.push(focused);
@@ -712,6 +736,11 @@ function setup(
     snapshots,
     attentionCalls,
     serverCalls,
+    setupCalls,
+    /** Makes the next `binary.choose` reject with `error` (a failed settings write). */
+    failSetup: (error: Error) => {
+      setupFailure = error;
+    },
     focusCalls,
     viewFocuses,
     picked,
@@ -1180,6 +1209,41 @@ describe('server state', () => {
     });
   });
 
+  // E2 (issue #85). Fabricated states: they pin the copy, not what a real detection produces.
+  it('copies the binary diagnosis of an unavailable server to the connection, and only then', () => {
+    const { controller, posted } = setup(fakeApi().api);
+    const binary = {
+      settingPath: 'C:\\opencode.exe',
+      checks: [
+        {
+          source: 'setting' as const,
+          path: 'C:\\opencode.exe',
+          outcome: 'invalid' as const,
+          detail: 'the file does not exist',
+        },
+      ],
+    };
+    controller.onServerState({
+      kind: 'unavailable',
+      reason: 'binary-missing',
+      message: 'no binary',
+      binary,
+    });
+    expect(posted.at(-1)).toEqual({
+      type: 'connection.state',
+      connection: {
+        state: 'unavailable',
+        reason: 'binary-missing',
+        error: { code: 'binary-missing', message: 'no binary' },
+        binary,
+      },
+    });
+    controller.onServerState({ kind: 'unavailable', reason: 'start-failed', message: 'boom' });
+    const last = posted.at(-1);
+    expect(last).toMatchObject({ connection: { state: 'unavailable', reason: 'start-failed' } });
+    expect(JSON.stringify(last)).not.toContain('binary"');
+  });
+
   it('shows connected on a connected stream and reconnecting (scrubbed) on a lost one', () => {
     const { controller, streams, posted } = setup(fakeApi().api);
     controller.onServerState(RUNNING);
@@ -1326,6 +1390,19 @@ describe('editor actions and attachments', () => {
     expect(posted).toEqual([
       { type: 'attachments.picked', requestId: 'p1', files: picked },
       { type: 'request.result', requestId: 'p1' },
+    ]);
+  });
+
+  // E2 (issue #85, decision P11). Fake editor: it records the kind the controller passes on; the
+  // dialog filter itself is UNVERIFIED (a native dialog cannot be driven by the test API).
+  it('passes the kind of attachments.pick to the picker, file by default', async () => {
+    const { editor, calls } = fakeEditor();
+    const { controller } = setup(fakeApi().api, undefined, editor);
+    await controller.handle({ type: 'attachments.pick', requestId: 'p1' });
+    await controller.handle({ type: 'attachments.pick', requestId: 'p2', kind: 'image' });
+    expect(calls).toEqual([
+      ['pickFiles', 'file'],
+      ['pickFiles', 'image'],
     ]);
   });
 
@@ -2412,6 +2489,43 @@ describe('server commands, reconnecting banner and per-folder memory (issue #10)
     await controller.handle({ type: 'server.restart' });
     await controller.handle({ type: 'logs.show' });
     expect(serverCalls).toEqual(['restart', 'showLogs']);
+  });
+
+  // E2 (issue #85). Fake `deps.setup`: it records the call; what each one does in VS Code is
+  // `setupActions.ts`, which has no unit test (only Choose binary… was driven in a real window by
+  // `test:visual`; the rest is UNVERIFIED, see its header).
+  it('forwards each setup.action to its command of deps.setup', async () => {
+    const { controller, setupCalls } = setup(fakeApi().api);
+    for (const action of [
+      'binary.choose',
+      'binary.settings',
+      'server.settings',
+      'server.password',
+      'install.guide',
+      'folder.open',
+    ] as const) {
+      await controller.handle({ type: 'setup.action', action });
+    }
+    expect(setupCalls).toEqual([
+      'binary.choose',
+      'binary.settings',
+      'server.settings',
+      'server.password',
+      'install.guide',
+      'folder.open',
+    ]);
+  });
+
+  it('turns a failed binary.choose into a warning notice and does not throw', async () => {
+    const { controller, posted, failSetup, logs } = setup(fakeApi().api);
+    failSetup(new Error('could not write the setting'));
+    await controller.handle({ type: 'setup.action', action: 'binary.choose' });
+    expect(posted.at(-1)).toMatchObject({
+      type: 'notice',
+      level: 'warning',
+      error: { message: 'could not write the setting' },
+    });
+    expect(logs.some((line) => line.startsWith('warn: setup.action failed'))).toBe(true);
   });
 
   it('shows reconnecting with the attempt while a restart is scheduled, and starting while restarting', () => {

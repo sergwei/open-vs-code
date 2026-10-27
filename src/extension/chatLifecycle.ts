@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { isWebviewToHost, type UiCommand } from '../shared/protocol';
 import { createAttention } from './attention';
 import { ChatController, type FocusTarget } from './chatController';
+import type { ChatSurfaceGate } from './chatSurfaceGate';
 import { registerChatView } from './chatViewProvider';
 import { createEditorActions } from './editorActions';
 import type { ModelRef } from '../shared/model';
@@ -24,6 +25,7 @@ import {
 } from './ids';
 import { createOpencodeClient } from './opencodeClient';
 import { safeLog } from './opencodeServer';
+import { createSetupActions } from './setupActions';
 import { pickSavedPermissionsToRevoke } from './savedPermissionsUi';
 import { restartServerWithFeedback } from './serverLifecycle';
 import type { ServerManager } from './serverManager';
@@ -172,6 +174,11 @@ function parseReply(
  * `hasFocus()` false while a typed letter still reached the box, and the run without the second
  * focus was not repeated to prove it is needed.
  *
+ * E2 (issue #85) injects `deps.setup` (`createSetupActions`, `setupActions.ts`): the buttons of the
+ * setup guide and the error card run through it. VERIFIED for "Choose binary…" on Windows 11 (27/10/2026,
+ * visual check "Choose binary… through the real file dialog wrote the setting and step 1 is done");
+ * the other setup actions are UNVERIFIED in a real window (see `setupActions.ts`).
+ *
  * The two internal commands (`SHOW_REQUEST_COMMAND_ID`, `REPLY_PERMISSION_COMMAND_ID`) are always
  * registered and not contributed: they are the targets of the links of an attention
  * notification. They validate their argument and refuse `always`. A rejected argument logs a
@@ -181,6 +188,7 @@ export function registerChat(
   context: vscode.ExtensionContext,
   channel: vscode.LogOutputChannel,
   manager: ServerManager,
+  gate?: ChatSurfaceGate,
 ): vscode.Disposable {
   const log = safeLog(channel);
   // Whether the chat webview holds the keyboard focus; the source of truth for the toggle.
@@ -237,6 +245,7 @@ export function registerChat(
         channel.show();
       },
     },
+    setup: createSetupActions(),
     ui: {
       setChatFocused,
       focusView: () => {
@@ -268,6 +277,8 @@ export function registerChat(
       if (!visible && chatFocused) setChatFocused(false);
     },
   });
+  // P3=2 (issue #85): the notifications ask whether this view can show the failure itself.
+  gate?.attach(() => view.provider.canDeliver);
   /** Reveals the chat (the view's generated focus command) and relays `command` to its webview. */
   const runInChat = async (command: UiCommand): Promise<void> => {
     await vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);

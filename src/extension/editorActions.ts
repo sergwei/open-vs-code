@@ -15,7 +15,12 @@ import type { EditorActions, EditorContext } from './chatController';
 import { classifyDropped } from './droppedFiles';
 import { isInServedFolder, selectionLines, toEditorRef } from './fileMentions';
 import type { ServerLog } from './opencodeServer';
-import { resolveInsideFolder, toAttachmentName } from './pathPolicy';
+import {
+  hasImageExtension,
+  IMAGE_EXTENSIONS,
+  resolveInsideFolder,
+  toAttachmentName,
+} from './pathPolicy';
 import { pickWorkspaceFolder } from './serverManager';
 import { openSessionDiff } from './sessionDiffEditor';
 
@@ -133,7 +138,9 @@ function readEditorContext(folder: string | undefined): EditorContext {
  * (it ran in the opt-in `realOpencode.test.ts` until issue #41).
  * The refusal of a path outside the folder is only unit-tested (`pathPolicy.test.ts`).
  * UNVERIFIED: `pickFiles` (a native dialog cannot be
- * driven by the test API; F5), and `insert` when the focus is in the side view (whether
+ * driven by the test API; F5), including its `image` kind (E2, decision P11: an "Images" filter
+ * plus `hasImageExtension` on what comes back; the visual run does not drive "Attach image…"
+ * through the dialog, so it was never run in a real window), and `insert` when the focus is in the side view (whether
  * `activeTextEditor` is still the last editor, HYPOTHESIS), macOS and Linux.
  */
 export function createEditorActions(log: ServerLog): EditorActions {
@@ -242,17 +249,20 @@ export function createEditorActions(log: ServerLog): EditorActions {
       return { refs, skipped: { folders, outside, remote, missing } };
     },
 
-    async pickFiles() {
+    async pickFiles(kind = 'file') {
       const folder = workspaceFolder();
+      const images = kind === 'image';
       const picked = await vscode.window.showOpenDialog({
         canSelectMany: true,
         canSelectFiles: true,
         canSelectFolders: false,
-        openLabel: 'Attach',
+        openLabel: images ? 'Attach image' : 'Attach',
+        ...(images ? { filters: { Images: [...IMAGE_EXTENSIONS] } } : {}),
         ...(folder === undefined ? {} : { defaultUri: vscode.Uri.file(folder) }),
       });
       if (picked === undefined) return [];
-      return picked.map((uri): AttachmentRef => {
+      const chosen = images ? picked.filter((uri) => hasImageExtension(uri.fsPath)) : picked;
+      return chosen.map((uri): AttachmentRef => {
         const fsPath = uri.fsPath;
         return {
           uri: pathToFileURL(fsPath).href,
