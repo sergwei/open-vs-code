@@ -48,15 +48,17 @@
 // original; then it sends SUBAGENT (the fixture creates the child session) and follows the link
 // to the child ("‹ parent" crumb), back, and through "Subagent sessions (1)". Since
 // E5-model-agent-selectors (issues
-// #23/#24) step 11 drives the selectors of the prompt row with the real mouse and keyboard: the
-// model panel (focus in the search box, groups, the four themes), filtering and choosing with the
-// keyboard, Escape, the Build | Plan switch (mouse, Tab with a visible ring, arrows, and that Enter on
-// it does NOT send the prompt), a real prompt whose reply line must read "Plan · <chosen model>", the
-// last used model proposed to the next new session, the `openVsCode.defaultModel` setting beating it
-// (and a malformed value being reported once and ignored) and reopening the session; it also presses
-// the prompt box with the real mouse while the model panel is open and asserts the panel closes (and
-// the same for "More agents", which the fixture's catalog always has). It runs after steps 1-10,
-// which keep the fixture's default model. Step 13 (review #1015 S1) attaches a real file with the real Attach button (the
+// #23/#24), and since E2 (#85) phase 3 on the combined chip "agent · model ▾", step 11 drives the
+// chip with the real mouse and keyboard: its panel (focus on the current agent, the Agent and Model
+// columns, stacked only under 360 px of container, groups, the four themes), filtering and choosing
+// with the keyboard, Escape, the agent (mouse, Tab to the chip with a visible ring, Enter, arrows,
+// and that Enter on an agent row does NOT send the prompt), a real prompt whose reply line must
+// read "Plan · <chosen model>", the last used model proposed to the next new session, the
+// `openVsCode.defaultModel` setting beating it (and a malformed value being reported once and
+// ignored) and reopening the session; it also presses the prompt box with the real mouse while the
+// panel is open and asserts the panel closes. The rewrite of steps 11 and 14 on the chip first ran
+// in the full run of phase 4 (27/10/2026, all green). It runs after steps 1-10,
+// which keep the fixture's default model. Step 13 (review #1015 S1) attaches a real file with the "Attach file…" item of the "+" menu (the
 // file dialog is VS Code's own quick input, `files.simpleDialog.enable` in `vscodeProcess.mjs`),
 // sends, and asserts the message leaves with its attachment and the webview logs no exception: a
 // prompt with an attachment used to throw DataCloneError (VERIFIED by running this step against the
@@ -446,7 +448,7 @@ const README_CROPS = new Set([
   '07a-question',
   '10a-sessions-dark',
   '11c-fork-dark',
-  '12b-model-panel-dark',
+  '12b-chip-panel-dark',
   '12f-reply-meta-dark',
   '15a-tool-cards-folded',
   '15b-tool-edit-open',
@@ -609,7 +611,9 @@ async function clickButton(text) {
   if (/yes,?\s*always/i.test(text)) throw new Error(`refusing to press "${text}"`);
   const target = await web.inDoc((doc, label) => {
     const button = [...doc.querySelectorAll('button')].find(
-      (candidate) => candidate.textContent.trim() === label,
+      // Send and Stop are round icon buttons (E2 P9=1+b): no text, only an `aria-label`.
+      (candidate) =>
+        candidate.textContent.trim() === label || candidate.getAttribute('aria-label') === label,
     );
     if (!button) return null;
     button.setAttribute('data-visual-click', 'true');
@@ -670,10 +674,10 @@ async function send(text) {
   await page.keyboard.press('Enter');
 }
 
-/** True while the webview shows a Stop button (a turn is running). */
+/** True while the webview shows a Stop button (a turn is running); an icon button named by aria-label. */
 const isBusy = () =>
   web.inDoc((doc) =>
-    [...doc.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Stop'),
+    [...doc.querySelectorAll('button')].some((b) => b.getAttribute('aria-label') === 'Stop'),
   );
 
 /** Waits until no turn is running; returns whether it got there in time. */
@@ -837,13 +841,132 @@ async function step(name, body) {
   }
 }
 
-/** Waits for the webview to say "Connected" (the server is up and the stream is connected). */
+/**
+ * Waits for the webview to be connected (the server is up and the stream is connected). Since E2
+ * (issue #85, P10=1) there is no visible "Connected" line: the app root carries
+ * `data-connection="connected"`, which is what is read.
+ */
 async function waitConnected(ms = 60_000) {
   const ok = await waitFor(
-    () => web.inDoc((doc) => (doc.body?.innerText ?? '').includes('Connected')),
+    () =>
+      web.inDoc(
+        (doc) => doc.querySelector('.app')?.getAttribute('data-connection') === 'connected',
+      ),
     ms,
   );
-  return check(ok === true, 'the webview shows "Connected"');
+  return check(
+    ok === true,
+    'the webview is connected (the app root says data-connection="connected")',
+  );
+}
+
+/** The four themes the layout rounds of steps 0 and 7b run in. */
+const PROBLEM_THEMES = [
+  ['light', 'Default Light Modern'],
+  ['dark', 'Default Dark Modern'],
+  ['hc-dark', 'Default High Contrast'],
+  ['hc-light', 'Default High Contrast Light'],
+];
+
+/**
+ * Boxes of the pieces of a connection problem (the guide or the card), in CSS px, plus whether the
+ * root overflows sideways. `sel` is `{root, text, actions}`; a missing element gives `null`.
+ * Self-contained: it is serialized into the page.
+ */
+function measureProblem(doc, sel) {
+  const box = (selector) => {
+    const element = doc.querySelector(selector);
+    if (!element) return null;
+    const r = element.getBoundingClientRect();
+    return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width };
+  };
+  const root = doc.querySelector(sel.root);
+  return {
+    root: box(sel.root),
+    text: box(sel.text),
+    actions: box(sel.actions),
+    overflow: root ? root.scrollWidth - root.clientWidth : null,
+  };
+}
+
+/**
+ * Layout round of a connection problem (E2, issue #85; the bug #1294 is "a notice shares its row
+ * with its buttons when they do not fit"). At every width it measures, in the four themes: the
+ * text block is at least 60 % as wide as the guide or card (no letter-per-line text), nothing
+ * overflows sideways, the text and its title/cause are readable (contrast >= 4.5), and, when the
+ * width is narrow (the bar is under 400 px), the buttons are BELOW the text, never beside it.
+ *
+ * Widths: 300 px (the default side bar), about 900 px, and the narrowest the side bar goes under
+ * 200 px. `setSideBarWidth` throws when the bar stops elsewhere (the editor has a minimum width,
+ * the side bar has its own), so each width is tried and the measured one is recorded; a width the
+ * workbench does not allow is a `warn`, not a pass. `contrast` maps names to selectors for
+ * `measureText`. Leaves the side bar at 300 px and the dark theme.
+ */
+async function problemLayoutRounds(label, sel, contrast) {
+  const widths = [
+    ['300', 300],
+    ['wide', 900],
+    ['narrow', 150],
+  ];
+  for (const [name, wanted] of widths) {
+    let barPx;
+    try {
+      barPx = await setSideBarWidth(wanted);
+    } catch (error) {
+      barPx = await sideBarPx();
+      warn(
+        `${label}: the side bar did not go to ${String(wanted)} px (it is ${String(barPx)} px): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const inWanted =
+      name === '300'
+        ? Math.abs(barPx - 300) <= SIZE_TOLERANCE
+        : name === 'wide'
+          ? barPx >= 600
+          : barPx < 200;
+    if (!inWanted) {
+      warn(`${label}: width "${name}" not reached (side bar ${String(barPx)} px): not judged`);
+      continue;
+    }
+    for (const [themeName, theme] of PROBLEM_THEMES) {
+      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+      await page.waitForTimeout(2500);
+      const where = `${label} at ${name} (bar ${String(Math.round(barPx))} px), ${themeName}`;
+      const m = await web.inDoc(measureProblem, sel);
+      if (m.root === null || m.text === null) {
+        check(false, `${where}: the ${sel.root} and ${sel.text} elements exist`);
+        continue;
+      }
+      const ratio = m.text.width / m.root.width;
+      check(
+        ratio >= 0.6,
+        `${where}: the text block is ${String(Math.round(ratio * 100))} % of the width (${String(Math.round(m.text.width))}/${String(Math.round(m.root.width))} px) >= 60 %`,
+      );
+      check(
+        m.overflow !== null && m.overflow <= 1,
+        `${where}: no sideways overflow (${String(m.overflow)} px)`,
+      );
+      if (barPx < 400 && m.actions !== null) {
+        check(
+          m.actions.top >= m.text.bottom - 1,
+          `${where}: the buttons are below the text (buttons top ${String(Math.round(m.actions.top))} >= text bottom ${String(Math.round(m.text.bottom))})`,
+        );
+      }
+      const contrastNow = await web.inDoc(measureText, contrast);
+      for (const [part, result] of Object.entries(contrastNow)) {
+        if (part === 'error') continue;
+        if (!check(result !== null, `${where}: ${part} is on screen to be measured`)) continue;
+        check(
+          result.ratio >= 4.5,
+          `${where}: ${part} contrast ${result.ratio.toFixed(2)} >= 4.5 (${result.color} on ${result.background})`,
+        );
+      }
+      await shot(`${label.replace(/\W+/g, '-')}-${name}-${themeName}`);
+    }
+  }
+  writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
+  await setSideBarWidth(300).catch(() => undefined);
+  await page.waitForTimeout(1500);
 }
 
 /** Measures code text contrast in the webview; see the long comment inside. */
@@ -1084,7 +1207,16 @@ let started = false;
 let startupError;
 try {
   workspace = createWorkspace();
-  vscode = await startVSCode({ repoRoot, workDir, workspace });
+  // Step 0 (E2, issue #85) starts with a binary that does not exist and the fixture marked down:
+  // the first thing the chat can show is the setup guide.
+  const missingBinary = path.join(workDir, 'no-such-opencode', 'opencode.exe');
+  vscode = await startVSCode({
+    repoRoot,
+    workDir,
+    workspace,
+    opencodePath: missingBinary,
+    startDown: true,
+  });
   console.log(
     `VS Code pid ${String(vscode.pid)}, CDP port ${String(vscode.port)}, workspace ${workspace}`,
   );
@@ -1097,12 +1229,137 @@ try {
   started = true;
   await page.waitForTimeout(3000);
 
-  await step('1 empty state and connection', async () => {
+  // E2 (issue #85) step 0: the setup guide. VS Code started with `openVsCode.opencodePath` pointing
+  // at a file that does not exist, and with the fixture's `.down` marker in place.
+  await step('0 setup guide: binary missing, Choose binary…, server down, Restart', async () => {
     for (let i = 0; i < 5 && (await page.locator('.onboarding-a-overlay.visible').count()); i++) {
       await page.keyboard.press('Escape');
       await page.waitForTimeout(400);
     }
     await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+    await openChat(40_000);
+    const guide = await waitFor(
+      () => web.inDoc((doc) => doc.querySelector('.setup-guide') !== null),
+      30_000,
+    );
+    check(guide === true, 'the setup guide is shown instead of the chat');
+    const state = await web.inDoc((doc) => ({
+      title: doc.querySelector('.setup-guide h2')?.textContent,
+      steps: [...doc.querySelectorAll('.setup-step .step-title')].map((t) => t.textContent),
+      text: doc.querySelector('[data-step="binary"]')?.textContent ?? '',
+      header: doc.querySelector('.chat-header') !== null,
+      textarea: doc.querySelector('textarea') !== null,
+    }));
+    check(state.title === 'Set up opencode', `the guide title is "${state.title}"`);
+    check(
+      state.steps[0] === '1. Find the opencode binary — Failed',
+      `step 1 is marked failed in words ("${state.steps[0]}")`,
+    );
+    check(
+      state.text.includes(missingBinary),
+      'step 1 says which openVsCode.opencodePath value was searched (the missing file)',
+    );
+    check(!state.header && !state.textarea, 'the guide has no header and no prompt box');
+    await shot('00-guide');
+    await problemLayoutRounds(
+      'guide',
+      {
+        root: '.setup-guide',
+        // The text of the step (its first line), not `.step-body`, which also holds the buttons.
+        text: '[data-step="binary"] .step-line',
+        actions: '[data-step="binary"] .step-actions',
+      },
+      {
+        title: '[data-step="binary"] .step-title',
+        detail: '[data-step="binary"] .step-line',
+        subtitle: '.setup-subtitle',
+      },
+    );
+
+    // Choose binary… with the real mouse, through VS Code's own file dialog (a quick input).
+    const fixturePath = path.join(
+      repoRoot,
+      'src',
+      'extension',
+      'test-fixtures',
+      'fake-opencode.mjs',
+    );
+    check(await clickButton('Choose binary…'), 'Choose binary… is pressed with the real mouse');
+    const dialog = page.locator('.quick-input-widget input').first();
+    let viaDialog;
+    try {
+      await dialog.waitFor({ state: 'visible', timeout: 15_000 });
+      await sleep(400);
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.type(fixturePath);
+      await sleep(600);
+      await shot('00b-choose-binary-dialog');
+      await page.keyboard.press('Enter');
+      viaDialog =
+        (await waitFor(
+          () =>
+            web.inDoc(
+              (doc) =>
+                doc.querySelector('[data-step="binary"]')?.getAttribute('data-status') === 'done',
+            ),
+          20_000,
+          300,
+        )) === true;
+    } catch {
+      viaDialog = false;
+    }
+    if (!viaDialog) {
+      // Plan B (decision of the plan, section 10): the dialog did not take the .mjs. Close it,
+      // write the setting the way the action would, and say so.
+      await page.keyboard.press('Escape');
+      writeSettings(vscode.userDataDir, { 'openVsCode.opencodePath': fixturePath });
+      warn(
+        'Choose binary…: the simple dialog did not accept the .mjs; the setting was written with writeSettings (plan B). The click and the dialog opening were real, the write by the action was NOT verified',
+      );
+    } else {
+      check(
+        true,
+        'Choose binary… through the real file dialog wrote the setting and step 1 is done',
+      );
+    }
+    const afterChoose = await waitFor(
+      () =>
+        web.inDoc(
+          (doc) =>
+            doc.querySelector('[data-step="binary"]')?.getAttribute('data-status') === 'done' &&
+            doc.querySelector('[data-step="server"]')?.getAttribute('data-status') === 'failed',
+        ),
+      30_000,
+      300,
+    );
+    check(
+      afterChoose === true,
+      'step 1 is done and step 2 (Start the server) fails: the server is marked down',
+    );
+    await shot('00c-server-down');
+
+    // The server is let back up and Restart is pressed with the real mouse.
+    fs.rmSync(vscode.downMarker, { force: true });
+    check(await clickButton('Restart'), 'Restart is pressed with the real mouse');
+    await waitConnected(60_000);
+    const after = await web.inDoc((doc) => ({
+      guide: doc.querySelector('.setup-guide') !== null,
+      suggestions: doc.querySelectorAll('.suggestion').length,
+    }));
+    check(!after.guide, 'the guide is gone once connected');
+    check(after.suggestions >= 3, 'the normal empty state is back');
+    assertNoWebviewErrors('setup guide');
+  });
+
+  await step('1 empty state and connection', async () => {
+    for (let i = 0; i < 5 && (await page.locator('.onboarding-a-overlay.visible').count()); i++) {
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(400);
+    }
+    // Step 0 already opened the chat; a second click on the activity bar would hide the side bar.
+    if ((await page.locator('iframe.webview.ready').count()) === 0) {
+      await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+    }
     await openChat(40_000);
     await waitConnected();
     // Diagnostic: the width the layout-dependent steps (9, 10, 11, 15) run with.
@@ -1496,6 +1753,83 @@ try {
       `the answered-request lines are the same after Restart Server (${JSON.stringify(linesBefore.log)} -> ${JSON.stringify(linesAfter.log)})`,
     );
     await shot('08a-after-restart');
+  });
+
+  // E2 (issue #85) step 7b: the error card inside a conversation. A prompt with CRASH makes the
+  // fixture exit mid-turn and leave its `.down` marker, so the relaunch fails (reconnecting, then
+  // unavailable).
+  await step('7b error card after a crash, with the history visible', async () => {
+    const before = await snapshotOfChat();
+    // After step 7 the keyboard focus is not in the webview (the first run of this step typed
+    // "CRASH…" into a new untitled editor); take it into the prompt box and check before typing.
+    await sleep(1500);
+    await clickIn('textarea');
+    await sleep(500);
+    const focused = await web.inDoc(
+      (doc) => doc.activeElement?.tagName === 'TEXTAREA' && doc.hasFocus(),
+    );
+    check(focused === true, 'the prompt box has the keyboard focus before CRASH is typed');
+    await send('CRASH the server now');
+    const card = await waitFor(
+      () =>
+        web.inDoc(
+          (doc) => doc.querySelector('[role="log"] .connection-card[role="alert"]') !== null,
+        ),
+      60_000,
+      500,
+    );
+    check(card === true, 'the error card (role alert) is inside the conversation after a CRASH');
+    const state = await web.inDoc((doc) => {
+      const textarea = doc.querySelector('textarea');
+      const send = [...doc.querySelectorAll('button')].find(
+        (b) => b.getAttribute('aria-label') === 'Send',
+      );
+      return {
+        messages: doc.querySelectorAll('[role="log"] .message').length,
+        title: doc.querySelector('.connection-card .card-title')?.textContent,
+        placeholder: textarea?.placeholder,
+        editable: textarea !== null && !textarea.disabled && !textarea.readOnly,
+        sendBlocked: send?.disabled === true || send?.getAttribute('aria-disabled') === 'true',
+        guide: doc.querySelector('.setup-guide') !== null,
+      };
+    });
+    check(
+      state.messages > 0 && before.messages > 0,
+      `the history is still visible (${String(state.messages)} messages)`,
+    );
+    check(
+      state.title === 'opencode could not start',
+      `the card title is "opencode could not start" (got "${String(state.title)}")`,
+    );
+    check(!state.guide, 'the setup guide does not replace a conversation');
+    check(
+      state.placeholder === 'Waiting for opencode…',
+      `the box says "Waiting for opencode…" (got "${String(state.placeholder)}")`,
+    );
+    check(state.editable, 'the box stays editable without a connection');
+    check(state.sendBlocked, 'Send is blocked without a connection');
+    await shot('07b-card');
+    await problemLayoutRounds(
+      'card',
+      {
+        root: '.connection-card',
+        text: '.connection-card .card-text',
+        actions: '.connection-card .card-actions',
+      },
+      { title: '.connection-card .card-title', cause: '.connection-card .card-cause' },
+    );
+
+    fs.rmSync(vscode.downMarker, { force: true });
+    check(await clickButton('Restart'), 'Restart on the card is pressed with the real mouse');
+    await waitConnected(60_000);
+    const after = await snapshotOfChat();
+    const cardLeft = await web.inDoc((doc) => doc.querySelector('.connection-card') !== null);
+    check(!cardLeft, 'the card is gone once connected');
+    check(
+      after.title === before.title,
+      `the same session is open after the restart ("${after.title}")`,
+    );
+    assertNoWebviewErrors('error card');
   });
 
   await step('8 Reload Window keeps the session', async () => {
@@ -2149,37 +2483,64 @@ try {
 
   // Issues #23/#24. The LAST step on purpose: steps 1-10 ran with the fixture's default model and
   // the default agent, because the profile (and so `globalState` and the setting) is wiped at start.
-  await step('11 model and agent selectors (issues #23/#24)', async () => {
-    /** What the prompt row and the model panel show. Self-contained (it is serialized). */
+  //
+  // E2 (#85, phase 3): rewritten on the combined chip "agent · model ▾" (the Build | Plan switch,
+  // "More agents" and the model button are gone). It was not run in phase 3 (decision of Sergio,
+  // Engram #1303); its first full run was the one at the end of phase 4 (27/10/2026, Windows 11,
+  // VS Code 1.143.1), which passed.
+  await step('11 agent and model chip (issues #23/#24, E2 #85)', async () => {
+    /** What the prompt bar and the chip's panel show. Self-contained (it is serialized). */
     const ui = () =>
       web.inDoc((doc) => {
-        const trigger = doc.querySelector('button.model-trigger');
-        const radio = doc.querySelector('.agent-toggle input:checked');
+        const trigger = doc.querySelector('button.agent-model-chip');
+        const parts = (trigger?.textContent ?? '').split(' · ');
         const active = doc.activeElement;
-        const label = active?.id ? doc.querySelector(`label[for="${active.id}"]`) : null;
+        const app = doc.querySelector('.app');
+        const columns = [...doc.querySelectorAll('.agent-model-panel .menu-column')];
+        const appStyle = app ? doc.defaultView.getComputedStyle(app) : null;
         const metas = [...doc.querySelectorAll('.message-assistant .message-meta')];
         return {
           trigger: trigger?.textContent ?? '',
           triggerName: trigger?.getAttribute('aria-label') ?? '',
           expanded: trigger?.getAttribute('aria-expanded') ?? '',
-          agent: radio?.value ?? '',
-          panel: doc.querySelector('.model-panel') !== null,
-          groups: [...doc.querySelectorAll('.model-panel .model-group > h3')].map(
+          // The chip names the agent and the model, not their ids: "Plan · GLM-5.3-Flash Free".
+          agent: parts[0] ?? '',
+          model: parts[1] ?? '',
+          dot: doc.querySelector('.agent-model-chip .conn-dot')?.getAttribute('data-state') ?? '',
+          panel: doc.querySelector('.agent-model-panel') !== null,
+          groups: [...doc.querySelectorAll('.agent-model-panel .model-group > h3')].map(
             (h) => h.textContent ?? '',
           ),
-          options: [...doc.querySelectorAll('.model-panel button.model-option')].map((b) => ({
+          agents: [...doc.querySelectorAll('.agent-model-panel [data-group="agent"] button')].map(
+            (b) => ({
+              id: b.getAttribute('data-agent') ?? '',
+              current: b.getAttribute('aria-current') === 'true',
+            }),
+          ),
+          options: [...doc.querySelectorAll('.agent-model-panel button[data-model]')].map((b) => ({
             id: b.getAttribute('data-model') ?? '',
             name: b.querySelector('.model-name')?.textContent ?? '',
             current: b.getAttribute('aria-current') === 'true',
           })),
-          live: (doc.querySelector('.model-panel [role="status"]')?.textContent ?? '').trim(),
-          panelTop: doc.querySelector('.model-panel')?.getBoundingClientRect().top ?? null,
+          live: (doc.querySelector('.agent-model-panel [role="status"]')?.textContent ?? '').trim(),
+          panelTop: doc.querySelector('.agent-model-panel')?.getBoundingClientRect().top ?? null,
+          // Columns side by side from 360 px of container, stacked below it (`@container`).
+          stacked:
+            columns.length === 2 &&
+            columns[1].getBoundingClientRect().top > columns[0].getBoundingClientRect().bottom - 1,
+          containerWidth:
+            app && appStyle
+              ? app.clientWidth -
+                Number.parseFloat(appStyle.paddingLeft) -
+                Number.parseFloat(appStyle.paddingRight)
+              : null,
           focus: {
             tag: active?.tagName ?? '',
             cls: active?.className ?? '',
             aria: active?.getAttribute?.('aria-label') ?? '',
+            agentRow: active?.getAttribute?.('data-agent') ?? '',
             visible: active?.matches?.(':focus-visible') ?? false,
-            ring: label ? doc.defaultView.getComputedStyle(label).outlineStyle : '',
+            ring: active ? doc.defaultView.getComputedStyle(active).outlineStyle : '',
           },
           lastMeta: metas.at(-1)?.textContent ?? '',
           metas: metas.length,
@@ -2209,22 +2570,36 @@ try {
     check(await clickButton('New session'), 'New session is pressed');
     await page.waitForTimeout(1500);
     let state = await ui();
-    check(state.agent === 'build', `a new session starts on Build (got "${state.agent}")`);
+    check(state.agent === 'Build', `a new session starts on Build (got "${state.agent}")`);
     check(
-      state.trigger.endsWith('(default)') && state.triggerName === `Model: ${state.trigger}`,
-      `the model button names the server default ("${state.trigger}" / "${state.triggerName}")`,
+      state.triggerName.startsWith(`Agent and model: ${state.trigger} (`) &&
+        state.triggerName.endsWith('(Connected)') &&
+        state.dot === 'connected',
+      `the chip names agent and model and says the connection ("${state.triggerName}", dot "${state.dot}")`,
     );
+    check(!state.trigger.includes('(default)'), 'the chip does not write "(default)"');
     check(!state.headerHasMarker, 'the header no longer has the Agent · model marker');
     await shot('12a-prompt-row');
 
-    // --- The panel: focus in the search box, groups, the four themes ---------------------------
-    check(await clickIn('button.model-trigger'), 'the model button is pressed');
+    // --- The panel: focus on the current agent, columns, groups, the four themes ----------------
+    check(await clickIn('button.agent-model-chip'), 'the chip is pressed');
     await sleep(400);
     state = await ui();
-    check(state.panel && state.expanded === 'true', 'the model panel opened');
+    check(state.panel && state.expanded === 'true', 'the chip panel opened');
     check(
-      state.focus.cls.includes('session-search') && state.focus.aria === 'Search models',
-      `the focus is in "Search models" (${JSON.stringify(state.focus)})`,
+      state.focus.agentRow === 'build',
+      `the focus is on the current agent, Build (${JSON.stringify(state.focus)})`,
+    );
+    check(
+      state.agents.length >= 2 &&
+        state.agents.filter((a) => a.current).length === 1 &&
+        state.agents.some((a) => a.id === 'plan') &&
+        state.agents.some((a) => a.id === 'docs'),
+      `the Agent column lists Build, Plan and the custom agent, one current (${JSON.stringify(state.agents)})`,
+    );
+    check(
+      state.containerWidth !== null && state.stacked === state.containerWidth < 360,
+      `the columns are ${state.stacked ? 'stacked' : 'side by side'} at ${String(state.containerWidth)} px of container (stacked only under 360)`,
     );
     check(
       state.groups.length >= 1 && state.options.length >= 1,
@@ -2245,7 +2620,7 @@ try {
     );
     for (const [name, theme] of THEMES) {
       await setTheme(theme);
-      await shot(`12b-model-panel-${name}`);
+      await shot(`12b-chip-panel-${name}`);
     }
     await setTheme('Default Dark Modern');
 
@@ -2257,6 +2632,8 @@ try {
       await press('Escape');
       return;
     }
+    // The focus starts on the agent, so the mouse takes it to the search box, as a user would.
+    check(await clickIn('.agent-model-panel input[type="search"]'), 'the search box is pressed');
     await page.keyboard.type(target.name);
     await sleep(400);
     state = await ui();
@@ -2279,103 +2656,114 @@ try {
     state = await ui();
     check(!state.panel && state.expanded === 'false', 'choosing a model closes the panel');
     check(
-      state.trigger.startsWith(chosen.name) && !state.trigger.endsWith('(default)'),
-      `the button shows the chosen model ("${state.trigger}" for "${chosen.name}")`,
+      state.model === chosen.name,
+      `the chip shows the chosen model ("${state.trigger}" for "${chosen.name}")`,
     );
     check(
-      state.focus.cls.includes('model-trigger'),
-      `the focus returns to the model button (${JSON.stringify(state.focus)})`,
+      state.focus.cls.includes('agent-model-chip'),
+      `the focus returns to the chip (${JSON.stringify(state.focus)})`,
     );
 
     // --- Escape closes without choosing ---------------------------------------------------------
-    check(await clickIn('button.model-trigger'), 'the model button is pressed again');
+    check(await clickIn('button.agent-model-chip'), 'the chip is pressed again');
     await sleep(400);
     state = await ui();
     check(
-      state.panel && state.focus.cls.includes('session-search'),
-      'the panel reopened with the focus in the box',
+      state.panel && state.focus.agentRow === 'build',
+      'the panel reopened with the focus on the current agent',
     );
     await press('Escape');
     state = await ui();
     check(
-      !state.panel &&
-        state.trigger.startsWith(chosen.name) &&
-        state.focus.cls.includes('model-trigger'),
+      !state.panel && state.model === chosen.name && state.focus.cls.includes('agent-model-chip'),
       `Escape closes it, keeps the model and returns the focus (${JSON.stringify(state.focus)})`,
     );
 
     // --- A press outside the panel closes it (dismissOutside, review #1015 C1) ------------------
     // A real mouse click on the prompt box: it is outside the panel, so the panel must close, the
     // model must stay, and the focus must stay where the user clicked (the rule does not move it).
-    check(
-      await clickIn('button.model-trigger'),
-      'the model button is pressed to test an outside click',
-    );
+    check(await clickIn('button.agent-model-chip'), 'the chip is pressed to test an outside click');
     await sleep(400);
     check((await ui()).panel, 'the panel is open before the outside click');
     check(await clickIn('textarea'), 'the prompt box is pressed (outside the panel)');
     await sleep(400);
     state = await ui();
     check(
-      !state.panel && state.expanded === 'false' && state.trigger.startsWith(chosen.name),
-      `a press outside closes the model panel and keeps the model ("${state.trigger}")`,
+      !state.panel && state.expanded === 'false' && state.model === chosen.name,
+      `a press outside closes the panel and keeps the model ("${state.trigger}")`,
     );
     check(
       state.focus.tag === 'TEXTAREA',
       `...and the focus stays where the user clicked (${JSON.stringify(state.focus)})`,
     );
-    const moreAgents = await web.inDoc(
-      (doc) => doc.querySelector('button[data-agent-more-trigger]') !== null,
-    );
-    // The synthetic catalog of the visual run has one custom primary agent (`docs`).
-    check(moreAgents, 'the server has a custom agent, so "More agents" is offered');
-    if (moreAgents) {
-      check(await clickIn('button[data-agent-more-trigger]'), '"More agents" is pressed');
-      await sleep(400);
-      const opened = await web.inDoc((doc) => doc.querySelector('#agent-more-panel') !== null);
-      check(opened, 'the "More agents" panel opened');
-      check(await clickIn('textarea'), 'the prompt box is pressed (outside "More agents")');
-      await sleep(400);
-      check(
-        !(await web.inDoc((doc) => doc.querySelector('#agent-more-panel') !== null)),
-        'a press outside closes "More agents"',
-      );
-    }
 
-    // --- The agent switch: mouse, then Tab and arrows ------------------------------------------
-    check(await clickIn('label[for="agent-plan"]'), '"Plan" is pressed');
-    state = await ui();
-    check(state.agent === 'plan', `Plan is checked (got "${state.agent}")`);
-    await clickIn('textarea');
-    await page.keyboard.type('keep this text');
-    await press('Tab');
+    // --- The agent: mouse, then keyboard (Tab to the chip, Enter, arrows) ------------------------
+    check(await clickIn('button.agent-model-chip'), 'the chip is pressed to pick an agent');
+    await sleep(400);
+    check(await clickIn('button[data-agent="plan"]'), '"Plan" is pressed');
+    await sleep(400);
     state = await ui();
     check(
-      state.focus.tag === 'INPUT' && state.focus.cls.includes('agent-radio'),
-      `Tab from the prompt lands on the agent switch (${JSON.stringify(state.focus)})`,
+      !state.panel && state.agent === 'Plan' && state.focus.cls.includes('agent-model-chip'),
+      `choosing an agent closes the panel, the chip reads Plan and the focus returns ("${state.trigger}")`,
+    );
+    await clickIn('textarea');
+    await page.keyboard.type('keep this text');
+    const visited = [];
+    for (let i = 0; i < 8; i += 1) {
+      await press('Tab');
+      const focus = (await ui()).focus;
+      visited.push(focus.cls);
+      if (focus.cls.includes('agent-model-chip')) break;
+    }
+    state = await ui();
+    check(
+      state.focus.cls.includes('agent-model-chip'),
+      `Tab from the prompt reaches the chip (${JSON.stringify(visited)})`,
     );
     check(
       state.focus.visible && state.focus.ring !== '' && state.focus.ring !== 'none',
-      `the focused segment shows a ring (${JSON.stringify(state.focus)})`,
+      `the focused chip shows a ring (${JSON.stringify(state.focus)})`,
     );
-    await shot('12c-agent-focus');
-    await press('ArrowLeft');
+    await shot('12c-chip-focus');
+    const before = await web.inDoc((doc) => doc.querySelectorAll('[role="log"] > *').length);
+    await press('Enter');
     state = await ui();
-    check(state.agent === 'build', `ArrowLeft moves to Build (got "${state.agent}")`);
-    await press('ArrowRight');
+    check(
+      state.panel && state.focus.agentRow === 'plan',
+      `Enter opens the panel with the focus on the current agent (${JSON.stringify(state.focus)})`,
+    );
+    await press('ArrowUp');
     state = await ui();
-    check(state.agent === 'plan', `ArrowRight moves back to Plan (got "${state.agent}")`);
-    const before = state.blocks;
+    check(
+      state.focus.agentRow === 'build',
+      `ArrowUp moves to the previous agent (${JSON.stringify(state.focus)})`,
+    );
     await press('Enter');
     await sleep(800);
     state = await ui();
+    const kept = await web.inDoc((doc) => doc.querySelector('textarea')?.value ?? '');
+    const blocks = await web.inDoc((doc) => doc.querySelectorAll('[role="log"] > *').length);
     check(
-      state.draft === 'keep this text' && state.blocks === before && !(await isBusy()),
-      `Enter on the agent switch does NOT send the prompt ("${state.draft}")`,
+      !state.panel &&
+        state.agent === 'Build' &&
+        kept === 'keep this text' &&
+        blocks === before &&
+        !(await isBusy()),
+      `Enter on an agent row picks it and does NOT send the prompt ("${kept}", agent "${state.agent}")`,
+    );
+    // Back to Plan with the keyboard only: Enter, ArrowDown, Enter.
+    await press('Enter');
+    await press('ArrowDown');
+    await press('Enter');
+    state = await ui();
+    check(
+      state.agent === 'Plan' && state.focus.cls.includes('agent-model-chip'),
+      `the keyboard alone picked Plan again ("${state.trigger}")`,
     );
     for (const [name, theme] of THEMES) {
       await setTheme(theme);
-      await shot(`12d-agent-${name}`);
+      await shot(`12d-chip-${name}`);
     }
     await setTheme('Default Dark Modern');
 
@@ -2393,7 +2781,7 @@ try {
       `the reply says who answered ("${state.lastMeta}", expected "Plan · ${chosen.name}")`,
     );
     check(
-      state.agent === 'plan' && state.trigger.startsWith(chosen.name),
+      state.agent === 'Plan' && state.model === chosen.name,
       `the session now holds Plan and the chosen model ("${state.agent}", "${state.trigger}")`,
     );
     await shot('12e-reply-meta');
@@ -2408,21 +2796,17 @@ try {
     await page.waitForTimeout(1500);
     state = await ui();
     check(
-      state.trigger.startsWith(chosen.name) && !state.trigger.endsWith('(default)'),
+      state.model === chosen.name,
       `a new session proposes the LAST model used ("${state.trigger}")`,
     );
     check(
-      state.agent === 'build',
+      state.agent === 'Build',
       `the agent is not remembered: Build again (got "${state.agent}")`,
     );
 
     const other = options.find((o) => o.id !== chosen.id && o.id !== target.id) ?? target;
     const settingFile = writeSettings(vscode.userDataDir, { 'openVsCode.defaultModel': other.id });
-    const applied = await waitFor(
-      async () => (await ui()).trigger.startsWith(other.name),
-      15_000,
-      300,
-    );
+    const applied = await waitFor(async () => (await ui()).model === other.name, 15_000, 300);
     state = await ui();
     check(
       applied === true,
@@ -2439,7 +2823,7 @@ try {
     state = await ui();
     check(ignored === true, 'a badly written setting is reported to the user once');
     check(
-      state.trigger.startsWith(chosen.name),
+      state.model === chosen.name,
       `...and ignored: the last used model applies again ("${state.trigger}")`,
     );
     writeSettings(vscode.userDataDir, { 'openVsCode.defaultModel': '' });
@@ -2453,10 +2837,10 @@ try {
     );
     check(rows === true, 'the session list has rows');
     check(await clickRowMain('button.session-main'), 'the newest session is pressed');
-    const reopened = await waitFor(async () => (await ui()).agent === 'plan', 20_000, 300);
+    const reopened = await waitFor(async () => (await ui()).agent === 'Plan', 20_000, 300);
     state = await ui();
     check(
-      reopened === true && state.trigger.startsWith(chosen.name),
+      reopened === true && state.model === chosen.name,
       `the reopened session shows its own model and agent ("${state.agent}", "${state.trigger}")`,
     );
     await shot('12h-reopened');
@@ -2465,7 +2849,7 @@ try {
 
   // Review #1015 S1: a prompt WITH an attachment threw DataCloneError in a real VS Code (the picked
   // files were Solid store Proxies and `postMessage` cannot clone them). jsdom cannot see it, so this
-  // attaches a real file through the real Attach button and sends. The file dialog is the quick-input
+  // attaches a real file through the "Attach file…" item of the "+" menu and sends. The file dialog is the quick-input
   // one (`files.simpleDialog.enable`, see `vscodeProcess.mjs`), which is DOM that Playwright can type in.
   await step('13 attach a real file and send it (review #1015 S1)', async () => {
     const target = path.join(workspace, 'src', 'sample.ts');
@@ -2484,7 +2868,10 @@ try {
     // permission forever (seen on 21/10/2026, screenshot 12e), and a busy session would swallow Enter.
     check(await clickButton('New session'), 'New session is pressed');
     await page.waitForTimeout(1500);
-    check(await clickButton('Attach'), 'Attach is pressed');
+    // E2 #85 phase 4: Attach is now the "Attach file…" item of the "+" menu.
+    check(await clickButton('Add context'), 'the "+" button is pressed');
+    await sleep(300);
+    check(await clickButton('Attach file…'), 'Attach file… is pressed in the "+" menu');
     const dialog = page.locator('.quick-input-widget input').first();
     await dialog.waitFor({ state: 'visible', timeout: 15_000 });
     await sleep(400);
@@ -2536,35 +2923,40 @@ try {
   // steps 11 and 13 expect a new session to propose. The model with variants is found in the
   // catalog the fixture serves (`visual` mode: models with variants low/high and one without);
   // the step ASSERTS that the catalog has one of each, it never skips.
+  //
+  // E2 (#85, phase 3): rewritten on the chip. The level is the "· low" at the end of the chip text
+  // and the Reasoning section of its panel (present only for a model that lists variants). Not run
+  // in phase 3 (decision of Sergio, Engram #1303); its first full run (phase 4, 27/10/2026,
+  // Windows 11, VS Code 1.143.1) passed.
   await step('14 reasoning variant (issue #61)', async () => {
-    /** What the prompt row, the variant control and its panel show. Self-contained (serialized). */
+    /** What the chip and its panel show. Self-contained (serialized). */
     const ui = () =>
       web.inDoc((doc) => {
-        const model = doc.querySelector('button.model-trigger');
-        const trigger = doc.querySelector('button.variant-trigger');
-        const panel = doc.querySelector('#variant-panel');
+        const chip = doc.querySelector('button.agent-model-chip');
+        const parts = (chip?.textContent ?? '').split(' · ');
+        const panel = doc.querySelector('.agent-model-panel');
         const active = doc.activeElement;
         const metas = [...doc.querySelectorAll('.message-assistant .message-meta')];
-        const row = [...doc.querySelectorAll('.prompt-selectors button')].map(
-          (b) => b.className.split(' ').find((c) => c !== 'secondary') ?? '',
-        );
         const style = active ? doc.defaultView.getComputedStyle(active) : null;
         return {
-          model: model?.textContent ?? '',
-          trigger: trigger?.textContent ?? null,
-          expanded: trigger?.getAttribute('aria-expanded') ?? '',
-          disabled: trigger?.getAttribute('aria-disabled') ?? '',
+          model: parts[1] ?? '',
+          // "" for Default (the chip adds nothing), else the level ("low").
+          level: parts.slice(2).join(' · '),
+          expanded: chip?.getAttribute('aria-expanded') ?? '',
+          disabled: chip?.getAttribute('aria-disabled') ?? '',
           panel: panel !== null,
-          entries: [...doc.querySelectorAll('#variant-panel button.model-option')].map((b) => ({
+          hasReasoning: doc.querySelector('.agent-model-panel .menu-reasoning') !== null,
+          entries: [
+            ...doc.querySelectorAll('.agent-model-panel .menu-reasoning button.model-option'),
+          ].map((b) => ({
             id: b.getAttribute('data-variant') ?? '',
             current: b.getAttribute('aria-current') === 'true',
           })),
-          modelIds: [...doc.querySelectorAll('.model-panel button[data-model]')].map(
+          modelIds: [...doc.querySelectorAll('.agent-model-panel button[data-model]')].map(
             (b) => b.getAttribute('data-model') ?? '',
           ),
-          afterModel: row.indexOf('variant-trigger') === row.indexOf('model-trigger') + 1,
-          inRow: row.includes('variant-trigger'),
           focus: {
+            agentRow: active?.getAttribute?.('data-agent') ?? '',
             cls: active?.className ?? '',
             variant: active?.getAttribute?.('data-variant') ?? '',
             visible: active?.matches?.(':focus-visible') ?? false,
@@ -2594,13 +2986,21 @@ try {
       ['hc-dark', 'Default High Contrast'],
       ['hc-light', 'Default High Contrast Light'],
     ];
-    /** Opens the model panel with the real mouse and presses model `id`; false if not listed. */
+    /** Opens the chip's panel with the real mouse and presses model `id`; false if not listed. */
     const pickModel = async (id) => {
-      if (!(await clickIn('button.model-trigger'))) return false;
+      if (!(await clickIn('button.agent-model-chip'))) return false;
       await sleep(400);
-      const pressed = await clickIn(`.model-panel button.model-option[data-model="${id}"]`);
+      const pressed = await clickIn(`.agent-model-panel button.model-option[data-model="${id}"]`);
       await sleep(500);
       return pressed;
+    };
+    /** Opens the panel, says whether it has a Reasoning section, and closes it again. */
+    const hasReasoning = async () => {
+      await clickIn('button.agent-model-chip');
+      await sleep(400);
+      const has = (await ui()).hasReasoning;
+      await press('Escape');
+      return has;
     };
 
     assertNoWebviewErrors('before the variant step');
@@ -2608,7 +3008,7 @@ try {
     await page.waitForTimeout(1500);
 
     // --- Find a model that lists variants and one that lists none; assert both exist ------------
-    check(await clickIn('button.model-trigger'), 'the model button is pressed');
+    check(await clickIn('button.agent-model-chip'), 'the chip is pressed');
     await sleep(400);
     const ids = (await ui()).modelIds;
     await press('Escape');
@@ -2618,7 +3018,7 @@ try {
     let withoutVariants;
     for (const id of candidates) {
       if (!(await pickModel(id))) continue;
-      const has = (await ui()).trigger !== null;
+      const has = await hasReasoning();
       if (has && withVariants === undefined) withVariants = id;
       if (!has && withoutVariants === undefined) withoutVariants = id;
       if (withVariants !== undefined && withoutVariants !== undefined) break;
@@ -2628,42 +3028,46 @@ try {
     check(withoutVariants !== undefined, 'the catalog has a model that lists no variants');
     if (withVariants === undefined) return;
 
-    // --- A model without variants shows no control -------------------------------------------
+    // --- A model without variants has no Reasoning section -----------------------------------
     if (withoutVariants !== undefined) {
       await pickModel(withoutVariants);
-      const state = await ui();
       check(
-        state.trigger === null && !state.inRow,
-        `a model without variants (${withoutVariants}) shows no variant control`,
+        !(await hasReasoning()) && (await ui()).level === '',
+        `a model without variants (${withoutVariants}) shows no Reasoning section and no level`,
       );
     }
 
-    // --- A model with variants: the control, closed and open, in the four themes -------------
+    // --- A model with variants: the section, closed chip and open panel, in the four themes ----
     check(await pickModel(withVariants), `the model with variants (${withVariants}) is chosen`);
     let state = await ui();
-    check(
-      state.trigger === 'Reasoning: Default',
-      `the control appears reading "Reasoning: Default" ("${String(state.trigger)}")`,
-    );
-    check(state.afterModel, 'the control sits right after the model button in the prompt row');
+    check(state.level === '', `the chip shows no level for Default ("${state.level}")`);
     await shot('14a-variant-closed');
-    check(
-      await clickIn('button.variant-trigger'),
-      'the variant button is pressed with the real mouse',
-    );
+    check(await clickIn('button.agent-model-chip'), 'the chip is pressed with the real mouse');
     await sleep(400);
     state = await ui();
-    check(state.panel && state.expanded === 'true', 'the variant panel opened');
+    check(state.panel && state.expanded === 'true', 'the chip panel opened');
     check(
-      state.entries[0]?.id === 'default' &&
+      state.hasReasoning &&
+        state.entries[0]?.id === 'default' &&
         state.entries.length >= 2 &&
         state.entries.filter((e) => e.current).length === 1 &&
         state.entries[0].current,
-      `the panel lists Default (current) and the catalog variants (${JSON.stringify(state.entries)})`,
+      `the Reasoning section lists Default (current) and the catalog variants (${JSON.stringify(state.entries)})`,
     );
+    // Decision of Sergio (27/10/2026): Reasoning sits INSIDE the Model column, under its list, not
+    // across the full width under both columns (also when the columns stack under 360 px).
     check(
-      state.focus.variant === 'default',
-      `the focus is on the current entry (${JSON.stringify(state.focus)})`,
+      (await web.inDoc((doc) => {
+        const reasoning = doc.querySelector('.agent-model-panel .menu-reasoning');
+        const column = doc.querySelector('.agent-model-panel [data-group="model"]');
+        const lastModel = [...doc.querySelectorAll('.agent-model-panel button[data-model]')].at(-1);
+        if (!reasoning || !column || !lastModel) return false;
+        return (
+          column.contains(reasoning) &&
+          reasoning.getBoundingClientRect().top >= lastModel.getBoundingClientRect().bottom - 1
+        );
+      })) === true,
+      'the Reasoning section is inside the Model column, under the model list',
     );
     for (const [name, theme] of THEMES) {
       await setTheme(theme);
@@ -2674,18 +3078,18 @@ try {
     // --- Choose a variant with the real mouse ------------------------------------------------
     const variant = state.entries.find((e) => e.id === 'low')?.id ?? state.entries[1]?.id;
     check(
-      await clickIn(`#variant-panel button[data-variant="${String(variant)}"]`),
+      await clickIn(`.menu-reasoning button[data-variant="${String(variant)}"]`),
       `the variant "${String(variant)}" is pressed`,
     );
     await sleep(400);
     state = await ui();
     check(
-      !state.panel && state.trigger === `Reasoning: ${String(variant)}`,
-      `choosing closes the panel and the control reads "Reasoning: ${String(variant)}" ("${String(state.trigger)}")`,
+      !state.panel && state.level === String(variant),
+      `choosing closes the panel and the chip ends in "· ${String(variant)}" ("${state.level}")`,
     );
     check(
-      state.focus.cls.includes('variant-trigger'),
-      `the focus returns to the variant button (${JSON.stringify(state.focus)})`,
+      state.focus.cls.includes('agent-model-chip'),
+      `the focus returns to the chip (${JSON.stringify(state.focus)})`,
     );
     await shot('14c-variant-chosen');
     for (const [name, theme] of THEMES) {
@@ -2694,20 +3098,19 @@ try {
     }
     await setTheme('Default Dark Modern');
 
-    // --- Keyboard: Tab from the model button, Enter opens, arrows, Escape ---------------------
+    // --- Keyboard: Tab to the chip, Enter opens, Tab to the Reasoning list, arrows, Escape ----
     await clickIn('textarea');
     const visited = [];
     for (let i = 0; i < 12; i += 1) {
       await press('Tab');
       const focus = (await ui()).focus;
       visited.push(focus.cls);
-      if (focus.cls.includes('variant-trigger')) break;
+      if (focus.cls.includes('agent-model-chip')) break;
     }
     state = await ui();
     check(
-      state.focus.cls.includes('variant-trigger') &&
-        (visited.at(-2) ?? '').includes('model-trigger'),
-      `Tab from the model button reaches the variant button (${JSON.stringify(visited)})`,
+      state.focus.cls.includes('agent-model-chip'),
+      `Tab from the prompt reaches the chip (${JSON.stringify(visited)})`,
     );
     check(
       state.focus.visible && state.focus.outline !== '' && !state.focus.outline.startsWith('none'),
@@ -2717,8 +3120,16 @@ try {
     await press('Enter');
     state = await ui();
     check(
-      state.panel && state.focus.variant === String(variant),
-      `Enter opens the panel with the focus on the current variant (${JSON.stringify(state.focus)})`,
+      state.panel && state.focus.agentRow !== '',
+      `Enter opens the panel with the focus on the current agent (${JSON.stringify(state.focus)})`,
+    );
+    for (let i = 0; i < 6 && state.focus.variant === ''; i += 1) {
+      await press('Tab');
+      state = await ui();
+    }
+    check(
+      state.focus.variant === String(variant),
+      `Tab reaches the Reasoning list on the current level (${JSON.stringify(state.focus)})`,
     );
     await press('ArrowUp');
     state = await ui();
@@ -2730,52 +3141,46 @@ try {
     state = await ui();
     check(
       !state.panel &&
-        state.trigger === `Reasoning: ${String(variant)}` &&
-        state.focus.cls.includes('variant-trigger'),
+        state.level === String(variant) &&
+        state.focus.cls.includes('agent-model-chip'),
       `Escape closes it, keeps the variant and returns the focus (${JSON.stringify(state.focus)})`,
     );
 
     // --- A press outside closes the panel (dismissOutside) -----------------------------------
-    check(
-      await clickIn('button.variant-trigger'),
-      'the variant button is pressed to test an outside click',
-    );
+    check(await clickIn('button.agent-model-chip'), 'the chip is pressed to test an outside click');
     await sleep(400);
-    check((await ui()).panel, 'the variant panel is open before the outside click');
+    check((await ui()).panel, 'the chip panel is open before the outside click');
     check(await clickIn('textarea'), 'the prompt box is pressed (outside the panel)');
     await sleep(400);
     state = await ui();
     check(
-      !state.panel && state.trigger === `Reasoning: ${String(variant)}`,
-      'a press outside closes the variant panel and keeps the variant',
+      !state.panel && state.level === String(variant),
+      'a press outside closes the panel and keeps the variant',
     );
 
     // --- Decision (c): the same model keeps the variant, another model starts on Default ------
     check(await pickModel(withVariants), 'the SAME model is chosen again');
     state = await ui();
     check(
-      state.trigger === `Reasoning: ${String(variant)}`,
-      `re-choosing the same model keeps the variant ("${String(state.trigger)}")`,
+      state.level === String(variant),
+      `re-choosing the same model keeps the variant ("${state.level}")`,
     );
     const another = candidates.find((id) => id !== withVariants);
     check(another !== undefined, 'the catalog lists a second model');
     if (another !== undefined) {
       check(await pickModel(another), `another model (${another}) is chosen`);
       state = await ui();
-      check(
-        state.trigger === null || state.trigger === 'Reasoning: Default',
-        `another model starts on Default or shows no control ("${String(state.trigger)}")`,
-      );
+      check(state.level === '', `another model starts on Default ("${state.level}")`);
       check(await pickModel(withVariants), `the first model is chosen again`);
       state = await ui();
       check(
-        state.trigger === 'Reasoning: Default',
-        `...and its variant was NOT remembered across the change ("${String(state.trigger)}")`,
+        state.level === '',
+        `...and its variant was NOT remembered across the change ("${state.level}")`,
       );
-      check(await clickIn('button.variant-trigger'), 'the variant button is pressed again');
+      check(await clickIn('button.agent-model-chip'), 'the chip is pressed again');
       await sleep(400);
       check(
-        await clickIn(`#variant-panel button[data-variant="${String(variant)}"]`),
+        await clickIn(`.menu-reasoning button[data-variant="${String(variant)}"]`),
         `the variant "${String(variant)}" is chosen again`,
       );
       await sleep(400);
@@ -2794,10 +3199,7 @@ try {
       state.lastMeta.endsWith(` · ${String(variant)}`),
       `the reply line ends in the variant ("${state.lastMeta}", expected "… · ${String(variant)}")`,
     );
-    check(
-      state.trigger === `Reasoning: ${String(variant)}`,
-      `the open session holds the variant ("${String(state.trigger)}")`,
-    );
+    check(state.level === String(variant), `the open session holds the variant ("${state.level}")`);
     await shot('14f-variant-reply');
 
     // --- A NEW session proposes the last model WITH its variant; reopening shows the stored one
@@ -2805,8 +3207,8 @@ try {
     await page.waitForTimeout(1500);
     state = await ui();
     check(
-      state.trigger === `Reasoning: ${String(variant)}`,
-      `a new session proposes the last used variant ("${String(state.trigger)}")`,
+      state.level === String(variant),
+      `a new session proposes the last used variant ("${state.level}")`,
     );
     await shot('14g-variant-new-session');
     check(await clickButton('Sessions'), 'Sessions is pressed');
@@ -2817,15 +3219,11 @@ try {
     );
     check(rows === true, 'the session list has rows');
     check(await clickRowMain('button.session-main'), 'the newest session is pressed');
-    const reopened = await waitFor(
-      async () => (await ui()).trigger === `Reasoning: ${String(variant)}`,
-      20_000,
-      300,
-    );
+    const reopened = await waitFor(async () => (await ui()).level === String(variant), 20_000, 300);
     state = await ui();
     check(
       reopened === true,
-      `the reopened session shows the variant the SERVER stored ("${String(state.trigger)}")`,
+      `the reopened session shows the variant the SERVER stored ("${state.level}")`,
     );
     check(
       state.styled.length === 0,
@@ -3316,7 +3714,7 @@ try {
         const rows = [...doc.querySelectorAll('.mention-popup [role="option"]')];
         const active = doc.activeElement;
         const send = [...doc.querySelectorAll('button')].find(
-          (b) => b.textContent.trim() === 'Send',
+          (b) => b.getAttribute('aria-label') === 'Send',
         );
         const pointedAt = field?.getAttribute('aria-activedescendant') ?? '';
         return {
@@ -3336,7 +3734,9 @@ try {
           sent: [...doc.querySelectorAll('[role="log"] .message-files .chip')].map(
             (c) => c.textContent ?? '',
           ),
-          busy: [...doc.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Stop'),
+          busy: [...doc.querySelectorAll('button')].some(
+            (b) => b.getAttribute('aria-label') === 'Stop',
+          ),
           sendDisabled: send?.disabled ?? null,
           messages: doc.querySelectorAll('[role="log"] > *').length,
           styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
@@ -3566,7 +3966,9 @@ try {
     await page.keyboard.press('Shift+ArrowDown');
     await sleep(300);
     console.log(`  editor selection: "${(await editorSelection()).trim()}"`);
-    check(await clickButton('Add selection'), 'Add selection is pressed');
+    check(await clickButton('Add context'), 'the "+" button is pressed');
+    await sleep(300);
+    check(await clickButton('Add selection'), 'Add selection is pressed in the "+" menu');
     const ranged = await waitFor(
       async () => (await ui()).chips.includes('src/sample.ts#2-3'),
       10_000,
@@ -3801,7 +4203,7 @@ try {
     // --- Part 2: a COSTLY turn on a 5000-token window: the cost and the `high` level ---------
     check(await clickButton('New session'), 'New session is pressed for the costly turn');
     await page.waitForTimeout(1500);
-    check(await clickIn('button.model-trigger'), 'the model button is pressed');
+    check(await clickIn('button.agent-model-chip'), 'the agent and model chip is pressed');
     await sleep(400);
     check(
       await clickIn('.model-panel button.model-option[data-model="opencode/tiny-context"]'),
@@ -4747,6 +5149,20 @@ try {
       await sleep(200);
       check((await ui()).drop === '', `the highlight goes away when the drag leaves in ${name}`);
     }
+    // The same hint is the tooltip of the "Attach file…" item of the "+" menu (E2 #85 phase 4).
+    check(await clickButton('Add context'), 'the "+" button is pressed to read the Attach hint');
+    await sleep(300);
+    const attachHint = await web.inDoc(
+      (doc) =>
+        [...doc.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent === 'Attach file…')
+          ?.title ?? null,
+    );
+    check(
+      attachHint === 'Hold Shift to drop files from the Explorer',
+      `the "Attach file…" item carries the drop hint as its tooltip (${JSON.stringify(attachHint)})`,
+    );
+    await page.keyboard.press('Escape');
+    await sleep(200);
     await removeChips();
     await drag('drop', [vsUri(sample), vsUri(folder), vsUri(outside)]);
     const added = await waitFor(
@@ -5036,6 +5452,69 @@ try {
     );
     await shot('22c-new-session');
 
+    // --- E2 #85 phase 4: with the "+" menu OPEN, the shortcuts still work and the menu closes ---
+    // The menu holds the focus on an item (a webview element), so `chatFocused` is true: New Session
+    // and Focus Prompt must act as before, and the focus leaving the menu must not leave it open.
+    const menuOpen = () =>
+      web.inDoc((doc) => ({
+        menu: doc.querySelector('[role="menu"]') !== null,
+        expanded:
+          doc.querySelector('button[aria-label="Add context"]')?.getAttribute('aria-expanded') ??
+          '',
+      }));
+    check(await clickButton('Add context'), 'the "+" button is pressed with the real mouse');
+    await sleep(400);
+    check((await menuOpen()).menu === true, 'the "+" menu is open before the shortcut');
+    await page.keyboard.press(`${modifier}+n`);
+    await sleep(1500);
+    let menuNow = await menuOpen();
+    check(
+      menuNow.menu === false && menuNow.expanded === 'false',
+      `${modifier}+N with the "+" menu open closes the menu (menu ${String(menuNow.menu)}, expanded "${menuNow.expanded}")`,
+    );
+    check(
+      (await promptState()).messages === 0 && sessionCount() === sessionsBefore,
+      `and ${modifier}+N still leaves the empty view without creating a session`,
+    );
+    check(await clickButton('Add context'), 'the "+" button is pressed again');
+    await sleep(400);
+    check((await menuOpen()).menu === true, 'the "+" menu is open before Focus Prompt');
+    await page.keyboard.press(`${modifier}+p`);
+    const leftChat = await waitFor(editorHasFocus, 8_000, 250);
+    menuNow = await menuOpen();
+    check(
+      leftChat === true && menuNow.menu === false,
+      `${modifier}+P with the "+" menu open moves the focus to the editor and closes the menu (editor ${String(leftChat)}, menu ${String(menuNow.menu)})`,
+    );
+    await page.keyboard.press(`${modifier}+p`);
+    check(
+      (await waitFor(async () => (await promptState()).focused, 8_000, 250)) === true,
+      `${modifier}+P again brings the focus back to the prompt box`,
+    );
+    await shot('22c2-plus-menu-shortcuts');
+
+    // --- Review W1: the chip's panel closes the same way when the focus leaves by shortcut ------
+    const chipPanelOpen = () =>
+      web.inDoc((doc) => ({
+        panel: doc.querySelector('.agent-model-panel') !== null,
+        expanded: doc.querySelector('button.agent-model-chip')?.getAttribute('aria-expanded') ?? '',
+      }));
+    check(await clickIn('button.agent-model-chip'), 'the chip is pressed to open its panel');
+    await sleep(400);
+    check((await chipPanelOpen()).panel === true, 'the chip panel is open before the shortcut');
+    await page.keyboard.press(`${modifier}+p`);
+    const leftWithChip = await waitFor(editorHasFocus, 8_000, 250);
+    const chipNow = await chipPanelOpen();
+    check(
+      leftWithChip === true && chipNow.panel === false && chipNow.expanded === 'false',
+      `${modifier}+P with the chip panel open moves the focus to the editor and closes the panel (editor ${String(leftWithChip)}, panel ${String(chipNow.panel)}, expanded "${chipNow.expanded}")`,
+    );
+    await page.keyboard.press(`${modifier}+p`);
+    check(
+      (await waitFor(async () => (await promptState()).focused, 8_000, 250)) === true,
+      `${modifier}+P again brings the focus back to the prompt box after the chip panel`,
+    );
+
     // --- Stop Response from the palette while a turn runs --------------------------------------
     await send('Count from 1 to 400, one number per line. Do not use tools. LONG');
     check((await waitFor(isBusy, 30_000, 300)) === true, 'a LONG turn is running');
@@ -5077,6 +5556,345 @@ try {
     writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
     await page.waitForTimeout(1500);
     assertNoWebviewErrors('palette commands and shortcuts');
+  });
+
+  // E2 (issue #85, phase 4): the "+" menu with the keyboard and the mouse at 300 px and wide, in the
+  // four themes, and the compact state under 200 px (decision P13=1: the chip takes a row of its own).
+  // The compact state is judged by boxes: the chip is as wide as the prompt box, no two pieces of the
+  // bar overlap, and nothing sticks out of the view (the page does not scroll sideways).
+  await step('23 "+" menu and the compact state (E2 #85, phase 4)', async () => {
+    const plusState = () =>
+      web.inDoc((doc) => {
+        const rect = (selector) => {
+          const element = doc.querySelector(selector);
+          if (!element) return null;
+          const r = element.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width };
+        };
+        const active = doc.activeElement;
+        const trigger = doc.querySelector('button[aria-label="Add context"]');
+        return {
+          open: doc.querySelector('[role="menu"]') !== null,
+          expanded: trigger?.getAttribute('aria-expanded') ?? '',
+          items: [...doc.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent ?? ''),
+          activeItem:
+            active?.getAttribute?.('role') === 'menuitem' ? (active.textContent ?? '') : '',
+          activeIsTrigger: active === trigger,
+          activeIsBody: active === doc.body || active === null,
+          view: { width: doc.defaultView.innerWidth, height: doc.defaultView.innerHeight },
+          scrollOverflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+          menu: rect('[role="menu"]'),
+          prompt: rect('form.prompt'),
+          plus: rect('button[aria-label="Add context"]'),
+          chip: rect('button.agent-model-chip'),
+          send: rect('button.send-button'),
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+        };
+      });
+    const overlap = (a, b) =>
+      a !== null &&
+      b !== null &&
+      a.left < b.right - 0.5 &&
+      b.left < a.right - 0.5 &&
+      a.top < b.bottom - 0.5 &&
+      b.top < a.bottom - 0.5;
+    const inView = (box, view) =>
+      box !== null &&
+      box.left >= -0.5 &&
+      box.top >= -0.5 &&
+      box.right <= view.width + 0.5 &&
+      box.bottom <= view.height + 0.5;
+    const openByMouse = async () => {
+      if ((await plusState()).open) return;
+      check(await clickButton('Add context'), 'the "+" button is pressed with the real mouse');
+      await sleep(400);
+    };
+    const closeByEscape = async () => {
+      await page.keyboard.press('Escape');
+      await sleep(250);
+    };
+    const press = async (key) => {
+      await page.keyboard.press(key);
+      await sleep(200);
+    };
+
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    check(await clickButton('New session'), 'New session is pressed');
+    await sleep(1500);
+    assertNoWebviewErrors('before the "+" menu step');
+
+    // --- Keyboard, 300 px ------------------------------------------------------------------------
+    await setSideBarWidth(300).catch(() => undefined);
+    await clickIn('textarea');
+    // The button is focused by code (its place in the Tab order is not what this step judges): what
+    // follows is the REAL keyboard on it.
+    await web.inDoc((doc) => doc.querySelector('button[aria-label="Add context"]')?.focus());
+    await sleep(200);
+    let state = await plusState();
+    check(state.activeIsTrigger === true, 'the "+" button can take the keyboard focus');
+    await press('Enter');
+    state = await plusState();
+    check(
+      state.open &&
+        state.expanded === 'true' &&
+        state.items.join('|') === 'Add selection|Attach file…|Attach image…|Mention a file' &&
+        state.activeItem === 'Add selection',
+      `Enter opens the menu with its four items and the focus on the first (${JSON.stringify(state.items)}, focus "${state.activeItem}")`,
+    );
+    check(
+      inView(state.menu, state.view) && state.menu.width >= 0.8 * state.prompt.width,
+      `the menu is inside the view and as wide as the prompt box (${JSON.stringify(state.menu)})`,
+    );
+    await press('ArrowDown');
+    check((await plusState()).activeItem === 'Attach file…', 'ArrowDown moves to Attach file…');
+    await press('End');
+    check((await plusState()).activeItem === 'Mention a file', 'End goes to Mention a file');
+    await press('ArrowDown');
+    check((await plusState()).activeItem === 'Add selection', 'ArrowDown wraps to the first item');
+    await press('Home');
+    check((await plusState()).activeItem === 'Add selection', 'Home goes to the first item');
+    await closeByEscape();
+    state = await plusState();
+    check(
+      !state.open && state.activeIsTrigger,
+      `Escape closes the menu and returns the focus to the button (open ${String(state.open)}, focus on the button ${String(state.activeIsTrigger)})`,
+    );
+    await press('Space');
+    check((await plusState()).open === true, 'Space on the button opens the menu');
+    await press('Tab');
+    state = await plusState();
+    check(
+      !state.open && !state.activeIsBody,
+      `Tab closes the menu and the focus does not fall to the page (open ${String(state.open)}, on the page ${String(state.activeIsBody)})`,
+    );
+
+    // --- Mention a file writes the @ and opens the popup like typing it ---------------------------
+    await web.inDoc((doc) => doc.querySelector('button[aria-label="Add context"]')?.focus());
+    await press('Enter');
+    await press('End');
+    await press('Enter');
+    await sleep(500);
+    const mention = await web.inDoc((doc) => ({
+      value: doc.querySelector('textarea.prompt-text')?.value ?? '',
+      popup: doc.querySelector('.mention-popup') !== null,
+      focusIsBox: doc.activeElement === doc.querySelector('textarea.prompt-text'),
+      menu: doc.querySelector('[role="menu"]') !== null,
+    }));
+    check(
+      mention.value.endsWith('@') && mention.popup && mention.focusIsBox && !mention.menu,
+      `Mention a file writes "@", opens the file popup and puts the focus in the box (${JSON.stringify(mention)})`,
+    );
+    await closeByEscape(); // closes the popup; the "@" stays in the box
+    await page.keyboard.press('Backspace');
+    await sleep(200);
+
+    // --- Mouse: outside click closes without moving the focus; the item with the mouse -------------
+    await openByMouse();
+    check(
+      await clickIn('textarea'),
+      'the prompt box is pressed with the real mouse while the menu is open',
+    );
+    await sleep(300);
+    state = await plusState();
+    const boxFocused = await web.inDoc(
+      (doc) => doc.activeElement === doc.querySelector('textarea.prompt-text'),
+    );
+    check(
+      !state.open && boxFocused === true,
+      `a click outside closes the menu (open ${String(state.open)}) and the box keeps the focus (${String(boxFocused)})`,
+    );
+
+    // --- The chip panel at about 900 px (reconciliation C1, decision of Sergio 27/10/2026) -----------
+    // The two-column layout (container >= 360 px) was only ever seen stacked at 300 px; jsdom does
+    // not evaluate container queries. Judged by boxes, never by a class. Reasoning exists only for a
+    // model that lists variants, so one is chosen first (the session keeps it across the themes).
+    const chipPanelState = () =>
+      web.inDoc((doc) => {
+        const box = (element) => {
+          if (!element) return null;
+          const r = element.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width };
+        };
+        const panel = doc.querySelector('.agent-model-panel');
+        const agent = panel?.querySelector('[data-group="agent"]') ?? null;
+        const model = panel?.querySelector('[data-group="model"]') ?? null;
+        const reasoning = panel?.querySelector('.menu-reasoning') ?? null;
+        const lastModel = [...(panel?.querySelectorAll('button[data-model]') ?? [])].at(-1) ?? null;
+        const chip = doc.querySelector('button.agent-model-chip');
+        const active = doc.activeElement;
+        return {
+          open: panel !== null,
+          panel: box(panel),
+          agent: box(agent),
+          model: box(model),
+          reasoning: box(reasoning),
+          lastModel: box(lastModel),
+          reasoningInModel: reasoning !== null && model !== null && model.contains(reasoning),
+          view: { width: doc.defaultView.innerWidth, height: doc.defaultView.innerHeight },
+          scrollOverflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+          expanded: chip?.getAttribute('aria-expanded') ?? '',
+          focusOnChip: active === chip,
+        };
+      });
+    const openChipPanel = async () => {
+      if ((await chipPanelState()).open) return;
+      check(await clickIn('button.agent-model-chip'), 'the chip is pressed with the real mouse');
+      await sleep(500);
+    };
+    const ensureModelWithVariants = async () => {
+      await openChipPanel();
+      const ids = await web.inDoc((doc) =>
+        [...doc.querySelectorAll('.agent-model-panel button[data-model]')].map(
+          (b) => b.getAttribute('data-model') ?? '',
+        ),
+      );
+      await closeByEscape();
+      const GLM = 'opencode/glm-5.3-flash-free';
+      for (const id of [...ids.filter((x) => x === GLM), ...ids.filter((x) => x !== GLM)]) {
+        await openChipPanel();
+        await clickIn(`.agent-model-panel button.model-option[data-model="${id}"]`);
+        await sleep(500);
+        await openChipPanel();
+        const has = (await chipPanelState()).reasoning !== null;
+        await closeByEscape();
+        if (has) return id;
+      }
+      return undefined;
+    };
+    const modelWithVariants = await ensureModelWithVariants();
+    check(
+      modelWithVariants !== undefined,
+      'a model that lists variants is chosen for the chip panel',
+    );
+    const judgeWideChipPanel = async (where, themeName) => {
+      await waitFor(async () => (await plusState()).chip !== null, 60_000, 500);
+      await openChipPanel();
+      await sleep(300);
+      const s = await chipPanelState();
+      const sideBySide =
+        s.agent !== null &&
+        s.model !== null &&
+        s.model.left >= s.agent.right - 1 &&
+        Math.abs(s.model.top - s.agent.top) <= 2;
+      check(
+        sideBySide,
+        `${where}: the chip panel has the Agent and Model columns side by side (Agent ${JSON.stringify(s.agent)}, Model ${JSON.stringify(s.model)})`,
+      );
+      check(
+        s.reasoningInModel &&
+          s.reasoning !== null &&
+          s.lastModel !== null &&
+          s.reasoning.top >= s.lastModel.bottom - 1 &&
+          s.reasoning.left >= s.model.left - 1 &&
+          s.reasoning.right <= s.model.right + 1,
+        `${where}: Reasoning is inside the Model column, under the model list (Reasoning ${JSON.stringify(s.reasoning)})`,
+      );
+      check(
+        inView(s.panel, s.view) && s.scrollOverflow <= 1,
+        `${where}: the chip panel fits the view and the page does not scroll sideways (panel ${JSON.stringify(s.panel)}, overflow ${String(s.scrollOverflow)} px)`,
+      );
+      const look = await web.inDoc(measureText, {
+        name: '.agent-model-panel button.model-option .model-name',
+        title: '.agent-model-panel [data-group="model"] h3',
+      });
+      check(
+        look.name != null &&
+          look.name.ratio >= 4.5 &&
+          look.title != null &&
+          look.title.ratio >= 4.5,
+        `${where}: the first row of the chip panel and the Model column title have contrast >= 4.5 (row ${look.name ? look.name.ratio.toFixed(2) : 'not found'}, title ${look.title ? look.title.ratio.toFixed(2) : 'not found'})`,
+      );
+      await shot(`23-chip-panel-wide-${themeName}`);
+      await closeByEscape();
+      const after = await chipPanelState();
+      check(
+        !after.open && after.expanded === 'false' && after.focusOnChip,
+        `${where}: Escape closes the chip panel and the focus returns to the chip (open ${String(after.open)}, expanded "${after.expanded}", focus on the chip ${String(after.focusOnChip)})`,
+      );
+    };
+
+    // --- Themes at 300 px, the wide bar and the compact state ------------------------------------
+    const WIDTHS = [
+      ['300', 300],
+      ['wide', 900],
+      ['compact', 150],
+    ];
+    for (const [name, wanted] of WIDTHS) {
+      let barPx;
+      try {
+        barPx = await setSideBarWidth(wanted);
+      } catch (error) {
+        barPx = await sideBarPx();
+        warn(
+          `"+" menu: the side bar did not go to ${String(wanted)} px (it is ${String(barPx)} px): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const reached =
+        name === '300'
+          ? Math.abs(barPx - 300) <= SIZE_TOLERANCE
+          : name === 'wide'
+            ? barPx >= 600
+            : barPx < 200;
+      if (!reached) {
+        warn(`"+" menu: width "${name}" not reached (side bar ${String(barPx)} px): not judged`);
+        continue;
+      }
+      for (const [themeName, theme] of PROBLEM_THEMES) {
+        writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+        await page.waitForTimeout(2500);
+        const where = `at ${name} (bar ${String(Math.round(barPx))} px), ${themeName}`;
+        // The bar closed: nothing overlaps, nothing sticks out, and in the compact state the chip
+        // has a row of its own at the width of the box.
+        // The webview may have been re-created by the resize: wait until it answers again.
+        await waitFor(async () => (await plusState()).plus !== null, 60_000, 500);
+        state = await plusState();
+        check(
+          state.scrollOverflow <= 1 && state.styled === 0,
+          `${where}: the view does not scroll sideways (${String(state.scrollOverflow)} px) and has no style attribute`,
+        );
+        check(
+          !overlap(state.plus, state.chip) &&
+            !overlap(state.plus, state.send) &&
+            !overlap(state.chip, state.send),
+          `${where}: the "+", the chip and Send do not overlap`,
+        );
+        check(
+          inView(state.plus, state.view) &&
+            inView(state.chip, state.view) &&
+            inView(state.send, state.view),
+          `${where}: the "+", the chip and Send are inside the view`,
+        );
+        if (name === 'compact') {
+          check(
+            state.chip.width >= 0.95 * state.prompt.width &&
+              state.chip.top >= state.plus.bottom - 1,
+            `${where}: the chip takes a row of its own at the width of the box (chip ${String(Math.round(state.chip.width))} of ${String(Math.round(state.prompt.width))} px, below the "+")`,
+          );
+        }
+        await shot(`23-bar-${name}-${themeName}`);
+        // The menu open with the real mouse: inside the view, readable.
+        await openByMouse();
+        state = await plusState();
+        check(
+          state.open && inView(state.menu, state.view),
+          `${where}: the menu opens inside the view (${JSON.stringify(state.menu)})`,
+        );
+        const look = await web.inDoc(measureText, { item: 'button.plus-item' });
+        check(
+          look.item !== null && look.item !== undefined && look.item.ratio >= 4.5,
+          `${where}: the menu items have contrast >= 4.5 (${look.item ? look.item.ratio.toFixed(2) : 'not found'})`,
+        );
+        await shot(`23-menu-${name}-${themeName}`);
+        await closeByEscape();
+        if (name === 'wide') await judgeWideChipPanel(where, themeName);
+      }
+    }
+    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
+    await setSideBarWidth(300).catch(() => undefined);
+    await page.waitForTimeout(1500);
+    assertNoWebviewErrors('"+" menu');
   });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.

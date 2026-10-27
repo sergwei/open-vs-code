@@ -32,6 +32,8 @@ body {
 }
 
 .app {
+  /* A size container (E2, issue #85): the layout reacts to the width of the webview, not of the window. */
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -1142,24 +1144,6 @@ button.secondary:hover:not(:disabled),
   gap: 4px;
 }
 
-.connection {
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.9em;
-}
-
-.connection-problem {
-  padding: 4px 6px;
-  color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
-  background: var(--vscode-inputValidation-warningBackground);
-  border: 1px solid var(--vscode-inputValidation-warningBorder, transparent);
-}
-
-.connection[data-state='unavailable'] {
-  color: var(--vscode-inputValidation-errorForeground, var(--vscode-foreground));
-  background: var(--vscode-inputValidation-errorBackground);
-  border-color: var(--vscode-inputValidation-errorBorder, transparent);
-}
-
 .activity {
   display: flex;
   align-items: center;
@@ -1185,9 +1169,10 @@ button.secondary:hover:not(:disabled),
 
 .alert {
   display: flex;
+  flex-wrap: wrap; /* bug #1294: the buttons drop below the text when they do not fit */
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 4px 8px;
   padding: 4px 6px;
   border: 1px solid var(--vscode-inputValidation-infoBorder, transparent);
   background: var(--vscode-inputValidation-infoBackground);
@@ -1215,26 +1200,159 @@ button.secondary:hover:not(:disabled),
 }
 
 .alert-text {
+  flex: 1 1 12rem;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.connection-row {
+/*
+ * E2 (issue #85): the error card of a connection problem. Same wrap rule as `.alert` (bug #1294):
+ * the text block asks for 12rem and may shrink to nothing, the buttons keep their size, and the
+ * row wraps, so the buttons drop BELOW the text when they do not fit, instead of squeezing the
+ * text to one letter per line. Text in the foreground colour; the error tone is background and border only.
+ */
+.connection-card {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px 8px;
+  margin: 8px 0;
+  padding: 8px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-inputValidation-errorBackground);
+  border: 1px solid var(--vscode-inputValidation-errorBorder, transparent);
 }
 
-.connection-row .connection {
-  flex: 1;
+.connection-card-neutral {
+  background: var(--vscode-inputValidation-infoBackground);
+  border-color: var(--vscode-inputValidation-infoBorder, transparent);
+}
+
+.card-icon {
+  display: flex;
+  flex: 0 0 auto;
+  padding-top: 1px;
+}
+
+.card-text {
+  flex: 1 1 12rem;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.connection-actions {
+.card-title {
+  margin: 0;
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.card-cause {
+  margin: 2px 0 0;
+}
+
+.card-actions {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* The setup guide (E2, issue #85): fills the view when the server cannot start. */
+.setup-guide {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  color: var(--vscode-foreground);
+}
+
+.setup-title {
+  margin: 0;
+  font-size: 1.2em;
+  font-weight: 600;
+}
+
+.setup-subtitle {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.setup-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-step {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
+}
+
+.setup-step[data-status='failed'] {
+  background: var(--vscode-inputValidation-errorBackground);
+  border-color: var(--vscode-inputValidation-errorBorder, transparent);
+}
+
+.step-mark {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 1.4em;
+}
+
+.step-body {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.step-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.step-status {
+  font-weight: 400;
+  color: var(--vscode-descriptionForeground);
+}
+
+.step-line {
+  margin: 2px 0 0;
+}
+
+.step-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  margin-top: 6px;
+}
+
+.setup-footer {
+  margin: 0;
+}
+
+.link-button {
+  padding: 0;
+  color: var(--vscode-textLink-foreground);
+  background: none;
+  border: 0;
+  text-decoration: underline;
+}
+
+.link-button:hover {
+  color: var(--vscode-textLink-activeForeground);
+}
+
+.icon {
+  flex: 0 0 auto;
 }
 
 /* ---------- request dock: permissions and questions (issues #18, #44) ---------- */
@@ -1479,76 +1597,174 @@ button.secondary:hover:not(:disabled),
   gap: 6px;
 }
 
-/* The agent switch and the model button (issues #23/#24) take the free space; Attach and Send sit right. */
+/*
+ * The combined chip (E2, issue #85, phase 3) sits after the context buttons and takes only the
+ * room it needs, shrinking with an ellipsis before it wraps; Send / Stop is pushed to the right
+ * edge by `margin-left: auto`. Under 200 px the chip gets a row of its own, full width (P13=1).
+ */
 .prompt-selectors {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
 }
 
-.prompt-actions > button.secondary {
+button.send-button {
   margin-left: auto;
-}
-
-/* Add selection and Attach sit side by side: only the first one takes the free space. */
-.prompt-actions > button.secondary + button.secondary {
-  margin-left: 0;
-}
-
-/* ---------- agent and model selectors (issues #23/#24) ---------- */
-
-/* Build | Plan: native radios hidden visually, each label is a segment. */
-.agent-toggle {
+  flex: 0 0 auto;
   display: inline-flex;
-  margin: 0;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  min-width: 0;
-  border: 1px solid var(--vscode-button-border, var(--vscode-input-border, transparent));
+  border-radius: 50%;
 }
 
-.agent-toggle label {
-  padding: 2px 8px;
-  cursor: pointer;
-  color: var(--vscode-button-secondaryForeground);
-  background: var(--vscode-button-secondaryBackground);
+@container (max-width: 199px) {
+  .prompt-selectors {
+    order: 3;
+    flex: 1 0 100%;
+  }
+
+  .prompt-selectors .agent-model-chip {
+    width: 100%;
+  }
 }
 
-.agent-toggle label:hover {
-  background: var(--vscode-button-secondaryHoverBackground);
+/*
+ * The "+" button and its menu (E2, issue #85, phase 4). The wrapper is NOT positioned, so the menu
+ * (absolute, like the chip panel) spans the box (`.prompt` is the positioned ancestor) and opens
+ * upwards over it. The button is square-ish and never shrinks.
+ */
+.plus-wrap {
+  flex: 0 0 auto;
+  display: flex;
 }
 
-/* The chosen agent: a stronger fill AND weight, so it is not told apart by colour alone. */
-.agent-toggle input:checked + label {
-  font-weight: 600;
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
+button.plus-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
 }
 
-.agent-toggle input:focus-visible + label {
-  outline: 1px solid var(--vscode-focusBorder);
-  outline-offset: 1px;
+.plus-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  z-index: 10;
+  margin-bottom: 4px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  max-height: 60vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, transparent);
 }
 
-.agent-toggle[aria-disabled='true'] label {
+button.plus-item {
+  width: 100%;
+  padding: 4px 8px;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-left: 3px solid transparent;
+}
+
+button.plus-item:hover,
+button.plus-item:focus-visible {
+  color: var(--vscode-menu-selectionForeground, inherit);
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+}
+
+button.plus-item[aria-disabled='true'] {
   opacity: 0.5;
   cursor: default;
 }
+
+/* ---------- agent and model chip and panel (issues #23/#24, E2 #85) ---------- */
 
 button.secondary[aria-disabled='true'] {
   opacity: 0.5;
   cursor: default;
 }
 
-.model-trigger,
-.variant-trigger {
+.agent-model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   max-width: 100%;
+  min-width: 0;
+}
+
+/* The text shrinks with an ellipsis; the dot and the chevron keep their size. */
+.agent-model-chip .chip-text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The connection dot (decision P10=1): its colour is never alone, the chip's name and tooltip say it. */
+.conn-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--vscode-descriptionForeground);
+}
+
+.conn-dot[data-state='connected'] {
+  background: var(--vscode-charts-green, var(--vscode-descriptionForeground));
+}
+
+.conn-dot[data-state='starting'],
+.conn-dot[data-state='reconnecting'] {
+  background: var(--vscode-charts-yellow, var(--vscode-descriptionForeground));
+}
+
+.conn-dot[data-state='unavailable'] {
+  background: var(--vscode-charts-red, var(--vscode-descriptionForeground));
+}
+
+/* Agent | Model side by side; stacked (Agent on top) when the view is narrower than 360 px. */
+.menu-columns {
+  display: flex;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.menu-column {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.menu-reasoning {
+  flex: 0 0 auto;
+}
+
+.agent-model-panel {
+  max-width: 480px;
+}
+
+@container (max-width: 359px) {
+  .menu-columns {
+    flex-direction: column;
+    gap: 6px;
+  }
 }
 
 /* Over the top edge of the prompt box, same surface as the session list. */
@@ -1761,7 +1977,8 @@ button.secondary[aria-disabled='true'] {
 [class*='vscode-high-contrast'] .code-block,
 [class*='vscode-high-contrast'] .suggestion,
 [class*='vscode-high-contrast'] .alert,
-[class*='vscode-high-contrast'] .connection-problem,
+[class*='vscode-high-contrast'] .connection-card,
+[class*='vscode-high-contrast'] .setup-step,
 [class*='vscode-high-contrast'] .prompt-text,
 [class*='vscode-high-contrast'] .chip,
 [class*='vscode-high-contrast'] .request-card,
@@ -1776,7 +1993,7 @@ button.secondary[aria-disabled='true'] {
 [class*='vscode-high-contrast'] .session-picker,
 [class*='vscode-high-contrast'] .model-panel,
 [class*='vscode-high-contrast'] .mention-popup,
-[class*='vscode-high-contrast'] .agent-toggle,
+[class*='vscode-high-contrast'] .agent-model-chip,
 [class*='vscode-high-contrast'] .session-search,
 [class*='vscode-high-contrast'] .subagent-sessions,
 [class*='vscode-high-contrast'] .changed-files,
@@ -1802,14 +2019,12 @@ button.secondary[aria-disabled='true'] {
   border-left-color: var(--vscode-contrastBorder);
 }
 
-/* The chosen agent and the model in use need a mark that does not rely on a tint. */
-[class*='vscode-high-contrast'] .agent-toggle input:checked + label {
-  background: transparent;
-  color: var(--vscode-foreground);
-  text-decoration: underline;
-  outline: 1px solid var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+/* The connection dot has no tint to lean on in high contrast: an outline in the text colour. */
+[class*='vscode-high-contrast'] .conn-dot {
+  outline: 1px solid var(--vscode-foreground);
 }
 
+/* The chosen agent, model and level need a mark that does not rely on a tint. */
 [class*='vscode-high-contrast'] .model-option[aria-current='true'] {
   background: transparent;
   outline: 1px solid var(--vscode-contrastBorder);

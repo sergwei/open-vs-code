@@ -6,7 +6,10 @@ import {
 } from '../../src/shared/protocol';
 import { RevertBanner } from './changes/RevertBanner';
 import { splitAtRevert } from './changes/revertView';
+import { ConnectionCard } from './chat/ConnectionCard';
+import { describeProblem, nextGuideLatch } from './chat/connectionView';
 import { EmptyState } from './chat/EmptyState';
+import { SetupGuide } from './chat/SetupGuide';
 import { Header } from './chat/Header';
 import type { DropContent } from './chat/dropData';
 import { HostContext, type SendToHost } from './chat/hostContext';
@@ -17,8 +20,7 @@ import { nextRequestId, PromptInput } from './chat/PromptInput';
 import { createHistory } from './chat/promptHistory';
 import { StatusBar } from './chat/StatusBar';
 import { RequestDock } from './requests/RequestDock';
-import { AgentToggle } from './selectors/AgentToggle';
-import { ModelPicker } from './selectors/ModelPicker';
+import { AgentModelMenu } from './selectors/AgentModelMenu';
 import {
   effectiveAgent,
   effectiveModel,
@@ -27,7 +29,6 @@ import {
   withVariant,
   type SelectionInput,
 } from './selectors/selection';
-import { VariantPicker } from './selectors/VariantPicker';
 import { deriveActivity } from './store/activity';
 import type { ChatStore } from './store/chatStore';
 import type { UiState } from './uiState';
@@ -81,9 +82,18 @@ interface LastRevert {
  * are not in the dock: `MessageList` shows them under their tool (E3-resolved-history), so sending
  * a prompt does not erase them.
  *
- * Issue #61 mounts the `VariantPicker` after the model button: its choices come from the effective
- * model (`variantChoices`), and picking one stores the effective model reference with that
- * variant as the draft (`withVariant`), so `selectionToSend` carries it with the next prompt.
+ * Issue #61 (reasoning variant), now the Reasoning section of the {@link AgentModelMenu}: its choices
+ * come from the effective model (`variantChoices`), and picking one stores the effective model
+ * reference with that variant as the draft (`withVariant`), so `selectionToSend` carries it with
+ * the next prompt.
+ *
+ * E2 (issue #85, phase 2): a failure of the server with no conversation shows the {@link SetupGuide}
+ * instead of the whole view (P1=1: latched through the next `starting` until `connected`, see
+ * `nextGuideLatch`); with a conversation the {@link ConnectionCard} sits at the end of the log; with
+ * neither (reconnecting, or no folder) the card takes the place of the empty state. While there
+ * is no connection the prompt box stays editable with the placeholder "Waiting for opencode…"
+ * (P5=2). `.app` carries `data-connection` (the state) for the tests and is a size container for
+ * the CSS. VERIFIED in jsdom by `App.test.tsx` ("setup guide and connection card").
  *
  * Issue #20 adds the session list to the header (open, search, rename, delete; the host confirms a
  * delete) and makes New session lazy. Deleting the open session leaves the view empty (the store
@@ -98,8 +108,8 @@ interface LastRevert {
  * pending request, so a prompt cannot go to the old session in the middle of the switch. It also
  * hands `openSession` to the subagent links of the conversation.
  *
- * Issues #23/#24 put the agent switch and the model picker in the prompt row (decision of 21/10/2026,
- * Engram #1012: both in the row, not the header) and make the choice a DRAFT in the store:
+ * Issues #23/#24, since E2 (#85, phase 3) ONE combined chip "agent · model ▾" in the prompt bar
+ * (decision of 21/10/2026, Engram #1012: in the bar, not the header), make the choice a DRAFT in the store:
  * `sendPrompt` (Send and Retry alike) adds the model and agent the next prompt would use
  * (`selectionToSend`) and the host validates and applies them just before the prompt. Nothing is
  * sent to the host when the user picks. The draft is persisted with the prompt draft, keyed by the
@@ -161,6 +171,8 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   const [draft, setDraft] = createSignal(props.uiState.draft);
   const [announcement, setAnnouncement] = createSignal('');
   let focusInput: (() => void) | undefined;
+  /** Closes the panel of the agent and model chip; set by the chip itself (review W1). */
+  let closeChipPanel: (() => void) | undefined;
   let lastSend: LastSend | undefined;
   const [lastFork, setLastFork] = createSignal<LastFork | undefined>(undefined);
   const [lastRevert, setLastRevert] = createSignal<LastRevert | undefined>(undefined);
@@ -214,6 +226,16 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     return message?.kind === 'assistant' && message.error !== undefined;
   };
   const connected = () => state.connection.state === 'connected';
+  // E2 (issue #85): the setup guide replaces the view after a failure with no conversation behind
+  // it (P1=1) and stays through the next `starting` until `connected`. The memo keeps the previous
+  // answer in `guide` because `nextGuideLatch` needs it for the in-between states.
+  let guide = false;
+  const guideVisible = createMemo(() => {
+    guide = nextGuideLatch(guide, state.connection, state.open.messages.length > 0);
+    return guide;
+  });
+  /** The card of the current connection problem, if any (inside the conversation or in its place). */
+  const problem = createMemo(() => describeProblem(state.connection));
   const canSend = () => connected() && !busy() && state.pending.length === 0;
   /** What the selectors and the next `prompt.send` read: catalog, open session row and draft. */
   const selectionInput = (): SelectionInput => ({
@@ -448,11 +470,18 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     sendPrompt(message.text, files);
   };
 
-  /** Asks the host to show the file picker; the files arrive as `attachments.picked`. */
-  const attach = (): void => {
+  /**
+   * Asks the host to show the file picker ("Attach file…" and, with `kind: 'image'`, "Attach
+   * image…" of the "+" menu, decision P11=1); the files arrive as `attachments.picked`.
+   */
+  const attach = (kind: 'file' | 'image' = 'file'): void => {
     const requestId = nextRequestId();
     props.store.begin(requestId);
-    props.send({ type: 'attachments.pick', requestId });
+    props.send(
+      kind === 'image'
+        ? { type: 'attachments.pick', requestId, kind }
+        : { type: 'attachments.pick', requestId },
+    );
   };
 
   /**
@@ -539,7 +568,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     if (images.length < content.files.length) {
       props.store.notify('warning', {
         code: 'DropNotSupported',
-        message: 'Drop files from the VS Code Explorer, or use Attach',
+        message: 'Drop files from the VS Code Explorer, or use the + menu',
       });
     }
   };
@@ -695,130 +724,151 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
 
   return (
     <HostContext.Provider value={props.send}>
-      <div class="app">
-        <Header
-          store={props.store}
-          onNewSession={newSession}
-          closePickerRequest={closePickerRequest()}
-          onOpenSession={openSession}
-          onOpenChangedFile={openChangedFile}
-        />
-        <main class="chat-main">
-          <Show
-            when={state.open.messages.length > 0}
-            fallback={
-              <EmptyState
-                onPick={(text) => {
-                  setDraft(text);
-                  focusInput?.();
+      <div class="app" data-connection={state.connection.state}>
+        <Show
+          when={!guideVisible()}
+          fallback={<SetupGuide connection={state.connection} catalog={state.catalog} />}
+        >
+          <Header
+            store={props.store}
+            onNewSession={newSession}
+            closePickerRequest={closePickerRequest()}
+            onOpenSession={openSession}
+            onOpenChangedFile={openChangedFile}
+          />
+          <main class="chat-main">
+            <Show
+              when={state.open.messages.length > 0}
+              fallback={
+                <Show
+                  when={problem()}
+                  fallback={
+                    <EmptyState
+                      onPick={(text) => {
+                        setDraft(text);
+                        focusInput?.();
+                      }}
+                    />
+                  }
+                >
+                  {(current) => <ConnectionCard problem={current()} />}
+                </Show>
+              }
+            >
+              <MessageList
+                open={state.open}
+                messages={messages()}
+                catalog={state.catalog}
+                resolutions={state.resolutions}
+                requests={state.requests}
+                busy={busy()}
+                canRetry={lastUser() !== undefined}
+                forkDisabled={forkDisabled()}
+                revertDisabled={revertDisabled()}
+                onRetry={retry}
+                onFork={forkFrom}
+                onRevert={revertFrom}
+                onOpenSession={openSession}
+                trailing={
+                  <Show when={problem()}>
+                    {(current) => <ConnectionCard problem={current()} />}
+                  </Show>
+                }
+              />
+            </Show>
+          </main>
+          <Show when={state.open.revert}>
+            {(revert) => (
+              <RevertBanner
+                revert={revert()}
+                split={split()}
+                disabled={revertDisabled()}
+                onRestore={() => {
+                  finishRevert('session.revert.clear');
                 }}
+                onDiscard={() => {
+                  finishRevert('session.revert.commit');
+                }}
+                onOpenFile={openRevertedFile}
               />
-            }
-          >
-            <MessageList
-              open={state.open}
-              messages={messages()}
-              catalog={state.catalog}
-              resolutions={state.resolutions}
-              requests={state.requests}
-              busy={busy()}
-              canRetry={lastUser() !== undefined}
-              forkDisabled={forkDisabled()}
-              revertDisabled={revertDisabled()}
-              onRetry={retry}
-              onFork={forkFrom}
-              onRevert={revertFrom}
-              onOpenSession={openSession}
-            />
+            )}
           </Show>
-        </main>
-        <Show when={state.open.revert}>
-          {(revert) => (
-            <RevertBanner
-              revert={revert()}
-              split={split()}
-              disabled={revertDisabled()}
-              onRestore={() => {
-                finishRevert('session.revert.clear');
-              }}
-              onDiscard={() => {
-                finishRevert('session.revert.commit');
-              }}
-              onOpenFile={openRevertedFile}
-            />
-          )}
-        </Show>
-        <RequestDock
-          store={props.store}
-          typing={draft().trim() !== ''}
-          focusInput={() => {
-            focusInput?.();
-          }}
-        />
-        <StatusBar
-          state={state}
-          activity={activity()}
-          announcement={announcement()}
-          canRetry={lastUser() !== undefined && canSend() && !lastMessageHasError()}
-          onRetry={retry}
-          onDismiss={props.store.dismissNotice}
-        />
-        <PromptInput
-          draft={draft()}
-          onDraft={(text) => {
-            setDraft(text);
-          }}
-          history={history}
-          files={state.draftFiles}
-          busy={busy()}
-          sendDisabled={!canSend()}
-          attachDisabled={!connected()}
-          addSelectionDisabled={!connected()}
-          fileSearch={state.fileSearch}
-          onMentionQuery={searchFiles}
-          onMentionPick={(file) => {
-            // Plain copy: the chip is read back into a `postMessage` when the prompt is sent.
-            props.store.addDraftFiles([{ uri: file.uri, name: file.name }]);
-            clearFileSearch();
-          }}
-          onSubmit={submit}
-          onStop={stop}
-          onAttach={attach}
-          onAddSelection={addSelection}
-          onRemoveFile={removeFile}
-          onDrop={dropped}
-          onPasteImages={addImages}
-          thumbs={state.thumbs}
-          onFocusReady={(focus) => {
-            focusInput = focus;
-          }}
-          selectors={
-            <>
-              <AgentToggle
+          <RequestDock
+            store={props.store}
+            typing={draft().trim() !== ''}
+            focusInput={() => {
+              focusInput?.();
+            }}
+          />
+          <StatusBar
+            state={state}
+            activity={activity()}
+            announcement={announcement()}
+            canRetry={lastUser() !== undefined && canSend() && !lastMessageHasError()}
+            onRetry={retry}
+            onDismiss={props.store.dismissNotice}
+          />
+          <PromptInput
+            draft={draft()}
+            onDraft={(text) => {
+              setDraft(text);
+            }}
+            history={history}
+            files={state.draftFiles}
+            busy={busy()}
+            waiting={!connected()}
+            sendDisabled={!canSend()}
+            attachDisabled={!connected()}
+            fileSearch={state.fileSearch}
+            onMentionQuery={searchFiles}
+            onMentionPick={(file) => {
+              // Plain copy: the chip is read back into a `postMessage` when the prompt is sent.
+              props.store.addDraftFiles([{ uri: file.uri, name: file.name }]);
+              clearFileSearch();
+            }}
+            onSubmit={submit}
+            onStop={stop}
+            onAttach={() => {
+              attach('file');
+            }}
+            onAttachImage={() => {
+              attach('image');
+            }}
+            onAddSelection={addSelection}
+            onRemoveFile={removeFile}
+            onDrop={dropped}
+            onPasteImages={addImages}
+            thumbs={state.thumbs}
+            onFocusReady={(focus) => {
+              // Same rule as the "+" menu: the focus moving by code closes the chip's panel too.
+              focusInput = () => {
+                closeChipPanel?.();
+                focus();
+              };
+            }}
+            selectors={
+              <AgentModelMenu
+                onCloseReady={(close) => {
+                  closeChipPanel = close;
+                }}
                 catalog={state.catalog}
-                effective={effectiveAgent(selectionInput())}
+                agent={effectiveAgent(selectionInput())}
+                model={effectiveModel(selectionInput())}
+                variants={variantChoices(effectiveModel(selectionInput()))}
+                connection={state.connection.state}
                 disabled={!connected()}
-                onSelect={props.store.selectAgent}
-              />
-              <ModelPicker
-                catalog={state.catalog}
-                effective={effectiveModel(selectionInput())}
-                disabled={!connected()}
-                onSelect={props.store.selectModel}
-              />
-              <VariantPicker
-                choices={variantChoices(effectiveModel(selectionInput()))}
-                disabled={!connected() || state.catalog === undefined}
-                onSelect={(variant) => {
+                onSelectAgent={props.store.selectAgent}
+                onSelectModel={props.store.selectModel}
+                onSelectVariant={(variant) => {
                   const effective = effectiveModel(selectionInput());
                   if (effective !== undefined) {
                     props.store.selectModel(withVariant(effective.ref, variant));
                   }
                 }}
               />
-            </>
-          }
-        />
+            }
+          />
+        </Show>
       </div>
     </HostContext.Provider>
   );

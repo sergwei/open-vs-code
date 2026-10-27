@@ -131,6 +131,9 @@
 //     more primary agent (`docs`), a model without variants and a model with a 5000-token context
 //     (so one `STEP_TOKENS` step is 85 %), and `GET /api/fs/find` walks the served folder. Without
 //     it the catalog is the two models and four agents the Vitest e2e expects.
+//   - A prompt containing CRASH (E2, issue #85; only with FAKE_OPENCODE_STATE_FILE) writes the marker
+//     `<state file>.down` and exits with code 1 mid-turn; while the marker exists every start
+//     behaves like `exit-early`. Deleting the marker and restarting brings the server back.
 //   - FAKE_OPENCODE_STATE_FILE: sessions, history and the id counter are loaded from it on start
 //     and rewritten after every change (temporary file, then rename), so a relaunched server (the
 //     visual run's Restart Server and Reload Window) still has the conversation, as the real
@@ -208,6 +211,8 @@ const nextId = (prefix) => `${prefix}_${String(++seq).padStart(6, '0')}`;
 
 /** Where the conversation is kept between processes (see the header); empty = in memory only. */
 const STATE_FILE = process.env.FAKE_OPENCODE_STATE_FILE ?? '';
+/** The marker a CRASH turn leaves next to the state file; while it exists every start fails. */
+const DOWN_MARKER = `${STATE_FILE}.down`;
 
 /**
  * Loads sessions, history and the id counter from {@link STATE_FILE} when it exists. A missing or
@@ -750,7 +755,7 @@ const CATALOG_AGENTS = [
   ['general', 'General', 'subagent', false],
   ['title', 'Title', 'primary', true],
   ['plan', 'Plan', 'primary', false],
-  // Only in `visual` mode: a custom primary agent, so "More agents" has something to show.
+  // Only in `visual` mode: a custom primary agent, so the Agent column of the chip's panel has a third row.
   ...(has('visual') ? [['docs', 'Docs', 'primary', false]] : []),
 ].map(([id, name, mode, hidden]) => ({
   id,
@@ -898,6 +903,14 @@ function compactionSteps(sessionID) {
  * EDIT_FILES makes the step end with the `files` and `snapshot` of {@link applyEdits} (issue #31).
  */
 function playTurn(sessionID, inboxID, text, files = []) {
+  // CRASH (E2, issue #85): the server dies in the middle of a turn and cannot come back until the
+  // marker `<FAKE_OPENCODE_STATE_FILE>.down` is deleted. Only with a state file, because the
+  // marker lives next to it and the conversation must survive the exit (the `exit` handler of
+  // `runServe` saves it). Exit code 1, as a crashed process would.
+  if (text.includes('CRASH') && STATE_FILE !== '') {
+    fs.writeFileSync(DOWN_MARKER, 'crashed on purpose by the CRASH trigger\n');
+    process.exit(1);
+  }
   const assistantMessageID = nextId('msg');
   const chosen = selectionOf(sessionID);
   const a = { sessionID, assistantMessageID };
@@ -2180,7 +2193,9 @@ function runServe() {
     })}\n`,
   );
 
-  if (has('exit-early')) {
+  // The `.down` marker left by a CRASH turn makes every start behave like `exit-early` until the
+  // test deletes it (E2, issue #85: an unavailable server WITH a conversation behind it).
+  if (has('exit-early') || (STATE_FILE !== '' && fs.existsSync(DOWN_MARKER))) {
     exitAfterStderr('boom\n', 3);
     return;
   }

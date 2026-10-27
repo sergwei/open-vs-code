@@ -173,7 +173,7 @@ describe('a stopped turn is not an error', () => {
     const { container, apply } = startApp();
     apply(open([user('m1', 'x'), assistant('m2')], { type: 'busy' }));
     container.querySelectorAll('button').forEach((button) => {
-      if (button.textContent === 'Stop') button.click();
+      if (button.getAttribute('aria-label') === 'Stop') button.click();
     });
     apply({ type: 'session.status', sessionID: SES, status: { type: 'idle' } });
     expect(
