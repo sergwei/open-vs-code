@@ -80,6 +80,10 @@
 // Isolation: opencode's data/state/cache dirs are redirected into `.vscode-test/visual/opencode-xdg`
 // (see `vscodeProcess.mjs`), so the run does not add sessions to the developer's own history.
 //
+// Window: the run sets 1440x900 CSS px (`setWindowSize`) and prints size, DPR and webview width;
+// a window that does not reach it is meant to exit with 2 (not executed). Step 15 also measures the failed card in a 1080x900
+// window with a 270 px side bar (`setSideBarWidth`), see `test/visual/README.md`.
+//
 // Output: screenshots in `.vscode-test/visual/shots/` (ignored by git), and a summary on stdout.
 // At the end (also after an exception, and on SIGINT/SIGTERM) VS Code is closed with its whole
 // process tree and the temporary workspace is deleted. A hang inside a CDP call is cut by a
@@ -234,8 +238,13 @@ for (const required of ['dist/extension.js', 'dist/webview/assets/index.js']) {
   }
 }
 
-fs.rmSync(shotsDir, { recursive: true, force: true });
+// The CONTENTS are cleared, not the folder: a process that has `shots` as its working directory
+// (an editor or terminal opened there) makes `rmSync` of the folder itself fail with EPERM on
+// Windows (seen 27/10/2026), and that is not a reason to stop the run.
 fs.mkdirSync(shotsDir, { recursive: true });
+for (const entry of fs.readdirSync(shotsDir)) {
+  fs.rmSync(path.join(shotsDir, entry), { recursive: true, force: true });
+}
 // Assigned inside the `try` at the bottom, so that a failure while creating them (the VS Code
 // download, say) still reaches `cleanup`.
 let workspace;
@@ -296,6 +305,123 @@ async function connectWorkbench(timeoutMs = 90_000) {
     await sleep(500);
   }
   throw new Error(`could not connect to VS Code over CDP: ${String(lastError)}`);
+}
+
+/** Window size the whole run uses (HYPOTHESIS: VS Code's own default for a new window with a folder). */
+const WINDOW_SIZE = { width: 1440, height: 900 };
+/** Narrow window of the step 15 measurement: the width of a vertical monitor. */
+const NARROW_SIZE = { width: 1080, height: 900 };
+/**
+ * Side bar width for the narrow measurement. 270 is HYPOTHESIS for what a window that OPENED 1080
+ * px wide gets (a quarter of it): the failing runs of 25/10/2026 overflowed by 15 px, and 270
+ * gave 14 px against the old CSS (a 250 px bar gave 34 px, 27/10/2026); the real proportion of
+ * VS Code 1.143.1 was not read from its source. The width to go back to is measured, not assumed.
+ */
+const NARROW_BAR_WIDTH = 270;
+/** CSS px by which the measured inner size may differ from the requested one (see below). */
+const SIZE_TOLERANCE = 4;
+
+/** Inner size of the workbench in CSS px, the device pixel ratio and the screen's work area. */
+function windowSize() {
+  return page.evaluate(() => ({
+    width: globalThis.innerWidth,
+    height: globalThis.innerHeight,
+    dpr: globalThis.devicePixelRatio,
+    screen: `${String(globalThis.screen.availWidth)}x${String(globalThis.screen.availHeight)}`,
+  }));
+}
+
+/**
+ * Resizes the VS Code window to `width` x `height` with `window.resizeTo` over CDP, waits for the
+ * layout to settle and returns the measured size; throws when the window never gets there.
+ *
+ * Why: the run used to inherit the size of the monitor VS Code opened on, and with a narrow one
+ * steps 9, 10, 11 and 15 failed for a reason that was the environment (27/10/2026).
+ * HYPOTHESIS (read in `mainImpl.js` of VS Code 1.143.1, not executed): a new window with a folder
+ * asks for 1440x900 and VS Code clips it to the work area; the side bar of such a window is
+ * probably about 270 px, see `NARROW_BAR_WIDTH`. Throwing, instead of going on with an unknown
+ * layout, is meant to make the run exit with 2 ("could not start") when this is called before the
+ * first step: HYPOTHESIS read from the `started`/`startupError` flow at the bottom of this file,
+ * the throwing path has not been executed. The inner size lands within 1-2 px of the request, not
+ * on it, hence `SIZE_TOLERANCE`.
+ * VERIFIED on Windows 11, VS Code 1.143.1, DPR 1.25 (27/10/2026): the run prints "window 1440x902
+ * CSS px, DPR 1.25, screen work area 4096x1152" at start and, in step 15, "narrow window 1082x902,
+ * side bar 270 px: header 169 px wide" (an earlier spike on the real workbench also went from
+ * 1440x902 to 1082x902 with `resizeTo(1080, 900)`). NOT observed: macOS, Linux, a request larger
+ * than the screen's work area (it would throw here).
+ */
+async function setWindowSize(width, height) {
+  await page.evaluate(([w, h]) => globalThis.resizeTo(w, h), [width, height]);
+  const reached = await waitFor(
+    async () => {
+      const size = await windowSize();
+      const close =
+        Math.abs(size.width - width) <= SIZE_TOLERANCE &&
+        Math.abs(size.height - height) <= SIZE_TOLERANCE;
+      return close ? size : undefined;
+    },
+    8_000,
+    250,
+  );
+  if (reached === undefined) {
+    const size = await windowSize();
+    throw new Error(
+      `the window is ${String(size.width)}x${String(size.height)} CSS px (screen work area ${size.screen}), not the ${String(width)}x${String(height)} that was requested`,
+    );
+  }
+  await sleep(1_000); // the layout of the side bar and the webview follows the window
+  return windowSize();
+}
+
+/** Box of the primary side bar in page coordinates, or null when it is not in the page. */
+function sideBarBox() {
+  return page.evaluate(() => {
+    const rect = globalThis.document.querySelector('.part.sidebar')?.getBoundingClientRect();
+    return rect ? { left: rect.left, right: rect.right, top: rect.top, height: rect.height } : null;
+  });
+}
+
+/** Width of the primary side bar in CSS px (0 when it is not in the page). */
+async function sideBarPx() {
+  const box = await sideBarBox();
+  return box === null ? 0 : box.right - box.left;
+}
+
+/**
+ * Drags the sash of the primary side bar with the real mouse until the bar is `width` CSS px
+ * wide; returns the width measured afterwards, and throws when it is more than
+ * `SIZE_TOLERANCE` off. The pointer is parked over the editor afterwards, so a screenshot taken
+ * next does not show the sash's hover line (VERIFIED on Windows 11, 27/10/2026: the narrow
+ * capture of the final run shows no hover line on the side bar's edge; before the pointer was
+ * parked, an earlier capture did).
+ *
+ * Why: resizing the window does NOT change the side bar width (VERIFIED, below), so a narrow
+ * side bar has to be set directly. HYPOTHESIS, not observed: VS Code fixes the width in px when
+ * the window opens, as a proportion of the window then, and the 1080 px wide runs of 25/10/2026,
+ * where the header of a failed tool card overflowed, had a bar of about 270 px for that reason.
+ * VERIFIED on Windows 11, VS Code 1.143.1 (27/10/2026), spike on the real workbench: the side bar
+ * stayed 300 px after `resizeTo(1080, 900)` and became 250 and then 200 px with this drag; the
+ * run prints "narrow window 1082x902, side bar 270 px: header 169 px wide". NOT observed: macOS
+ * and Linux, a side bar on the right (`workbench.sideBar.location`), a side bar hidden when
+ * called.
+ */
+async function setSideBarWidth(width) {
+  const before = await sideBarBox();
+  if (before === null) throw new Error('the primary side bar is not in the page');
+  const y = before.top + before.height / 2;
+  await page.mouse.move(before.right, y);
+  await page.mouse.down();
+  await page.mouse.move(before.left + width, y, { steps: 10 });
+  await page.mouse.up();
+  await page.mouse.move(before.left + Math.max(width, before.right - before.left) + 200, y);
+  await sleep(1_000);
+  const measured = await sideBarPx();
+  if (Math.abs(measured - width) > SIZE_TOLERANCE) {
+    throw new Error(
+      `the side bar is ${String(measured)} px wide after dragging it to ${String(width)}`,
+    );
+  }
+  return measured;
 }
 
 /**
@@ -408,6 +534,61 @@ async function clickIn(selector) {
   const point = await centreOf(selector);
   if (!point) return false;
   await page.mouse.click(point.x, point.y);
+  return true;
+}
+
+/**
+ * A real click on the main button of a session row (`.session-main`), at a point that is safe from
+ * the row actions, or a throw when the pointer would land elsewhere.
+ *
+ * Why not `clickIn`: that clicks the CENTRE, and `.session-row-actions` (Rename, Delete) is laid
+ * over the right end of the row with `opacity: 0`, which still takes the click. In a narrow side
+ * bar the centre falls on that overlay, so "the other session is clicked" pressed Rename blind, the
+ * row went into edit mode and the next steps failed one after another (found on 27/10/2026 in a
+ * 1080 px wide window; the screenshots showed the rename input on the wrong row). Here the point
+ * is the middle of the part of the row to the LEFT of the actions, and the page is asked with
+ * `elementFromPoint` whether that point is inside the row button before the mouse is used; if not
+ * the call throws with what is there instead, so the failure is readable on its own line.
+ * Returns false when nothing matches `selector`. What this does NOT cover: a layout shift between
+ * the check and the click, as in `clickButton`.
+ * VERIFIED on Windows 11, VS Code 1.143.1 (27/10/2026) by mutation, with the side bar dragged to
+ * 270 px before step 9 and the `right` bound of the point changed to the row's own right edge
+ * (so the point was the CENTRE of the row, where the hidden actions are): the run failed with
+ * "the pointer for the session row "[data-visual-pick="true"]" would land on button.secondary
+ * session-action, not on the row button (227 px of row left of its actions)" (there "227 px" is
+ * the whole row, since the actions bound was removed), in steps 9, 11 and 14.
+ * Unmutated, with the side bar at 270 px before step 9, steps 9, 10 and 11 ended without a FAIL
+ * line. NOT observed: other widths, themes with a scrollbar in the list.
+ */
+async function clickRowMain(selector) {
+  const target = await web.inDoc((doc, sel) => {
+    const main = doc.querySelector(sel);
+    if (!main) return null;
+    // 'nearest': see `centreOf`.
+    main.scrollIntoView({ block: 'nearest' });
+    const rect = main.getBoundingClientRect();
+    const actions = main.closest('.session-row')?.querySelector('.session-row-actions');
+    const right = actions ? Math.min(rect.right, actions.getBoundingClientRect().left) : rect.right;
+    const x = rect.left + (right - rect.left) / 2;
+    const y = rect.top + rect.height / 2;
+    const hit = doc.elementFromPoint(x, y);
+    return {
+      x,
+      y,
+      landed: hit !== null && main.contains(hit),
+      hit: hit ? `${hit.tagName.toLowerCase()}.${hit.getAttribute('class') ?? ''}` : 'nothing',
+      room: Math.round(right - rect.left),
+    };
+  }, selector);
+  if (!target) return false;
+  if (!target.landed) {
+    throw new Error(
+      `the pointer for the session row "${selector}" would land on ${target.hit}, not on the row button (${String(target.room)} px of row left of its actions)`,
+    );
+  }
+  const frame = await page.locator('iframe.webview.ready').first().boundingBox();
+  if (!frame) return false;
+  await page.mouse.click(frame.x + target.x, frame.y + target.y);
   return true;
 }
 
@@ -908,6 +1089,11 @@ try {
     `VS Code pid ${String(vscode.pid)}, CDP port ${String(vscode.port)}, workspace ${workspace}`,
   );
   await connectWorkbench();
+  // A wrong size throws here, before `started`, so it takes the start-up path (exit 2).
+  const startSize = await setWindowSize(WINDOW_SIZE.width, WINDOW_SIZE.height);
+  console.log(
+    `window ${String(startSize.width)}x${String(startSize.height)} CSS px, DPR ${String(startSize.dpr)}, screen work area ${startSize.screen}`,
+  );
   started = true;
   await page.waitForTimeout(3000);
 
@@ -919,6 +1105,10 @@ try {
     await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
     await openChat(40_000);
     await waitConnected();
+    // Diagnostic: the width the layout-dependent steps (9, 10, 11, 15) run with.
+    console.log(
+      `  webview ${String(await web.inDoc((doc) => doc.documentElement.clientWidth))} CSS px wide`,
+    );
     const state = await web.inDoc((doc) => ({
       title: doc.querySelector('.chat-title')?.textContent,
       newSessionButtons: [...doc.querySelectorAll('header button')].map((b) => b.textContent),
@@ -1579,7 +1769,7 @@ try {
         );
         row?.querySelector('.session-main')?.setAttribute('data-visual-pick', 'true');
       }, other.title);
-      check(await clickIn('[data-visual-pick="true"]'), 'the other session is clicked');
+      check(await clickRowMain('[data-visual-pick="true"]'), 'the other session is clicked');
       const switched = await until((s) => !s.open && s.title === other.title, 20_000);
       check(
         switched === true,
@@ -1601,14 +1791,16 @@ try {
       );
       row?.querySelector('.session-main')?.setAttribute('data-visual-pick', 'true');
     }, renamed);
-    // The centre of the row is only safe while the document has no scrollbar: the row actions are
-    // laid over its right end (opacity 0 still takes the click), and a 9 px overflow narrowed the
-    // row enough for the centre to land on "Rename" (found while adding step 10, issue #21).
+    // The row actions are laid over its right end (opacity 0 still takes the click), so the CENTRE
+    // of a narrow row lands on "Rename": a 9 px scrollbar did it once (issue #21) and a 1080 px
+    // wide window does it without any scrollbar (27/10/2026). `clickRowMain` aims left of the
+    // actions and throws when it cannot; the overflow check stays because a scrollbar still
+    // changes the layout the rest of the step measures.
     const overflowPx = await web.inDoc(
       (doc) => doc.documentElement.scrollHeight - doc.documentElement.clientHeight,
     );
     check(overflowPx <= 0, `the document has no vertical overflow (${String(overflowPx)} px)`);
-    await clickIn('[data-visual-pick="true"]');
+    await clickRowMain('[data-visual-pick="true"]');
     await until((s) => !s.open && s.title === renamed, 20_000);
     await openList();
     const dialog = page.locator('.monaco-dialog-box');
@@ -2260,7 +2452,7 @@ try {
       300,
     );
     check(rows === true, 'the session list has rows');
-    check(await clickIn('button.session-main'), 'the newest session is pressed');
+    check(await clickRowMain('button.session-main'), 'the newest session is pressed');
     const reopened = await waitFor(async () => (await ui()).agent === 'plan', 20_000, 300);
     state = await ui();
     check(
@@ -2624,7 +2816,7 @@ try {
       300,
     );
     check(rows === true, 'the session list has rows');
-    check(await clickIn('button.session-main'), 'the newest session is pressed');
+    check(await clickRowMain('button.session-main'), 'the newest session is pressed');
     const reopened = await waitFor(
       async () => (await ui()).trigger === `Reasoning: ${String(variant)}`,
       20_000,
@@ -2945,6 +3137,92 @@ try {
       check(
         failedCard !== null && failedCard.overflowPx <= 1,
         `the failed header fits inside its toggle, nothing runs over the Open link (overflow ${String(failedCard?.overflowPx)} px)`,
+      );
+      // At the default side bar width a header stays on ONE line: the argument and the result
+      // shrink with an ellipsis before anything wraps (`.tool-toggle` in index.css). Lines are the
+      // toggle's content height over the height of its title; a header that wrapped (the review
+      // of 27/10/2026 found Edit, Write, Grep and Fetch on two lines) reads 2.
+      const headerLines = await web.inDoc((doc) => {
+        const count = (selector) => {
+          const toggle = doc.querySelector(`${selector} .tool-toggle`);
+          const title = toggle?.querySelector('.tool-title');
+          if (!toggle || !title) return -1;
+          const style = doc.defaultView.getComputedStyle(toggle);
+          const inner =
+            toggle.getBoundingClientRect().height -
+            parseFloat(style.paddingTop) -
+            parseFloat(style.paddingBottom);
+          return Math.round(inner / title.getBoundingClientRect().height);
+        };
+        return {
+          edit: count('.tool-card[data-tool="edit"]'),
+          write: count('.tool-card[data-tool="write"]'),
+          grep: count('.tool-card[data-tool="grep"]'),
+          fetch: count('.tool-card[data-tool="webfetch"]'),
+          failed: count('[data-visual-card]'),
+        };
+      });
+      check(
+        Object.values(headerLines).every((lines) => lines === 1),
+        `at the default side bar width the Edit, Write, Grep, Fetch and failed headers take one line each (${JSON.stringify(headerLines)})`,
+      );
+      // The same card in a 1080 px wide window with a ~270 px side bar (HYPOTHESIS for what such a
+      // window gets, see NARROW_BAR_WIDTH), where the header used to run over the "Open" link by
+      // 14 px (27/10/2026). The window, the side bar and the theme go back to what they were in a
+      // `finally`, and the card is measured again, so a resize that did not undo itself is seen
+      // here and not as a cascade in the steps that follow.
+      const toggleFit = () =>
+        web.inDoc((doc) => {
+          const toggle = doc.querySelector('[data-visual-card] .tool-toggle');
+          return toggle
+            ? { overflowPx: toggle.scrollWidth - toggle.clientWidth, width: toggle.clientWidth }
+            : null;
+        });
+      const barBefore = await sideBarPx();
+      const fitBefore = await toggleFit();
+      let narrowFit;
+      try {
+        // Resizing the window leaves the side bar at its width, so the sash is dragged too.
+        const narrowSize = await setWindowSize(NARROW_SIZE.width, NARROW_SIZE.height);
+        const narrowBar = await setSideBarWidth(NARROW_BAR_WIDTH);
+        narrowFit = await toggleFit();
+        console.log(
+          `  narrow window ${String(narrowSize.width)}x${String(narrowSize.height)}, side bar ${String(narrowBar)} px: header ${String(narrowFit?.width)} px wide`,
+        );
+        await web.inDoc((doc) =>
+          doc.querySelector('[data-visual-card]')?.scrollIntoView({ block: 'center' }),
+        );
+        await sleep(300);
+        await shot('15e-tool-failed-narrow');
+        await setTheme('Default High Contrast Light');
+        await shot('15e-tool-failed-narrow-hc-light');
+      } finally {
+        for (const [what, restore] of [
+          ['theme', () => setTheme('Default Dark Modern')],
+          ['side bar', () => setSideBarWidth(barBefore)],
+          ['window', () => setWindowSize(WINDOW_SIZE.width, WINDOW_SIZE.height)],
+        ]) {
+          await restore().catch((error) => {
+            check(
+              false,
+              `the ${what} could not be restored after the narrow measure: ${String(error)}`,
+            );
+          });
+        }
+      }
+      check(
+        narrowFit !== undefined && narrowFit !== null && narrowFit.overflowPx <= 1,
+        `the failed header fits inside its toggle in a ${String(NARROW_SIZE.width)} px wide window (overflow ${String(narrowFit?.overflowPx)} px)`,
+      );
+      const wideFit = await toggleFit();
+      const barAfter = await sideBarPx();
+      check(
+        wideFit !== null &&
+          fitBefore !== null &&
+          wideFit.overflowPx <= 1 &&
+          Math.abs(wideFit.width - fitBefore.width) <= 1 &&
+          Math.abs(barAfter - barBefore) <= 1,
+        `back at ${String(WINDOW_SIZE.width)}x${String(WINDOW_SIZE.height)} the side bar and the header are as before (side bar ${String(barBefore)} -> ${String(barAfter)} px, header ${String(fitBefore?.width)} -> ${String(wideFit?.width)} px, overflow ${String(wideFit?.overflowPx)} px)`,
       );
       check(
         failedCard !== null && failedCard.expanded === 'false' && !failedCard.body,
