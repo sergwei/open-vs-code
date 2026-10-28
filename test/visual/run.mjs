@@ -985,15 +985,16 @@ function waitPresent(selector, present = true, ms = 3_000) {
 }
 
 /**
- * Types `text` in the quick input that is open (`dialog` is its input) once it has the focus and
- * waits until the input holds `text`, instead of the 400 and 600 ms sleeps the dialogs used.
+ * Types `text` in the quick input that is open (`dialog` is its input) once it has the focus, then
+ * waits up to 2 s for the input to hold `text` and goes on (the return only reports the focus),
+ * instead of the 400 and 600 ms sleeps the dialogs used.
  *
  * Returns whether the focus reached the quick input within 2 s, and types NOTHING when it did not:
  * a Ctrl+A and a text sent to whatever else holds the focus (an editor) write into the workspace.
- * `command()` turns the `false` into a throw. The dialogs of steps 0 and 13 ignore it: the first
- * then sees its own "done" wait expire and takes the fallback, the second Enters an empty input
- * and its "the picked file shows as a chip" check FAILs. HYPOTHESIS: neither path was run, the
- * focus has always arrived in the runs so far.
+ * Every caller turns the `false` into a throw before pressing Enter, since an Enter without the
+ * focus goes to whatever holds it (#94): `command()` fails the step, step 0 throws inside its `try`
+ * and takes its fallback (write the setting, warn), step 13 fails with the dialog named.
+ * UNVERIFIED: the `false` path has not run, the focus has always arrived in the runs so far.
  */
 async function typeInQuickInput(dialog, text) {
   const focused =
@@ -1845,7 +1846,9 @@ try {
     let viaDialog;
     try {
       await dialog.waitFor({ state: 'visible', timeout: 15_000 });
-      await typeInQuickInput(dialog, fixturePath);
+      if (!(await typeInQuickInput(dialog, fixturePath))) {
+        throw new Error('the Choose binary… dialog did not take the focus'); // to the fallback
+      }
       await shot('00b-choose-binary-dialog');
       await page.keyboard.press('Enter');
       viaDialog =
@@ -3525,7 +3528,9 @@ try {
     check(await clickButton('Attach file…'), 'Attach file… is pressed in the "+" menu');
     const dialog = page.locator('.quick-input-widget input').first();
     await dialog.waitFor({ state: 'visible', timeout: 15_000 });
-    await typeInQuickInput(dialog, target);
+    if (!(await typeInQuickInput(dialog, target))) {
+      throw new Error('the Attach file… dialog did not take the focus');
+    }
     await shot('13a-attach-dialog');
     await page.keyboard.press('Enter');
     const attached = await waitFor(async () => (await chips()).pending.length > 0, 15_000, 300);
@@ -5523,15 +5528,9 @@ try {
       'the pinned diff tab is in front and does not show value2 = 5 yet',
     );
     fs.writeFileSync(sampleFile, `${SAMPLE_HEADER}export const value2 = 5;\n`);
-    // The editor has the keyboard focus now: enter the chat first, or the typing lands in the file.
-    await waitFor(
-      async () => {
-        await clickIn('textarea');
-        return web.inDoc((doc) => doc.activeElement?.tagName === 'TEXTAREA' && doc.hasFocus());
-      },
-      3_000,
-      200,
-    );
+    // The editor has the keyboard focus now: `send` enters the chat first with a focus that stays
+    // (`focusPromptBox`), or the typing would land in the file (#94: a single focused read did not
+    // guard against the late focus move back to the editor).
     await send('EDIT_FILES: again');
     check(await waitIdle(30_000), 'the second edit turn finished');
     // Waits for BOTH sides: the left one updates first, and on 28/10/2026 (Windows 11, VS Code
