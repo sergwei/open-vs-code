@@ -6203,7 +6203,10 @@ try {
     // The `blur` of a hidden element does not always fire, so the reset of `chatFocused` in
     // `onVisibilityChange(false)` is the only thing that stops a stale `true` from turning the
     // next Focus Prompt into "go back to the editor". The press must therefore start inside the
-    // chat; the editor is clicked afterwards only so the key's `editorTextFocus` is true.
+    // chat. Focus Prompt then runs from the PALETTE: since issue #92 the key from editor text says
+    // "to the chat" in its argument and no longer reads the flag, so only the palette (the toggle)
+    // still fails when the reset is missing. The editor is clicked first so the focus is outside
+    // the chat, as for a user.
     await page.keyboard.press(`${modifier}+p`);
     const inChatAgain = await waitFor(async () => (await promptState()).focused, 8_000, 250);
     check(inChatAgain === true, `${modifier}+P brings the focus back into the chat`);
@@ -6211,7 +6214,7 @@ try {
     await waitFor(async () => (await sideBarPx()) === 0, 3_000, 100);
     await page.locator('.monaco-editor .view-lines').first().click();
     await waitFor(editorHasFocus, 2_000, 100);
-    await page.keyboard.press(`${modifier}+p`);
+    await command('OpenCode: Focus Prompt');
     await openChat();
     const reopened = await waitFor(async () => (await promptState()).active, 10_000, 300);
     if (reopened !== true) {
@@ -6239,7 +6242,7 @@ try {
     }
     check(
       reopened === true,
-      'after Ctrl+B hid the chat while it had the focus, Focus Prompt shows it and the prompt box is the active element of the new document (the context key was reset)',
+      'after Ctrl+B hid the chat while it had the focus, Focus Prompt from the palette shows it and the prompt box is the active element of the new document (the context key was reset)',
     );
     // `doc.hasFocus()` is false in this new document although the workbench holds focus on its iframe
     // (seen in this step), so the proof is the real keyboard: a typed letter must land in the box.
