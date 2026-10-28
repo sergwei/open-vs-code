@@ -26,6 +26,8 @@ let mounted: Mounted | undefined;
 afterEach(() => {
   mounted?.dispose();
   mounted = undefined;
+  // The focus tests of issue #92 stub `document.hasFocus`, which outlives the mounted component.
+  vi.restoreAllMocks();
 });
 
 /** Mounts a PromptInput whose draft lives in a signal, with spies for every callback. */
@@ -615,6 +617,81 @@ describe('Mention a file, an item of the "+" menu', () => {
     focusBox();
     expect(mounted?.container.querySelector('[role="menu"]')).toBeNull();
     expect(document.activeElement).toBe(textarea);
+  });
+
+  // Issue #92: in step 22 the focus the box was given fell to the body in the same millisecond
+  // (trace of a scratch loop, 28/10/2026). jsdom has no VS Code around it, so the loss is faked:
+  // `blur()` right after, or `focus` doing nothing the first times, with `hasFocus` stubbed.
+  const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+  const frames = async (count: number) => {
+    for (let i = 0; i < count; i++) await nextFrame();
+  };
+  it('puts the focus back on the box when it falls to the body right after', async () => {
+    const { focusBox, textarea } = setup();
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    focusBox();
+    textarea.blur();
+    expect(document.activeElement).toBe(document.body);
+    await frames(2);
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('retries a focus that did not land until it holds', async () => {
+    const { focusBox, textarea } = setup();
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const real = textarea.focus.bind(textarea);
+    let lostCalls = 2;
+    vi.spyOn(textarea, 'focus').mockImplementation(() => {
+      if (lostCalls > 0) lostCalls -= 1;
+      else real();
+    });
+    focusBox();
+    expect(document.activeElement).not.toBe(textarea);
+    await frames(4);
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('leaves the body active while the document has no focus (the user is in the editor)', async () => {
+    const { focusBox, textarea } = setup();
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    focusBox();
+    textarea.blur();
+    await frames(3);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  // Review of 28/10/2026: a click on an empty part of the chat also leaves the body active; the
+  // hold must not undo it (nor cut a text selection being dragged).
+  it('ends the hold when the user presses the pointer or a key in the document', async () => {
+    for (const press of [
+      () => document.body.dispatchEvent(new Event('pointerdown', { bubbles: true })),
+      () => document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true })),
+    ]) {
+      const { focusBox, textarea } = setup();
+      vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+      focusBox();
+      press();
+      textarea.blur();
+      await frames(3);
+      expect(document.activeElement).toBe(document.body);
+      mounted?.dispose();
+      mounted = undefined;
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('does not take the focus back once it moved to another element', async () => {
+    const { focusBox, textarea } = setup();
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    focusBox();
+    const other = document.createElement('button');
+    document.body.append(other);
+    other.focus();
+    await frames(2);
+    other.blur();
+    await frames(2);
+    expect(document.activeElement).not.toBe(textarea);
+    other.remove();
   });
 
   it('asks for an image through onAttachImage', () => {

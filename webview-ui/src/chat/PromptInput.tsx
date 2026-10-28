@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, on, Show, type JSX } from 'solid-js';
+import { createEffect, createSignal, For, on, onCleanup, Show, type JSX } from 'solid-js';
 import type { AttachmentRef } from '../../../src/shared/protocol';
 import { AttachmentOpenButton } from './AttachmentOpenButton';
 import { hasDropPayload, imagesOf, readDrop, type DropContent } from './dropData';
@@ -15,6 +15,14 @@ const MENTION_LIST_ID = 'mention-list';
 
 /** Built from its code point: a literal one in the source trips `no-irregular-whitespace`. */
 const NO_BREAK_SPACE = String.fromCharCode(0xa0);
+
+/**
+ * How long the prompt box keeps the focus it was given (issue #92, see `holdFocus` inside
+ * {@link PromptInput}). Our own figure: the lost focus seen in step 22 went within the same
+ * millisecond, so 1 s is a wide margin; an estimate, not measured, is that a user does not reach
+ * for the chat within that second, and a press of a key or of the pointer ends the hold anyway.
+ */
+const FOCUS_HOLD_MS = 1_000;
 
 /**
  * Builds a request id without `crypto.randomUUID` (the shared protocol has no `crypto`): a
@@ -40,7 +48,8 @@ export function nextRequestId(): string {
  * (`field-sizing: content`, capped by `max-height`), with no script and no inline style:
  * HYPOTHESIS that the Chromium of VS Code 1.105+ supports it (Chrome has it since 123); where
  * it does not, the box keeps its minimum height and still works. `onFocusReady` hands the parent
- * a function that focuses the textarea, used after sending, stopping or retrying.
+ * a function that focuses the textarea, used after sending, stopping or retrying, and by the New
+ * Session and Focus Prompt commands; it then keeps that focus for a moment (`holdFocus`, #92).
  * Without a connection (`waiting`, E2 P5=2) the textarea stays editable and its placeholder reads
  * "Waiting for opencode…"; VERIFIED by `PromptInput.test.tsx` ("shows the waiting placeholder
  * and stays editable without a connection").
@@ -167,7 +176,60 @@ export function PromptInput(props: {
   props.onFocusReady?.(() => {
     closePlusMenu?.();
     textarea?.focus();
+    holdFocus();
   });
+
+  /** The pending animation frame of {@link holdFocus}, if any. */
+  let focusHold: number | undefined;
+  /** Ends a running {@link holdFocus}; the user acted (a press of a key or of the pointer). */
+  const endFocusHold = (): void => {
+    if (focusHold !== undefined) cancelAnimationFrame(focusHold);
+    focusHold = undefined;
+  };
+  document.addEventListener('pointerdown', endFocusHold, true);
+  document.addEventListener('keydown', endFocusHold, true);
+  onCleanup(() => {
+    endFocusHold();
+    document.removeEventListener('pointerdown', endFocusHold, true);
+    document.removeEventListener('keydown', endFocusHold, true);
+  });
+  /**
+   * For `FOCUS_HOLD_MS` after the parent focused the box, puts the focus back on it in every
+   * animation frame in which the document has the focus but its active element fell to the body
+   * (or to nothing).
+   *
+   * Why (issue #92): in a scratch loop of test:visual step 22 (Windows 11, VS Code 1.143.1,
+   * 28/10/2026) Focus Prompt sometimes left the chat shown with `BODY` active. A trace kept in the
+   * document showed the focus DID land: `focusin` on the box, then in the same millisecond a
+   * `focusout` with no `relatedTarget` while `document.hasFocus()` stayed true, so something
+   * outside our code moved it off the box. What does it is UNVERIFIED (VS Code's own handling of
+   * the webview focus is the HYPOTHESIS; the first guess, a focus asked while VS Code still hides
+   * a new document, was refuted by that trace).
+   * It gives way to the user: a `pointerdown` or `keydown` anywhere in the document ends it (a
+   * click on an empty part of the chat also leaves the body active, and must not be undone), it
+   * stops for good once another element than the box or the body is active, and it does nothing
+   * while the document has no focus, so it cannot pull the focus out of the editor. Those three
+   * are covered by the jsdom tests of `PromptInput.test.tsx` (synthetic events and a stubbed
+   * `hasFocus`); in a real window only the absence of misses below was seen.
+   * VERIFIED by the same loop, with the two keys of #92 in place: on this code 160 rounds with no
+   * body-active miss (one other miss, the box active but `hasFocus()` false after Ctrl+Alt+P from
+   * the editor, which this hold does not touch). Without this hold, on the same keys, it missed 1
+   * of 40; on the old code, 1 of 40 with no pause between presses and 2 of 40 with 300 ms. Not
+   * observed: the real cause, macOS or Linux.
+   */
+  const holdFocus = (): void => {
+    endFocusHold();
+    const end = performance.now() + FOCUS_HOLD_MS;
+    const tick = () => {
+      focusHold = undefined;
+      const active = document.activeElement;
+      if (textarea === undefined || performance.now() > end) return;
+      if (active !== textarea && active !== null && active !== document.body) return;
+      if (active !== textarea && document.hasFocus()) textarea.focus();
+      focusHold = requestAnimationFrame(tick);
+    };
+    focusHold = requestAnimationFrame(tick);
+  };
 
   /** True while the `@` popup is open (a mention is under the caret). */
   const mentionOpen = () => token() !== undefined;
