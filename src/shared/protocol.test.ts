@@ -223,6 +223,7 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
     },
   },
   notice: { type: 'notice', level: 'warning', error },
+  'setup.binary': { type: 'setup.binary', outcome: 'chosen', path: '/opt/opencode' },
 };
 
 /** One valid sample per webview-to-host type; a missing key is a compile error. */

@@ -1,11 +1,11 @@
-// Test double of `ChatControllerDeps.setup` for the suites that never press a setup button (E2,
-// issue #85): every command does nothing. `chatController.test.ts` has its own recording version.
-
 import type { SetupCommands } from '../chatController';
 
-/** A {@link SetupCommands} whose every command is a no-op. */
+/** A {@link SetupCommands} whose every command is a no-op (a cancelled dialog, an unset path). */
 export const noSetup: SetupCommands = {
-  chooseBinary: () => Promise.resolve(),
+  pickBinary: () => Promise.resolve(undefined),
+  currentBinaryPath: () => '',
+  writeBinaryPath: () => Promise.resolve(),
+  redetectBinary: () => undefined,
   openBinarySettings: () => undefined,
   openServerSettings: () => undefined,
   setServerPassword: () => undefined,

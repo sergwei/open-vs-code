@@ -53,6 +53,55 @@ describe('SetupGuide', () => {
     ]);
   });
 
+  // Issue #86. Provenance: FABRICATED binaryCheck values rendered in jsdom.
+  it('says Checking… with a spinner and the chosen path, and Choose binary… ignores presses', () => {
+    mounted = mount(() => (
+      <SetupGuide
+        connection={missing}
+        catalog={undefined}
+        binaryCheck={{ kind: 'checking', path: '/opt/oc' }}
+      />
+    ));
+    const root = mounted.container;
+    expect(must(root, '[data-step="binary"] .step-title').textContent).toBe(
+      '1. Find the opencode binary — Checking…',
+    );
+    expect(root.querySelector('[data-step="binary"] .spinner')).not.toBeNull();
+    expect(
+      [...root.querySelectorAll('[data-step="binary"] .step-line')].map((l) => l.textContent),
+    ).toEqual(['Checking /opt/oc…']);
+    expect(must(root, '[role="status"]').textContent).toBe('Checking the opencode binary…');
+    const choose = [...root.querySelectorAll('button')].find(
+      (b) => b.textContent === 'Choose binary…',
+    );
+    expect(choose?.getAttribute('aria-disabled')).toBe('true');
+    expect(choose?.hasAttribute('disabled')).toBe(false);
+    choose?.click();
+    expect(mounted.sent).toEqual([]);
+  });
+
+  it('calls onChoose before sending binary.choose, and keeps the focus on the pressed button', () => {
+    const order: string[] = [];
+    mounted = mount(() => (
+      <SetupGuide
+        connection={missing}
+        catalog={undefined}
+        onChoose={() => {
+          order.push('onChoose');
+        }}
+      />
+    ));
+    const choose = [...mounted.container.querySelectorAll('button')].find(
+      (b) => b.textContent === 'Choose binary…',
+    );
+    document.body.append(mounted.container);
+    choose?.focus();
+    choose?.click();
+    order.push(`sent:${String(mounted.sent.length)}`);
+    expect(order).toEqual(['onChoose', 'sent:1']);
+    expect(document.activeElement).toBe(choose);
+  });
+
   it('does not announce a failure while it is only starting', () => {
     mounted = mount(() => <SetupGuide connection={{ state: 'starting' }} catalog={undefined} />);
     expect(must(mounted.container, '[role="status"]').textContent).toBe('');

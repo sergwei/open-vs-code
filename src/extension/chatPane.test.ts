@@ -91,6 +91,7 @@ describe('routeOf', () => {
       },
       { type: 'attachments.picked', requestId: 'r', files: [] },
       { type: 'ui.command', command: 'prompt.focus' },
+      { type: 'setup.binary', outcome: 'cancelled' },
     ] satisfies HostToWebview[]) {
       expect(routeOf(message)).toBe('origin');
     }

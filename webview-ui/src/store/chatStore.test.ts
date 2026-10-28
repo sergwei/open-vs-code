@@ -758,6 +758,65 @@ describe('connection', () => {
   });
 });
 
+// Issue #86 ("Checking…" after Choose binary…). Provenance: FABRICATED host messages in the order
+// the controller posts them (`setup.binary` before the `connection.state` of the new detection).
+describe('binaryCheck (issue #86)', () => {
+  const unavailable = {
+    state: 'unavailable',
+    reason: 'binary-missing',
+    error: { code: 'binary-missing', message: 'nope' },
+  } as const;
+
+  it('goes choosing -> checking with the path -> idle on the next verdict', () => {
+    withStore((store) => {
+      expect(store.state.binaryCheck).toEqual({ kind: 'idle' });
+      store.beginBinaryChoice();
+      expect(store.state.binaryCheck).toEqual({ kind: 'choosing' });
+      store.apply({ type: 'setup.binary', outcome: 'chosen', path: '/x/opencode' });
+      expect(store.state.binaryCheck).toEqual({ kind: 'checking', path: '/x/opencode' });
+      store.apply({ type: 'connection.state', connection: { state: 'starting' } });
+      expect(store.state.binaryCheck).toEqual({ kind: 'idle' });
+    });
+  });
+
+  it('gives the button back when the dialog is cancelled or the write fails', () => {
+    withStore((store) => {
+      for (const outcome of ['cancelled', 'failed'] as const) {
+        store.beginBinaryChoice();
+        store.apply({ type: 'setup.binary', outcome });
+        expect(store.state.binaryCheck, outcome).toEqual({ kind: 'idle' });
+      }
+    });
+  });
+
+  it('ends on a connection.state IDENTICAL to the previous one (reconcile notifies nobody)', () => {
+    withStore((store) => {
+      store.apply({ type: 'connection.state', connection: unavailable });
+      store.apply({ type: 'setup.binary', outcome: 'chosen', path: '/x' });
+      store.apply({ type: 'connection.state', connection: unavailable });
+      expect(store.state.binaryCheck).toEqual({ kind: 'idle' });
+    });
+  });
+
+  it('ends idle when chosen and the verdict arrive in the same batch', () => {
+    withStore((store) => {
+      batch(() => {
+        store.apply({ type: 'setup.binary', outcome: 'chosen', path: '/x' });
+        store.apply({ type: 'connection.state', connection: unavailable });
+      });
+      expect(store.state.binaryCheck).toEqual({ kind: 'idle' });
+    });
+  });
+
+  it('keeps choosing while the dialog is open when a connection.state arrives', () => {
+    withStore((store) => {
+      store.beginBinaryChoice();
+      store.apply({ type: 'connection.state', connection: unavailable });
+      expect(store.state.binaryCheck).toEqual({ kind: 'choosing' });
+    });
+  });
+});
+
 // Phase 2 (issues #13/#16): attachments chosen with Attach, dismissible notices and the
 // `requestId` that lets the UI give an unsent prompt back. Data fabricated like the rest.
 describe('attachments and notices (phase 2)', () => {

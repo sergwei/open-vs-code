@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { notifyUnlessChatShows, type ChatSurfaceGate } from './chatSurfaceGate';
+import { CHAT_SHOW_GRACE_MS, notifyUnlessChatShows, type ChatSurfaceGate } from './chatSurfaceGate';
 import type { DetectionResult } from './opencodeBinary';
 import { fetchServerInfo, safeLog, startServer, stopServer } from './opencodeServer';
 import {
@@ -110,10 +110,19 @@ async function runFailureAction(
  * folder listener are plain disposables in `context.subscriptions` (they hold no process).
  * External server (issue #11): the target the manager follows (own process or the server in
  * `openVsCode.serverUrl`) is read with `readServerTarget` and refreshed whenever the setting or
- * the stored password changes, so no reload is needed. E2 (issue #85, P3=2): the optional `gate`
- * silences the failure notification while the chat is visible and ready (its card or guide shows
- * the failure with the same buttons); without a gate, or with the chat hidden, it appears as
- * before. UNVERIFIED in a real window (the decision itself is unit-tested). `registerServerLifecycle` stays
+ * the stored password changes, so no reload is needed. E2 (issue #85, P3=2; issue #87, P-A=1): the
+ * optional `gate` silences the failure notification while the chat is visible and ready (its card
+ * or guide shows the failure with the same buttons). If the chat is not ready when the failure
+ * happens, the notification waits up to 3 s for it (`notifyUnlessChatShows`), is dropped if
+ * `manager.state` is no longer that same transition (identity of the state object), and is shown
+ * once otherwise; without a gate it appears at once. HYPOTHESIS (checked by reading
+ * `ServerManager.setState`, which assigns `next` as is, so identity is a sound "still current"
+ * test; no test runs it against the real manager).
+ * VERIFIED on Windows 11, VS Code 1.144.0 (28/10/2026), full `npm run test:visual` (exit 0): "ok
+ * no native OpenCode warning appears after step 2 (Start the server) fails (center read: true;
+ * [])" and the log line "server
+ * failure: native notification withheld: the chat shows the problem". The "chat not ready" wait
+ * of this notification is only unit-tested. `registerServerLifecycle` stays
  * SYNCHRONOUS even though `secrets.get` is not: everything is registered at once and the target
  * is resolved right after, in the background. The alternative (making the function async, so the
  * target is known before the first detection) would have forced `activate`, and every caller,
@@ -182,16 +191,23 @@ export function registerServerLifecycle(
     previous = next;
     if (failure !== undefined) {
       const reason = next.kind === 'unavailable' ? next.reason : 'start-failed';
-      // E2 (issue #85, P3=2): while the chat is showing, its card or guide carries the same
-      // buttons, so the native notification would only duplicate them.
-      notifyUnlessChatShows(
-        () => gate?.isShowing() ?? false,
-        () => {
+      // E2 (issue #85, P3=2; issue #87): while the chat is showing, its card or guide carries the
+      // same buttons, so the native notification would only duplicate them. If the chat is not
+      // ready yet it waits for it; the failure is dropped if the manager has moved on meanwhile.
+      void notifyUnlessChatShows({
+        gate,
+        showsProblem: () => gate?.isShowing() ?? false,
+        stillCurrent: () => manager.state === next,
+        graceMs: CHAT_SHOW_GRACE_MS,
+        log: (message) => {
+          log.info(`server failure: ${message}`);
+        },
+        notify: () => {
           void vscode.window
             .showErrorMessage(failure, ...failureActions(reason))
             .then((choice) => runFailureAction(choice, manager, channel));
         },
-      );
+      });
     }
   });
 
