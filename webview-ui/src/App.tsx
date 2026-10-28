@@ -727,7 +727,14 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       <div class="app" data-connection={state.connection.state}>
         <Show
           when={!guideVisible()}
-          fallback={<SetupGuide connection={state.connection} catalog={state.catalog} />}
+          fallback={
+            <SetupGuide
+              connection={state.connection}
+              catalog={state.catalog}
+              binaryCheck={state.binaryCheck}
+              onChoose={props.store.beginBinaryChoice}
+            />
+          }
         >
           <Header
             store={props.store}

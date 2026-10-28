@@ -159,6 +159,40 @@ describe('guideSteps', () => {
   });
 });
 
+// Issue #86. Provenance: FABRICATED states; the real flow is `test:visual` step 0.
+describe('guideSteps with binaryCheck (issue #86)', () => {
+  const missing = failure('binary-missing', 'not found');
+
+  it('turns step 1 into one Checking line, keeps step 2 waiting and Install guide active', () => {
+    const steps = guideSteps(missing, undefined, { kind: 'checking', path: '/opt/oc' });
+    expect(steps.map((s) => [s.id, s.status])).toEqual([
+      ['binary', 'checking'],
+      ['server', 'waiting'],
+      ['model', 'waiting'],
+    ]);
+    expect(steps[0]?.lines).toEqual(['Checking /opt/oc…']);
+    expect(steps[0]?.actions.map((a) => [a.label, a.disabled === true])).toEqual([
+      ['Choose binary…', true],
+      ['Install guide', false],
+    ]);
+  });
+
+  it('keeps the failure but makes Choose binary… busy while the dialog is open', () => {
+    const steps = guideSteps(missing, undefined, { kind: 'choosing' });
+    expect(steps[0]?.status).toBe('failed');
+    expect(steps[0]?.actions[0]?.disabled).toBe(true);
+    expect(guideSteps(missing, undefined)[0]?.actions[0]?.disabled).toBeUndefined();
+  });
+
+  it('does not hide a success or touch an external-server guide', () => {
+    const checking = { kind: 'checking', path: '/opt/oc' } as const;
+    expect(guideSteps({ state: 'starting' }, undefined, checking)[0]?.status).toBe('done');
+    expect(guideSteps(failure('unreachable', 'no route'), undefined, checking)[0]?.id).toBe(
+      'connect',
+    );
+  });
+});
+
 describe('describeProblem', () => {
   it.each([
     ['exited', 'opencode stopped', ['Restart', 'Show logs']],

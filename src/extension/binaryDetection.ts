@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { CHAT_SHOW_GRACE_MS, notifyUnlessChatShows, type ChatSurfaceGate } from './chatSurfaceGate';
 import {
   CONFIG_SECTION,
   OPENCODE_PATH_KEY,
@@ -26,11 +27,26 @@ const SHOW_LOGS = 'Show Logs';
  * `viewsWelcome` does not apply; HYPOTHESIS: per the VS Code contribution-points docs,
  * not run, F5 will show it). Fire-and-forget so `activate` never waits on a child
  * process. A run counter drops stale results when the setting changes mid-detection.
- * E2 (issue #85, P3=2): `shouldSilence`, read right before the warning, skips it when the caller
- * says the chat already shows the failure (extension.ts: chat visible and ready AND the manager
- * `unavailable`; a bad setting while a working server runs still notifies, because nothing in the
- * chat would say it). Evaluated after `onResult`; if the manager has not moved to `unavailable` by
- * then the warning is shown (a duplicate at worst). UNVERIFIED in a real window.
+ * E2 (issue #85, P3=2; issue #87, P-A=1): `surface` (extension.ts: the chat gate plus "chat
+ * visible and ready AND the manager `unavailable`"; a bad setting while a working server runs
+ * still notifies, because nothing in the chat would say it) decides whether the warning is shown.
+ * The detection usually ends BEFORE the chat's `ready`, so the warning waits up to
+ * `CHAT_SHOW_GRACE_MS` (3 s) for it via `notifyUnlessChatShows`, then shows nothing if the chat
+ * shows the problem or a newer detection replaced this one (`current === run`), and warns once
+ * otherwise. With the view closed the warning therefore arrives 3 s late (accepted by Sergio).
+ * The warning is no longer awaited by `detect` (the wait happens inside the helper). Each
+ * decision is logged as `binary detection: native notification …`.
+ * VERIFIED on Windows 11, VS Code 1.144.0 (28/10/2026) by a full `npm run test:visual` (exit 0):
+ * "ok no native OpenCode warning appears while the setup guide is shown (center read: true; [])"
+ * and the log line "binary detection: native notification withheld: the chat showed the problem
+ * 255 ms later" (the gap from "binary detection: setting …: invalid" to "webview ready" is about
+ * 202 ms in the same log). The mutation ran with `--steps 0` on the phase 1 tree, before the check required a
+ * readable center, and was not re-run: with `CHAT_SHOW_GRACE_MS` set to 0 the same check printed
+ * "FAIL no native OpenCode warning appears while the setup guide is shown". The "view closed" branch is UNVERIFIED in a real window.
+ * Issue #86: returns `{ redetect }`, the same run as a setting change (stale-result counter
+ * included), which the setup guide uses when the user picks the path the setting already holds
+ * (no change event fires, so nothing else would answer its "Checking…"). UNVERIFIED in a real
+ * window: the equal-path pick is covered by a unit double only.
  * The result is not cached; it is handed to the optional `onResult` callback (issue #8 uses it
  * to start the server), called after stale results are dropped and before the notification, so
  * the server start never waits for the user to dismiss it. A throwing callback is logged.
@@ -64,8 +80,8 @@ export function registerBinaryDetection(
   context: vscode.ExtensionContext,
   channel: vscode.LogOutputChannel,
   onResult?: (result: DetectionResult) => void,
-  shouldSilence?: () => boolean,
-): void {
+  surface?: { gate: ChatSurfaceGate; showsProblem: () => boolean },
+): { redetect: () => void } {
   let run = 0;
   // Seam of issue #41: `undefined`, hence plain `nodeDeps()`, unless the host is a test host or
   // the visual run's explicit opt-in (never in production). See `testLaunchFrom`.
@@ -120,16 +136,37 @@ export function registerBinaryDetection(
     }
     if (description.notify === 'none') return;
 
-    // E2 (issue #85, P3=2): the guide or card of the chat already shows this; see `shouldSilence`.
-    if (shouldSilence?.() === true) return;
-
+    // E2 (issue #85, P3=2; issue #87): the guide or card of the chat already shows this, so the
+    // warning waits for the chat's `ready` and is withheld if the chat shows the problem by then.
     const buttons = description.notify === 'actions' ? [OPEN_SETTINGS, SHOW_LOGS] : [];
-    const choice = await vscode.window.showWarningMessage(description.message, ...buttons);
-    if (choice === OPEN_SETTINGS) {
-      await vscode.commands.executeCommand('workbench.action.openSettings', OPENCODE_PATH_SETTING);
-    } else if (choice === SHOW_LOGS) {
-      channel.show();
-    }
+    await notifyUnlessChatShows({
+      gate: surface?.gate,
+      showsProblem: () => surface?.showsProblem() ?? false,
+      stillCurrent: () => current === run,
+      graceMs: CHAT_SHOW_GRACE_MS,
+      log: (message) => {
+        channel.info(`binary detection: ${message}`);
+      },
+      notify: () => {
+        void vscode.window
+          .showWarningMessage(description.message, ...buttons)
+          .then(async (choice) => {
+            if (choice === OPEN_SETTINGS) {
+              await vscode.commands.executeCommand(
+                'workbench.action.openSettings',
+                OPENCODE_PATH_SETTING,
+              );
+            } else if (choice === SHOW_LOGS) {
+              channel.show();
+            }
+          })
+          .then(undefined, (error: unknown) => {
+            channel.error(
+              `binary detection warning action failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+      },
+    });
   };
 
   const start = (): void => {
@@ -151,4 +188,5 @@ export function registerBinaryDetection(
     }),
   );
   start();
+  return { redetect: start };
 }

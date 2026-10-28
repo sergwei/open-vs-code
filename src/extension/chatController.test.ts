@@ -611,9 +611,26 @@ function setup(
   if (remembered !== undefined) stored.set(SERVER.folder, remembered);
   const attentionCalls: Array<readonly PendingSummary[]> = [];
   const serverCalls: string[] = [];
-  /** The `setup.action`s that reached `deps.setup`; `setupFailure` makes `chooseBinary` reject. */
+  /**
+   * The `setup.action`s that reached `deps.setup`. `binary` scripts the "Choose binary…" dialog:
+   * `picked` is what the dialog returns, `current` the setting's value, `pickError` makes the
+   * dialog reject, `writeError` makes the write reject, and `postedAtWrite` is how many messages the pane had received when the write
+   * started (issue #86: `setup.binary chosen` must already be among them).
+   */
   const setupCalls: string[] = [];
-  let setupFailure: Error | undefined;
+  const binary: {
+    picked: string | undefined;
+    current: string;
+    pickError: Error | undefined;
+    writeError: Error | undefined;
+    postedAtWrite: number | undefined;
+  } = {
+    picked: undefined,
+    current: '',
+    pickError: undefined,
+    writeError: undefined,
+    postedAtWrite: undefined,
+  };
   const focusCalls: boolean[] = [];
   /** How many times the controller asked to give the keyboard to the chat iframe again. */
   const viewFocuses = { count: 0 };
@@ -684,9 +701,22 @@ function setup(
       },
     },
     setup: {
-      chooseBinary: () => {
+      pickBinary: () => {
         setupCalls.push('binary.choose');
-        return setupFailure === undefined ? Promise.resolve() : Promise.reject(setupFailure);
+        return binary.pickError === undefined
+          ? Promise.resolve(binary.picked)
+          : Promise.reject(binary.pickError);
+      },
+      currentBinaryPath: () => binary.current,
+      writeBinaryPath: (path) => {
+        setupCalls.push(`binary.write:${path}`);
+        binary.postedAtWrite = posted.length;
+        return binary.writeError === undefined
+          ? Promise.resolve()
+          : Promise.reject(binary.writeError);
+      },
+      redetectBinary: () => {
+        setupCalls.push('binary.redetect');
       },
       openBinarySettings: () => {
         setupCalls.push('binary.settings');
@@ -737,10 +767,8 @@ function setup(
     attentionCalls,
     serverCalls,
     setupCalls,
-    /** Makes the next `binary.choose` reject with `error` (a failed settings write). */
-    failSetup: (error: Error) => {
-      setupFailure = error;
-    },
+    /** Scripts the "Choose binary…" dialog and the setting; see `binary` above. */
+    binary,
     focusCalls,
     viewFocuses,
     picked,
@@ -2516,15 +2544,77 @@ describe('server commands, reconnecting banner and per-folder memory (issue #10)
     ]);
   });
 
-  it('turns a failed binary.choose into a warning notice and does not throw', async () => {
-    const { controller, posted, failSetup, logs } = setup(fakeApi().api);
-    failSetup(new Error('could not write the setting'));
+  // Issue #86. Provenance: FABRICATED dialog and setting (a recording double); the real dialog
+  // and the real order of `setup.binary` against `connection.state` are driven by `test:visual`
+  // step 0 ("Checking…" with the chosen path, then back after a cancel).
+  it('answers a cancelled dialog with setup.binary cancelled and writes nothing', async () => {
+    const { controller, posted, setupCalls, logs } = setup(fakeApi().api);
     await controller.handle({ type: 'setup.action', action: 'binary.choose' });
+    expect(posted.filter((m) => m.type === 'setup.binary')).toEqual([
+      { type: 'setup.binary', outcome: 'cancelled' },
+    ]);
+    expect(setupCalls).toEqual(['binary.choose']);
+    expect(logs).toContain('info: binary choice: cancelled');
+  });
+
+  it('posts setup.binary chosen BEFORE it writes the setting, and never logs the path', async () => {
+    const { controller, posted, setupCalls, binary, logs } = setup(fakeApi().api);
+    binary.picked = '/opt/secret-user/opencode';
+    await controller.handle({ type: 'setup.action', action: 'binary.choose' });
+    expect(setupCalls).toEqual(['binary.choose', 'binary.write:/opt/secret-user/opencode']);
+    const chosenAt = posted.findIndex((m) => m.type === 'setup.binary');
+    expect(posted[chosenAt]).toEqual({
+      type: 'setup.binary',
+      outcome: 'chosen',
+      path: '/opt/secret-user/opencode',
+    });
+    expect(binary.postedAtWrite).toBeGreaterThan(chosenAt);
+    expect(logs.join('\n')).not.toContain('secret-user');
+  });
+
+  it('re-runs the detection instead of writing when the pick equals the setting', async () => {
+    const { controller, posted, setupCalls, binary } = setup(fakeApi().api);
+    binary.picked = '/opt/opencode';
+    binary.current = '/opt/opencode';
+    await controller.handle({ type: 'setup.action', action: 'binary.choose' });
+    expect(setupCalls).toEqual(['binary.choose', 'binary.redetect']);
+    expect(posted.filter((m) => m.type === 'setup.binary')).toEqual([
+      { type: 'setup.binary', outcome: 'chosen', path: '/opt/opencode' },
+    ]);
+  });
+
+  it('turns a failed write into setup.binary failed plus a warning notice, without throwing', async () => {
+    const { controller, posted, binary, logs } = setup(fakeApi().api);
+    binary.picked = '/opt/opencode';
+    binary.writeError = new Error('could not write the setting');
+    await controller.handle({ type: 'setup.action', action: 'binary.choose' });
+    expect(posted.filter((m) => m.type === 'setup.binary')).toEqual([
+      { type: 'setup.binary', outcome: 'chosen', path: '/opt/opencode' },
+      { type: 'setup.binary', outcome: 'failed' },
+    ]);
     expect(posted.at(-1)).toMatchObject({
       type: 'notice',
       level: 'warning',
       error: { message: 'could not write the setting' },
     });
+    expect(logs.some((line) => line.startsWith('warn: setup.action failed'))).toBe(true);
+  });
+
+  // Issue #86 (review C1/S1). Protects the `choosing` state of the guide: if a rejected dialog
+  // were not answered, the button would stay disabled for good. Provenance: FABRICATED rejection.
+  it('turns a rejected dialog into setup.binary failed plus a warning notice, writing nothing', async () => {
+    const { controller, posted, setupCalls, binary, logs } = setup(fakeApi().api);
+    binary.pickError = new Error('the dialog broke');
+    await controller.handle({ type: 'setup.action', action: 'binary.choose' });
+    expect(posted.filter((m) => m.type === 'setup.binary')).toEqual([
+      { type: 'setup.binary', outcome: 'failed' },
+    ]);
+    expect(posted.at(-1)).toMatchObject({
+      type: 'notice',
+      level: 'warning',
+      error: { message: 'the dialog broke' },
+    });
+    expect(setupCalls).toEqual(['binary.choose']);
     expect(logs.some((line) => line.startsWith('warn: setup.action failed'))).toBe(true);
   });
 

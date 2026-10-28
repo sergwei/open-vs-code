@@ -210,6 +210,15 @@ function parseReply(
  * `hasFocus()` false while a typed letter still reached the box, and the run without the second
  * focus was not repeated to prove it is needed.
  *
+ * Issue #87: the optional `gate` is attached to the view (`canDeliver`) and told on every webview
+ * `ready` (`gate.changed()`), so a failure notification waiting for the chat can be withheld.
+ * VERIFIED on Windows 11, VS Code 1.144.0 (28/10/2026), full `npm run test:visual` (exit 0): "ok
+ * no native OpenCode warning appears while the setup guide is shown (center read: true; [])".
+ *
+ * Issue #86: the optional `redetect` (a lazy closure from `extension.ts`, because the detection is
+ * registered after the chat) reaches `createSetupActions`, for "Choose binary…" on the path the
+ * setting already holds. Without it that pick re-runs nothing.
+ *
  * E2 (issue #85) injects `deps.setup` (`createSetupActions`, `setupActions.ts`): the buttons of the
  * setup guide and the error card run through it. VERIFIED for "Choose binary…" on Windows 11 (27/10/2026,
  * visual check "Choose binary… through the real file dialog wrote the setting and step 1 is done");
@@ -225,6 +234,7 @@ export function registerChat(
   channel: vscode.LogOutputChannel,
   manager: ServerManager,
   gate?: ChatSurfaceGate,
+  redetect?: () => void,
 ): vscode.Disposable {
   const log = safeLog(channel);
   // Whether the chat webview holds the keyboard focus; the source of truth for the toggle.
@@ -281,7 +291,7 @@ export function registerChat(
         channel.show();
       },
     },
-    setup: createSetupActions(),
+    setup: createSetupActions(redetect),
     ui: {
       setChatFocused,
       focusView: () => {
@@ -299,6 +309,9 @@ export function registerChat(
   });
   const view = registerChatView(context.extensionUri, channel, {
     onReady: () => {
+      // Issue #87: the provider marked the view `ready` before calling this, so `canDeliver` is
+      // true now; wakes any native notification that is waiting to learn the chat is showing.
+      gate?.changed();
       void controller.onPaneReady(pane.id).catch((error: unknown) => {
         log.error(`answering webview ready failed: ${String(error)}`);
       });

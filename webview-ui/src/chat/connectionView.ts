@@ -3,6 +3,7 @@
 // the texts and the rules are unit-tested. The texts are product copy: step 1 keeps one line per
 // attempt (Sergio's decision of 27/10/2026, Engram #1315), not the literal P12 sentences of #1300.
 import type { Catalog } from '../../../src/shared/model';
+import type { BinaryChoice } from '../store/chatStore';
 import type {
   BinaryCheck,
   BinaryDiagnosis,
@@ -13,14 +14,22 @@ import type {
 
 type Unavailable = Extract<ConnectionState, { state: 'unavailable' }>;
 
-/** A button of the guide or the card: its label and the exact message it sends to the host. */
+/**
+ * A button of the guide or the card: its label and the exact message it sends to the host.
+ * `disabled` (issue #86) means "busy, ignore the press": the guide renders it `aria-disabled`,
+ * never `disabled`, so the keyboard focus it holds is not thrown to the body.
+ */
 export interface ViewAction {
   label: string;
   message: WebviewToHost;
+  disabled?: boolean;
 }
 
-/** `waiting` has not started, `running` is in progress, `done` passed and `failed` is the one to fix. */
-export type StepStatus = 'waiting' | 'running' | 'done' | 'failed';
+/**
+ * `waiting` has not started, `running` is in progress, `done` passed, `failed` is the one to fix
+ * and `checking` (issue #86) is the binary step while the detection judges the path just chosen.
+ */
+export type StepStatus = 'waiting' | 'running' | 'done' | 'failed' | 'checking';
 
 /** One numbered step of the setup guide. `lines` are plain text (never markup). */
 export interface GuideStep {
@@ -126,8 +135,21 @@ function binaryLines(binary: BinaryDiagnosis | undefined, fallback: string): str
  * is done when the catalog lists a model.
  * An `unsupported-version` WITH `binary` is step 1 (the detection found v1); WITHOUT it, it came
  * from `/api/info` after the server started, so it is step 2.
+ * Issue #86 (`binaryCheck`): only while step 1 is the failed one, `choosing` keeps the step as
+ * `failed` but turns "Choose binary…" busy (`disabled`), and `checking` turns step 1 into
+ * `checking` with the single line "Checking <path>…" instead of the previous failure, "Choose
+ * binary…" busy and "Install guide" still active. Step 2 stays `waiting`. Anywhere else (the
+ * detection already passed, an external server) it is ignored, so a verdict is never hidden.
+ * VERIFIED on Windows 11, VS Code 1.144.0 (28/10/2026), full `npm run test:visual`: "ok   Checking…
+ * at 300 (bar 300 px), hc-light: the title says Checking… ("1. Find the opencode binary —
+ * Checking…")" and the same lines in light, dark and hc-dark. The unit tests of
+ * `connectionView.test.ts` use fabricated states only.
  */
-export function guideSteps(connection: ConnectionState, catalog: Catalog | undefined): GuideStep[] {
+export function guideSteps(
+  connection: ConnectionState,
+  catalog: Catalog | undefined,
+  binaryCheck: BinaryChoice = { kind: 'idle' },
+): GuideStep[] {
   const modelStep: GuideStep = {
     id: 'model',
     title: 'Pick a model',
@@ -162,13 +184,21 @@ export function guideSteps(connection: ConnectionState, catalog: Catalog | undef
       (failure.reason === 'unsupported-version' && failure.binary !== undefined));
   const serverFailed = failure !== undefined && !binaryFailed;
 
+  const busy = binaryFailed && binaryCheck.kind !== 'idle';
   const binary: GuideStep = {
     id: 'binary',
     title: 'Find the opencode binary',
-    status: binaryFailed ? 'failed' : 'done',
-    lines: binaryFailed ? binaryLines(failure.binary, failure.error.message) : [],
+    status: binaryFailed ? (binaryCheck.kind === 'checking' ? 'checking' : 'failed') : 'done',
+    lines: binaryFailed
+      ? binaryCheck.kind === 'checking'
+        ? [`Checking ${binaryCheck.path}…`]
+        : binaryLines(failure.binary, failure.error.message)
+      : [],
     actions: binaryFailed
-      ? [setup('Choose binary…', 'binary.choose'), setup('Install guide', 'install.guide')]
+      ? [
+          { ...setup('Choose binary…', 'binary.choose'), ...(busy ? { disabled: true } : {}) },
+          setup('Install guide', 'install.guide'),
+        ]
       : [],
   };
   const server: GuideStep = {

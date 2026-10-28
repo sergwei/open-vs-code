@@ -202,9 +202,19 @@ export interface ChangedFilesState {
   error: ErrorInfo | undefined;
 }
 
+/**
+ * Where "Choose binary…" of the setup guide is (issue #86): `choosing` while the host's file dialog
+ * is open, `checking` from the host's `setup.binary chosen` until the next `connection.state`
+ * (the new detection's verdict), `idle` otherwise.
+ */
+export type BinaryChoice =
+  { kind: 'idle' } | { kind: 'choosing' } | { kind: 'checking'; path: string };
+
 /** Everything the UI reads. */
 export interface ChatState {
   connection: ConnectionState;
+  /** The "Choose binary…" flow of the setup guide. See {@link BinaryChoice}. */
+  binaryCheck: BinaryChoice;
   /** Models, providers and selectable agents of the server; `undefined` until the host sends it. */
   catalog: Catalog | undefined;
   /** The unsent model/agent choice. See {@link SelectionDraft}. */
@@ -267,6 +277,11 @@ export interface ChatStore {
   apply: (message: HostToWebview) => void;
   /** Marks `requestId` as in flight, until a `request.result` with that id arrives. */
   begin: (requestId: string) => void;
+  /**
+   * The user pressed "Choose binary…": the guide shows the button as busy (`choosing`) until the
+   * host answers with `setup.binary`. A dialog that is already being waited on is left alone.
+   */
+  beginBinaryChoice: () => void;
   /**
    * Starts a session-list query: remembers `search` and `requestId` as the newest (a page for any
    * other id is ignored) and shows "loading". Does NOT touch `pending`, so Send stays usable.
@@ -361,6 +376,7 @@ function emptyOpen(): OpenView {
 export function createChatStore(): ChatStore {
   const [state, setState] = createStore<ChatState>({
     connection: { state: 'starting' },
+    binaryCheck: { kind: 'idle' },
     catalog: undefined,
     selection: { sessionID: undefined, model: undefined, agent: undefined },
     sessions: {},
@@ -461,6 +477,14 @@ export function createChatStore(): ChatStore {
     setState('selection', { sessionID, model: undefined, agent: undefined });
   };
 
+  /**
+   * Replaces `binaryCheck` as a whole. `reconcile` is what makes it a REPLACEMENT: a plain
+   * `setState` merges objects and would keep the `path` of a previous `checking`.
+   */
+  const setBinaryCheck = (next: BinaryChoice): void => {
+    setState('binaryCheck', reconcile(next));
+  };
+
   const handlers: Handlers<HostToWebview> = {
     catalog: (m) => {
       setState('catalog', m.catalog);
@@ -469,12 +493,20 @@ export function createChatStore(): ChatStore {
     'connection.state': (m) => {
       batch(() => {
         setState('connection', reconcile(m.connection));
+        // Issue #86: any verdict ends "Checking…". Done here, not by an effect on `connection`,
+        // because `reconcile` notifies nobody when the new state equals the old one (a pick
+        // that fails the same way).
+        // A dialog still open (`choosing`) is not a verdict's business: only the host's
+        // `setup.binary` closes it.
+        if (state.binaryCheck.kind === 'checking') {
+          setBinaryCheck({ kind: 'idle' });
+        }
         // The requests of a server that is starting, gone or stopped died with it; their cards
         // would keep live buttons that only answer ServerUnavailable (W2 of the review). Not on
         // `reconnecting`: that is also the SSE loop retrying against a server that is still up,
         // and its next snapshot replaces the set anyway.
-        const state = m.connection.state;
-        if (state === 'starting' || state === 'unavailable' || state === 'stopped') {
+        const kind = m.connection.state;
+        if (kind === 'starting' || kind === 'unavailable' || kind === 'stopped') {
           setState('requests', { permissions: [], forms: [] });
           setState('replying', reconcile({}));
           setState('requestErrors', reconcile({}));
@@ -851,6 +883,12 @@ export function createChatStore(): ChatStore {
     notice: (m) => {
       addNotice(m.level, m.error);
     },
+
+    'setup.binary': (m) => {
+      setBinaryCheck(
+        m.outcome === 'chosen' ? { kind: 'checking', path: m.path } : { kind: 'idle' },
+      );
+    },
   };
 
   return {
@@ -860,6 +898,11 @@ export function createChatStore(): ChatStore {
     },
     begin: (requestId) => {
       setState('pending', (pending) => [...pending, requestId]);
+    },
+    beginBinaryChoice: () => {
+      if (state.binaryCheck.kind === 'idle') {
+        setBinaryCheck({ kind: 'choosing' });
+      }
     },
     beginQuery: (requestId, search) => {
       setState('browser', { search, requestId, loading: true });

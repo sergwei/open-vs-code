@@ -1,6 +1,7 @@
 import { For, Show } from 'solid-js';
 import type { Catalog } from '../../../src/shared/model';
 import type { ConnectionState } from '../../../src/shared/protocol';
+import type { BinaryChoice } from '../store/chatStore';
 import { guideSteps, type StepStatus } from './connectionView';
 import { useSend } from './hostContext';
 import { CheckIcon, CrossIcon, WaitingIcon } from './icons';
@@ -11,6 +12,7 @@ const STATUS_TEXT: Record<StepStatus, string> = {
   running: 'In progress',
   done: 'Done',
   failed: 'Failed',
+  checking: 'Checking…',
 };
 
 /**
@@ -32,14 +34,38 @@ const STATUS_TEXT: Record<StepStatus, string> = {
  * through the real file dialog wrote the setting and step 1 is done" (real mouse click, path typed
  * in the simple dialog). NOT observed: macOS and Linux, a screen reader, the dialog's filters on
  * a path without an extension.
+ *
+ * Issue #86: `binaryCheck` (the store's {@link BinaryChoice}) makes step 1 say "Checking…" with a
+ * spinner while the detection judges the path just chosen, and the hidden region then says
+ * "Checking the opencode binary…". A button whose action is `disabled` stays `aria-disabled`
+ * (never `disabled`, so the focus it holds is not thrown to the body) and ignores the press.
+ * Pressing "Choose binary…" first calls `onChoose` (the store moves to `choosing`), then sends the
+ * message. VERIFIED on Windows 11, VS Code 1.144.0 (28/10/2026), full `npm run test:visual`: "ok
+ * while the file dialog is open, Choose binary… is aria-disabled (not disabled) and step 1 still
+ * says Failed", "ok   cancelling the file dialog gives Choose binary… back and step 1 stays
+ * Failed" and, in the 4 themes at 300 px, "the hidden region announces the check and step 2 still
+ * waits" and "title contrast 14.55 >= 4.5" (hc-light). NOT observed: a screen reader, 900 px and
+ * 170 px widths in "Checking…", the contrast of the busy button (opacity 0.5).
  */
-export function SetupGuide(props: { connection: ConnectionState; catalog: Catalog | undefined }) {
+export function SetupGuide(props: {
+  connection: ConnectionState;
+  catalog: Catalog | undefined;
+  binaryCheck?: BinaryChoice;
+  onChoose?: () => void;
+}) {
   const send = useSend();
-  const steps = () => guideSteps(props.connection, props.catalog);
+  const steps = () =>
+    guideSteps(props.connection, props.catalog, props.binaryCheck ?? { kind: 'idle' });
+  const announcement = () =>
+    props.binaryCheck?.kind === 'checking'
+      ? 'Checking the opencode binary…'
+      : props.connection.state === 'unavailable'
+        ? 'opencode is not available'
+        : '';
   return (
     <section class="setup-guide" aria-labelledby="setup-guide-title">
       <div class="visually-hidden" role="status">
-        <Show when={props.connection.state === 'unavailable'}>opencode is not available</Show>
+        {announcement()}
       </div>
       <h2 id="setup-guide-title" class="setup-title">
         Set up opencode
@@ -59,7 +85,7 @@ export function SetupGuide(props: { connection: ConnectionState; catalog: Catalo
                 <Show when={step.status === 'waiting'}>
                   <WaitingIcon />
                 </Show>
-                <Show when={step.status === 'running'}>
+                <Show when={step.status === 'running' || step.status === 'checking'}>
                   <span class="spinner" aria-hidden="true" />
                 </Show>
               </span>
@@ -76,7 +102,15 @@ export function SetupGuide(props: { connection: ConnectionState; catalog: Catalo
                         <button
                           type="button"
                           class="secondary"
+                          aria-disabled={action.disabled === true ? 'true' : undefined}
                           onClick={() => {
+                            if (action.disabled === true) return;
+                            if (
+                              action.message.type === 'setup.action' &&
+                              action.message.action === 'binary.choose'
+                            ) {
+                              props.onChoose?.();
+                            }
                             send(action.message);
                           }}
                         >

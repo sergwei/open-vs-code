@@ -38,6 +38,11 @@ let logChannel: vscode.LogOutputChannel | undefined;
  * shows `open-vs-code 0.0.1 activated`, in light and dark themes.
  * macOS/Linux UNVERIFIED.
  *
+ * Issue #86: the chat is registered before the binary detection, so `registerChat` receives a lazy
+ * `redetect` closure that is filled with the `redetect` the detection returns (HYPOTHESIS that it
+ * is always set before a user can press "Choose binary…": it is assigned synchronously in this
+ * function).
+ *
  * `ExtensionContext.extension.packageJSON` is `any` in @types/vscode 1.105.0, so the `version`
  * read narrows it with an assertion to `{ version?: unknown }` to satisfy the typed lint rules;
  * a missing version would print "undefined".
@@ -64,13 +69,17 @@ export function activate(context: vscode.ExtensionContext): void {
   const gate = createChatSurfaceGate();
   const lifecycle = registerServerLifecycle(context, channel, gate);
   serverManager = lifecycle.manager;
-  context.subscriptions.push(registerChat(context, channel, lifecycle.manager, gate));
-  registerBinaryDetection(
-    context,
-    channel,
-    lifecycle.onDetection,
-    () => gate.isShowing() && lifecycle.manager.state.kind === 'unavailable',
+  // Issue #86: the chat is registered BEFORE the detection, so it reads `redetect` lazily.
+  let redetect: () => void = () => undefined;
+  context.subscriptions.push(
+    registerChat(context, channel, lifecycle.manager, gate, () => {
+      redetect();
+    }),
   );
+  redetect = registerBinaryDetection(context, channel, lifecycle.onDetection, {
+    gate,
+    showsProblem: () => gate.isShowing() && lifecycle.manager.state.kind === 'unavailable',
+  }).redetect;
 
   const { version } = context.extension.packageJSON as { version?: unknown };
   channel.info(`open-vs-code ${String(version)} activated`);

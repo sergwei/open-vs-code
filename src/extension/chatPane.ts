@@ -48,8 +48,8 @@ export type MessageRoute = 'session' | 'all' | 'origin';
  *
  * `session`: the content of one session (`message.*`, `part.*`, `session.diff`, `session.revert`),
  * only for the panes showing it. `origin`: an answer to something one pane asked (`request.result`,
- * `sessions.page`, `attachments.picked`, `files.found`, `ui.focus`, `ui.command`, `snapshot`), only
- * for that pane; broadcasting a `request.result` would close a request with the same id in another
+ * `sessions.page`, `attachments.picked`, `files.found`, `ui.focus`, `ui.command`, `snapshot`,
+ * `setup.binary` of issue #86: the answer of the file dialog one pane opened), only for that pane; broadcasting a `request.result` would close a request with the same id in another
  * pane (ids are a per-document counter). Everything else (`connection.state`, `catalog`,
  * `session.upserted|removed|status`, `permission.*`, `form.*`, `notice`) belongs to the location and
  * goes to all of them. A `notice` caused by one pane's request is posted to that pane directly and
@@ -71,6 +71,7 @@ export function routeOf(message: HostToWebview): MessageRoute {
     case 'ui.focus':
     case 'ui.command':
     case 'snapshot':
+    case 'setup.binary':
       return 'origin';
     case 'connection.state':
     case 'catalog':

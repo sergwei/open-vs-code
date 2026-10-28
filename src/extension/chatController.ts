@@ -197,13 +197,21 @@ export interface ServerCommands {
 
 /**
  * What the controller needs from the VS Code side to run the buttons of the setup guide and the
- * error card (E2, issue #85; implemented by `setupActions.ts`). `chooseBinary` rejects when the
- * setting cannot be written: the controller turns that into a `warning` notice. The others are
- * fire and forget, like {@link ServerCommands}.
+ * error card (E2, issue #85; implemented by `setupActions.ts`). "Choose binary…" is split in four
+ * so the order of its steps (issue #86) lives in the controller and is unit-tested:
+ * `writeBinaryPath` rejects when the setting cannot be written and the controller answers
+ * `setup.binary` `failed` plus a `warning` notice. The others are fire and forget, like
+ * {@link ServerCommands}.
  */
 export interface SetupCommands {
-  /** File dialog, then writes the choice to `openVsCode.opencodePath`; resolves on cancel too. */
-  chooseBinary(): Promise<void>;
+  /** File dialog; the chosen file system path, or `undefined` when the user cancelled. */
+  pickBinary(): Promise<string | undefined>;
+  /** The current (trimmed) value of `openVsCode.opencodePath`; `''` when unset. */
+  currentBinaryPath(): string;
+  /** Writes `path` to `openVsCode.opencodePath` (the change event re-runs the detection). */
+  writeBinaryPath(path: string): Promise<void>;
+  /** Re-runs the binary detection; for a pick equal to the current value, which fires no event. */
+  redetectBinary(): void;
   /** Opens Settings filtered to `openVsCode.opencodePath`. */
   openBinarySettings(): void;
   /** Opens Settings filtered to `openVsCode.serverUrl`. */
@@ -1982,19 +1990,32 @@ export class ChatController {
   /**
    * `setup.action` (E2, issue #85): runs the button of the setup guide or the error card through
    * `deps.setup`. The action is a closed union the guard already checked, so there is nothing to
-   * whitelist. Only `binary.choose` can fail (it writes a setting): its failure becomes a
+   * whitelist. Only `binary.choose` can fail (its file dialog can reject and it writes a setting): its failure becomes a
    * `warning` notice like any editor action; the other actions are fire and forget and their
    * outcome, if any, is the next `connection.state`. Logs `setup action: <action>`.
+   * Issue #86: `binary.choose` answers the asking pane (never a broadcast) with `setup.binary`:
+   * `cancelled` when the dialog closes without a file; otherwise `chosen` with the path, posted
+   * BEFORE the setting is written so it precedes the `connection.state` the detection produces
+   * (same channel, in order). A pick equal to the current setting fires no change event, so the
+   * controller calls `redetectBinary` instead of writing (P-C=1); a failed write answers `failed`
+   * and a `warning` notice. A rejected `pickBinary` (the dialog itself failing, not a cancel)
+   * answers `failed` plus the same `warning` notice (decision of Sergio, 28/10/2026), and writes
+   * nothing; the unit test "turns a rejected dialog into setup.binary failed ..." covers it. Logs `binary choice:
+   * <outcome>` without the path (the detection lines carry it).
    * VERIFIED on Windows 11, VS Code 1.143.1 (27/10/2026) for `binary.choose` and `server.restart`:
    * the visual checks "Choose binary… through the real file dialog wrote the setting and step 1
    * is done" and "Restart is pressed with the real mouse". The other actions were never clicked
-   * in a real window (UNVERIFIED, see `setupActions.ts`).
+   * in a real window (UNVERIFIED, see `setupActions.ts`). VERIFIED on Windows 11, VS Code 1.144.0
+   * (28/10/2026), full `npm run test:visual`: "ok   after choosing a path, step 1 says Checking…
+   * while the detection runs" and "ok   cancelling the file dialog gives Choose binary… back and
+   * step 1 stays Failed". The order `chosen` before the write is checked by `chatController.test.ts`
+   * with a recording double only.
    */
   private async setupAction(pane: ChatPane, action: SetupAction): Promise<void> {
     this.log.info(`setup action: ${action}`);
     switch (action) {
       case 'binary.choose':
-        await this.editorAction(pane, 'setup.action', () => this.deps.setup.chooseBinary());
+        await this.chooseBinary(pane);
         return;
       case 'binary.settings':
         this.deps.setup.openBinarySettings();
@@ -2011,6 +2032,49 @@ export class ChatController {
       case 'folder.open':
         this.deps.setup.openFolder();
         return;
+    }
+  }
+
+  /**
+   * The "Choose binary…" flow of {@link setupAction} (issue #86): pick, tell the pane, then write
+   * the setting or re-run the detection. Never throws: every failure (a rejected dialog or a
+   * rejected write) becomes `setup.binary` `failed`, a `warning` notice as any editor action, and
+   * a log line. Both failure branches are covered by unit tests with a FABRICATED rejecting double
+   * ("turns a failed write ..." and "turns a rejected dialog ..." in `chatController.test.ts`);
+   * UNVERIFIED in a real window. The happy path and the cancel are driven by `test:visual` step 0.
+   */
+  private async chooseBinary(pane: ChatPane): Promise<void> {
+    const { setup } = this.deps;
+    let picked: string | undefined;
+    try {
+      picked = await setup.pickBinary();
+    } catch (error) {
+      const info = toErrorInfo(error, this.secrets);
+      this.log.warn(`setup.action failed: ${info.code}: ${info.message}`);
+      this.log.info('binary choice: failed');
+      pane.post({ type: 'setup.binary', outcome: 'failed' });
+      pane.post({ type: 'notice', level: 'warning', error: info });
+      return;
+    }
+    if (picked === undefined) {
+      this.log.info('binary choice: cancelled');
+      pane.post({ type: 'setup.binary', outcome: 'cancelled' });
+      return;
+    }
+    this.log.info('binary choice: chosen');
+    pane.post({ type: 'setup.binary', outcome: 'chosen', path: picked });
+    if (picked === setup.currentBinaryPath()) {
+      setup.redetectBinary();
+      return;
+    }
+    try {
+      await setup.writeBinaryPath(picked);
+    } catch (error) {
+      const info = toErrorInfo(error, this.secrets);
+      this.log.warn(`setup.action failed: ${info.code}: ${info.message}`);
+      this.log.info('binary choice: failed');
+      pane.post({ type: 'setup.binary', outcome: 'failed' });
+      pane.post({ type: 'notice', level: 'warning', error: info });
     }
   }
 
