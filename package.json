@@ -153,7 +153,19 @@
         "command": "openVsCode.focusPrompt",
         "key": "ctrl+alt+p",
         "mac": "cmd+alt+p",
-        "when": "editorTextFocus || openVsCode.chatFocused"
+        "when": "editorTextFocus",
+        "args": {
+          "to": "chat"
+        }
+      },
+      {
+        "command": "openVsCode.focusPrompt",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p",
+        "when": "openVsCode.chatFocused && !editorTextFocus",
+        "args": {
+          "to": "editor"
+        }
       },
       {
         "command": "openVsCode.newSession",

@@ -147,7 +147,7 @@ describe('palette commands and keybindings', () => {
    * VERIFIED by the macos-latest CI job of PR #81 (25/10/2026): VS Code binds `alt+cmd+p` to these
    * three commands on macOS. The `when` values were READ in the bundle of VS Code 1.143.1 (Windows
    * build, its `mac` key 2606), not executed: `editorFocus`, `searchViewletFocus`, `inKeybindings`.
-   * `editorFocus` is NOT disjoint from our `when` (`editorTextFocus || openVsCode.chatFocused`):
+   * `editorFocus` is NOT disjoint from the `when` of our key to the chat (`editorTextFocus`, issue #92):
    * with the caret in editor text both rules apply, and VS Code runs only the winning one.
    * HYPOTHESIS that the extension rule wins there (contributed keybindings weigh more than
    * built-in ones), so Cmd+Alt+P is Focus Prompt in editor text and Preserve Case in the find
