@@ -40,8 +40,36 @@ describe('editor actions', () => {
     // A dirty buffer would make the close ask to save: revert first so the editors really close.
     await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-    for (const dir of tempDirs.splice(0)) await fs.rm(dir, { recursive: true, force: true });
+    for (const dir of tempDirs.splice(0)) await removeTempDir(dir);
   });
+
+  /**
+   * Removes a temp folder of a case, retrying while Windows still holds it, and never fails.
+   *
+   * Issue #102: once on the Windows CI runner (VS Code 1.144.0) this `afterEach` failed with
+   * "EBUSY: resource busy or locked, rmdir '…\ovsc-context-…'" after the editors were closed, and
+   * the re-run passed. HYPOTHESIS: VS Code still held a handle on the folder for a moment after
+   * `closeAllEditors`; not reproduced with VS Code. Node retries `EBUSY`/`EPERM`/`ENOTEMPTY` up to
+   * `maxRetries` times, waiting `retryDelay` longer on each try (the values of
+   * `fakeServer.test.ts`). VERIFIED on Windows 11 with Node 24.22.0 (28/10/2026), a scratch script
+   * that kept a child process with its cwd inside the folder (a stand-in for VS Code's handle):
+   * without the retries `fs.rm` threw "EBUSY: resource busy or locked, rmdir"; with them a 300 ms
+   * hold gave "removed after 324 ms", a 1200 ms hold "removed after 1533 ms", and an 8000 ms hold
+   * "EBUSY after 1539 ms", so the retries cover about 1.5 s. HYPOTHESIS: the Node inside VS Code's
+   * Electron, where this hook really runs, retries the same way; no integration run has gone
+   * through the retries yet. A folder still locked after the retries is only logged: a leftover
+   * in the OS temp folder proves nothing about the action the case checked, so it must not turn
+   * that case red.
+   */
+  async function removeTempDir(dir: string): Promise<void> {
+    try {
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (error) {
+      console.warn(
+        `could not remove ${dir}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 
   /**
    * "New file" opens an untitled document with the code and the language id the webview chose.
