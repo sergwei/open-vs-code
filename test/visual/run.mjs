@@ -86,6 +86,38 @@
 // a window that does not reach it is meant to exit with 2 (not executed). Step 15 also measures the failed card in a 1080x900
 // window with a 270 px side bar (`setSideBarWidth`), see `test/visual/README.md`.
 //
+// Filter and timings (issue #89, `steps.mjs`): `--steps 11,14,23` runs only those steps, in the
+// canonical order, plus the steps they need (`needs` in `STEPS`, closed automatically and announced
+// before the run). A filtered run prints `PARTIAL RUN (steps …): not evidence for a commit`, writes
+// its screenshots to `shots-partial/` and its README crops to `readme-partial/` (the full run's
+// `shots/` and `readme/` stay untouched), starts VS Code normally (the fixture as server, no `.down`
+// marker) unless step 0 is in, and judges the fake's state file only if a selected step sends a
+// prompt. An unknown id exits with 2 and lists the valid ones. Every step prints `  time N.N s` and
+// the summary has `== timings` (those lines never start with ok/FAIL/warn, so `compare-runs.mjs`
+// ignores them). A full run that did not execute exactly the ids of the catalogue fails (a silent
+// guard: it prints no `ok` line).
+// `npm run test:visual -- --steps 8` passes the arguments through npm to this script
+// (VERIFIED on Windows 11, 27/10/2026: `npm run test:visual -- --steps 1` printed "PARTIAL RUN
+// (steps 1): not evidence for a commit" and ran only that step; `node test/visual/run.mjs --steps
+// 8` printed "steps added because the requested ones need them: 1, 5, 6, 6b (requested: 8)" and
+// ended "all visual checks passed"). Every step after the 1 needs the 1, which opens the chat.
+// Only a FULL run is evidence.
+// `--bail` (for development, decision of Sergio, 28/10/2026): the first FAIL ends its step, the
+// later steps are skipped and the run exits 1 after its cleanup, so a broken state costs seconds
+// instead of every later wait running to its cap. It prints that the run is not evidence and
+// writes to `shots-partial/` and `readme-partial/`, like a filtered run. Combines with `--steps`.
+//
+// Themes (issue #89): every theme change goes through `setTheme`, which waits for the theme to be
+// applied (workbench class, webview kind, two frames) instead of sleeping. The six loops that only
+// take screenshots (11g, 12b, 12d, 12f, 14b, 14d) capture once, in dark, unless `--all-themes` is
+// given (decision of Sergio); they carry no check, so the `ok` lines are the same either way.
+//
+// Waits (issue #89 phase 3): a wait is a condition with a cap (`waitFor`, `waitPresent`,
+// `waitEmptyView`, `settleLayout`, `command`, the start of `waitIdle`), never a fixed sleep, except
+// where the comment next to the `sleep` says why it stays (negative checks, the pace of the
+// fixture, keys whose effect has no signal). A wait that expires does not throw: the check after
+// it still runs, so a failure is still a FAIL line.
+//
 // Output: screenshots in `.vscode-test/visual/shots/` (ignored by git), and a summary on stdout.
 // At the end (also after an exception, and on SIGINT/SIGTERM) VS Code is closed with its whole
 // process tree and the temporary workspace is deleted. A hang inside a CDP call is cut by a
@@ -187,10 +219,45 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createWorkspace, startVSCode, writeSettings } from './vscodeProcess.mjs';
 import { openWebview } from './webviewCdp.mjs';
+import {
+  STEP_IDS,
+  parseAllThemesArg,
+  parseBailArg,
+  parseStepsArg,
+  resolveSelection,
+  stepIdOf,
+} from './steps.mjs';
 
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const workDir = path.join(repoRoot, '.vscode-test', 'visual');
-const shotsDir = path.join(workDir, 'shots');
+
+// `--steps` filter (see the header). Read before anything is created, so a typo costs nothing.
+const parsedSteps = parseStepsArg(process.argv.slice(2));
+if (parsedSteps.error !== undefined) {
+  console.error(`test:visual: ${parsedSteps.error}`);
+  process.exit(2);
+}
+/** `undefined` for the full run, else the requested ids closed over their prerequisites. */
+const selection = parsedSteps.ids === undefined ? undefined : resolveSelection(parsedSteps.ids);
+const partial = selection !== undefined;
+/** `--all-themes`: the screenshot-only theme loops capture in four themes instead of dark only. */
+const allThemes = parseAllThemesArg(process.argv.slice(2));
+/** `--bail`: stop after the first step that fails (for development; see `parseBailArg`). */
+const bail = parseBailArg(process.argv.slice(2));
+const selectedIds = new Set(selection?.selected ?? STEP_IDS);
+if (partial) {
+  console.log(`PARTIAL RUN (steps ${selection.selected.join(', ')}): not evidence for a commit`);
+  if (selection.added.length > 0) {
+    console.log(
+      `steps added because the requested ones need them: ${selection.added.join(', ')} (requested: ${parsedSteps.ids.join(', ')})`,
+    );
+  }
+}
+if (bail)
+  console.log('--bail: the run stops after the first step that fails; not evidence for a commit');
+// A filtered or bailing run never touches the folders of the full run.
+const scratchOutput = partial || bail;
+const shotsDir = path.join(workDir, scratchOutput ? 'shots-partial' : 'shots');
 
 const failures = [];
 const warnings = [];
@@ -200,10 +267,24 @@ const webviewLogs = [];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Records an assertion; prints it; returns whether it held. */
+/** Thrown by `check` under `--bail` to end the step at its first FAIL; `step` stops the run. */
+class BailStop extends Error {}
+/** Whether a step body is running: only there may `check` throw `BailStop`. */
+let inStep = false;
+
+/**
+ * Records an assertion; prints it; returns whether it held.
+ *
+ * Under `--bail`, a failed check inside a step also throws `BailStop`, so the rest of the step is
+ * not run: on a broken state every later wait of the step would expire at its cap (step 16 took 81
+ * s that way on 28/10/2026, against about 17 s when it passes). Outside a step (the final checks
+ * after the steps) it never throws. A step body that wraps the check in its own `try/catch` may
+ * swallow the throw; that step then runs to its end, and the run still stops after it.
+ */
 function check(ok, message) {
   console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${message}`);
   if (!ok) failures.push(message);
+  if (!ok && bail && inStep) throw new BailStop(message);
   return ok;
 }
 
@@ -213,8 +294,17 @@ function warn(message) {
   warnings.push(message);
 }
 
-/** Polls `fn` until it returns a truthy value, or returns `undefined` after `ms`. */
-async function waitFor(fn, ms, intervalMs = 500) {
+/**
+ * Polls `fn` until it returns a truthy value, or returns `undefined` after `ms`; an exception of
+ * `fn` counts as "not yet". An expired wait is NOT an error: the caller's check then judges what
+ * is on screen, so a timeout still ends as a FAIL line, never as a swallowed problem (#89 phase 3).
+ *
+ * The default interval is 150 ms (it was 500): the sleep between polls is the mechanism itself
+ * (category H of the #89 plan), and 150 ms keeps the polling cost of `evaluate` calls small.
+ * HYPOTHESIS: that 150 ms is better than 500 ms was not measured apart; the full run of phase 3
+ * is what was timed.
+ */
+async function waitFor(fn, ms, intervalMs = 150) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
     let value;
@@ -254,6 +344,8 @@ let vscode;
 let browser;
 let page;
 let web;
+/** `performance.now()` when `startVSCode` returned: the origin of the total in `== timings`. */
+let vscodeStartedAt;
 
 /**
  * Closes everything the run opened: the CDP connections, VS Code with its whole process tree and
@@ -286,6 +378,41 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
+/** Longest one `keyboard.press` may take before the run treats it as hung, in ms (see below). */
+const PRESS_TIMEOUT_MS = 10_000;
+
+/**
+ * Makes every `keyboard.press` of `target` reject after `PRESS_TIMEOUT_MS` instead of waiting
+ * forever, so a key that is never acknowledged becomes a FAIL of its step and the run goes on.
+ *
+ * Why: Playwright's keyboard and mouse calls take no timeout. A press that went to a webview
+ * frame hidden under it never returned: step 5 waited 647 s on 27/10/2026, until VS Code was
+ * closed, and the run had no line saying where it was stuck (#89, Engram #1333). Wrapping the
+ * method once here covers the 79 call sites and the reconnection after Reload Window, which also
+ * goes through `connectWorkbench`. The hung press is not cancelled (Playwright cannot), it is only
+ * no longer awaited; the steps after it may then fail for the same broken frame, as they did then.
+ * 10 s is our own figure, far above what was seen: the presses traced in step 5 on 28/10/2026
+ * answered in 0.00-0.02 s; the other call sites were not timed.
+ * HYPOTHESIS: the reject path has not been run; to check it, press a key while a modal native
+ * dialog blocks the renderer and expect "keyboard.press(...) did not return" as a FAIL line.
+ */
+function boundKeyPresses(target) {
+  const press = target.keyboard.press.bind(target.keyboard);
+  target.keyboard.press = (key, options) => {
+    let timer;
+    const cap = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new Error(
+            `keyboard.press('${key}') did not return within ${String(PRESS_TIMEOUT_MS)} ms (the key was never acknowledged)`,
+          ),
+        );
+      }, PRESS_TIMEOUT_MS);
+    });
+    return Promise.race([press(key, options), cap]).finally(() => clearTimeout(timer));
+  };
+}
+
 /** Connects Playwright to the workbench, waiting for the debugging endpoint to come up. */
 async function connectWorkbench(timeoutMs = 90_000) {
   const end = Date.now() + timeoutMs;
@@ -298,13 +425,14 @@ async function connectWorkbench(timeoutMs = 90_000) {
       if (workbench) {
         browser = connected;
         page = workbench;
+        boundKeyPresses(page);
         return;
       }
       await connected.close().catch(() => undefined);
     } catch (error) {
       lastError = error;
     }
-    await sleep(500);
+    await sleep(500); // retry interval of the connection attempts, not a wait for a condition
   }
   throw new Error(`could not connect to VS Code over CDP: ${String(lastError)}`);
 }
@@ -371,8 +499,35 @@ async function setWindowSize(width, height) {
       `the window is ${String(size.width)}x${String(size.height)} CSS px (screen work area ${size.screen}), not the ${String(width)}x${String(height)} that was requested`,
     );
   }
-  await sleep(1_000); // the layout of the side bar and the webview follows the window
+  await settleLayout(); // the layout of the side bar and the webview follows the window
   return windowSize();
+}
+
+/**
+ * Waits until the boxes of the side bar and of the chat iframe are the same in two reads 100 ms
+ * apart (cap 3 s, then goes on: the caller measures and judges). Replaces the 1 s sleeps after a
+ * window resize and a sash drag (#89 phase 3). HYPOTHESIS: two equal reads mean the layout is
+ * done; a layout that pauses for 100 ms and then moves again would pass too early, which the
+ * measurements that follow would show as a different width.
+ */
+async function settleLayout() {
+  let previous;
+  await waitFor(
+    async () => {
+      const now = await page.evaluate(() => {
+        const box = (selector) => {
+          const rect = globalThis.document.querySelector(selector)?.getBoundingClientRect();
+          return rect ? [rect.left, rect.top, rect.width, rect.height] : null;
+        };
+        return JSON.stringify([box('.part.sidebar'), box('iframe.webview.ready')]);
+      });
+      const same = now === previous;
+      previous = now;
+      return same;
+    },
+    3_000,
+    100,
+  );
 }
 
 /** Box of the primary side bar in page coordinates, or null when it is not in the page. */
@@ -392,7 +547,8 @@ async function sideBarPx() {
 /**
  * Drags the sash of the primary side bar with the real mouse until the bar is `width` CSS px
  * wide; returns the width measured afterwards, and throws when it is more than
- * `SIZE_TOLERANCE` off. The pointer is parked over the editor afterwards, so a screenshot taken
+ * `SIZE_TOLERANCE` off. It waits for the layout to settle (`settleLayout`, two equal reads of the
+ * boxes, no fixed second) before measuring. The pointer is parked over the editor afterwards, so a screenshot taken
  * next does not show the sash's hover line (VERIFIED on Windows 11, 27/10/2026: the narrow
  * capture of the final run shows no hover line on the side bar's edge; before the pointer was
  * parked, an earlier capture did).
@@ -416,7 +572,7 @@ async function setSideBarWidth(width) {
   await page.mouse.move(before.left + width, y, { steps: 10 });
   await page.mouse.up();
   await page.mouse.move(before.left + Math.max(width, before.right - before.left) + 200, y);
-  await sleep(1_000);
+  await settleLayout();
   const measured = await sideBarPx();
   if (Math.abs(measured - width) > SIZE_TOLERANCE) {
     throw new Error(
@@ -457,7 +613,7 @@ const README_CROPS = new Set([
   '16e-mention-sent',
 ]);
 
-const readmeDir = path.join(workDir, 'readme');
+const readmeDir = path.join(workDir, scratchOutput ? 'readme-partial' : 'readme');
 // Cleared at start, like `shotsDir`: crops of an earlier run must not survive to be copied into
 // docs/images/ as if they were new. Declared here, not next to `shotsDir`, because of the const.
 fs.rmSync(readmeDir, { recursive: true, force: true });
@@ -504,14 +660,356 @@ async function openChat(timeoutMs = 30_000) {
   web = await openWebview(vscode.port, webviewLogs, timeoutMs);
 }
 
-/** Types a command in the palette (F1) and runs it. */
+/**
+ * What each theme of the run looks like once applied: the class `.monaco-workbench` carries and the
+ * `data-vscode-theme-kind` the webview's `<body>` gets.
+ * VERIFIED by reading VS Code 1.143.1 (local install, 27/10/2026): the theme service removes
+ * "vs", "vs-dark", "hc-black", "hc-light" and adds the new one on the workbench container, and the
+ * webview's `applyStyles` sets the kind and the `--vscode-*` variables in one synchronous call.
+ */
+const THEME_KINDS = {
+  'Default Light Modern': { workbench: 'vs', webview: 'vscode-light' },
+  'Default Dark Modern': { workbench: 'vs-dark', webview: 'vscode-dark' },
+  'Default High Contrast': { workbench: 'hc-black', webview: 'vscode-high-contrast' },
+  'Default High Contrast Light': {
+    workbench: 'hc-light',
+    webview: 'vscode-high-contrast-light',
+  },
+};
+
+/** Longest `setTheme` waits for a theme to show up in the workbench and in the webview. */
+const THEME_TIMEOUT_MS = 10_000;
+
+/** Whether a chat webview iframe is on screen (a hidden view does not repaint nor run frames). */
+function webviewVisible() {
+  return page.evaluate(() =>
+    [...globalThis.document.querySelectorAll('iframe.webview.ready')].some(
+      (frame) =>
+        frame.checkVisibility({ checkVisibilityCSS: true }) &&
+        frame.getBoundingClientRect().width > 0,
+    ),
+  );
+}
+
+/**
+ * Switches the colour theme and returns once it is really applied; throws after `THEME_TIMEOUT_MS`.
+ *
+ * Replaces the fixed 1.5-3 s sleeps that used to follow every `workbench.colorTheme` write (issue
+ * #89): it writes the setting, then waits for (a) the class of the theme on `.monaco-workbench`,
+ * (b) only if a chat webview is visible, its `<body>` `data-vscode-theme-kind`, and (c) two
+ * animation frames, in the webview if it is visible, else in the workbench. With the view hidden
+ * (b) is skipped on purpose: a hidden webview never updates its kind nor runs frames, and waiting
+ * for it would be a false timeout. The frames are raced against 1 s so a page that does not
+ * run them cannot hang the step. Throws for a theme name it does not know.
+ * VERIFIED on Windows 11, VS Code 1.143.1 (27/10/2026): `--steps 2,4` printed lines such as "ok
+ * light: code text contrast 10.55 >= 4.5 (code background rgba(0, 0, 0, 0))" and "ok dark: code
+ * text contrast 8.82 >= 4.5 (code background rgba(0, 0, 0, 0))" with the same four figures as the
+ * full baseline, and with this wait cut out (mutation test) they changed. HYPOTHESIS: that a screenshot never lags one frame behind the wait; only the
+ * figures prove that, the captures were read by eye. NOT observed: macOS, Linux.
+ */
+async function setTheme(theme) {
+  const kind = THEME_KINDS[theme];
+  if (kind === undefined) throw new Error(`unknown theme: ${theme}`);
+  writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
+  const end = Date.now() + THEME_TIMEOUT_MS;
+  const left = () => Math.max(end - Date.now(), 0);
+  const inWorkbench = await waitFor(
+    () =>
+      page.evaluate(
+        (cls) =>
+          globalThis.document.querySelector('.monaco-workbench')?.classList.contains(cls) ?? false,
+        kind.workbench,
+      ),
+    left(),
+    50,
+  );
+  if (inWorkbench === undefined) {
+    throw new Error(
+      `the workbench did not take the theme ${theme} in ${String(THEME_TIMEOUT_MS)} ms`,
+    );
+  }
+  if (web !== undefined && (await webviewVisible())) {
+    const inWebview = await waitFor(
+      () =>
+        web.inDoc((doc, expected) => doc.body?.dataset.vscodeThemeKind === expected, kind.webview),
+      left(),
+      50,
+    );
+    if (inWebview === undefined) {
+      throw new Error(
+        `the chat webview did not take the theme ${theme} (${kind.webview}) in ${String(THEME_TIMEOUT_MS)} ms`,
+      );
+    }
+    await web.inDoc(twoFrames);
+  } else {
+    await page.evaluate(`(${twoFrames.toString()})(document)`);
+  }
+}
+
+/**
+ * Resolves after two animation frames of `doc`'s window (`true`), or after 1 s if they never run
+ * (`false`: a page that is not painting must not hang the step). Self-contained: it is serialized
+ * into the workbench page and into the webview.
+ */
+function twoFrames(doc) {
+  return new Promise((resolve) => {
+    const win = doc.defaultView;
+    const giveUp = win.setTimeout(() => resolve(false), 1_000);
+    win.requestAnimationFrame(() => {
+      win.requestAnimationFrame(() => {
+        win.clearTimeout(giveUp);
+        resolve(true);
+      });
+    });
+  });
+}
+
+/** The dark theme, the one the screenshot-only loops capture without `--all-themes`. */
+const DARK_THEME = ['dark', 'Default Dark Modern'];
+
+/**
+ * The themes a screenshot-only loop captures: `themes` with `--all-themes`, else just dark (the
+ * theme the run is in when such a loop starts, and the one `README_CROPS` names). Never used by a
+ * loop that measures something: those must stay in every theme.
+ */
+function captureThemes(themes) {
+  return allThemes ? themes : [DARK_THEME];
+}
+
+/** True when the quick input (the command palette) is not on screen. */
+const quickInputHidden = () =>
+  page.evaluate(() => {
+    const widget = globalThis.document.querySelector('.quick-input-widget');
+    return widget === null || globalThis.getComputedStyle(widget).display === 'none';
+  });
+
+/**
+ * Opens the quick input with a real mouse click on the title bar's command center; false when no
+ * visible one is found (the caller then falls back to F1).
+ *
+ * The point comes from `getBoundingClientRect` of the first `.command-center-center` with a width,
+ * and `page.mouse` clicks it, as `clickIn` does for the webview. Not `locator.click()`: on
+ * 28/10/2026 (Windows 11, VS Code 1.143.1) it timed out after 5 s in 6 runs of 6 of
+ * `--steps 16,17 --bail` although the box was on screen. HYPOTHESIS for why: a hidden match first,
+ * or the draggable title bar failing Playwright's "receives events" check; not looked into.
+ */
+async function clickCommandCenter() {
+  const point = await page.evaluate(() => {
+    for (const element of globalThis.document.querySelectorAll('.command-center-center')) {
+      const rect = element.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      }
+    }
+    return null;
+  });
+  if (point === null) return false;
+  await page.mouse.click(point.x, point.y);
+  return true;
+}
+
+/**
+ * Runs a command from the palette.
+ *
+ * Waits for conditions instead of 400/600/800 ms: the quick input is visible, its focused row
+ * names the typed command, Enter, then the quick input is hidden. The 150 ms at the end is a fixed
+ * settle: the command runs after the palette closes and there is no signal common to all the
+ * commands this suite runs (close editors, restart, reload, stop). #89 phase 3.
+ *
+ * The palette is opened with the MOUSE (the command center of the title bar) and F1 is only the
+ * fallback, up to 3 attempts. Nothing is typed unless the quick input is open AND holds the focus
+ * (`typeInQuickInput` reports it): if it never opens, or opens without the focus, the call throws
+ * with the command's name and the number of presses, so the step FAILs at once. Why: F1 is lost now
+ * and then. It used to be pressed once and the title typed anyway after a 2 s cap, and on
+ * 28/10/2026 (Windows 11, VS Code 1.143.1) "View: Revert and Close Editor" landed as text in the
+ * Untitled editor of step 2 (screenshot 16d of `--steps 16,17`): a dirty editor, a save dialog
+ * nobody answered and every later wait of the run expiring at its cap (step 16 from about 17 s to
+ * 81 s). With F1 retried 3 times, `--steps 16,17` still ended once in 4 with "the command palette
+ * did not open for "View: Close All Editors" (F1 pressed 3 times)". The same lost F1 is the likely
+ * reason the palette "did not hide the side bar" in step 5 (8 runs of 8, Engram #1335):
+ * HYPOTHESIS. Why F1 is lost is not known. The throw for a palette that is open but without the
+ * focus was not run (the focus has always arrived): UNVERIFIED until a run loses it. The click opens the quick input in file mode, so the
+ * text starts with `>` and replaces whatever the input held.
+ */
 async function command(title) {
-  await page.keyboard.press('F1');
-  await sleep(400);
-  await page.keyboard.type(title);
-  await sleep(600);
+  let open = false;
+  let clicks = 0;
+  let f1Presses = 0;
+  for (let attempt = 0; attempt < 3 && !open; attempt += 1) {
+    const clicked = attempt === 0 && (await clickCommandCenter()); // the mouse first, then F1
+    if (clicked) clicks += 1;
+    else {
+      f1Presses += 1;
+      await page.keyboard.press('F1');
+    }
+    open = (await waitFor(async () => !(await quickInputHidden()), 1_000, 50)) === true;
+  }
+  if (!open) {
+    throw new Error(
+      `the command palette did not open for "${title}" (${String(clicks)} click on the command center, F1 pressed ${String(f1Presses)} times)`,
+    );
+  }
+  const typed = await typeInQuickInput(
+    page.locator('.quick-input-widget input').first(),
+    `>${title}`,
+  );
+  if (!typed) {
+    throw new Error(`the command palette opened but did not take the focus for "${title}"`);
+  }
+  await waitFor(
+    () =>
+      page.evaluate((wanted) => {
+        const row = globalThis.document.querySelector('.quick-input-list .monaco-list-row.focused');
+        return (row?.textContent ?? '').toLowerCase().includes(wanted);
+      }, title.toLowerCase()),
+    2_000,
+    50,
+  );
   await page.keyboard.press('Enter');
-  await sleep(800);
+  await waitFor(quickInputHidden, 1_500, 50);
+  await sleep(150); // the command runs after the palette closes; no common signal for all commands
+}
+
+/**
+ * Waits until the chat shows the empty view that New session leaves: at least 3 suggestions, no
+ * block in the log and the title "Untitled session". Gives up after `ms` (the caller's check then
+ * reports what it sees), so a New session that does nothing still FAILs there.
+ */
+async function waitEmptyView(ms = 5_000) {
+  await waitFor(
+    () =>
+      web.inDoc(
+        (doc) =>
+          doc.querySelectorAll('.suggestion').length >= 3 &&
+          doc.querySelectorAll('[role="log"] > *').length === 0 &&
+          (doc.querySelector('.chat-title')?.textContent ?? '') === 'Untitled session',
+      ),
+    ms,
+    100,
+  );
+}
+
+/**
+ * Clicks the prompt box until the focus has stayed in it for 3 consecutive reads 300 ms apart
+ * (cap 8 s, then goes on: the caller checks the focus and fails there).
+ *
+ * Why not one focused read: after a step that ends with the quick input or a restart, VS Code
+ * gives the focus back to the editor a moment after the first click, and the text typed next lands
+ * in an untitled editor. Seen twice: step 7b (the first run of the step) and, on 28/10/2026 in
+ * #89 phase 3, steps 7b and 13 when a single focused read replaced the old 1.5-2 s sleeps. Each
+ * round clicks again, so the wait ends only on a focus that stayed. HYPOTHESIS: three reads
+ * (about 0.6-0.9 s) are enough for the late focus move; not measured beyond the runs of phase 3.
+ *
+ * It is the rule for every place that clicks the prompt box and then types or moves with the
+ * keyboard (decision of Sergio, 28/10/2026, Engram `tooling/visual-speed/decisions/focus-everywhere`):
+ * the same late move then showed up in steps 16 and 17 ("@sample" typed into an editor, a prompt
+ * typed into `src/sample.ts`), whenever an editor was the active part. A bare `clickIn('textarea')`
+ * stays only where the click itself is what a check judges, or where no key follows it.
+ */
+async function focusPromptBox() {
+  let steadyReads = 0;
+  await waitFor(
+    async () => {
+      await clickIn('textarea');
+      const has = await web.inDoc(
+        (doc) => doc.activeElement?.tagName === 'TEXTAREA' && doc.hasFocus(),
+      );
+      steadyReads = has ? steadyReads + 1 : 0;
+      return steadyReads >= 3;
+    },
+    8_000,
+    300,
+  );
+}
+
+/** Waits until the workbench has no editor tab open (after "View: Close All Editors"), up to 3 s. */
+function waitForNoTabs() {
+  return waitFor(async () => (await page.locator('.tab').count()) === 0, 3_000, 100);
+}
+
+/**
+ * Runs "View: Close All Editors" and waits until no tab is left; if VS Code asks whether to save a
+ * changed editor, presses "Don't Save" and warns, so the run never writes to the workspace nor
+ * leaves a modal dialog taking the keys of the next steps. If tabs are still open afterwards
+ * (and no dialog explains it) it warns instead of returning silently.
+ *
+ * Why: the Untitled file of step 2 made every Close All Editors raise "Do you want to save the
+ * changes you made to …?" and no code answered it (screenshot of Sergio, 28/10/2026); a prompt
+ * typed into `src/sample.ts` by a lost focus (step 17, Engram #1337) would have done the same, and
+ * "Save" would have kept it on disk. The warning names the editor, because a dialog here means some
+ * earlier key went to an editor. The button is found by text: VS Code 1.143.1 keeps it as
+ * "Do&&n't Save" in `nls.messages.json`, the mnemonic is not drawn. HYPOTHESIS: the dialog is the
+ * in-DOM `.monaco-dialog-box` (custom dialog style, `vscodeProcess.mjs`), as Sergio's screenshot
+ * shows; the path that presses the button was not run on purpose yet.
+ */
+async function closeAllEditors() {
+  await command('View: Close All Editors');
+  const dontSave = page.locator('.monaco-dialog-box button', { hasText: /Don.t Save/ });
+  const asked = await waitFor(
+    async () => (await dontSave.count()) > 0 || (await page.locator('.tab').count()) === 0,
+    3_000,
+    100,
+  );
+  if (asked && (await dontSave.count()) > 0) {
+    const text = await page
+      .locator('.monaco-dialog-box')
+      .first()
+      .innerText()
+      .catch(() => '');
+    warn(
+      `Close All Editors asked to save a changed editor: ${text.replace(/\s+/g, ' ').slice(0, 120)}`,
+    );
+    await dontSave.first().click({ timeout: 5_000 });
+    await waitForNoTabs();
+  }
+  const left = await page.locator('.tab').count();
+  if (left > 0) {
+    warn(`Close All Editors left ${String(left)} tab(s) open; a later tab count may include them`);
+  }
+}
+
+/**
+ * Waits until an element matching `selector` is in the webview (`present`) or no longer is
+ * (`!present`), up to `ms`; an expired wait just returns, so the check that follows judges it.
+ */
+function waitPresent(selector, present = true, ms = 3_000) {
+  return waitFor(
+    () =>
+      web.inDoc((doc, arg) => (doc.querySelector(arg.selector) !== null) === arg.present, {
+        selector,
+        present,
+      }),
+    ms,
+    100,
+  );
+}
+
+/**
+ * Types `text` in the quick input that is open (`dialog` is its input) once it has the focus and
+ * waits until the input holds `text`, instead of the 400 and 600 ms sleeps the dialogs used.
+ *
+ * Returns whether the focus reached the quick input within 2 s, and types NOTHING when it did not:
+ * a Ctrl+A and a text sent to whatever else holds the focus (an editor) write into the workspace.
+ * `command()` turns the `false` into a throw. The dialogs of steps 0 and 13 ignore it: the first
+ * then sees its own "done" wait expire and takes the fallback, the second Enters an empty input
+ * and its "the picked file shows as a chip" check FAILs. HYPOTHESIS: neither path was run, the
+ * focus has always arrived in the runs so far.
+ */
+async function typeInQuickInput(dialog, text) {
+  const focused =
+    (await waitFor(
+      () =>
+        page.evaluate(() =>
+          globalThis.document.activeElement?.closest('.quick-input-widget') ? true : false,
+        ),
+      2_000,
+      50,
+    )) === true;
+  if (!focused) return false;
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type(text);
+  await waitFor(async () => (await dialog.inputValue()) === text, 2_000, 50);
+  return true;
 }
 
 /** On-screen centre of the first element matching `selector` in the webview, or null. */
@@ -657,19 +1155,27 @@ async function clickButton(text) {
 }
 
 /**
- * Real click in the textarea (so keyboard focus enters the iframe), empties it, then types and
- * sends. Emptying first matters: a fork refills the draft with the forked prompt and the draft
- * survives New session, so typing straight away concatenated both prompts (seen in screenshot
+ * Puts a focus that stays in the textarea (so keyboard focus enters the iframe), empties it, then
+ * types and sends. Emptying first matters: a fork refills the draft with the forked prompt and the
+ * draft survives New session, so typing straight away concatenated both prompts (seen in screenshot
  * 11h of step 10, review of #21). On an empty textarea select-all + Backspace does nothing.
+ *
+ * Why `focusPromptBox` and not one click: when the step before left an editor focused, VS Code
+ * gave the focus back to it after the click and the prompt was typed into `src/sample.ts`. Seen
+ * in step 17 once #89 phase 3 replaced the 1.5 s sleep after New session: on 28/10/2026 (Windows
+ * 11, VS Code 1.143.1) `--steps 16,17` traced the focus in the editor (`DIV.native-edit-context`),
+ * an empty box and no turn after `send` in 4 runs of 6. The steady focus costs about 0.6-0.9 s
+ * per call. HYPOTHESIS: the steady focus is enough; to check, run `--steps 16,17` repeatedly and
+ * expect "the context line appears once a step has reported its tokens" every time.
  */
 async function send(text) {
-  await clickIn('textarea');
+  await focusPromptBox();
   await page.keyboard.press('ControlOrMeta+A');
   await page.keyboard.press('Backspace');
   // Without this pause the first typed character was lost (screenshot 11h showed "all the
   // subagent tool…" for "Call the…"). Cause: HYPOTHESIS, the webview re-renders the emptied
   // textarea. The 150 ms pause: VERIFIED by the test:visual run of 21/10/2026 (153 ok, 11h clean).
-  await sleep(150);
+  await sleep(150); // first typed character lost without it (see above): kept, not converted
   await page.keyboard.type(text);
   await page.keyboard.press('Enter');
 }
@@ -680,9 +1186,16 @@ const isBusy = () =>
     [...doc.querySelectorAll('button')].some((b) => b.getAttribute('aria-label') === 'Stop'),
   );
 
-/** Waits until no turn is running; returns whether it got there in time. */
+/**
+ * Waits until no turn is running; returns whether it got there in time.
+ *
+ * It first waits up to 2 s (polling every 100 ms) for the Stop button to appear, so that a turn
+ * that has not started yet is not mistaken for an idle chat; if it never shows, the wait ends
+ * after those 2 s, exactly as the fixed sleep did, so it is never slower than before. A turn that
+ * both starts and ends between two polls costs the full 2 s. #89 phase 3.
+ */
 async function waitIdle(ms = 150_000) {
-  await sleep(2000);
+  await waitFor(isBusy, 2_000, 100);
   const idle = await waitFor(async () => !(await isBusy()), ms);
   return idle === true;
 }
@@ -828,16 +1341,53 @@ function withSavedClipboard(body) {
   };
 }
 
-/** Runs a step; an exception becomes a failure plus a screenshot, and the run continues. */
+/** The ids of the steps that ran and, per step, `{ id, name, seconds }`, for `== timings`. */
+const executedIds = [];
+const timings = [];
+
+/** Under `--bail`, the id of the step whose failure stopped the run; then every later step is skipped. */
+let bailedAt;
+
+/**
+ * Runs a step; an exception becomes a failure plus a screenshot, and the run continues.
+ *
+ * The id is the first token of `name` (`stepIdOf`), already unique across the 25 calls. A step
+ * whose id is not in the selection returns at once without printing anything, so the call sites
+ * are the same in a full and in a filtered run. It prints `  time N.N s` when the body ends (also
+ * when it throws) and records it for `== timings`; that line is not an ok/FAIL/warn line. Measured
+ * with `performance.now()`, so it includes the settling sleeps of the body, which is the point.
+ *
+ * Under `--bail` the first step that fails (a FAIL check, which ends the body with `BailStop`, or
+ * an exception) takes its FAIL screenshot and stops the run: the later steps return at once, as an
+ * unselected one does, and the run goes to its cleanup and summary (exit 1).
+ */
 async function step(name, body) {
+  const id = stepIdOf(name);
+  if (!selectedIds.has(id) || bailedAt !== undefined) return;
+  executedIds.push(id);
   console.log(`\n== ${name}`);
+  const startedAt = performance.now();
+  const failuresBefore = failures.length;
+  inStep = true;
   try {
     await body();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    failures.push(`${name}: ${message}`);
-    console.log(`  FAIL (exception) ${message}`);
+    // A BailStop was already printed and counted by `check`.
+    if (!(error instanceof BailStop)) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(`${name}: ${message}`);
+      console.log(`  FAIL (exception) ${message}`);
+    }
     await shot(`FAIL-${name.replace(/\W+/g, '-')}`).catch(() => undefined);
+  } finally {
+    inStep = false;
+  }
+  const seconds = (performance.now() - startedAt) / 1000;
+  timings.push({ id, name, seconds });
+  console.log(`  time ${seconds.toFixed(1)} s`);
+  if (bail && failures.length > failuresBefore) {
+    bailedAt = id;
+    console.log(`  --bail: stopping after step ${id}; the remaining steps are skipped`);
   }
 }
 
@@ -929,8 +1479,7 @@ async function problemLayoutRounds(label, sel, contrast) {
       continue;
     }
     for (const [themeName, theme] of PROBLEM_THEMES) {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(2500);
+      await setTheme(theme);
       const where = `${label} at ${name} (bar ${String(Math.round(barPx))} px), ${themeName}`;
       const m = await web.inDoc(measureProblem, sel);
       if (m.root === null || m.text === null) {
@@ -964,9 +1513,8 @@ async function problemLayoutRounds(label, sel, contrast) {
       await shot(`${label.replace(/\W+/g, '-')}-${name}-${themeName}`);
     }
   }
-  writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
-  await setSideBarWidth(300).catch(() => undefined);
-  await page.waitForTimeout(1500);
+  await setTheme('Default Dark Modern');
+  await setSideBarWidth(300).catch(() => undefined); // it settles the layout itself
 }
 
 /** Measures code text contrast in the webview; see the long comment inside. */
@@ -1208,15 +1756,18 @@ let startupError;
 try {
   workspace = createWorkspace();
   // Step 0 (E2, issue #85) starts with a binary that does not exist and the fixture marked down:
-  // the first thing the chat can show is the setup guide.
+  // the first thing the chat can show is the setup guide. A run without step 0 (a filtered one)
+  // starts normally: the fixture as the binary and no `.down` marker, which is the state step 0
+  // leaves behind (`startVSCode` without those two options, see `vscodeProcess.mjs`).
+  const withSetupGuide = selectedIds.has('0');
   const missingBinary = path.join(workDir, 'no-such-opencode', 'opencode.exe');
   vscode = await startVSCode({
     repoRoot,
     workDir,
     workspace,
-    opencodePath: missingBinary,
-    startDown: true,
+    ...(withSetupGuide ? { opencodePath: missingBinary, startDown: true } : {}),
   });
+  vscodeStartedAt = performance.now();
   console.log(
     `VS Code pid ${String(vscode.pid)}, CDP port ${String(vscode.port)}, workspace ${workspace}`,
   );
@@ -1227,14 +1778,19 @@ try {
     `window ${String(startSize.width)}x${String(startSize.height)} CSS px, DPR ${String(startSize.dpr)}, screen work area ${startSize.screen}`,
   );
   started = true;
-  await page.waitForTimeout(3000);
+  // The OpenCode item of the activity bar is what step 0 clicks first; no fixed 3 s any more.
+  await page
+    .locator('.activitybar [aria-label^="OpenCode"]')
+    .first()
+    .waitFor({ state: 'visible', timeout: 30_000 })
+    .catch(() => undefined);
 
   // E2 (issue #85) step 0: the setup guide. VS Code started with `openVsCode.opencodePath` pointing
   // at a file that does not exist, and with the fixture's `.down` marker in place.
   await step('0 setup guide: binary missing, Choose binary…, server down, Restart', async () => {
     for (let i = 0; i < 5 && (await page.locator('.onboarding-a-overlay.visible').count()); i++) {
       await page.keyboard.press('Escape');
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(400); // the overlay fades out; the loop condition reads it again
     }
     await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
     await openChat(40_000);
@@ -1289,10 +1845,7 @@ try {
     let viaDialog;
     try {
       await dialog.waitFor({ state: 'visible', timeout: 15_000 });
-      await sleep(400);
-      await page.keyboard.press('ControlOrMeta+A');
-      await page.keyboard.type(fixturePath);
-      await sleep(600);
+      await typeInQuickInput(dialog, fixturePath);
       await shot('00b-choose-binary-dialog');
       await page.keyboard.press('Enter');
       viaDialog =
@@ -1354,7 +1907,7 @@ try {
   await step('1 empty state and connection', async () => {
     for (let i = 0; i < 5 && (await page.locator('.onboarding-a-overlay.visible').count()); i++) {
       await page.keyboard.press('Escape');
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(400); // the overlay fades out; the loop condition reads it again
     }
     // Step 0 already opened the chat; a second click on the activity bar would hide the side bar.
     if ((await page.locator('iframe.webview.ready').count()) === 0) {
@@ -1393,11 +1946,16 @@ try {
         'a markdown table with 2 columns and 2 rows, a bullet list of 2 items, the inline code path `src/sample.ts:20`, ' +
         'and a link to https://code.visualstudio.com . Do not use any tools. MARKDOWN',
     );
+    // Fixed on purpose: the fixture's pace (600 ms between deltas) defines "the block is half way".
     await page.waitForTimeout(3000);
     await shot('02a-streaming');
     const ended = await waitIdle(30_000);
     check(ended, 'the first turn ended');
-    await page.waitForTimeout(800);
+    await waitFor(
+      () => web.inDoc((doc) => doc.querySelectorAll('[class*="hljs-"]').length > 0),
+      3_000,
+      100,
+    );
     await shot('02b-markdown');
     const dom = await web.inDoc((doc) => ({
       hljs: doc.querySelectorAll('[class*="hljs-"]').length,
@@ -1433,7 +1991,14 @@ try {
       `the reply has a file reference to src/sample.ts:20 (${dom.fileRefs.join(', ') || 'none'})`,
     );
     await clickIn('.file-ref[data-path="src/sample.ts"][data-line="20"]');
-    await page.waitForTimeout(1500);
+    await waitFor(
+      async () =>
+        /Ln 20\b/.test(
+          await page.locator('#status\\.editor\\.selection').first().innerText({ timeout: 500 }),
+        ),
+      4_000,
+      100,
+    );
     const selection = await page
       .locator('#status\\.editor\\.selection')
       .first()
@@ -1448,7 +2013,17 @@ try {
       await clickIn('button[aria-label="Open code in a new file"]'),
       'a code block has an "Open code in a new file" button and it is pressed',
     );
-    await page.waitForTimeout(1500);
+    await waitFor(
+      async () => {
+        const mode = await page
+          .locator('#status\\.editor\\.mode')
+          .first()
+          .innerText({ timeout: 500 });
+        return mode.trim() !== '' && !/plain\s*text/i.test(mode);
+      },
+      4_000,
+      100,
+    );
     const language = await page
       .locator('#status\\.editor\\.mode')
       .first()
@@ -1458,22 +2033,36 @@ try {
       language.trim() !== '' && !/plain\s*text/i.test(language),
       `New file opens with a language (status bar: "${language.trim()}")`,
     );
+    // The new file is an unsaved Untitled editor: left open, the first "Close All Editors" (step 15)
+    // raised "Do you want to save the changes…?" and nothing answered it, so later keys went to the
+    // dialog (seen by Sergio in the runs of 28/10/2026). It is the active editor here.
+    await command('View: Revert and Close Editor');
+    await waitFor(
+      async () => (await page.locator('.tab[aria-label*="Untitled"]').count()) === 0,
+      3_000,
+      100,
+    );
     assertNoWebviewErrors('markdown');
   });
 
   await step('3 Stop is neutral, history, focus', async () => {
-    await clickIn('textarea');
+    await focusPromptBox();
     // LONG: the synthetic server answers with the numbers 1 to 400, five per delta every 200 ms
     // (about 16 s), so the turn is still running when Escape comes.
     await page.keyboard.type('Count from 1 to 400, one number per line. Do not use tools. LONG');
     await page.keyboard.press('Enter');
     const sawStop = await waitFor(isBusy, 30_000, 300);
     check(sawStop === true, 'Stop is visible while the turn runs');
+    // Fixed on purpose: the capture needs the LONG turn running for a while (lines already streamed).
     await page.waitForTimeout(2500);
     await shot('03a-busy');
     await page.keyboard.press('Escape'); // the focus is still in the textarea
     check(await waitIdle(30_000), 'Escape stops the turn');
-    await page.waitForTimeout(800);
+    await waitFor(
+      () => web.inDoc((doc) => doc.querySelectorAll('.stopped-note').length > 0),
+      3_000,
+      100,
+    );
     const state = await web.inDoc((doc) => ({
       stopped: doc.querySelectorAll('.stopped-note').length,
       alerts: doc.querySelectorAll('[role="alert"]').length,
@@ -1483,7 +2072,7 @@ try {
     check(state.stopped >= 1, `a neutral "Stopped" note is shown ("${state.text.trim()}")`);
     check(state.alerts === 0 && state.redBoxes === 0, 'a stopped turn is not an alert and not red');
     await shot('03b-stopped');
-    await clickIn('textarea');
+    await focusPromptBox();
     await page.keyboard.press('ArrowUp');
     const recalled = await web.inDoc((doc) => doc.querySelector('textarea').value);
     check(recalled.startsWith('Count from 1 to 400'), 'ArrowUp recalls the last prompt');
@@ -1498,8 +2087,7 @@ try {
       ['hc-dark', 'Default High Contrast', true],
       ['hc-light', 'Default High Contrast Light', true],
     ]) {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(3000);
+      await setTheme(theme);
       await shot(`04-theme-${name}`);
       const measured = await web.inDoc(measureCode);
       if (measured.error) {
@@ -1528,8 +2116,7 @@ try {
           );
       }
     }
-    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
-    await page.waitForTimeout(2000);
+    await setTheme('Default Dark Modern');
     assertNoWebviewErrors('themes');
   });
 
@@ -1540,14 +2127,25 @@ try {
       // `.env` and a `permission.asked` (action read, `save: ["*"]` so the Always panel has its
       // option), and wait for the reply.
       check(await clickButton('New session'), 'New session starts a clean conversation');
-      await page.waitForTimeout(1500);
-      await clickIn('textarea');
+      await waitEmptyView();
+      await focusPromptBox();
       await page.keyboard.type(
         'Use the read tool to read the file .env in the workspace root and tell me its content. ASK_PERMISSION',
       );
       await page.keyboard.press('Enter');
-      await page.waitForTimeout(800);
-      await page.keyboard.press('Control+b'); // hides the side bar: the chat view is not visible
+      await waitFor(isBusy, 3_000, 100); // the prompt is on its way before the side bar is hidden
+      // Hides the side bar so the chat view is not visible, with a mouse click on the title bar's
+      // layout button: no key is sent while the focus is still in the prompt box. With Ctrl+B the
+      // webview forwarded the key, the view was hidden under it and `press` never returned (647 s
+      // on 27/10/2026, until VS Code was closed; on 28/10/2026 `--steps 0,1,2,3,5` hung there 1
+      // time in 5; Engram #1333). The palette is no way out: its F1 also starts in the webview, and
+      // `command('View: Toggle Primary Side Bar Visibility')` left the side bar visible in 8 runs
+      // of 8 (28/10/2026). The click has a timeout, so a renamed button FAILs the step.
+      await page
+        .locator('.titlebar [aria-label^="Toggle Primary Side Bar"]')
+        .first()
+        .click({ timeout: 5_000 });
+      await waitFor(async () => (await sideBarPx()) === 0, 3_000, 100);
       const toast = await waitFor(async () => {
         const toasts = page.locator('.notifications-toasts .notification-toast');
         return (await toasts.count())
@@ -1561,7 +2159,14 @@ try {
       const badge = page.locator(
         '.activitybar .action-item:has([aria-label^="OpenCode"]) .badge-content',
       );
-      const badgeText = (await badge.allInnerTexts().catch(() => [])).join(',');
+      // The badge paints a moment after the toast: read at once it was empty in 2 of 6 runs of
+      // `--steps 5` on 28/10/2026, once the poll went from 500 to 150 ms (#89 phase 3).
+      const badgeText =
+        (await waitFor(
+          async () => (await badge.allInnerTexts().catch(() => [])).join(','),
+          5_000,
+          100,
+        )) ?? '';
       check(badgeText !== '', `the OpenCode activity bar item has a badge ("${badgeText}")`);
       await shot('05a-hidden-permission');
       const open = page
@@ -1573,7 +2178,6 @@ try {
         warn('the notification has no "Open" link; showing the side bar with Ctrl+B');
         await page.keyboard.press('Control+b');
       }
-      await page.waitForTimeout(2000);
       await openChat(30_000);
       const card = await waitFor(
         () => web.inDoc((doc) => doc.querySelector('.permission-card')?.innerText?.slice(0, 200)),
@@ -1589,7 +2193,11 @@ try {
       await shot('05b-card');
 
       check(await clickButton('Always allow…'), 'the first "Always allow…" press opens the panel');
-      await page.waitForTimeout(800);
+      await waitFor(
+        () => web.inDoc((doc) => doc.querySelector('.request-always') !== null),
+        3_000,
+        100,
+      );
       const panel = await web.inDoc((doc) => ({
         open: doc.querySelector('.request-always') !== null,
         primaries: [...doc.querySelectorAll('.permission-card button.primary')].map((b) =>
@@ -1603,14 +2211,22 @@ try {
       );
       await shot('05c-always-panel');
       check(await clickButton('Back'), 'Back closes the panel');
-      await page.waitForTimeout(500);
+      await waitFor(
+        () => web.inDoc((doc) => doc.querySelector('.request-always') === null),
+        3_000,
+        100,
+      );
       check(
         await web.inDoc((doc) => doc.querySelector('.request-always') === null),
         'the confirmation panel is closed after Back',
       );
       check(await clickButton('Allow once'), 'Allow once is pressed (never Always)');
       check(await waitIdle(30_000), 'the turn ends after Allow once');
-      await page.waitForTimeout(1000);
+      await waitFor(
+        async () => (await badge.allInnerTexts().catch(() => ['x'])).join(',') === '',
+        3_000,
+        100,
+      );
       const after = (await badge.allInnerTexts().catch(() => [])).join(',');
       check(after === '', `the badge is gone after answering ("${after}")`);
       // E3-resolved-history: the answer stays in the conversation, under the tool, not in the dock.
@@ -1633,7 +2249,7 @@ try {
     // ASK_QUESTION makes the synthetic server call the `question` tool at once: a form with two
     // fields (q0 "Pick A or B", q1 "Any extras?"), as the real tool builds them.
     await waitIdle(30_000);
-    await clickIn('textarea');
+    await focusPromptBox();
     await page.keyboard.type(
       'Call the question tool now to ask me to pick one option: A or B. Then reply with the letter I picked. ASK_QUESTION',
     );
@@ -1669,7 +2285,11 @@ try {
       check(await waitIdle(30_000), 'the turn ends after answering');
       const gone = await web.inDoc((doc) => doc.querySelector('.form-card') === null);
       check(gone === true, 'the question card is gone after the answer');
-      await page.waitForTimeout(800);
+      await waitFor(
+        async () => (await outcomeLines()).log.some((line) => /Answered/.test(line)),
+        3_000,
+        100,
+      );
       const answered = await outcomeLines();
       console.log(`  outcome lines: ${JSON.stringify(answered.log)}`);
       check(
@@ -1684,7 +2304,7 @@ try {
 
   await step('6b a plain Reject is kept in the history, not painted as an error', async () => {
     await waitIdle(30_000);
-    await clickIn('textarea');
+    await focusPromptBox();
     await page.keyboard.type(
       'Use the read tool to read the file .env in the workspace root once more and tell me its content. ASK_PERMISSION',
     );
@@ -1700,7 +2320,11 @@ try {
     }
     check(await clickButton('Reject'), 'Reject is pressed (the plain one, never Always)');
     check(await waitIdle(30_000), 'the turn ends after Reject');
-    await page.waitForTimeout(1000);
+    await waitFor(
+      async () => (await outcomeLines()).log.some((line) => /Rejected/.test(line)),
+      3_000,
+      100,
+    );
     const lines = await outcomeLines();
     check(
       lines.log.some((line) => /Rejected/.test(line) && !/feedback/.test(line)),
@@ -1733,7 +2357,16 @@ try {
       `there is a conversation to keep (${String(before.messages)} blocks, "${before.title}")`,
     );
     await command('OpenCode: Restart Server');
-    await page.waitForTimeout(6000);
+    // The connection leaves "connected" and comes back; if the change is too quick to be seen the
+    // wait ends after 4 s and `waitConnected` below judges (HYPOTHESIS that it is seen, #89).
+    await waitFor(
+      () =>
+        web.inDoc(
+          (doc) => doc.querySelector('.app')?.getAttribute('data-connection') !== 'connected',
+        ),
+      4_000,
+      100,
+    );
     await openChat(40_000);
     await waitConnected();
     const afterRestart = await snapshotOfChat();
@@ -1762,9 +2395,8 @@ try {
     const before = await snapshotOfChat();
     // After step 7 the keyboard focus is not in the webview (the first run of this step typed
     // "CRASH…" into a new untitled editor); take it into the prompt box and check before typing.
-    await sleep(1500);
-    await clickIn('textarea');
-    await sleep(500);
+    await waitFor(() => web.inDoc((doc) => doc.querySelector('textarea') !== null), 5_000, 100);
+    await focusPromptBox();
     const focused = await web.inDoc(
       (doc) => doc.activeElement?.tagName === 'TEXTAREA' && doc.hasFocus(),
     );
@@ -1837,11 +2469,26 @@ try {
     const linesPreReload = await outcomeLines();
     const hadRejected = linesPreReload.log.some((line) => /Rejected/.test(line));
     const hadAnswered = linesPreReload.log.some((line) => /Answered/.test(line));
+    // A mark on the OLD page: the reloaded workbench is the first page without it.
+    await page.evaluate(() => {
+      globalThis.__visualPreReload = true;
+    });
     await command('Developer: Reload Window');
     web?.close();
     await browser.close().catch(() => undefined);
-    await sleep(10_000);
-    await connectWorkbench(90_000);
+    let reloaded = false;
+    for (let tries = 0; tries < 120 && !reloaded; tries++) {
+      await connectWorkbench(90_000);
+      const stale = await page
+        .evaluate(() => globalThis.__visualPreReload === true)
+        .catch(() => true);
+      reloaded = !stale;
+      if (reloaded) break;
+      await browser.close().catch(() => undefined);
+      await sleep(250); // between two attempts to reach the new page, not a fixed wait for it
+    }
+    // Only the old page was reachable: every check below would judge it, not a reloaded workbench.
+    if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
     let opened = true;
     try {
       await openChat(8_000);
@@ -1857,7 +2504,7 @@ try {
       await openChat(60_000);
     }
     await waitConnected();
-    await page.waitForTimeout(4000);
+    await waitFor(async () => (await snapshotOfChat()).messages === preReload.messages, 5_000, 100);
     const afterReload = await snapshotOfChat();
     check(
       afterReload.messages === preReload.messages,
@@ -1935,7 +2582,7 @@ try {
     /** Closes the list with a real Escape (the focus is inside it). */
     const closeList = async () => {
       await page.keyboard.press('Escape');
-      await sleep(300);
+      await sleep(300); // a short settle: the callers read the list state or reopen it next
     };
     /** Waits until `predicate(await picker())` holds. */
     const until = (predicate, ms = 15_000) =>
@@ -1970,8 +2617,7 @@ try {
       ['hc-dark', 'Default High Contrast'],
       ['hc-light', 'Default High Contrast Light'],
     ]) {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(3000);
+      await setTheme(theme);
       await shot(`10a-sessions-${name}`);
       const marker = await web.inDoc((doc) => {
         const row = doc.querySelector('.session-row.current');
@@ -1990,8 +2636,7 @@ try {
         `${name}: the open session has a visible marker (${JSON.stringify(marker)})`,
       );
     }
-    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
-    await page.waitForTimeout(2500);
+    await setTheme('Default Dark Modern');
 
     // Keyboard: ArrowDown from the search box enters the list, with a visible focus ring.
     await openList();
@@ -2014,7 +2659,7 @@ try {
 
     // "New session" is lazy: it empties the view and creates NOTHING until the first prompt.
     check(await clickButton('New session'), 'New session is pressed');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
     state = await picker();
     check(
       state.suggestions >= 3 && state.title === 'Untitled session',
@@ -2038,7 +2683,7 @@ try {
     const token = 'vrvisual';
     // LONG: the turn lasts about 16 s, so the list opens while it is running.
     await send(`Reply with exactly: ${token}. Do not use any tools. LONG`);
-    await page.waitForTimeout(1200);
+    await waitFor(isBusy, 5_000, 100);
     const busyNow = await isBusy();
     check(busyNow === true, 'the turn is still running when the session list is opened');
     await openList();
@@ -2060,7 +2705,7 @@ try {
     const renamed = `Visual ${token}`;
     await openList();
     check(await clickIn('.session-row.current .session-action'), 'the Rename button is pressed');
-    await page.waitForTimeout(400);
+    await waitPresent('.session-rename-input');
     check(
       (await web.inDoc((doc) => doc.activeElement?.classList.contains('session-rename-input'))) ===
         true,
@@ -2168,6 +2813,8 @@ try {
       .first()
       .getByRole('button', { name: /^Cancel$/ })
       .click();
+    // A declined dialog changes nothing, so there is no positive signal: a fixed window for the
+    // check below, which asserts that nothing was deleted.
     await page.waitForTimeout(800);
     state = await picker();
     check(
@@ -2256,12 +2903,8 @@ try {
     const hover = async (selector) => {
       const point = await centreOf(selector);
       if (point) await page.mouse.move(point.x, point.y);
-      await sleep(300);
+      await sleep(300); // hover styles and tooltips appear after a delay of their own
       return point !== null;
-    };
-    const setTheme = async (theme) => {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(2500);
     };
 
     // --- Fork from the second user message ---------------------------------------------------
@@ -2400,7 +3043,7 @@ try {
     );
     await shot('11d-fork-in-list');
     await page.keyboard.press('Escape');
-    await sleep(300);
+    await sleep(300); // a short settle: the list closing is read by the next check
 
     // "Forked from ..." goes back to the original, which still has both exchanges.
     check(
@@ -2422,7 +3065,7 @@ try {
     // SUBAGENT makes the synthetic server call the `subagent` tool: it creates a child session
     // ("Say hello", agent general) and answers inside it, as the spike of #21 saw.
     check(await clickButton('New session'), 'New session is pressed for the subagent run');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
     await send(
       'Call the subagent tool exactly once with agent "general", description "Say hello" and ' +
         'prompt "Reply with exactly: HELLO". After it returns, reply with exactly: DONE. SUBAGENT',
@@ -2449,10 +3092,11 @@ try {
     check(state.pathButton, 'the parent crumb is a button');
     check(state.users.length >= 1, 'the child conversation is shown');
     await shot('11f-subagent-child');
-    for (const [name, theme] of [
+    // Screenshot-only loop: dark by default, light and hc-light with `--all-themes`.
+    for (const [name, theme] of captureThemes([
       ['light', 'Default Light Modern'],
       ['hc-light', 'Default High Contrast Light'],
-    ]) {
+    ])) {
       await setTheme(theme);
       await shot(`11g-subagent-child-${name}`);
     }
@@ -2473,7 +3117,7 @@ try {
       await clickIn('details.subagent-sessions > summary'),
       'the "Subagent sessions" summary is pressed',
     );
-    await sleep(300);
+    await waitPresent('details.subagent-sessions[open] .subagent-child');
     await shot('11h-subagent-list');
     check(await clickIn('.subagent-child'), 'the child in the list is pressed');
     const again = await waitFor(async () => (await chat()).path.startsWith('‹'), 20_000);
@@ -2551,13 +3195,9 @@ try {
           text: doc.body.innerText,
         };
       });
-    const setTheme = async (theme) => {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(2500);
-    };
     const press = async (key) => {
       await page.keyboard.press(key);
-      await sleep(250);
+      await sleep(250); // the key reaches the webview through the workbench asynchronously; some keys expect "nothing changes"
     };
     const THEMES = [
       ['light', 'Default Light Modern'],
@@ -2568,7 +3208,7 @@ try {
 
     // --- A new session proposes the default agent and the server's default model --------------
     check(await clickButton('New session'), 'New session is pressed');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
     let state = await ui();
     check(state.agent === 'Build', `a new session starts on Build (got "${state.agent}")`);
     check(
@@ -2583,7 +3223,7 @@ try {
 
     // --- The panel: focus on the current agent, columns, groups, the four themes ----------------
     check(await clickIn('button.agent-model-chip'), 'the chip is pressed');
-    await sleep(400);
+    await waitPresent('.agent-model-panel');
     state = await ui();
     check(state.panel && state.expanded === 'true', 'the chip panel opened');
     check(
@@ -2618,7 +3258,8 @@ try {
       /^\d+ models?$/.test(state.live.replace(/ /g, '')),
       `the live region counts the models ("${state.live}")`,
     );
-    for (const [name, theme] of THEMES) {
+    // Screenshot-only loops (12b, 12d, 12f, 14b, 14d): dark by default, four themes with `--all-themes`.
+    for (const [name, theme] of captureThemes(THEMES)) {
       await setTheme(theme);
       await shot(`12b-chip-panel-${name}`);
     }
@@ -2635,7 +3276,16 @@ try {
     // The focus starts on the agent, so the mouse takes it to the search box, as a user would.
     check(await clickIn('.agent-model-panel input[type="search"]'), 'the search box is pressed');
     await page.keyboard.type(target.name);
-    await sleep(400);
+    // The search box holds the typed name AND the list got shorter. An expired wait just falls
+    // through: the check below judges the list (it stays strict about "at least one, no more").
+    await waitFor(
+      async () =>
+        (await web.inDoc(
+          (doc) => doc.querySelector('.agent-model-panel input[type="search"]')?.value ?? '',
+        )) === target.name && (await ui()).options.length < options.length,
+      3_000,
+      100,
+    );
     state = await ui();
     check(
       state.options.length >= 1 && state.options.length <= options.length,
@@ -2666,7 +3316,7 @@ try {
 
     // --- Escape closes without choosing ---------------------------------------------------------
     check(await clickIn('button.agent-model-chip'), 'the chip is pressed again');
-    await sleep(400);
+    await waitPresent('.agent-model-panel');
     state = await ui();
     check(
       state.panel && state.focus.agentRow === 'build',
@@ -2683,10 +3333,10 @@ try {
     // A real mouse click on the prompt box: it is outside the panel, so the panel must close, the
     // model must stay, and the focus must stay where the user clicked (the rule does not move it).
     check(await clickIn('button.agent-model-chip'), 'the chip is pressed to test an outside click');
-    await sleep(400);
+    await waitPresent('.agent-model-panel');
     check((await ui()).panel, 'the panel is open before the outside click');
     check(await clickIn('textarea'), 'the prompt box is pressed (outside the panel)');
-    await sleep(400);
+    await waitPresent('.agent-model-panel', false);
     state = await ui();
     check(
       !state.panel && state.expanded === 'false' && state.model === chosen.name,
@@ -2699,15 +3349,15 @@ try {
 
     // --- The agent: mouse, then keyboard (Tab to the chip, Enter, arrows) ------------------------
     check(await clickIn('button.agent-model-chip'), 'the chip is pressed to pick an agent');
-    await sleep(400);
+    await waitPresent('.agent-model-panel');
     check(await clickIn('button[data-agent="plan"]'), '"Plan" is pressed');
-    await sleep(400);
+    await waitPresent('.agent-model-panel', false);
     state = await ui();
     check(
       !state.panel && state.agent === 'Plan' && state.focus.cls.includes('agent-model-chip'),
       `choosing an agent closes the panel, the chip reads Plan and the focus returns ("${state.trigger}")`,
     );
-    await clickIn('textarea');
+    await focusPromptBox();
     await page.keyboard.type('keep this text');
     const visited = [];
     for (let i = 0; i < 8; i += 1) {
@@ -2740,6 +3390,7 @@ try {
       `ArrowUp moves to the previous agent (${JSON.stringify(state.focus)})`,
     );
     await press('Enter');
+    // Fixed on purpose: negative check below (Enter on an agent row does NOT send a prompt).
     await sleep(800);
     state = await ui();
     const kept = await web.inDoc((doc) => doc.querySelector('textarea')?.value ?? '');
@@ -2761,7 +3412,7 @@ try {
       state.agent === 'Plan' && state.focus.cls.includes('agent-model-chip'),
       `the keyboard alone picked Plan again ("${state.trigger}")`,
     );
-    for (const [name, theme] of THEMES) {
+    for (const [name, theme] of captureThemes(THEMES)) {
       await setTheme(theme);
       await shot(`12d-chip-${name}`);
     }
@@ -2785,7 +3436,7 @@ try {
       `the session now holds Plan and the chosen model ("${state.agent}", "${state.trigger}")`,
     );
     await shot('12e-reply-meta');
-    for (const [name, theme] of THEMES) {
+    for (const [name, theme] of captureThemes(THEMES)) {
       await setTheme(theme);
       await shot(`12f-reply-meta-${name}`);
     }
@@ -2793,7 +3444,7 @@ try {
 
     // --- A NEW session proposes the last model used; the setting wins over it --------------------
     check(await clickButton('New session'), 'New session is pressed after the reply');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
     state = await ui();
     check(
       state.model === chosen.name,
@@ -2867,17 +3518,14 @@ try {
     // A fresh session: when the model of step 11 ignores "do not use tools" its turn waits for a
     // permission forever (seen on 21/10/2026, screenshot 12e), and a busy session would swallow Enter.
     check(await clickButton('New session'), 'New session is pressed');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
     // E2 #85 phase 4: Attach is now the "Attach file…" item of the "+" menu.
     check(await clickButton('Add context'), 'the "+" button is pressed');
-    await sleep(300);
+    await waitPresent('[role="menu"]');
     check(await clickButton('Attach file…'), 'Attach file… is pressed in the "+" menu');
     const dialog = page.locator('.quick-input-widget input').first();
     await dialog.waitFor({ state: 'visible', timeout: 15_000 });
-    await sleep(400);
-    await page.keyboard.press('ControlOrMeta+A');
-    await page.keyboard.type(target);
-    await sleep(600);
+    await typeInQuickInput(dialog, target);
     await shot('13a-attach-dialog');
     await page.keyboard.press('Enter');
     const attached = await waitFor(async () => (await chips()).pending.length > 0, 15_000, 300);
@@ -2889,9 +3537,8 @@ try {
     await shot('13b-attached');
     // The quick input gives the focus back to the editor when it closes, a moment later: let it
     // happen, then take the focus into the prompt box before typing (else the text lands in a file).
-    await sleep(1000);
-    await clickIn('textarea');
-    await sleep(300);
+    await waitFor(quickInputHidden, 2_000, 50);
+    await focusPromptBox();
     const focus = await web.inDoc((doc) => ({
       tag: doc.activeElement?.tagName ?? '',
       focused: doc.hasFocus(),
@@ -2972,13 +3619,9 @@ try {
           alerts: doc.querySelectorAll('[role="alert"]').length,
         };
       });
-    const setTheme = async (theme) => {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(2500);
-    };
     const press = async (key) => {
       await page.keyboard.press(key);
-      await sleep(250);
+      await sleep(250); // the key reaches the webview through the workbench asynchronously; some keys expect "nothing changes"
     };
     const THEMES = [
       ['light', 'Default Light Modern'],
@@ -2989,15 +3632,15 @@ try {
     /** Opens the chip's panel with the real mouse and presses model `id`; false if not listed. */
     const pickModel = async (id) => {
       if (!(await clickIn('button.agent-model-chip'))) return false;
-      await sleep(400);
+      await waitPresent('.agent-model-panel');
       const pressed = await clickIn(`.agent-model-panel button.model-option[data-model="${id}"]`);
-      await sleep(500);
+      await waitPresent('.agent-model-panel', false);
       return pressed;
     };
     /** Opens the panel, says whether it has a Reasoning section, and closes it again. */
     const hasReasoning = async () => {
       await clickIn('button.agent-model-chip');
-      await sleep(400);
+      await waitPresent('.agent-model-panel');
       const has = (await ui()).hasReasoning;
       await press('Escape');
       return has;
@@ -3005,11 +3648,11 @@ try {
 
     assertNoWebviewErrors('before the variant step');
     check(await clickButton('New session'), 'New session is pressed');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
 
     // --- Find a model that lists variants and one that lists none; assert both exist ------------
     check(await clickIn('button.agent-model-chip'), 'the chip is pressed');
-    await sleep(400);
+    await waitPresent('.agent-model-panel');
     const ids = (await ui()).modelIds;
     await press('Escape');
     const GLM = 'opencode/glm-5.3-flash-free';
@@ -3043,7 +3686,7 @@ try {
     check(state.level === '', `the chip shows no level for Default ("${state.level}")`);
     await shot('14a-variant-closed');
     check(await clickIn('button.agent-model-chip'), 'the chip is pressed with the real mouse');
-    await sleep(400);
+    await waitPresent('.agent-model-panel');
     state = await ui();
     check(state.panel && state.expanded === 'true', 'the chip panel opened');
     check(
@@ -3069,7 +3712,7 @@ try {
       })) === true,
       'the Reasoning section is inside the Model column, under the model list',
     );
-    for (const [name, theme] of THEMES) {
+    for (const [name, theme] of captureThemes(THEMES)) {
       await setTheme(theme);
       await shot(`14b-variant-panel-${name}`);
     }
@@ -3081,7 +3724,7 @@ try {
       await clickIn(`.menu-reasoning button[data-variant="${String(variant)}"]`),
       `the variant "${String(variant)}" is pressed`,
     );
-    await sleep(400);
+    await waitPresent('.agent-model-panel', false);
     state = await ui();
     check(
       !state.panel && state.level === String(variant),
@@ -3092,14 +3735,14 @@ try {
       `the focus returns to the chip (${JSON.stringify(state.focus)})`,
     );
     await shot('14c-variant-chosen');
-    for (const [name, theme] of THEMES) {
+    for (const [name, theme] of captureThemes(THEMES)) {
       await setTheme(theme);
       await shot(`14d-variant-chosen-${name}`);
     }
     await setTheme('Default Dark Modern');
 
     // --- Keyboard: Tab to the chip, Enter opens, Tab to the Reasoning list, arrows, Escape ----
-    await clickIn('textarea');
+    await focusPromptBox();
     const visited = [];
     for (let i = 0; i < 12; i += 1) {
       await press('Tab');
@@ -3148,10 +3791,10 @@ try {
 
     // --- A press outside closes the panel (dismissOutside) -----------------------------------
     check(await clickIn('button.agent-model-chip'), 'the chip is pressed to test an outside click');
-    await sleep(400);
+    await waitPresent('.agent-model-panel');
     check((await ui()).panel, 'the chip panel is open before the outside click');
     check(await clickIn('textarea'), 'the prompt box is pressed (outside the panel)');
-    await sleep(400);
+    await waitPresent('.agent-model-panel', false);
     state = await ui();
     check(
       !state.panel && state.level === String(variant),
@@ -3178,12 +3821,12 @@ try {
         `...and its variant was NOT remembered across the change ("${state.level}")`,
       );
       check(await clickIn('button.agent-model-chip'), 'the chip is pressed again');
-      await sleep(400);
+      await waitPresent('.agent-model-panel');
       check(
         await clickIn(`.menu-reasoning button[data-variant="${String(variant)}"]`),
         `the variant "${String(variant)}" is chosen again`,
       );
-      await sleep(400);
+      await waitPresent('.agent-model-panel', false);
     }
 
     // --- The prompt carries it, and the reply says so -----------------------------------------
@@ -3204,7 +3847,7 @@ try {
 
     // --- A NEW session proposes the last model WITH its variant; reopening shows the stored one
     check(await clickButton('New session'), 'New session is pressed after the reply');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
     state = await ui();
     check(
       state.level === String(variant),
@@ -3316,17 +3959,13 @@ try {
       });
     /** Real Shift+Tab from the prompt box until the tagged card's toggle has the focus. */
     const tabToTagged = async () => {
-      await clickIn('textarea');
+      await focusPromptBox();
       for (let i = 0; i < 120; i += 1) {
         await page.keyboard.press('Shift+Tab');
-        await sleep(40);
+        await sleep(40); // pace between Shift+Tab presses so the focus read sees each one
         if ((await tagged())?.focusOnToggle) return true;
       }
       return false;
-    };
-    const setTheme = async (theme) => {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(2500);
     };
     const THEMES = [
       ['light', 'Default Light Modern'],
@@ -3339,7 +3978,7 @@ try {
 
     assertNoWebviewErrors('before the tool cards step');
     check(await clickButton('New session'), 'New session is pressed');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
 
     // --- One prompt with the TOOLS trigger: the synthetic server plays nine tool calls ----------
     // (shell twice, read, edit, write, grep, glob, webfetch and an MCP-style tool), each completed.
@@ -3387,7 +4026,7 @@ try {
       );
       const before = state?.logChildren ?? 0;
       await page.keyboard.press('Enter');
-      await sleep(400);
+      await waitFor(async () => (await tagged())?.expanded === 'true', 3_000, 100);
       state = await tagged();
       check(
         state?.expanded === 'true' && state.body,
@@ -3422,7 +4061,7 @@ try {
       }
       await shot(`15b-tool-${tool}-open`);
       await page.keyboard.press('Space');
-      await sleep(400);
+      await waitFor(async () => (await tagged())?.expanded === 'false', 3_000, 100);
       state = await tagged();
       check(
         state?.expanded === 'false' && !state.body,
@@ -3435,7 +4074,7 @@ try {
       await tagCard('edit');
       await tabToTagged();
       await page.keyboard.press('Enter');
-      await sleep(400);
+      await waitFor(async () => (await tagged())?.expanded === 'true', 3_000, 100);
       for (const [name, theme] of THEMES) {
         await setTheme(theme);
         const diff = await web.inDoc(measureDiffLines);
@@ -3462,14 +4101,17 @@ try {
       }
       await setTheme('Default Dark Modern');
       await page.keyboard.press('Space');
-      await sleep(300);
+      await waitFor(async () => (await tagged())?.expanded === 'false', 3_000, 100);
     }
 
     // --- The header of the LAST card stays in view after unfolding it (auto-scroll risk) ------
     const lastTool = await tagCard(null, true);
     if (lastTool !== null && (await tabToTagged())) {
       await page.keyboard.press('Enter');
-      await sleep(600);
+      await waitFor(async () => (await tagged())?.expanded === 'true', 3_000, 100);
+      // The auto-scroll that could push the header out of view runs after the unfolding: a fixed
+      // window for that check, after the positive wait (it is what the check below is about).
+      await sleep(400);
       const state = await tagged();
       check(
         state?.expanded === 'true' && state.headerVisible,
@@ -3477,7 +4119,7 @@ try {
       );
       await shot('15d-last-card-open');
       await page.keyboard.press('Space');
-      await sleep(300);
+      await waitFor(async () => (await tagged())?.expanded === 'false', 3_000, 100);
     } else {
       check(
         false,
@@ -3590,7 +4232,7 @@ try {
         await web.inDoc((doc) =>
           doc.querySelector('[data-visual-card]')?.scrollIntoView({ block: 'center' }),
         );
-        await sleep(300);
+        await sleep(300); // scrollIntoView has no completion signal; the capture follows
         await shot('15e-tool-failed-narrow');
         await setTheme('Default High Contrast Light');
         await shot('15e-tool-failed-narrow-hc-light');
@@ -3629,7 +4271,7 @@ try {
       // Unfolded, the body ends with the error section and starts with the same first line.
       if (await tabToTagged()) {
         await page.keyboard.press('Enter');
-        await sleep(400);
+        await waitFor(async () => (await tagged())?.expanded === 'true', 3_000, 100);
         const opened = await tagged();
         const firstLine = (failedCard?.result ?? '').replace(/…$/, '');
         check(
@@ -3649,7 +4291,7 @@ try {
         }
         await setTheme('Default Dark Modern');
         await page.keyboard.press('Space');
-        await sleep(300);
+        await waitFor(async () => (await tagged())?.expanded === 'false', 3_000, 100);
       } else {
         check(false, 'Shift+Tab reached the failed card to open its body');
       }
@@ -3669,7 +4311,7 @@ try {
 
     // --- A path of a card opens the file in the editor ----------------------------------------
     if (judged.includes('read')) {
-      await command('View: Close All Editors');
+      await closeAllEditors();
       await tagCard('read');
       check(
         await web.inDoc((doc) => {
@@ -3681,7 +4323,11 @@ try {
         'the read card has an "Open" path button in its header',
       );
       check(await clickIn('[data-visual-click="true"]'), 'the path button is pressed');
-      await page.waitForTimeout(1500);
+      await waitFor(
+        async () => (await page.locator('.tab[aria-label*="sample.ts"]').count()) > 0,
+        4_000,
+        100,
+      );
       const tabs = await page.locator('.tab[aria-label*="sample.ts"]').count();
       check(tabs > 0, `pressing the path opens src/sample.ts in the editor (${String(tabs)} tab)`);
       await web.inDoc((doc) => {
@@ -3744,10 +4390,6 @@ try {
           ).length,
         };
       });
-    const setTheme = async (theme) => {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(2500);
-    };
     const THEMES = [
       ['light', 'Default Light Modern'],
       ['dark', 'Default Dark Modern'],
@@ -3756,35 +4398,56 @@ try {
     ];
     /** Empties the prompt box with the keyboard (focus goes into it first). */
     const clearBox = async () => {
-      await clickIn('textarea');
+      await focusPromptBox();
       await page.keyboard.press('ControlOrMeta+A');
       await page.keyboard.press('Backspace');
-      await sleep(200);
+      await sleep(200); // same pause as in `send`: the emptied textarea re-renders
     };
     /** Types `text` into an empty prompt box, as a user would. */
     const typeInBox = async (text) => {
       await clearBox();
       await page.keyboard.type(text);
     };
+    /** What the last `searchUntil` that gave up saw; the theme loop puts it in its error. */
+    let searchMiss = '';
     /**
      * Types `query` and waits for at least `min` rows. The real server refreshes its file index
      * every 10 s, so a file written a moment ago may not be listed yet: the last character is
      * typed again (a new search) until the rows appear, for about 40 s.
+     *
+     * When it gives up it records in `searchMiss` the box value, the popup rows, where the
+     * workbench focus is and the theme class, so the FAIL says whether the text went elsewhere or
+     * the popup stopped answering. Why: on 28/10/2026 the theme loop of this step failed twice in 6
+     * runs of `--steps 16,17` ("no popup rows after switching to hc-dark", "… to dark"), both
+     * times right after the "No files match" check of the theme before, and then passed 8 runs of
+     * 8 of `--steps 16` with a trace in place: the cause is UNVERIFIED, this is what will show it.
+     * The give-up path that fills `searchMiss` has not run yet either.
      */
     const searchUntil = async (query, min) => {
       await typeInBox(query);
       for (let attempt = 0; attempt < 14; attempt += 1) {
         if (await waitFor(async () => (await ui()).rows.length >= min, 3_000, 250)) return true;
         await page.keyboard.press('Backspace');
-        await sleep(100);
+        await sleep(100); // retries the last typed character: a pace, not a wait for a condition
         await page.keyboard.type(query.slice(-1));
       }
+      const seen = await ui().catch(() => null);
+      const workbench = await page
+        .evaluate(() => {
+          const active = globalThis.document.activeElement;
+          const theme = globalThis.document
+            .querySelector('.monaco-workbench')
+            ?.className.match(/\b(vs|vs-dark|hc-black|hc-light)\b/)?.[0];
+          return `focus ${String(active?.tagName)}.${String(active?.className).slice(0, 40)}, theme ${String(theme)}`;
+        })
+        .catch(() => 'workbench unreadable');
+      searchMiss = `box ${JSON.stringify(seen?.value)}, rows ${JSON.stringify(seen?.rows)}, popup ${String(seen?.popup)}, focus in box ${String(seen?.focusOnField)}; ${workbench}`;
       return false;
     };
     const removeChips = async () => {
       for (let guard = 0; guard < 6 && (await ui()).chips.length > 0; guard += 1) {
         await clickIn('.chips .chip-remove');
-        await sleep(200);
+        await sleep(200); // one chip gone per round: the re-render has no signal apart from the count read next
       }
     };
     const editorSelection = () =>
@@ -3797,7 +4460,7 @@ try {
     assertNoWebviewErrors('before the @ step');
     fs.writeFileSync(extra, 'export const extra = 1;\n');
     check(await clickButton('New session'), 'New session is pressed');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
 
     // --- The popup opens on "@", lists files, and the box keeps the focus ----------------------
     check(await searchUntil('@sample', 2), 'typing "@sample" lists at least two files');
@@ -3821,9 +4484,9 @@ try {
     for (const [name, theme] of THEMES) {
       await setTheme(theme);
       if (!(await searchUntil('@sample', 2)))
-        throw new Error(`no popup rows after switching to ${name}`);
+        throw new Error(`no popup rows after switching to ${name} (${searchMiss})`);
       await page.keyboard.press('ArrowDown'); // so row 0 is NOT the highlighted one
-      await sleep(250);
+      await sleep(250); // the highlight moves in a later render; the measurement follows
       const rowsLook = await web.inDoc(measureText, {
         normalName: '.mention-option[aria-selected="false"] .mention-name',
         normalDir: '.mention-option[aria-selected="false"] .mention-dir',
@@ -3880,7 +4543,7 @@ try {
     const wanted = state.rows.indexOf('src/sample.ts');
     const messagesBefore = state.messages;
     for (let i = 0; i < wanted; i += 1) await page.keyboard.press('ArrowDown');
-    await sleep(250);
+    await sleep(250); // the highlight follows the keys in a later render; `ui()` reads it next
     state = await ui();
     check(
       state.selected === wanted && state.pointsAtSelected,
@@ -3925,7 +4588,9 @@ try {
       const open = await waitFor(async () => (await ui()).rows.length > 0, 20_000, 250);
       check(open === true, 'the popup opens while a turn is running');
       await page.keyboard.press('Escape');
-      await sleep(600);
+      await waitFor(async () => !(await ui()).popup, 3_000, 100);
+      // Negative check below (the turn is NOT stopped): a fixed window after the positive wait.
+      await sleep(300);
       state = await ui();
       check(!state.popup, 'Escape closes the popup');
       check(state.busy, 'Escape with the popup open does NOT stop the running turn');
@@ -3951,23 +4616,34 @@ try {
     );
 
     // --- The chip opens the file ------------------------------------------------------------------
-    await command('View: Close All Editors');
+    await closeAllEditors();
     check(await clickIn('.chips .chip-open'), 'the chip name is pressed');
-    await page.waitForTimeout(1500);
+    await waitFor(
+      async () => (await page.locator('.tab.active[aria-label*="sample.ts"]').count()) > 0,
+      4_000,
+      100,
+    );
     const tabs = await page.locator('.tab.active[aria-label*="sample.ts"]').count();
     check(tabs > 0, `pressing the chip opens src/sample.ts in the editor (${String(tabs)} tab)`);
 
     // --- Add selection: lines 2-3 of the active editor ---------------------------------------------
-    await page.waitForTimeout(500);
+    await waitFor(
+      () =>
+        page.evaluate(
+          () => (globalThis.document.activeElement?.closest('.monaco-editor') ?? null) !== null,
+        ),
+      2_000,
+      100,
+    );
     await page.keyboard.press('ControlOrMeta+Home');
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('Home');
     await page.keyboard.press('Shift+ArrowDown');
     await page.keyboard.press('Shift+ArrowDown');
-    await sleep(300);
+    await waitFor(async () => (await editorSelection()).trim() !== '', 2_000, 100);
     console.log(`  editor selection: "${(await editorSelection()).trim()}"`);
     check(await clickButton('Add context'), 'the "+" button is pressed');
-    await sleep(300);
+    await waitPresent('[role="menu"]');
     check(await clickButton('Add selection'), 'Add selection is pressed in the "+" menu');
     const ranged = await waitFor(
       async () => (await ui()).chips.includes('src/sample.ts#2-3'),
@@ -3982,7 +4658,7 @@ try {
     await shot('16d-add-selection');
 
     // --- Send with both chips and the typed mention -------------------------------------------------
-    await clickIn('textarea');
+    await focusPromptBox();
     await page.keyboard.press('End');
     await page.keyboard.type('Reply with exactly: OK. Do not use any tools.');
     await page.keyboard.press('Enter');
@@ -3999,12 +4675,12 @@ try {
     await shot('16e-mention-sent');
 
     // --- The chip of the conversation opens the file at the start of its range --------------------
-    await command('View: Close All Editors');
+    await closeAllEditors();
     check(
       await clickIn('[role="log"] .message-files .chip-open[aria-label*="lines 2-3"]'),
       'the chip src/sample.ts#2-3 of the conversation is pressed',
     );
-    await page.waitForTimeout(1500);
+    await waitFor(async () => /Ln 2\b/.test(await editorSelection()), 4_000, 100);
     const selection = await editorSelection();
     const sampleTabs = await page.locator('.tab.active[aria-label*="sample.ts"]').count();
     check(
@@ -4135,7 +4811,7 @@ try {
 
     assertNoWebviewErrors('before the context line step');
     check(await clickButton('New session'), 'New session is pressed');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
     check((await line()) === null, 'a session that has not answered yet shows no context line');
     // The synthetic server reports 1200 + 40 + 8 + 3000 = 4248 tokens per step (`STEP_TOKENS`): of
     // a 200,000 window that is 2 %, shown as "4K / 200K" (`compactTokens` floors).
@@ -4185,8 +4861,7 @@ try {
     /** Measures the contrast of the line in the four themes; `tag` names the state and the shots. */
     const contrastInThemes = async (tag) => {
       for (const [name, theme] of THEMES) {
-        writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-        await page.waitForTimeout(2500);
+        await setTheme(theme);
         const look = await contrast();
         console.log(`  line contrast ${tag} ${name}: ${JSON.stringify(look)}`);
         check(
@@ -4195,21 +4870,20 @@ try {
         );
         await shot(`17-context-line-${tag}-${name}`);
       }
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
-      await page.waitForTimeout(2500);
+      await setTheme('Default Dark Modern');
     };
     await contrastInThemes('normal');
 
     // --- Part 2: a COSTLY turn on a 5000-token window: the cost and the `high` level ---------
     check(await clickButton('New session'), 'New session is pressed for the costly turn');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
     check(await clickIn('button.agent-model-chip'), 'the agent and model chip is pressed');
-    await sleep(400);
+    await waitPresent('.model-panel');
     check(
       await clickIn('.model-panel button.model-option[data-model="opencode/tiny-context"]'),
       'the model with the 5000-token window is chosen',
     );
-    await sleep(500);
+    await waitPresent('.model-panel', false);
     await send('Reply with exactly: DONE. COSTLY');
     check(await waitIdle(30_000), 'the costly turn finished');
     const costly = await waitFor(async () => {
@@ -4269,7 +4943,7 @@ try {
     fs.writeFileSync(path.join(workspace, 'src', 'removed.ts'), 'export const removed = true;\n');
     assertNoWebviewErrors('before the changed files step');
     check(await clickButton('New session'), 'New session is pressed');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
 
     /** The list: summary text, whether it is open, and the rows with their words and names. */
     const list = () =>
@@ -4342,8 +5016,7 @@ try {
 
     // --- Contrast of the summary, the path and the status line, four themes -------------------
     for (const [name, theme] of THEMES) {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(2500);
+      await setTheme(theme);
       const look = await web.inDoc(measureText, {
         summary: 'details.changed-files > summary',
         path: 'button.changed-file .session-title',
@@ -4358,8 +5031,7 @@ try {
       }
       await shot(`18c-changed-files-${name}`);
     }
-    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
-    await page.waitForTimeout(2500);
+    await setTheme('Default Dark Modern');
 
     /** The two sides of the diff editor in view, as text; `null` when no diff editor is shown. */
     const diffSides = () =>
@@ -4409,16 +5081,15 @@ try {
       `the tab is titled with the path and "(OpenCode session)" (${JSON.stringify(title)})`,
     );
     await shot('18d-diff-modified');
-    await command('View: Close All Editors');
-    await sleep(500);
+    await closeAllEditors();
 
     // --- The deleted file, with the keyboard ----------------------------------------------------
     await clickIn('details.changed-files > summary'); // focus enters the iframe, closes the list
     await clickIn('details.changed-files > summary'); // and opens it again
-    await sleep(400);
+    await waitPresent('details.changed-files[open]');
     for (let tabs = 0; tabs < 3; tabs++) {
       await page.keyboard.press('Tab');
-      await sleep(150);
+      await sleep(150); // pace between Tab presses so the focus read sees each one
     }
     const focused = await web.inDoc((doc) => doc.activeElement?.getAttribute('aria-label') ?? '');
     check(
@@ -4435,8 +5106,7 @@ try {
     );
     check(deleted?.modified.trim() === '', 'the RIGHT side of a deleted file is empty');
     await shot('18e-diff-deleted');
-    await command('View: Close All Editors');
-    await sleep(500);
+    await closeAllEditors();
 
     // --- The added file ---------------------------------------------------------------------------
     check(
@@ -4452,8 +5122,7 @@ try {
       'the RIGHT side holds the new file',
     );
     await shot('18f-diff-added');
-    await command('View: Close All Editors');
-    await sleep(500);
+    await closeAllEditors();
 
     // --- The binary: no diff, the file itself and a notice ----------------------------------------
     check(
@@ -4474,8 +5143,7 @@ try {
     );
     check(told === true, 'the chat says there is no text diff for that file');
     await shot('18g-binary-opened');
-    await command('View: Close All Editors');
-    await sleep(500);
+    await closeAllEditors();
 
     assertNoWebviewErrors('changed files');
   });
@@ -4508,17 +5176,16 @@ try {
     writeSettings(vscode.userDataDir, {
       'diffEditor.renderSideBySide': true,
       'diffEditor.useInlineViewWhenSpaceIsLimited': false,
-      'workbench.colorTheme': 'Default Dark Modern',
     });
-    await page.waitForTimeout(2500);
-    await command('View: Close All Editors');
+    await setTheme('Default Dark Modern');
+    await closeAllEditors();
     // The turn starts from a known disk: step 18 left its own files behind.
     fs.writeFileSync(sampleFile, `${SAMPLE_HEADER}export const value2 = 2;\n`);
     fs.writeFileSync(removedFile, 'export const removed = true;\n');
     for (const file of [addedFile, logoFile, bigFile]) fs.rmSync(file, { force: true });
     assertNoWebviewErrors('before the revert step');
     check(await clickButton('New session'), 'New session is pressed');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
 
     /** What the page shows about the revert: the log, the block, the draft and the changed files. */
     const view = () =>
@@ -4584,7 +5251,7 @@ try {
       `the summary counts five files (${JSON.stringify((await view()).changedSummary)})`,
     );
     check(await clickIn('details.changed-files > summary'), 'the summary is pressed');
-    await sleep(400);
+    await waitPresent('details.changed-files[open]');
     const largeRow = await web.inDoc((doc) => {
       const button = doc.querySelector(
         'details.changed-files button.changed-file[data-status="too-large"]',
@@ -4607,8 +5274,7 @@ try {
       `its accessible name is a sentence (${JSON.stringify(largeRow?.name)})`,
     );
     for (const [name, theme] of THEMES) {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(2500);
+      await setTheme(theme);
       const look = await web.inDoc(measureText, {
         meta: 'button.changed-file[data-status="too-large"] .session-meta',
         path: 'button.changed-file[data-status="too-large"] .session-title',
@@ -4621,8 +5287,7 @@ try {
       }
       await shot(`19a-too-large-${name}`);
     }
-    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
-    await page.waitForTimeout(2500);
+    await setTheme('Default Dark Modern');
 
     // --- Open the diff of sample.ts and LEAVE it open (pinned) ---------------------------------
     check(
@@ -4643,7 +5308,7 @@ try {
     );
     const staged = await waitFor(async () => (await view()).banner !== null, 20_000, 300);
     check(staged !== undefined, 'the revert block appears');
-    await sleep(1500);
+    await waitFor(async () => (await view()).messages === 0, 4_000, 100);
     const afterStage = await view();
     console.log(`  after stage: ${JSON.stringify(afterStage)}`);
     check(afterStage.messages === 0, 'the reverted messages are not in the conversation');
@@ -4704,8 +5369,7 @@ try {
 
     // Contrast of the block, four themes.
     for (const [name, theme] of THEMES) {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(2500);
+      await setTheme(theme);
       const look = await web.inDoc(measureText, {
         title: '.revert-banner-title',
         note: '.revert-banner-note',
@@ -4723,8 +5387,7 @@ try {
       }
       await shot(`19c-revert-block-${name}`);
     }
-    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
-    await page.waitForTimeout(2500);
+    await setTheme('Default Dark Modern');
 
     // --- What the revert undid, by a real press on a row --------------------------------------
     check(
@@ -4817,6 +5480,7 @@ try {
       .first()
       .getByRole('button', { name: /^Cancel$/ })
       .click();
+    // Fixed on purpose: negative check (Cancel changes nothing), no positive signal to wait for.
     await page.waitForTimeout(800);
     check((await view()).banner !== null, 'Cancel keeps the revert prepared');
     await clickIn('textarea'); // the native dialog took the keyboard focus out of the page
@@ -4851,7 +5515,7 @@ try {
     // The pinned tab is brought to the front BEFORE the turn and not touched afterwards, so what
     // it shows at the end was pushed by the provider (`onDidChange`), not re-read on activation.
     await page.locator('.tab[aria-label*="(OpenCode session)"]').first().click();
-    await sleep(800);
+    await waitFor(async () => (await diffSides()) !== null, 3_000, 100);
     const shownBefore = await diffSides();
     console.log(`  pinned tab before the turn: ${JSON.stringify(shownBefore)}`);
     check(
@@ -4860,23 +5524,35 @@ try {
     );
     fs.writeFileSync(sampleFile, `${SAMPLE_HEADER}export const value2 = 5;\n`);
     // The editor has the keyboard focus now: enter the chat first, or the typing lands in the file.
-    await clickIn('textarea');
-    await sleep(600);
-    await clickIn('textarea');
-    await sleep(400);
+    await waitFor(
+      async () => {
+        await clickIn('textarea');
+        return web.inDoc((doc) => doc.activeElement?.tagName === 'TEXTAREA' && doc.hasFocus());
+      },
+      3_000,
+      200,
+    );
     await send('EDIT_FILES: again');
     check(await waitIdle(30_000), 'the second edit turn finished');
-    const renewed = await waitFor(
-      async () => {
-        const sides = await diffSides();
-        return sides?.original.includes('export const value2 = 5;') ? sides : undefined;
-      },
-      20_000,
-      400,
-    );
+    // Waits for BOTH sides: the left one updates first, and on 28/10/2026 (Windows 11, VS Code
+    // 1.143.1) a wait on the left alone read "value2 = 5" on both sides, failing the check of the
+    // right in two full runs and in `--steps 19` (the 800 ms sleep before #89 hid it). Each side is
+    // still judged on its own, from the last read.
+    const renewed =
+      (await waitFor(
+        async () => {
+          const sides = await diffSides();
+          return sides?.original.includes('export const value2 = 5;') &&
+            sides.modified.includes('export const value2 = 52;')
+            ? sides
+            : undefined;
+        },
+        20_000,
+        400,
+      )) ?? (await diffSides());
     console.log(`  renewed sides: ${JSON.stringify(renewed)}`);
     check(
-      renewed !== undefined,
+      renewed?.original.includes('export const value2 = 5;') === true,
       'the diff tab opened before the revert now shows value2 = 5 on the left, without reopening it',
     );
     check(
@@ -4889,7 +5565,7 @@ try {
       toasts.every((text) => !/DiffNotListed|not among the files|NoTextDiff|Unknown/i.test(text)),
       `no error notification came from the provider's rejections (${JSON.stringify(toasts).slice(0, 200)})`,
     );
-    await command('View: Close All Editors');
+    await closeAllEditors();
     assertNoWebviewErrors('revert');
   });
 
@@ -4984,7 +5660,7 @@ try {
     };
     const pasteIntoBox = async () => {
       check(await clickIn('textarea'), 'the prompt box is clicked');
-      await sleep(300);
+      await sleep(300); // the click moves the focus into the iframe; the paste goes to the focused box
       await web.inDoc((doc) => {
         // Diagnostics only: what the paste event of the page carried (types, never contents).
         doc.defaultView.__lastPaste = undefined;
@@ -4999,7 +5675,11 @@ try {
         );
       });
       await page.keyboard.press('ControlOrMeta+V');
-      await sleep(1200);
+      await waitFor(
+        async () => (await web.inDoc((doc) => doc.defaultView.__lastPaste ?? null)) !== null,
+        3_000,
+        100,
+      );
       const seen = await web.inDoc((doc) => doc.defaultView.__lastPaste ?? null);
       console.log(`  paste event items: ${JSON.stringify(seen)}`);
       return seen;
@@ -5016,7 +5696,13 @@ try {
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         console.log(`  clipboard set through ${await clipboardImage()} (try ${String(attempt)})`);
         const seen = await pasteIntoBox();
-        if ((await ui()).chips.length > 0) return attempt;
+        // The chip comes a moment after the paste event (the image is read first): read at once it
+        // was missing in two full runs and in `--steps 20` on 28/10/2026, once #89 turned the 1.2 s
+        // sleep after Ctrl+V into a wait for the event. A paste without the image never gets one.
+        const chipped = seen?.includes('file:image/png')
+          ? await waitFor(async () => (await ui()).chips.length > 0, 3_000, 100)
+          : (await ui()).chips.length > 0;
+        if (chipped) return attempt;
         if (seen?.includes('file:image/png')) {
           throw new Error(
             `the paste event carried the image (${JSON.stringify(seen)}) but no chip appeared: our bug, not an empty clipboard`,
@@ -5029,18 +5715,15 @@ try {
     const removeChips = async () => {
       for (let guard = 0; guard < 6 && (await ui()).chips.length > 0; guard += 1) {
         await clickIn('.chips .chip-remove');
-        await sleep(200);
+        await sleep(200); // one chip gone per round: the re-render has no signal apart from the count read next
       }
     };
 
-    writeSettings(vscode.userDataDir, {
-      'workbench.colorTheme': 'Default Dark Modern',
-      'openVsCode.defaultModel': 'opencode/big-pickle',
-    });
-    await page.waitForTimeout(2500);
+    writeSettings(vscode.userDataDir, { 'openVsCode.defaultModel': 'opencode/big-pickle' });
+    await setTheme('Default Dark Modern');
     assertNoWebviewErrors('before the drop and paste step');
     check(await clickButton('New session'), 'New session is pressed');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
 
     // --- Paste a real image with the real keyboard (HYPOTHESIS F6 of the plan) ------------------
     console.log(`  tries needed: ${String(await pasteImage())}`);
@@ -5075,9 +5758,11 @@ try {
     await removeChips();
     check((await ui()).chips.length === 0, 'the x button removes the image chip');
     writeSettings(vscode.userDataDir, { 'openVsCode.defaultModel': 'opencode/glm-5.3-flash-free' });
+    // Fixed on purpose: the host picks up the edited user setting through a file watcher and
+    // there is no observable signal for it before the next New session reads it.
     await page.waitForTimeout(2500);
     check(await clickButton('New session'), 'New session is pressed (the image-capable model)');
-    await page.waitForTimeout(1500);
+    await waitEmptyView();
     const warningsBefore = count((await ui()).text, NO_IMAGES);
     console.log(`  tries needed: ${String(await pasteImage())}`);
     state = await ui();
@@ -5120,10 +5805,9 @@ try {
     const folder = path.join(workspace, 'src');
     const outside = path.join(workDir, 'outside.ts');
     for (const [name, theme] of THEMES) {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(2500);
+      await setTheme(theme);
       const prevented = await drag('dragover', [vsUri(sample)]);
-      await sleep(250);
+      await sleep(250); // the drop highlight is painted in a later frame; the capture follows
       state = await ui();
       check(
         prevented === true && state.drop === 'active',
@@ -5146,12 +5830,12 @@ try {
             new doc.defaultView.DragEvent('dragleave', { bubbles: true, cancelable: true }),
           );
       });
-      await sleep(200);
+      await waitFor(async () => (await ui()).drop === '', 2_000, 100);
       check((await ui()).drop === '', `the highlight goes away when the drag leaves in ${name}`);
     }
     // The same hint is the tooltip of the "Attach file…" item of the "+" menu (E2 #85 phase 4).
     check(await clickButton('Add context'), 'the "+" button is pressed to read the Attach hint');
-    await sleep(300);
+    await waitPresent('[role="menu"]');
     const attachHint = await web.inDoc(
       (doc) =>
         [...doc.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent === 'Attach file…')
@@ -5162,7 +5846,7 @@ try {
       `the "Attach file…" item carries the drop hint as its tooltip (${JSON.stringify(attachHint)})`,
     );
     await page.keyboard.press('Escape');
-    await sleep(200);
+    await waitPresent('[role="menu"]', false);
     await removeChips();
     await drag('drop', [vsUri(sample), vsUri(folder), vsUri(outside)]);
     const added = await waitFor(
@@ -5194,26 +5878,40 @@ try {
     // chip can only exist if the host kept it until the new document said `ready`. What is read is
     // the CHIP in the DOM of the webview, not a log line.
     await command('View: Show Explorer');
-    await sleep(1200);
     const sampleRow = page.locator(
       '.explorer-folders-view [role="treeitem"][aria-label^="sample.ts"]',
+    );
+    await waitFor(
+      async () =>
+        (await sampleRow.count()) > 0 ||
+        (await page.locator('.explorer-folders-view [role="treeitem"][aria-label="src"]').count()) >
+          0,
+      4_000,
+      100,
     );
     if ((await sampleRow.count()) === 0) {
       await page
         .locator('.explorer-folders-view [role="treeitem"][aria-label="src"]')
         .first()
         .click();
-      await sleep(800);
+      await waitFor(async () => (await sampleRow.count()) > 0, 3_000, 100);
     }
     check(
       (await sampleRow.count()) > 0,
       'the Explorer lists src/sample.ts (the chat view is hidden while it is shown)',
     );
     await sampleRow.first().click({ button: 'right' });
-    await sleep(600);
     const entry = page.getByText('Add to OpenCode Chat', { exact: true });
+    await waitFor(async () => (await entry.count()) > 0, 3_000, 100);
     check((await entry.count()) > 0, 'the Explorer context menu has "Add to OpenCode Chat"');
-    await entry.first().click();
+    // A click right after the menu opens only highlights the entry: on 28/10/2026 (Windows 11, VS
+    // Code 1.143.1, `--steps 20`) the menu stayed open with the entry highlighted once #89 removed
+    // the 600 ms sleep, and the chat never came back. HYPOTHESIS: the menu ignores clicks for a
+    // moment after it opens. So the click is repeated until the menu is gone (the entry ran).
+    for (let attempt = 0; attempt < 3 && (await entry.count()) > 0; attempt += 1) {
+      await entry.first().click();
+      await waitFor(async () => (await entry.count()) === 0, 1_000, 100);
+    }
     await openChat();
     const viaMenu = await waitFor(
       async () => (await ui()).chips.includes('src/sample.ts'),
@@ -5344,7 +6042,7 @@ try {
       await shot('21b-settings-link');
     }
     await page.keyboard.press('Control+W');
-    await sleep(500);
+    await sleep(500); // closing the settings tab has no signal the next step reads; kept short
   };
   await step('21 settings UI (issue #38)', settingsUi);
   // Step 22 (issue #35): the palette commands and the two default keys, with the REAL keyboard in a
@@ -5381,11 +6079,21 @@ try {
     check(await waitIdle(60_000), 'no turn is running when the step starts');
     // Focus in a text editor: quick open the sample file.
     await page.keyboard.press('ControlOrMeta+p');
-    await sleep(500);
+    await waitFor(async () => !(await quickInputHidden()), 2_000, 50);
     await page.keyboard.type('src/sample.ts');
-    await sleep(700);
+    await waitFor(
+      () =>
+        page.evaluate(() =>
+          (
+            globalThis.document.querySelector('.quick-input-list .monaco-list-row.focused')
+              ?.textContent ?? ''
+          ).includes('sample.ts'),
+        ),
+      2_000,
+      50,
+    );
     await page.keyboard.press('Enter');
-    await sleep(1200);
+    await waitFor(editorHasFocus, 5_000, 100);
     check((await editorHasFocus()) === true, 'the focus is in the text editor (src/sample.ts)');
 
     // --- Focus Prompt from the editor, then the toggle back ------------------------------------
@@ -5393,7 +6101,7 @@ try {
     const focusedChat = await waitFor(async () => (await promptState()).focused, 8_000, 250);
     check(focusedChat === true, `${modifier}+P from the editor puts the caret in the prompt box`);
     await shot('22a-focus-prompt');
-    await sleep(600);
+    await sleep(300); // a gap between two presses of the same key: no signal to wait on
     await page.keyboard.press(`${modifier}+p`);
     const backInEditor = await waitFor(editorHasFocus, 8_000, 250);
     check(backInEditor === true, `${modifier}+P again returns the focus to the editor`);
@@ -5408,13 +6116,35 @@ try {
     const inChatAgain = await waitFor(async () => (await promptState()).focused, 8_000, 250);
     check(inChatAgain === true, `${modifier}+P brings the focus back into the chat`);
     await page.keyboard.press('Control+b');
-    await sleep(800);
+    await waitFor(async () => (await sideBarPx()) === 0, 3_000, 100);
     await page.locator('.monaco-editor .view-lines').first().click();
-    await sleep(300);
+    await waitFor(editorHasFocus, 2_000, 100);
     await page.keyboard.press(`${modifier}+p`);
-    await sleep(1500);
     await openChat();
     const reopened = await waitFor(async () => (await promptState()).active, 10_000, 300);
+    if (reopened !== true) {
+      // Not an ok/FAIL/warn line, so `compare-runs` ignores it: it only says why the check below
+      // failed. Why: this check failed 2 times in 6 after #89 phase 3 (28/10/2026) and passed 8 of
+      // 8 with a trace that read the state right after `openChat`, so the trace changed the timing;
+      // this reads it only once the wait has expired. UNVERIFIED: this branch has not run.
+      const where = await page
+        .evaluate(() => {
+          const active = globalThis.document.activeElement;
+          return `${String(active?.tagName)}.${String(active?.className).slice(0, 40)}`;
+        })
+        .catch(() => 'unreadable');
+      const inChat = await web
+        .inDoc((doc) => ({
+          active: `${String(doc.activeElement?.tagName)}.${String(doc.activeElement?.className).slice(0, 40)}`,
+          hasFocus: doc.hasFocus(),
+          visibility: doc.visibilityState,
+          messages: doc.querySelectorAll('[role="log"] > *').length,
+        }))
+        .catch((error) => String(error));
+      console.log(
+        `  focus after the reopen: workbench ${where}, chat ${JSON.stringify(inChat)}, side bar ${String(await sideBarPx())} px`,
+      );
+    }
     check(
       reopened === true,
       'after Ctrl+B hid the chat while it had the focus, Focus Prompt shows it and the prompt box is the active element of the new document (the context key was reset)',
@@ -5422,7 +6152,7 @@ try {
     // `doc.hasFocus()` is false in this new document although the workbench holds focus on its iframe
     // (seen in this step), so the proof is the real keyboard: a typed letter must land in the box.
     await page.keyboard.type('q');
-    await sleep(300);
+    await waitFor(async () => (await promptState()).value === 'q', 2_000, 100);
     check(
       (await promptState()).value === 'q',
       'and a real keystroke typed right after lands in the prompt box',
@@ -5439,7 +6169,9 @@ try {
       `the view has messages before ${modifier}+N is pressed (${beforeNew.messages})`,
     );
     await page.keyboard.press(`${modifier}+n`);
-    await sleep(1500);
+    await waitFor(async () => (await promptState()).messages === 0, 3_000, 100);
+    // Negative check below (no session is created): a short fixed window after the positive wait.
+    await sleep(300);
     const afterNew = await promptState();
     check(afterNew.messages === 0, `${modifier}+N leaves the empty view (${afterNew.messages})`);
     check(
@@ -5463,10 +6195,12 @@ try {
           '',
       }));
     check(await clickButton('Add context'), 'the "+" button is pressed with the real mouse');
-    await sleep(400);
+    await waitPresent('[role="menu"]');
     check((await menuOpen()).menu === true, 'the "+" menu is open before the shortcut');
     await page.keyboard.press(`${modifier}+n`);
-    await sleep(1500);
+    await waitPresent('[role="menu"]', false);
+    // Negative check below (no session is created): a short fixed window after the positive wait.
+    await sleep(300);
     let menuNow = await menuOpen();
     check(
       menuNow.menu === false && menuNow.expanded === 'false',
@@ -5477,7 +6211,7 @@ try {
       `and ${modifier}+N still leaves the empty view without creating a session`,
     );
     check(await clickButton('Add context'), 'the "+" button is pressed again');
-    await sleep(400);
+    await waitPresent('[role="menu"]');
     check((await menuOpen()).menu === true, 'the "+" menu is open before Focus Prompt');
     await page.keyboard.press(`${modifier}+p`);
     const leftChat = await waitFor(editorHasFocus, 8_000, 250);
@@ -5500,7 +6234,7 @@ try {
         expanded: doc.querySelector('button.agent-model-chip')?.getAttribute('aria-expanded') ?? '',
       }));
     check(await clickIn('button.agent-model-chip'), 'the chip is pressed to open its panel');
-    await sleep(400);
+    await waitPresent('.agent-model-panel');
     check((await chipPanelOpen()).panel === true, 'the chip panel is open before the shortcut');
     await page.keyboard.press(`${modifier}+p`);
     const leftWithChip = await waitFor(editorHasFocus, 8_000, 250);
@@ -5519,7 +6253,7 @@ try {
     await send('Count from 1 to 400, one number per line. Do not use tools. LONG');
     check((await waitFor(isBusy, 30_000, 300)) === true, 'a LONG turn is running');
     await page.keyboard.press(`${modifier}+p`); // focus to the editor, so Stop acts from outside
-    await sleep(600);
+    await waitFor(editorHasFocus, 3_000, 100);
     await command('OpenCode: Stop Response');
     check(await waitIdle(30_000), 'Stop Response interrupts the turn');
     const stopped = await promptState();
@@ -5535,8 +6269,7 @@ try {
       ['hc-light', 'Default High Contrast Light'],
     ];
     for (const [name, theme] of THEMES) {
-      writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-      await page.waitForTimeout(2500);
+      await setTheme(theme);
       await command('OpenCode: Stop Response');
       const shown = await waitFor(
         async () =>
@@ -5553,8 +6286,7 @@ try {
       );
       await shot(`22e-nothing-to-stop-${name}`);
     }
-    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
-    await page.waitForTimeout(1500);
+    await setTheme('Default Dark Modern');
     assertNoWebviewErrors('palette commands and shortcuts');
   });
 
@@ -5609,29 +6341,29 @@ try {
     const openByMouse = async () => {
       if ((await plusState()).open) return;
       check(await clickButton('Add context'), 'the "+" button is pressed with the real mouse');
-      await sleep(400);
+      await waitPresent('[role="menu"]');
     };
     const closeByEscape = async () => {
       await page.keyboard.press('Escape');
-      await sleep(250);
+      await sleep(250); // the key reaches the webview asynchronously; some callers expect "nothing changes"
     };
     const press = async (key) => {
       await page.keyboard.press(key);
-      await sleep(200);
+      await sleep(200); // same: asynchronous path of the key, and negative checks follow some presses
     };
 
     check(await waitIdle(60_000), 'no turn is running when the step starts');
     check(await clickButton('New session'), 'New session is pressed');
-    await sleep(1500);
+    await waitEmptyView();
     assertNoWebviewErrors('before the "+" menu step');
 
     // --- Keyboard, 300 px ------------------------------------------------------------------------
     await setSideBarWidth(300).catch(() => undefined);
-    await clickIn('textarea');
+    await focusPromptBox();
     // The button is focused by code (its place in the Tab order is not what this step judges): what
     // follows is the REAL keyboard on it.
     await web.inDoc((doc) => doc.querySelector('button[aria-label="Add context"]')?.focus());
-    await sleep(200);
+    await waitFor(async () => (await plusState()).activeIsTrigger === true, 2_000, 100);
     let state = await plusState();
     check(state.activeIsTrigger === true, 'the "+" button can take the keyboard focus');
     await press('Enter');
@@ -5675,7 +6407,7 @@ try {
     await press('Enter');
     await press('End');
     await press('Enter');
-    await sleep(500);
+    await waitPresent('.mention-popup');
     const mention = await web.inDoc((doc) => ({
       value: doc.querySelector('textarea.prompt-text')?.value ?? '',
       popup: doc.querySelector('.mention-popup') !== null,
@@ -5688,7 +6420,7 @@ try {
     );
     await closeByEscape(); // closes the popup; the "@" stays in the box
     await page.keyboard.press('Backspace');
-    await sleep(200);
+    await waitPresent('.mention-popup', false);
 
     // --- Mouse: outside click closes without moving the focus; the item with the mouse -------------
     await openByMouse();
@@ -5696,7 +6428,7 @@ try {
       await clickIn('textarea'),
       'the prompt box is pressed with the real mouse while the menu is open',
     );
-    await sleep(300);
+    await waitPresent('[role="menu"]', false);
     state = await plusState();
     const boxFocused = await web.inDoc(
       (doc) => doc.activeElement === doc.querySelector('textarea.prompt-text'),
@@ -5741,7 +6473,7 @@ try {
     const openChipPanel = async () => {
       if ((await chipPanelState()).open) return;
       check(await clickIn('button.agent-model-chip'), 'the chip is pressed with the real mouse');
-      await sleep(500);
+      await waitPresent('.agent-model-panel');
     };
     const ensureModelWithVariants = async () => {
       await openChipPanel();
@@ -5755,7 +6487,7 @@ try {
       for (const id of [...ids.filter((x) => x === GLM), ...ids.filter((x) => x !== GLM)]) {
         await openChipPanel();
         await clickIn(`.agent-model-panel button.model-option[data-model="${id}"]`);
-        await sleep(500);
+        await waitPresent('.agent-model-panel', false);
         await openChipPanel();
         const has = (await chipPanelState()).reasoning !== null;
         await closeByEscape();
@@ -5771,7 +6503,19 @@ try {
     const judgeWideChipPanel = async (where, themeName) => {
       await waitFor(async () => (await plusState()).chip !== null, 60_000, 500);
       await openChipPanel();
-      await sleep(300);
+      // The panel lays out two columns after opening: read it once two reads of its boxes agree.
+      let lastBoxes = '';
+      await waitFor(
+        async () => {
+          const now = await chipPanelState();
+          const boxes = JSON.stringify([now.panel, now.agent, now.model, now.reasoning]);
+          const stable = boxes === lastBoxes;
+          lastBoxes = boxes;
+          return stable;
+        },
+        2_000,
+        100,
+      );
       const s = await chipPanelState();
       const sideBySide =
         s.agent !== null &&
@@ -5842,8 +6586,7 @@ try {
         continue;
       }
       for (const [themeName, theme] of PROBLEM_THEMES) {
-        writeSettings(vscode.userDataDir, { 'workbench.colorTheme': theme });
-        await page.waitForTimeout(2500);
+        await setTheme(theme);
         const where = `at ${name} (bar ${String(Math.round(barPx))} px), ${themeName}`;
         // The bar closed: nothing overlaps, nothing sticks out, and in the compact state the chip
         // has a row of its own at the width of the box.
@@ -5891,9 +6634,8 @@ try {
         if (name === 'wide') await judgeWideChipPanel(where, themeName);
       }
     }
-    writeSettings(vscode.userDataDir, { 'workbench.colorTheme': 'Default Dark Modern' });
-    await setSideBarWidth(300).catch(() => undefined);
-    await page.waitForTimeout(1500);
+    await setTheme('Default Dark Modern');
+    await setSideBarWidth(300).catch(() => undefined); // it settles the layout itself
     assertNoWebviewErrors('"+" menu');
   });
 } catch (error) {
@@ -5913,16 +6655,43 @@ if (startupError !== undefined) {
 
 // The fixture keeps the conversation in a state file (the run's Restart Server and Reload Window
 // depend on it): it must exist and hold the sessions of the run. It also proves the server that
-// answered was the fixture, not some opencode found on the PATH.
-check(
-  fs.existsSync(vscode.stateFile) &&
-    (JSON.parse(fs.readFileSync(vscode.stateFile, 'utf8')).sessions?.length ?? 0) > 0,
-  'the synthetic opencode kept the conversation of the run in its state file',
-);
+// answered was the fixture, not some opencode found on the PATH. Judged only if a selected step
+// sends a prompt: a filtered run of steps that never do (0, 1, 21, 23) leaves no session to find.
+// Nor after `--bail` stopped the run: the steps that send may never have run (seen on 28/10/2026,
+// a run stopped at step 1 failed this check too).
+if (bailedAt === undefined && (selection === undefined || selection.sendsPrompt)) {
+  check(
+    fs.existsSync(vscode.stateFile) &&
+      (JSON.parse(fs.readFileSync(vscode.stateFile, 'utf8')).sessions?.length ?? 0) > 0,
+    'the synthetic opencode kept the conversation of the run in its state file',
+  );
+}
+
+// Silent guard (it prints no `ok`, so the count of a full run does not change): a full run must
+// have executed exactly the ids of the catalogue, once and in order, or a step was renamed or
+// dropped without `steps.mjs` following.
+if (
+  selection === undefined &&
+  bailedAt === undefined &&
+  executedIds.join(',') !== STEP_IDS.join(',')
+) {
+  failures.push(
+    `the full run executed steps [${executedIds.join(', ')}] but the catalogue has [${STEP_IDS.join(', ')}]`,
+  );
+}
 
 console.log('\n== summary');
 console.log(`screenshots (${String(shots.length)}):`);
 for (const file of shots) console.log(`  ${file}`);
+console.log('\n== timings');
+for (const { id, name, seconds } of timings) {
+  console.log(
+    `  ${id.padEnd(3)} ${seconds.toFixed(1).padStart(6)} s  ${name.slice(id.length).trim()}`,
+  );
+}
+console.log(
+  `  total ${((performance.now() - vscodeStartedAt) / 1000).toFixed(1)} s since VS Code was started`,
+);
 if (warnings.length) {
   console.log(`warnings (${String(warnings.length)}):`);
   for (const message of warnings) console.log(`  - ${message}`);
