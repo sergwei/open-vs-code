@@ -32,18 +32,24 @@ npm run test:visual
   line of the summary: the build of the host and the webview before it, and the start-up of VS
   Code, are not in it. Every step prints its own `time N.N s` and the summary ends with a
   `== timings` table, so a slow step shows.
-- **What was measured, and on which code.** Four full runs finished without a FAIL (238.5 s, 235.3
-  s, 229.7 s, 229.4 s), but on trees BEFORE the last change to step 22. On the final tree there
-  are two full runs and neither is clean: one took 244.3 s with one FAIL in step 22, the other
-  707.7 s, a cascade of failures (see below). So there is no clean full run of the final code to
-  quote, and the durations above are what the earlier trees measured.
+- **What was measured, and on which code.** The last two full runs (230.6 s and 231.4 s,
+  28/10/2026) ended "all visual checks passed", and `compare-runs` against the baseline found "no
+  differences". They are the first runs with VS Code's own Chat (Copilot) turned off in the test
+  profile (`chat.disableAIFeatures`, the secondary side bar hidden). Earlier the same day, runs
+  on earlier code failed now and then: one FAIL in step 22, and two cascades of failures (see
+  below).
 - **Two known intermittent failures**, not explained yet:
   - Step 22 fails some checks that move the focus with `Control+Alt` (for example "Control+Alt+P
     again brings the focus back to the prompt box after the chip panel"): [#92](https://github.com/sergwei/open-vs-code/issues/92). The cause is a
     HYPOTHESIS: a key sent while the focus is still moving between the webview and the editor is
     lost. It was not reproduced (18 of 18 runs of the step alone passed), so nothing confirms it.
-  - The webview stops answering CDP and the failures cascade (the side bar stuck at an unintended
-    width, the theme not applied, 20 s timeouts): [#93](https://github.com/sergwei/open-vs-code/issues/93). This is where `--bail` saves time.
+  - The webview stops answering and the failures cascade (the side bar stuck at an unintended
+    width, the theme not applied, 20 s timeouts): [#93](https://github.com/sergwei/open-vs-code/issues/93).
+    When it shows as a CDP call that times out, the run now stops by itself after that step,
+    with or without `--bail` (checked by forcing a call that never answers). When it shows as a
+    theme that is not applied, with no CDP timeout, nothing stops it: one such run, with Copilot
+    still on, cascaded from step 0 and showed a GitHub/Copilot modal in step 9. That Copilot
+    played a part is a HYPOTHESIS.
 - Needs Node 22+ (global `WebSocket`) and a display (a real window opens; on Linux use `xvfb-run`).
 - Exit code `0` when every assertion held, `1` when any failed, `2` when it could not start (the
   build is missing, or the VS Code download, launch or CDP connection failed).
@@ -174,8 +180,10 @@ Every step is asserted; nothing is skipped because of what a model did.
 
 After every step it asserts the webview logged **no CSP violation and no uncaught exception**. At
 the end it asserts that the fixture wrote its state file, which proves the server that answered was
-the fixture. The only `warn` that can remain is the contrast of a weak highlighted token in a theme
-that is not strict (step 4), which depends on the colours, not on a model.
+the fixture. Two `warn`s are expected to show up now and then: the contrast of a weak highlighted
+token in a theme that is not strict (step 4), which depends on the colours, not on a model; and
+VS Code's own "Found unexpected null" race while it mounts the webview, which is VS Code's, not
+ours (only that exact message with that stack; any other exception still fails).
 
 **"Always allow".** The script only opens that panel (the "Always allow…" toggle), checks it, goes
 Back and presses "Allow once". It never asks for "Yes, always allow": the click helper throws on
