@@ -24,12 +24,98 @@ npm run test:visual
   It only needs the `stable` VS Code that `@vscode/test-electron` caches in `.vscode-test/`
   (downloaded the first time).
 - It is still run locally, not in CI (decision of Sergio, 22/10/2026): Linux needs `xvfb` and the
-  focus under it is unverified, macOS needs `Cmd+B` where step 5 sends `Control+B`, and contrast
-  and screenshots vary per system. It takes about 6 minutes on the development machine.
+  focus under it is unverified, macOS needs `Cmd+B` where step 22 sends `Control+b` (step 5 clicks
+  the layout button, and sends it only when the notification has no "Open" link), and contrast and
+  screenshots vary per system.
+- **Duration.** A clean full run takes about 230-245 s counted from the moment VS Code starts
+  (Windows 11, VS Code 1.143.1, 28/10/2026). That figure is the `total … since VS Code was started`
+  line of the summary: the build of the host and the webview before it, and the start-up of VS
+  Code, are not in it. Every step prints its own `time N.N s` and the summary ends with a
+  `== timings` table, so a slow step shows.
+- **What was measured, and on which code.** Four full runs finished without a FAIL (238.5 s, 235.3
+  s, 229.7 s, 229.4 s), but on trees BEFORE the last change to step 22. On the final tree there
+  are two full runs and neither is clean: one took 244.3 s with one FAIL in step 22, the other
+  707.7 s, a cascade of failures (see below). So there is no clean full run of the final code to
+  quote, and the durations above are what the earlier trees measured.
+- **Two known intermittent failures**, not explained yet:
+  - Step 22 fails some checks that move the focus with `Control+Alt` (for example "Control+Alt+P
+    again brings the focus back to the prompt box after the chip panel"): [#92](https://github.com/sergwei/open-vs-code/issues/92). The cause is a
+    HYPOTHESIS: a key sent while the focus is still moving between the webview and the editor is
+    lost. It was not reproduced (18 of 18 runs of the step alone passed), so nothing confirms it.
+  - The webview stops answering CDP and the failures cascade (the side bar stuck at an unintended
+    width, the theme not applied, 20 s timeouts): [#93](https://github.com/sergwei/open-vs-code/issues/93). This is where `--bail` saves time.
 - Needs Node 22+ (global `WebSocket`) and a display (a real window opens; on Linux use `xvfb-run`).
 - Exit code `0` when every assertion held, `1` when any failed, `2` when it could not start (the
   build is missing, or the VS Code download, launch or CDP connection failed).
 - Save the output with `npm run test:visual > .vscode-test/visual/run-output.txt 2>&1` to reread it.
+
+### Running only some steps
+
+```sh
+node test/visual/run.mjs --steps 11,14,23     # no build: dist/ must be up to date
+npm run test:visual -- --steps 11,14,23       # builds first
+```
+
+- `--steps a,b,c` runs those steps, always in the canonical order of the table below (a filter
+  never reorders). An unknown id exits with `2` and lists the valid ones.
+- **The prerequisites are added automatically and announced**: `--steps 8` runs 1, 5, 6, 6b and 8,
+  and prints `steps added because the requested ones need them: 1, 5, 6, 6b (requested: 8)`. They
+  are whole steps, so they bring their own `ok` lines; there is no separate set-up code that the
+  full run never exercises. The dependencies live in `STEPS[].needs` in `steps.mjs`.
+- A filtered run starts with the banner `PARTIAL RUN (steps …): not evidence for a commit` and writes
+  its screenshots to `.vscode-test/visual/shots-partial/` and the README crops to
+  `.vscode-test/visual/readme-partial/`, so the `shots/` and `readme/` of the last full run are not
+  touched. Without the step 0 VS Code starts normally (the fixture, no `.down` marker).
+- The check that the fixture kept its state file only runs if a selected step sends a prompt. A
+  selection without the step 20 should not touch the clipboard: read in `run.mjs`, only that step
+  uses `withSavedClipboard` and none presses Copy or Ctrl+C (not observed by running).
+- `--bail` is for development: the run stops after the first step that fails and skips the rest,
+  instead of letting every later wait expire on a broken state. It exits with `1`, prints its own
+  banner, and is **not evidence**: a run without it reports every failure.
+- `--all-themes` takes the screenshots that are only screenshots (11g, 12b, 12d, 12f, 14b, 14d) in
+  the four themes. By default they are taken once, in dark. It never changes a check, so it never
+  changes the `ok` lines; use it when a task touches the CSS of those views.
+- **Only the full run (no `--steps`, no `--bail`) is evidence for a commit.** A filtered run answers
+  "does my change to step N still hold" in seconds; it does not prove that the other steps do.
+
+Every id was run alone with `--steps <id> --bail` on 28/10/2026 (Windows 11, VS Code 1.143.1). 24
+passed on the first try; the 7 failed ("the answered-request lines are the same after Restart
+Server ([] -> [])") until its `needs` became the step 5, and then passed twice. "Step" is the time
+of the step itself, "Total" the `total … since VS Code was started` of that run (it includes the
+added steps):
+
+| Id | What runs | Step (s) | Total (s) |
+|---|---|---|---|
+| 0 | 0 | 9.3 | 13.5 |
+| 1 | 1 | 1.2 | 4.3 |
+| 2 | 1, 2 | 8.0 | 12.7 |
+| 3 | 1, 3 | 4.7 | 9.0 |
+| 4 | 1, 2, 4 | 2.1 | 14.5 |
+| 5 | 1, 5 | 2.7 | 6.8 |
+| 6 | 1, 5, 6 | 3.7 | 10.8 |
+| 6b | 1, 5, 6b | 3.3 | 11.0 |
+| 7 | 1, 5, 7 | 4.9 | 11.4 |
+| 7b | 1, 2, 7b | 10.0 | 22.6 |
+| 8 | 1, 5, 6, 6b, 8 | 2.6 | 16.6 |
+| 9 | 1, 2, 9 | 24.9 | 37.4 |
+| 10 | 1, 2, 9, 10 | 10.5 | 47.1 |
+| 11 | 1, 11 | 8.0 | 12.6 |
+| 13 | 1, 13 | 5.3 | 10.4 |
+| 14 | 1, 14 | 6.8 | 10.9 |
+| 15 | 1, 15 | 21.0 | 25.3 |
+| 16 | 1, 2, 16 | 27.8 | 39.6 |
+| 17 | 1, 17 | 6.3 | 10.4 |
+| 18 | 1, 18 | 9.1 | 13.2 |
+| 19 | 1, 19 | 12.7 | 16.8 |
+| 20 | 1, 20 | 13.4 | 17.2 |
+| 21 | 1, 21 | 2.5 | 6.9 |
+| 22 | 1, 2, 22 | 15.5 | 27.4 |
+| 23 | 1, 23 | 18.0 | 22.2 |
+
+The 16 needs the 2 because its "ArrowUp with the popup closed recalls the last prompt" reads a
+prompt history that an earlier step fills; 4, 7b, 9 and 22 need a conversation open (the 2's), and
+the 10 expects the EMPTY view the 9 leaves. Each of these was run once alone, so an intermittent
+failure would not show in the table.
 
 ### Window size
 
@@ -115,7 +201,8 @@ of `fake-opencode.mjs` says what each one plays and where its shape comes from.
 
 ## Where things go
 
-- Screenshots: `.vscode-test/visual/shots/` (ignored by git). The paths are printed at the end.
+- Screenshots: `.vscode-test/visual/shots/` (ignored by git); a filtered run writes to
+  `shots-partial/` instead. The paths are printed at the end.
 - README crops: for the shots listed in `README_CROPS` (`run.mjs`), a PNG of only the chat
   webview goes to `.vscode-test/visual/readme/` (the full-window shots carry the VS Code logo
   watermark, toasts and the temporary workspace path). The images of the root README
