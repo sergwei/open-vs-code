@@ -164,6 +164,17 @@ export async function startVSCode({ repoRoot, workDir, workspace, opencodePath, 
     // VERIFIED by step 13 (Windows 11, VS Code 1.143.0, 21/10/2026): it applies to
     // `showOpenDialog` from an extension. UNVERIFIED on macOS and Linux.
     'files.simpleDialog.enable': true,
+    // VS Code's own Chat (Copilot) opened in the secondary side bar of every run, picked up the
+    // active editor as context and is one more place that can take the keyboard focus, which is
+    // what most flaky checks of this suite are about (Sergio saw it react during a run,
+    // 28/10/2026). The secondary side bar starts hidden and the built-in AI features are off; the
+    // OpenCode chat is in the primary side bar. Both keys exist in VS Code 1.143.1 (read in
+    // `workbench.desktop.main.js`, 28/10/2026; the visibility takes "hidden"). VERIFIED on Windows
+    // 11, VS Code 1.143.1 (28/10/2026): `--steps 1 --bail` ended "all visual checks passed" and its
+    // screenshot shows no Chat panel, and two full runs then ended "all visual checks passed" with
+    // no differences against the baseline. UNVERIFIED on other VS Code versions.
+    'workbench.secondarySideBar.defaultVisibility': 'hidden',
+    'chat.disableAIFeatures': true,
   });
   const port = await freePort();
   const detached = process.platform !== 'win32'; // own process group, to kill the tree on POSIX
