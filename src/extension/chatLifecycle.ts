@@ -95,6 +95,35 @@ function parseFocusTarget(raw: unknown): FocusTarget | undefined {
 }
 
 /**
+ * Where Focus Prompt sends the focus: the `to` argument of its key (`chat` or `editor`), and with
+ * no valid argument (the palette, or `executeCommand` without one) the toggle on `chatFocused`.
+ *
+ * Why the keys carry it (issue #92): `chatFocused` comes from the webview by `postMessage`, so it
+ * lags the real focus. A press right after the focus left the chat still read `true` and sent the
+ * focus to the editor it was already in, so the key did nothing. The two keybindings in
+ * package.json decide with `editorTextFocus` instead: with the caret in editor text our key goes
+ * to the chat. HYPOTHESIS that the workbench sets that key synchronously from its own DOM focus
+ * (not read in its source; the loop below is what shows the press no longer lags). On macOS
+ * Cmd+Alt+P is also bound by VS Code under `editorFocus` (see `commands.test.ts`), and which rule
+ * wins there is UNVERIFIED.
+ * VERIFIED on Windows 11, VS Code 1.143.1 (28/10/2026) for the lag itself, with a scratch loop of
+ * step 22's presses (not committed): with the old single key, Ctrl+Alt+P pressed from the editor
+ * right after the toggle back left the focus in the editor ("DIV.native-edit-context" active, the
+ * chat document without focus): 15 of 40 rounds for the press after the chip panel. With these
+ * two keys (and the focus hold of `PromptInput`) the same loop ran 160 rounds with no miss of that
+ * kind; one press from the editor left the prompt box active with the chat document reporting
+ * `hasFocus()` false, a different signature, not explained. The
+ * palette keeps the toggle, and so the lag (UNVERIFIED there: the palette takes the focus first).
+ */
+function focusPromptTarget(raw: unknown, chatFocused: boolean): 'chat' | 'editor' {
+  if (typeof raw === 'object' && raw !== null) {
+    const { to } = raw as Record<string, unknown>;
+    if (to === 'chat' || to === 'editor') return to;
+  }
+  return chatFocused ? 'editor' : 'chat';
+}
+
+/**
  * Reads the argument of the "Allow once" / "Reject" links. `always` is refused on purpose: it
  * stores a rule for the whole project and must be chosen in the chat, where the rule is shown.
  */
@@ -154,7 +183,10 @@ function parseReply(
  * Response). Each one first reveals the chat with the command VS Code generates for the view
  * (`openVsCode.chat.focus`), which also hands the keyboard to the iframe, and then asks the
  * webview through `controller.runUiCommand` to do what its button does. Focus Prompt is a toggle:
- * with the chat focused it returns the focus to the editor instead. The `chatFocused` flag comes
+ * with the chat focused it returns the focus to the editor instead; its two keybindings say the
+ * direction in their argument instead of reading the flag (issue #92, {@link focusPromptTarget}),
+ * so the keys go by `editorTextFocus` and the flag only decides the key inside the chat and the
+ * palette. The `chatFocused` flag comes
  * from the webview (`chat.focusChanged`) and is mirrored into the context key
  * `openVsCode.chatFocused` that the keybindings' `when` clauses read; it is reset when the view
  * hides or is disposed, because `blur` does not always fire for a hidden element. The `when` of
@@ -167,7 +199,11 @@ function parseReply(
  * iframe, the toggle works and the context key is false after the chat was hidden while focused.
  * The hide check was also run with the reset of `onVisibilityChange(false)` temporarily removed
  * (25/10/2026): it failed ("the chat webview target did not appear", the key went back to the
- * editor), so it does cover that reset. Not observed: macOS and Linux (keys
+ * editor), so it does cover that reset. Since issue #92 that check runs Focus Prompt from the
+ * palette (the key from editor text no longer reads the flag) and reads "…, Focus Prompt from the
+ * palette shows it and …"; the same mutation repeated on 28/10/2026 (Windows 11, VS Code 1.143.1,
+ * `--steps 22 --bail`) failed it again with "the chat webview target did not appear", and
+ * unmutated it passed. Not observed: macOS and Linux (keys
  * pressed only as `Control+Alt`), a keyboard layout where Ctrl+Alt+P or +N types a character.
  * HYPOTHESIS: `focusView` (a second `openVsCode.chat.focus` after a kept command went out) is what
  * makes the first keystroke land in a freshly created document; in that run the document reported
@@ -310,8 +346,8 @@ export function registerChat(
     }),
     // Issue #35.
     vscode.commands.registerCommand(OPEN_CHAT_COMMAND_ID, () => runInChat('prompt.focus')),
-    vscode.commands.registerCommand(FOCUS_PROMPT_COMMAND_ID, async () => {
-      if (chatFocused) {
+    vscode.commands.registerCommand(FOCUS_PROMPT_COMMAND_ID, async (args: unknown) => {
+      if (focusPromptTarget(args, chatFocused) === 'editor') {
         await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
         return;
       }

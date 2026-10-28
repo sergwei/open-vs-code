@@ -191,9 +191,15 @@ describe('README.md', () => {
       if (command === undefined) throw new Error(`keybinding for an uncontributed command ${id}`);
       return command.category ? `${command.category}: ${command.title}` : command.title;
     };
-    const expected = (manifest.contributes.keybindings ?? []).map((binding) =>
-      `${binding.key} | ${binding.mac ?? ''} | ${label(binding.command)}`.toLowerCase(),
-    );
+    // One row per key and command: Focus Prompt has two rules for the same key, one per direction
+    // (issue #92), and the reader sees one shortcut.
+    const expected = [
+      ...new Set(
+        (manifest.contributes.keybindings ?? []).map((binding) =>
+          `${binding.key} | ${binding.mac ?? ''} | ${label(binding.command)}`.toLowerCase(),
+        ),
+      ),
+    ];
     const rows = readme
       .split(/\r?\n/)
       .map((line) => /^\| `([^`]+)` \| `([^`]+)` \| (OpenCode: [^|]+?) \|/.exec(line))

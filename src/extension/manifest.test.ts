@@ -133,6 +133,7 @@ describe('keybindings in package.json', () => {
     key: string;
     mac?: string;
     when?: string;
+    args?: unknown;
   }
   const bindings = readJson<{ contributes: { keybindings?: Binding[] } }>('../../package.json')
     .contributes.keybindings;
@@ -159,10 +160,22 @@ describe('keybindings in package.json', () => {
     'cmd+i',
   ];
 
-  it('declares the shortcuts of Focus Prompt and New Session', () => {
+  it('declares the shortcuts of Focus Prompt (two, one per direction) and New Session', () => {
     expect(list.map((b) => b.command).sort()).toEqual(
-      [ids.FOCUS_PROMPT_COMMAND_ID, ids.NEW_SESSION_COMMAND_ID].sort(),
+      [ids.FOCUS_PROMPT_COMMAND_ID, ids.FOCUS_PROMPT_COMMAND_ID, ids.NEW_SESSION_COMMAND_ID].sort(),
     );
+  });
+
+  // Issue #92: the key from editor text must not depend on `openVsCode.chatFocused`, which lags
+  // the real focus (it comes from the webview by postMessage). The two `when` clauses must also be
+  // disjoint, or VS Code would pick one of the two directions by rule order.
+  it('sends Focus Prompt to the chat from editor text and to the editor only from the chat', () => {
+    const focus = list.filter((b) => b.command === ids.FOCUS_PROMPT_COMMAND_ID);
+    expect(focus.map((b) => [b.when, b.args])).toEqual([
+      ['editorTextFocus', { to: 'chat' }],
+      [`${ids.CHAT_FOCUSED_CONTEXT_KEY} && !editorTextFocus`, { to: 'editor' }],
+    ]);
+    expect(new Set(focus.map((b) => `${b.key}|${b.mac ?? ''}`)).size).toBe(1);
   });
 
   it('binds only contributed commands, each with key, mac and a non-empty when', () => {
