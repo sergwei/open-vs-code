@@ -106,6 +106,8 @@
 // later steps are skipped and the run exits 1 after its cleanup, so a broken state costs seconds
 // instead of every later wait running to its cap. It prints that the run is not evidence and
 // writes to `shots-partial/` and `readme-partial/`, like a filtered run. Combines with `--steps`.
+// Without the flag too, the run stops after a step that left the chat webview stuck (a CDP call
+// timed out): the later steps would only fail in cascade (issue #93, see `step`).
 //
 // Themes (issue #89): every theme change goes through `setTheme`, which waits for the theme to be
 // applied (workbench class, webview kind, two frames) instead of sleeping. The six loops that only
@@ -218,7 +220,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createWorkspace, startVSCode, writeSettings } from './vscodeProcess.mjs';
-import { openWebview } from './webviewCdp.mjs';
+import { WEBVIEW_STUCK, openWebview } from './webviewCdp.mjs';
 import {
   STEP_IDS,
   parseAllThemesArg,
@@ -827,34 +829,65 @@ async function clickCommandCenter() {
  * 81 s). With F1 retried 3 times, `--steps 16,17` still ended once in 4 with "the command palette
  * did not open for "View: Close All Editors" (F1 pressed 3 times)". The same lost F1 is the likely
  * reason the palette "did not hide the side bar" in step 5 (8 runs of 8, Engram #1335):
- * HYPOTHESIS. Why F1 is lost is not known. The throw for a palette that is open but without the
- * focus was not run (the focus has always arrived): UNVERIFIED until a run loses it. The click opens the quick input in file mode, so the
+ * HYPOTHESIS. Why F1 is lost is not known. The click opens the quick input in file mode, so the
  * text starts with `>` and replaces whatever the input held.
+ *
+ * A palette that opened but did not get the focus is closed and opened again, up to 3 times,
+ * before the call throws. It is closed with Escape only once a click has put the focus in its own
+ * input: an Escape sent while the focus is elsewhere could reach the chat and stop a running turn.
+ * Why the retry: on 28/10/2026 (Windows 11, VS Code 1.143.1), in one full run of two, step 2
+ * failed with "the command palette opened but did not take the focus for "View: Revert and Close
+ * Editor"", right after "Open code in a new file" had opened an Untitled editor. HYPOTHESIS: that
+ * editor took the focus back a moment later; the output shows only the FAIL line.
+ * VERIFIED on Windows 11, VS Code 1.143.1 (28/10/2026) by mutation, a click on the editor right
+ * after the first opening of each call, `--steps 2 --bail`: for "View: Revert and Close Editor" the
+ * first try typed nothing, the second did, and the run ended "all visual checks passed". NOT
+ * observed: the close of a palette still shown (the click on the editor had probably closed it
+ * already), the throw after 3 openings, and the real late focus move being beaten by the retry.
  */
 async function command(title) {
-  let open = false;
   let clicks = 0;
   let f1Presses = 0;
-  for (let attempt = 0; attempt < 3 && !open; attempt += 1) {
-    const clicked = attempt === 0 && (await clickCommandCenter()); // the mouse first, then F1
-    if (clicked) clicks += 1;
-    else {
-      f1Presses += 1;
-      await page.keyboard.press('F1');
+  let unfocused = 0;
+  let typed = false;
+  for (let tries = 0; tries < 3 && !typed; tries += 1) {
+    let open = false;
+    for (let attempt = 0; attempt < 3 && !open; attempt += 1) {
+      const clicked = attempt === 0 && (await clickCommandCenter()); // the mouse first, then F1
+      if (clicked) clicks += 1;
+      else {
+        f1Presses += 1;
+        await page.keyboard.press('F1');
+      }
+      open = (await waitFor(async () => !(await quickInputHidden()), 1_000, 50)) === true;
     }
-    open = (await waitFor(async () => !(await quickInputHidden()), 1_000, 50)) === true;
+    if (!open) {
+      throw new Error(
+        `the command palette did not open for "${title}" (${String(clicks)} clicks on the command center, F1 pressed ${String(f1Presses)} times)`,
+      );
+    }
+    typed = await typeInQuickInput(page.locator('.quick-input-widget input').first(), `>${title}`);
+    if (!typed) {
+      unfocused += 1;
+      if (!(await quickInputHidden())) {
+        // The focus goes into the palette's input first, so the Escape cannot reach the chat.
+        await page
+          .locator('.quick-input-widget input')
+          .first()
+          .click({ timeout: 2_000 })
+          .catch(() => undefined);
+        const inPalette = await page.evaluate(() =>
+          globalThis.document.activeElement?.closest('.quick-input-widget') ? true : false,
+        );
+        if (inPalette) await page.keyboard.press('Escape');
+      }
+      await waitFor(quickInputHidden, 1_000, 50);
+    }
   }
-  if (!open) {
-    throw new Error(
-      `the command palette did not open for "${title}" (${String(clicks)} click on the command center, F1 pressed ${String(f1Presses)} times)`,
-    );
-  }
-  const typed = await typeInQuickInput(
-    page.locator('.quick-input-widget input').first(),
-    `>${title}`,
-  );
   if (!typed) {
-    throw new Error(`the command palette opened but did not take the focus for "${title}"`);
+    throw new Error(
+      `the command palette opened but did not take the focus for "${title}" (${String(unfocused)} openings)`,
+    );
   }
   await waitFor(
     () =>
@@ -991,10 +1024,12 @@ function waitPresent(selector, present = true, ms = 3_000) {
  *
  * Returns whether the focus reached the quick input within 2 s, and types NOTHING when it did not:
  * a Ctrl+A and a text sent to whatever else holds the focus (an editor) write into the workspace.
- * Every caller turns the `false` into a throw before pressing Enter, since an Enter without the
- * focus goes to whatever holds it (#94): `command()` fails the step, step 0 throws inside its `try`
- * and takes its fallback (write the setting, warn), step 13 fails with the dialog named.
- * UNVERIFIED: the `false` path has not run, the focus has always arrived in the runs so far.
+ * No caller presses Enter after a `false`, since an Enter without the focus goes to whatever holds
+ * it (#94): `command()` closes the palette and opens it again, up to 3 times, then throws; step 0
+ * throws inside its `try` and takes its fallback (write the setting, warn); step 13 fails with the
+ * dialog named. VERIFIED for `command()` on Windows 11, VS Code 1.143.1 (28/10/2026) by mutation:
+ * the first try returned false ("try 0 typed=false") and the second typed. NOT observed: the
+ * `false` path in steps 0 and 13.
  */
 async function typeInQuickInput(dialog, text) {
   const focused =
@@ -1224,11 +1259,45 @@ const outcomeLines = () =>
     alerts: doc.querySelectorAll('[role="alert"]').length,
   }));
 
-/** Fails when the webview logged a CSP violation or an uncaught exception since the last call. */
+/**
+ * Whether a logged exception is VS Code's own race while mounting the webview, not our code.
+ * VERIFIED by reading VS Code 1.143.1 (28/10/2026): `set contentOptions` and `setHtml` each call
+ * `doUpdateContent`, which sends "content", and the webview host page builds an inner frame per
+ * content update; `webview.options` then `webview.html` (chatViewProvider) are two updates. The
+ * stack seen twice that day was `assertIsDefined` <- `hookupOnLoadHandlers` <- the `setTimeout` of
+ * `onFrameLoaded`, in the webview host `index.html`. HYPOTHESIS (deduced from that reading and the
+ * stack, not forced): the first frame's pending `hookupOnLoadHandlers` finds its `contentWindow`
+ * gone once the second update replaced it, and the second frame loads; the extension cannot avoid
+ * it cleanly (scripts need an options update, and html first also makes two).
+ * Only that exact message with that frame matches: any other exception still fails the check.
+ * VERIFIED on Windows 11, Node 24.22 (28/10/2026) with a scratch script on the logged line of a
+ * full run: the real line matched, "Uncaught TypeError: x is undefined" did not, nor the same
+ * message with another frame. NOT observed: the warning in a full run.
+ */
+function isVsCodeFrameRace(line) {
+  return (
+    line.startsWith('[exception] Uncaught Error: Found unexpected null') &&
+    line.includes('at hookupOnLoadHandlers (vscode-webview://')
+  );
+}
+
+/**
+ * Fails when the webview logged a CSP violation or an uncaught exception since the last call.
+ * VS Code's own frame race (`isVsCodeFrameRace`) is a warning instead (decision of Sergio,
+ * 28/10/2026): it comes from the host page, not from our bundle, and the extension cannot avoid it
+ * cleanly (see `isVsCodeFrameRace`).
+ */
 function assertNoWebviewErrors(where) {
-  const bad = webviewLogs
+  const logged = webviewLogs
     .splice(0)
     .filter((line) => /Refused to|Content Security Policy|^\[exception\]/i.test(line));
+  const races = logged.filter(isVsCodeFrameRace);
+  if (races.length > 0) {
+    warn(
+      `${where}: VS Code's webview host threw "Found unexpected null" while mounting (its own race)`,
+    );
+  }
+  const bad = logged.filter((line) => !isVsCodeFrameRace(line));
   check(
     bad.length === 0,
     `${where}: no CSP violation or exception in the webview${bad.length ? ` (${bad.slice(0, 3).join(' | ')})` : ''}`,
@@ -1346,7 +1415,10 @@ function withSavedClipboard(body) {
 const executedIds = [];
 const timings = [];
 
-/** Under `--bail`, the id of the step whose failure stopped the run; then every later step is skipped. */
+/**
+ * The id of the step after which the run stopped (`--bail` and a failure, or a stuck webview);
+ * then every later step is skipped.
+ */
 let bailedAt;
 
 /**
@@ -1361,6 +1433,17 @@ let bailedAt;
  * Under `--bail` the first step that fails (a FAIL check, which ends the body with `BailStop`, or
  * an exception) takes its FAIL screenshot and stops the run: the later steps return at once, as an
  * unselected one does, and the run goes to its cleanup and summary (exit 1).
+ *
+ * With or without `--bail`, a step after which the chat webview connection is stuck (one CDP call
+ * timed out, `stuckReason` in `webviewCdp.mjs`) stops the run the same way and records why. Issue
+ * #93: once the webview stopped answering, nearly every later step failed in cascade and the full
+ * run took 707.7 s instead of about 240 (28/10/2026); the later steps prove nothing then. VERIFIED on
+ * Windows 11, VS Code 1.143.1 (28/10/2026) by mutation, an `inDoc` that never resolves added to
+ * step 1, `--steps 2`: the run printed "the webview is stuck (CDP Runtime.evaluate timed out after
+ * 20000 ms): stopping after step 1; the remaining steps are skipped" and ended in 27 s with exit 1.
+ * NOT observed: a real stuck webview (the cascade was not reproduced: 300 sash drags, 200 theme
+ * switches and 150 rounds with the server down, in isolation, were all clean), nor the path where
+ * `openChat` itself gets stuck.
  */
 async function step(name, body) {
   const id = stepIdOf(name);
@@ -1369,6 +1452,8 @@ async function step(name, body) {
   console.log(`\n== ${name}`);
   const startedAt = performance.now();
   const failuresBefore = failures.length;
+  // A stuck connection that never reached `web` (it got stuck inside `openChat`) shows only here.
+  let stuckInException;
   inStep = true;
   try {
     await body();
@@ -1378,6 +1463,7 @@ async function step(name, body) {
       const message = error instanceof Error ? error.message : String(error);
       failures.push(`${name}: ${message}`);
       console.log(`  FAIL (exception) ${message}`);
+      if (message.includes(WEBVIEW_STUCK)) stuckInException = message;
     }
     await shot(`FAIL-${name.replace(/\W+/g, '-')}`).catch(() => undefined);
   } finally {
@@ -1386,7 +1472,14 @@ async function step(name, body) {
   const seconds = (performance.now() - startedAt) / 1000;
   timings.push({ id, name, seconds });
   console.log(`  time ${seconds.toFixed(1)} s`);
-  if (bail && failures.length > failuresBefore) {
+  const stuck = web?.stuckReason() ?? stuckInException;
+  if (stuck !== undefined) {
+    bailedAt = id;
+    failures.push(`${name}: the remaining steps were skipped, the webview is stuck (#93)`);
+    console.log(
+      `  the webview is stuck (${stuck}): stopping after step ${id}; the remaining steps are skipped`,
+    );
+  } else if (bail && failures.length > failuresBefore) {
     bailedAt = id;
     console.log(`  --bail: stopping after step ${id}; the remaining steps are skipped`);
   }
@@ -6656,8 +6749,8 @@ if (startupError !== undefined) {
 // depend on it): it must exist and hold the sessions of the run. It also proves the server that
 // answered was the fixture, not some opencode found on the PATH. Judged only if a selected step
 // sends a prompt: a filtered run of steps that never do (0, 1, 21, 23) leaves no session to find.
-// Nor after `--bail` stopped the run: the steps that send may never have run (seen on 28/10/2026,
-// a run stopped at step 1 failed this check too).
+// Nor after the run stopped early (`--bail`, or a stuck webview, `bailedAt`): the steps that send
+// may never have run (seen on 28/10/2026, a run stopped at step 1 failed this check too).
 if (bailedAt === undefined && (selection === undefined || selection.sendsPrompt)) {
   check(
     fs.existsSync(vscode.stateFile) &&
