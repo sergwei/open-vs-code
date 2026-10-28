@@ -26,7 +26,8 @@ export default defineConfig({
       {
         test: {
           name: 'node',
-          include: ['src/**/*.test.ts'],
+          // `test/visual/*.test.mjs`: the pure part of the visual run (issue #89).
+          include: ['src/**/*.test.ts', 'test/visual/**/*.test.mjs'],
           environment: 'node',
         },
       },
