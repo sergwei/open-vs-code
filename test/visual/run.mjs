@@ -1879,6 +1879,44 @@ try {
     .waitFor({ state: 'visible', timeout: 30_000 })
     .catch(() => undefined);
 
+  /**
+   * Texts of the native notifications that mention OpenCode: the visible toasts plus the ones the
+   * notification center holds (a toast VS Code hid on its own is still listed there).
+   *
+   * The center is opened from the palette ("Notifications: Show Notifications") and closed with
+   * "Notifications: Hide Notifications", Escape only if it is still open. Returns `{ notices,
+   * centerRead }`; `centerRead` is false when the center could not be opened or read, and the
+   * callers then FAIL their check (an unreadable center is "not measured", never "0 notices").
+   * VERIFIED on Windows 11, VS Code 1.144.0 (28/10/2026), full `npm run test:visual`: "ok   no
+   * native OpenCode warning appears while the setup guide is shown (center read: true; [])" and
+   * "ok   no native OpenCode warning appears after step 2 (Start the server) fails (center read:
+   * true; [])", so both palette titles and the selector opened and read the center. Not observed:
+   * a center holding an OpenCode notification (that case is covered by the mutation check of step
+   * 0, not re-run in this round).
+   */
+  const nativeOpenCodeNotices = async () => {
+    const isOpenCode = (text) => /opencode|openVsCode/i.test(text);
+    const toasts = await page.locator('.notifications-toasts .notification-toast').allInnerTexts();
+    let listed = [];
+    let centerRead = false;
+    try {
+      await command('Notifications: Show Notifications');
+      await page.locator('.notifications-center.visible').waitFor({ timeout: 3_000 });
+      listed = await page.locator('.notifications-center .notification-list-item').allInnerTexts();
+      await command('Notifications: Hide Notifications');
+      if (await page.locator('.notifications-center.visible').count()) {
+        await page.keyboard.press('Escape');
+      }
+      centerRead = true;
+    } catch (error) {
+      console.log(`  the notification center could not be read: ${String(error)}`);
+    }
+    return {
+      notices: [...toasts, ...listed].filter(isOpenCode).map((text) => text.replace(/\s+/g, ' ')),
+      centerRead,
+    };
+  };
+
   // E2 (issue #85) step 0: the setup guide. VS Code started with `openVsCode.opencodePath` pointing
   // at a file that does not exist, and with the fixture's `.down` marker in place.
   await step('0 setup guide: binary missing, Choose binary…, server down, Restart', async () => {
@@ -1910,7 +1948,19 @@ try {
       'step 1 says which openVsCode.opencodePath value was searched (the missing file)',
     );
     check(!state.header && !state.textarea, 'the guide has no header and no prompt box');
+    const guideSeenAt = Date.now();
     await shot('00-guide');
+    // Issue #87: with the guide on screen, no native OpenCode notification may be there, neither as
+    // a toast nor in the notification center. The wait runs from the moment the guide was seen, a
+    // little past the 3 s grace period of `CHAT_SHOW_GRACE_MS`, so a warning that was only
+    // postponed (not withheld) has appeared by now. Placed before the theme rounds on purpose: a
+    // toast left on screen disturbs them, and this check must be the one that says why.
+    await page.waitForTimeout(Math.max(0, guideSeenAt + 4_500 - Date.now()));
+    const afterGuide = await nativeOpenCodeNotices();
+    check(
+      afterGuide.centerRead && afterGuide.notices.length === 0,
+      `no native OpenCode warning appears while the setup guide is shown (center read: ${String(afterGuide.centerRead)}; ${JSON.stringify(afterGuide.notices).slice(0, 200)})`,
+    );
     await problemLayoutRounds(
       'guide',
       {
@@ -1934,8 +1984,59 @@ try {
       'test-fixtures',
       'fake-opencode.mjs',
     );
+    // Issue #86: the state of "Choose binary…" as the page shows it.
+    const chooseState = () =>
+      web.inDoc((doc) => {
+        const button = [...doc.querySelectorAll('[data-step="binary"] button')].find(
+          (b) => b.textContent === 'Choose binary…',
+        );
+        return button
+          ? {
+              busy: button.getAttribute('aria-disabled'),
+              hasDisabled: button.hasAttribute('disabled'),
+              status: doc.querySelector('[data-step="binary"]')?.getAttribute('data-status'),
+            }
+          : null;
+      });
+    const quickInput = page.locator('.quick-input-widget input').first();
+
+    // Issue #86, part 1: a dialog that is cancelled. While it is open the button is busy
+    // (`aria-disabled`, never `disabled`) and the step still says Failed; Escape gives it back.
+    check(await clickButton('Choose binary…'), 'Choose binary… is pressed (and then cancelled)');
+    await quickInput.waitFor({ state: 'visible', timeout: 15_000 });
+    const busyWhileOpen = await waitFor(
+      async () => {
+        const s = await chooseState();
+        return s !== null && s.busy === 'true' && !s.hasDisabled && s.status === 'failed';
+      },
+      5_000,
+      100,
+    );
+    check(
+      busyWhileOpen === true,
+      'while the file dialog is open, Choose binary… is aria-disabled (not disabled) and step 1 still says Failed',
+    );
+    await page.keyboard.press('Escape');
+    const usableAgain = await waitFor(
+      async () => {
+        const s = await chooseState();
+        return s !== null && s.busy === null && s.status === 'failed';
+      },
+      5_000,
+      100,
+    );
+    check(
+      usableAgain === true,
+      'cancelling the file dialog gives Choose binary… back and step 1 stays Failed',
+    );
+
+    // Issue #86, part 2: a path is chosen while the fixture answers `--version` slowly (the
+    // `.slow-version` marker, at most 8 s), so "Checking…" stays on screen long enough to be
+    // measured at 300 px in the four themes.
+    const slowMarker = `${vscode.stateFile}.slow-version`;
+    fs.writeFileSync(slowMarker, 'slow --version\n');
     check(await clickButton('Choose binary…'), 'Choose binary… is pressed with the real mouse');
-    const dialog = page.locator('.quick-input-widget input').first();
+    const dialog = quickInput;
     let viaDialog;
     try {
       await dialog.waitFor({ state: 'visible', timeout: 15_000 });
@@ -1944,6 +2045,73 @@ try {
       }
       await shot('00b-choose-binary-dialog');
       await page.keyboard.press('Enter');
+      const checkingSeen = await waitFor(
+        () =>
+          web.inDoc(
+            (doc) =>
+              doc.querySelector('[data-step="binary"]')?.getAttribute('data-status') === 'checking',
+          ),
+        8_000,
+        100,
+      );
+      check(
+        checkingSeen === true,
+        'after choosing a path, step 1 says Checking… while the detection runs',
+      );
+      if (checkingSeen === true) {
+        const checkingBarPx = await sideBarPx();
+        const shownTheme = [];
+        for (const [themeName, theme] of PROBLEM_THEMES) {
+          await setTheme(theme);
+          const where = `Checking… at 300 (bar ${String(Math.round(checkingBarPx))} px), ${themeName}`;
+          const view = await web.inDoc((doc) => ({
+            status: doc.querySelector('[data-step="binary"]')?.getAttribute('data-status'),
+            title: doc.querySelector('[data-step="binary"] .step-title')?.textContent,
+            lines: [...doc.querySelectorAll('[data-step="binary"] .step-line')].map(
+              (l) => l.textContent,
+            ),
+            spinner: doc.querySelector('[data-step="binary"] .spinner') !== null,
+            live: doc.querySelector('.setup-guide [role="status"]')?.textContent,
+            serverStatus: doc.querySelector('[data-step="server"]')?.getAttribute('data-status'),
+          }));
+          if (view.status !== 'checking') {
+            warn(`${where}: the detection ended before this theme was measured: not judged`);
+            continue;
+          }
+          shownTheme.push(themeName);
+          check(
+            view.title === '1. Find the opencode binary — Checking…',
+            `${where}: the title says Checking… ("${String(view.title)}")`,
+          );
+          check(
+            // Lower-cased: the dialog hands back the drive letter in lower case ("g:\…").
+            view.lines.length === 1 &&
+              view.lines[0]?.toLowerCase() === `Checking ${fixturePath}…`.toLowerCase(),
+            `${where}: one line names the chosen path (${JSON.stringify(view.lines).slice(0, 160)})`,
+          );
+          check(view.spinner, `${where}: a spinner is shown`);
+          check(
+            view.live === 'Checking the opencode binary…' && view.serverStatus === 'waiting',
+            `${where}: the hidden region announces the check and step 2 still waits`,
+          );
+          const contrastNow = await web.inDoc(measureText, {
+            title: '[data-step="binary"] .step-title',
+            detail: '[data-step="binary"] .step-line',
+          });
+          for (const [part, result] of Object.entries(contrastNow)) {
+            if (part === 'error') continue;
+            if (!check(result !== null, `${where}: ${part} is on screen to be measured`)) continue;
+            check(
+              result.ratio >= 4.5,
+              `${where}: ${part} contrast ${result.ratio.toFixed(2)} >= 4.5 (${result.color} on ${result.background})`,
+            );
+          }
+          await shot(`00c-checking-${themeName}`);
+        }
+        console.log(`  Checking… measured in: ${shownTheme.join(', ') || 'no theme'}`);
+        await setTheme('Default Dark Modern');
+      }
+      fs.rmSync(slowMarker, { force: true });
       viaDialog =
         (await waitFor(
           () =>
@@ -1957,6 +2125,7 @@ try {
     } catch {
       viaDialog = false;
     }
+    fs.rmSync(slowMarker, { force: true });
     if (!viaDialog) {
       // Plan B (decision of the plan, section 10): the dialog did not take the .mjs. Close it,
       // write the setting the way the action would, and say so.
@@ -1986,6 +2155,14 @@ try {
       'step 1 is done and step 2 (Start the server) fails: the server is marked down',
     );
     await shot('00c-server-down');
+    // Issue #87, the lifecycle notification: the chat is ready and shows the failed step 2, so the
+    // "server failed to start" error must not appear natively either.
+    await page.waitForTimeout(1_500);
+    const afterStep2 = await nativeOpenCodeNotices();
+    check(
+      afterStep2.centerRead && afterStep2.notices.length === 0,
+      `no native OpenCode warning appears after step 2 (Start the server) fails (center read: ${String(afterStep2.centerRead)}; ${JSON.stringify(afterStep2.notices).slice(0, 200)})`,
+    );
 
     // The server is let back up and Restart is pressed with the real mouse.
     fs.rmSync(vscode.downMarker, { force: true });

@@ -134,6 +134,8 @@
 //   - A prompt containing CRASH (E2, issue #85; only with FAKE_OPENCODE_STATE_FILE) writes the marker
 //     `<state file>.down` and exits with code 1 mid-turn; while the marker exists every start
 //     behaves like `exit-early`. Deleting the marker and restarting brings the server back.
+//   - While the marker `<state file>.slow-version` exists, `--version` waits for it to go away,
+//     at most 8 s (issue #86: `test:visual` step 0 measures "Checking…" in that window).
 //   - FAKE_OPENCODE_STATE_FILE: sessions, history and the id counter are loaded from it on start
 //     and rewritten after every change (temporary file, then rename), so a relaunched server (the
 //     visual run's Restart Server and Reload Window) still has the conversation, as the real
@@ -2155,8 +2157,38 @@ function handleChat(request, response) {
   return false;
 }
 
+/**
+ * Longest a `--version` waits for the `<FAKE_OPENCODE_STATE_FILE>.slow-version` marker to go away,
+ * in ms. Chosen under the extension's own `VERSION_TIMEOUT_MS` (10 000 in `opencodeBinary.ts`) with
+ * room for the process start, so the detection never reports `run-failed` because of the marker.
+ */
+const SLOW_VERSION_CAP_MS = 8_000;
+
+/**
+ * Prints the version, but first waits (polling every 100 ms, at most {@link SLOW_VERSION_CAP_MS})
+ * while the `.slow-version` marker exists next to the state file (issue #86: `test:visual` step 0
+ * keeps the detection busy long enough to measure the "Checking…" state). Without a state file or
+ * without the marker it answers at once. After the cap it answers anyway, so a marker left behind
+ * delays the detection by 8 s and never breaks it.
+ * VERIFIED on Windows 11, VS Code 1.144.0 (28/10/2026), full `npm run test:visual`: "ok   after
+ * choosing a path, step 1 says Checking… while the detection runs" (the extension host's
+ * `--version` child saw the marker, so it inherits `FAKE_OPENCODE_STATE_FILE`).
+ */
+function printVersionWhenNotSlow() {
+  const marker = `${STATE_FILE}.slow-version`;
+  const started = Date.now();
+  const tick = () => {
+    if (STATE_FILE !== '' && fs.existsSync(marker) && Date.now() - started < SLOW_VERSION_CAP_MS) {
+      setTimeout(tick, 100);
+      return;
+    }
+    process.stdout.write(`opencode v${version}\n`, () => process.exit(0));
+  };
+  tick();
+}
+
 if (args.includes('--version')) {
-  process.stdout.write(`opencode v${version}\n`, () => process.exit(0));
+  printVersionWhenNotSlow();
 } else if (args[0] !== 'serve') {
   exitAfterStderr(`fake-opencode: unknown command ${JSON.stringify(args)}\n`, 2);
 } else {
