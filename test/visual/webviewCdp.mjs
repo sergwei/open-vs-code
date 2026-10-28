@@ -20,6 +20,12 @@ const EXTENSION_ID = 'sergwei.open-vs-code';
 /** Longest wait for one CDP reply, in ms; see `send` inside {@link openWebview}. */
 const CALL_TIMEOUT_MS = 20_000;
 
+/**
+ * Start of the message every call of a connection rejects with once one of its calls timed out;
+ * `run.mjs` reads it to stop the run (issue #93).
+ */
+export const WEBVIEW_STUCK = 'the chat webview stopped answering CDP';
+
 /** Finds the webview target of the extension, polling the debugging endpoint. */
 async function webviewTarget(port, timeoutMs) {
   const end = Date.now() + timeoutMs;
@@ -39,7 +45,7 @@ async function webviewTarget(port, timeoutMs) {
 }
 
 /**
- * Connects to the webview target and returns `{ inDoc, close }`.
+ * Connects to the webview target and returns `{ inDoc, stuckReason, close }`.
  *
  * `inDoc(fn, arg)` evaluates `fn(document, arg)` inside the inner frame and returns its JSON-able
  * result. `fn` is serialized with `toString()`, so it must be self-contained (no closures); `arg`
@@ -87,18 +93,44 @@ export async function openWebview(port, logs, timeoutMs = 30_000) {
       logs.push(`[exception] ${details.text} ${details.exception?.description ?? ''}`);
     }
   };
+  /** Set by the first call that timed out: why this connection is considered stuck. */
+  let stuck;
   /**
    * Sends one CDP command and resolves with its reply. Rejects when the socket closes or when no
    * reply comes within `CALL_TIMEOUT_MS` (our own figure: a `Runtime.evaluate` of these small
    * scripts answers in milliseconds, so 20 s means the target is gone or stuck). Without this a
    * destroyed target left the promise pending forever and `run.mjs` never reached its cleanup.
+   *
+   * After one timeout every later call of this connection rejects at once with `WEBVIEW_STUCK`
+   * instead of waiting another 20 s each (issue #93): in the full run of 28/10/2026 that ended in
+   * 707.7 s, most steps after the webview got stuck took about 20 s each. A new connection
+   * (`openChat`) starts clean. HYPOTHESIS: a webview that timed out once does not answer again; in
+   * the two cascades seen, no later call did.
+   * A call on a socket that is no longer open rejects at once with "socket closed", not as stuck:
+   * `ws.send` on a closed WebSocket does not throw, so it used to wait the 20 s and be told apart
+   * from a frozen webview by nothing. VERIFIED with a `node -` probe on Node 24.22, Windows 11
+   * (28/10/2026): `send` on a WebSocket in state CLOSED "did not throw".
+   * VERIFIED on Windows 11, VS Code 1.143.1 (28/10/2026) by mutation, a call that never answers in
+   * step 1 and a second call right after it: the first rejected with "the chat webview stopped
+   * answering CDP (CDP Runtime.evaluate timed out after 20000 ms)" and the second with the same
+   * message "after 0 ms". Both were caught inside the step, and the run still stopped through
+   * `stuckReason`. NOT observed: a really frozen webview, a closed socket in a run.
    */
   const send = (method, params = {}) =>
     new Promise((resolve, reject) => {
+      if (stuck !== undefined) {
+        reject(new Error(`${WEBVIEW_STUCK} (${stuck})`));
+        return;
+      }
+      if (ws.readyState !== WebSocket.OPEN) {
+        reject(new Error(`CDP ${method}: the webview CDP socket is closed`));
+        return;
+      }
       const id = ++nextId;
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`CDP ${method} timed out after ${String(CALL_TIMEOUT_MS)} ms`));
+        stuck = `CDP ${method} timed out after ${String(CALL_TIMEOUT_MS)} ms`;
+        reject(new Error(`${WEBVIEW_STUCK} (${stuck})`));
       }, CALL_TIMEOUT_MS);
       pending.set(id, { resolve, reject, timer });
       try {
@@ -138,6 +170,8 @@ export async function openWebview(port, logs, timeoutMs = 30_000) {
 
   return {
     inDoc,
+    /** Why this connection is stuck (a call timed out), or `undefined` while it answers. */
+    stuckReason: () => stuck,
     close: () => {
       ws.close();
     },
