@@ -33,6 +33,8 @@
  * measurement: the 24 needs the 1 (it drives the chat) and sends prompts; the 25 needs nothing
  * (it starts two more VS Code windows of its own, a control and one in Restricted Mode, and never
  * touches the main one).
+ * The step 26 (editor and Explorer context menus, issue #36) came after that measurement too: it
+ * needs the 1 (it drives the chat) and sends prompts.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -67,6 +69,7 @@ export const STEPS = [
   { id: '23', needs: ['1'], sendsPrompt: false },
   { id: '24', needs: ['1'], sendsPrompt: true },
   { id: '25', needs: [], sendsPrompt: false },
+  { id: '26', needs: ['1'], sendsPrompt: true },
 ];
 
 /** Every valid id, in canonical order. */

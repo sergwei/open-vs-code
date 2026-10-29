@@ -7409,6 +7409,498 @@ try {
       });
     },
   );
+
+  // Step 26 (issue #36, plan E9-context-menus section 8): the context-menu entries of the editor
+  // and the Explorer, driven with the REAL right mouse button and judged in the DOM of the webview
+  // (never in the host log, which carries no text). Cells: C1 the three entries of the editor menu,
+  // in order; C2 the two of the Explorer menu with two files selected; C3 Explain from the editor
+  // sends the exact prompt with the chip `src/sample.ts#2-3` and leaves the user's draft alone; C4
+  // Fix lists the two errors the TypeScript server reports; C5 Explain from the Explorer with the
+  // chat view HIDDEN, two files and a folder selected: two chips and ONE notice with the count; C6
+  // a busy session makes Fix fall to the prompt box (text, chip, notice, focus), the notice has
+  // contrast >= 4.5 in the four themes at 300 px and the box with several lines does not overflow
+  // at 300 px and under 200 px (dark); C7 an untitled document has no entries and a file outside
+  // the workspace folder raises the native warning and sends nothing.
+  await step('26 editor and Explorer context menus (issue #36)', async () => {
+    const DARK = 'Default Dark Modern';
+    const EXPLAIN = 'Explain with OpenCode';
+    const ADD = 'Add to OpenCode Chat';
+    const FIX = 'Fix with OpenCode';
+    const srcDir = path.join(workspace, 'src');
+    const brokenFile = path.join(srcDir, 'broken26.ts');
+    const otherFile = path.join(srcDir, 'context-b.ts');
+    const outsideFile = path.join(workDir, 'outside26.ts');
+    const ctx = () =>
+      web.inDoc((doc) => {
+        const box = (element) => {
+          if (!element) return null;
+          const r = element.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width };
+        };
+        const field = doc.querySelector('textarea.prompt-text');
+        const groups = [...doc.querySelectorAll('[role="log"] .message-files')];
+        const lastGroup = groups.at(-1);
+        return {
+          view: { width: doc.defaultView.innerWidth, height: doc.defaultView.innerHeight },
+          scrollOverflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+          value: field?.value ?? '',
+          field: box(field),
+          prompt: box(doc.querySelector('form.prompt')),
+          fieldOverflow: field ? field.scrollWidth - field.clientWidth : 0,
+          focusOnBox: field !== null && doc.activeElement === field,
+          chips: [...doc.querySelectorAll('.chips .chip-open, .chips .chip-name')].map(
+            (c) => c.textContent ?? '',
+          ),
+          users: [...doc.querySelectorAll('[role="log"] .message-user .part-text')].map((m) =>
+            (m.textContent ?? '').replace(/\s+/g, ' ').trim(),
+          ),
+          sentChips: lastGroup
+            ? [...lastGroup.querySelectorAll('.chip')].map((c) => (c.textContent ?? '').trim())
+            : [],
+          notices: [...doc.querySelectorAll('.status-bar .alert .alert-text')].map((n) =>
+            (n.textContent ?? '').replace(/\s+/g, ' ').trim(),
+          ),
+        };
+      });
+    // A Playwright locator, not `page.evaluate`: the editor's context menu lives in a shadow root
+    // (seen 29/10/2026: `querySelectorAll` found no row while the menu was on screen) and locators
+    // pierce open shadow roots; the Explorer's menu is plain DOM and works the same way.
+    const menuRows = async () =>
+      (await page.locator('.monaco-menu .action-label').allInnerTexts())
+        .map((text) => text.trim())
+        .filter((text) => text !== '');
+    const closeMenu = async () => {
+      await page.keyboard.press('Escape');
+      await waitFor(async () => (await menuRows()).length === 0, 2_000, 100);
+    };
+    // A real right-click at a point; resolves once a menu with rows is on screen.
+    const rightClick = async (point) => {
+      await page.mouse.click(point.x, point.y, { button: 'right' });
+      await waitFor(async () => (await menuRows()).length > 0, 3_000, 100);
+    };
+    // The entry is clicked again until the menu is gone: a click right after the menu opens only
+    // highlights it (see step 20, 28/10/2026).
+    const choose = async (label) => {
+      const entry = page.locator('.monaco-menu').getByText(label, { exact: true });
+      for (let attempt = 0; attempt < 3 && (await entry.count()) > 0; attempt += 1) {
+        await entry.first().click();
+        await waitFor(async () => (await entry.count()) === 0, 1_000, 100);
+      }
+    };
+    // Where to right-click in the editor: inside the line that holds `text` (or the first line).
+    const linePoint = async (text) => {
+      // Without `text` (an empty or unknown document) the point is in the empty area of the
+      // visible editor, below its lines: the "Select a language" hint of an untitled document
+      // swallowed the right-click when the point was on its line (seen 29/10/2026).
+      const target =
+        text === undefined
+          ? page.locator('.monaco-editor:visible').first()
+          : page.locator('.monaco-editor .view-lines .view-line').filter({ hasText: text }).first();
+      const box = await target.boundingBox({ timeout: 3_000 }).catch(() => null);
+      return box === null
+        ? null
+        : text === undefined
+          ? { x: box.x + 300, y: box.y + 250 }
+          : { x: box.x + 40, y: box.y + box.height / 2 };
+    };
+    const editorHasFocus = () =>
+      page.evaluate(() => globalThis.document.activeElement?.closest('.monaco-editor') != null);
+    const quickOpen = async (spec, tabName) => {
+      await page.keyboard.press('ControlOrMeta+p');
+      await waitFor(async () => !(await quickInputHidden()), 2_000, 50);
+      await page.keyboard.type(spec);
+      await waitFor(
+        () =>
+          page.evaluate(
+            (name) =>
+              (
+                globalThis.document.querySelector('.quick-input-list .monaco-list-row.focused')
+                  ?.textContent ?? ''
+              ).includes(name),
+            tabName,
+          ),
+        3_000,
+        50,
+      );
+      await page.keyboard.press('Enter');
+      await waitFor(
+        async () => (await page.locator(`.tab.active[aria-label*="${tabName}"]`).count()) > 0,
+        5_000,
+        100,
+      );
+      await waitFor(editorHasFocus, 3_000, 100);
+    };
+    const editorSelection = () =>
+      page
+        .locator('#status\\.editor\\.selection')
+        .first()
+        .innerText()
+        .catch(() => '');
+    const selectLines2to3 = async () => {
+      await page.keyboard.press('ControlOrMeta+Home');
+      await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('Home');
+      await page.keyboard.press('Shift+ArrowDown');
+      await page.keyboard.press('Shift+ArrowDown');
+      await waitFor(async () => /\(\d+ selected\)/.test(await editorSelection()), 2_000, 100);
+    };
+    const clearBox = async () => {
+      await focusPromptBox();
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.press('Backspace');
+      await sleep(150); // the first typed character is lost without it (see `send`)
+    };
+    const removeChips = async () => {
+      for (let guard = 0; guard < 6 && (await ctx()).chips.length > 0; guard += 1) {
+        await clickIn('.chips .chip-remove');
+        await sleep(200); // one chip gone per round; the count read next is the only signal
+      }
+    };
+    const dismissNotices = async () => {
+      for (let guard = 0; guard < 8 && (await ctx()).notices.length > 0; guard += 1) {
+        await clickButton('Dismiss notice');
+        await sleep(150); // one notice gone per round; the count read next is the only signal
+      }
+    };
+    const inView = (box, view) =>
+      box !== null &&
+      box.left >= -0.5 &&
+      box.top >= -0.5 &&
+      box.right <= view.width + 0.5 &&
+      box.bottom <= view.height + 0.5;
+
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    // The step does not trust what the steps before it left behind: step 19 rewrites
+    // `src/sample.ts` (a full run found two lines, `value2 = 52`, so line 2-3 and "line 2" were
+    // not there). Its 30 lines are written again, as `createWorkspace` makes them, with no editor
+    // holding the old text.
+    await closeAllEditors();
+    const sampleLines = ['// Sample file for the visual test run.'];
+    for (let line = 2; line <= 30; line += 1) {
+      sampleLines.push(
+        line === 20
+          ? 'export function greet(name: string): string { return `Hello, ${name}!`; }'
+          : `export const value${String(line)} = ${String(line)};`,
+      );
+    }
+    fs.writeFileSync(path.join(srcDir, 'sample.ts'), `${sampleLines.join('\n')}\n`);
+    fs.writeFileSync(brokenFile, "const x: number = 'text';\nconst y: string = 42;\n");
+    fs.writeFileSync(otherFile, 'export const other = 1;\n');
+    fs.writeFileSync(outsideFile, 'export const outside = 1;\nexport const more = 2;\n');
+    try {
+      await setTheme(DARK);
+      try {
+        await setSideBarWidth(300);
+      } catch (error) {
+        warn(
+          `context menus: the side bar did not go to 300 px: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      await waitFor(async () => (await ctx()).view !== undefined, 60_000, 500);
+      check(await clickButton('New session'), 'New session is pressed');
+      await waitEmptyView();
+      // Notices, a draft and chips of earlier steps survive New session (a full run showed four
+      // notices and a draft here); the cells below count and measure them.
+      await dismissNotices();
+      await clearBox();
+      await removeChips();
+      assertNoWebviewErrors('before the context menus step');
+
+      // --- C1 + C3: the editor menu, and Explain from it with a draft in the box ----------------
+      await focusPromptBox();
+      await page.keyboard.type('my draft');
+      await waitFor(async () => (await ctx()).value === 'my draft', 3_000, 100);
+      await quickOpen('src/sample.ts', 'sample.ts');
+      await selectLines2to3();
+      const aim = await linePoint('value2 = 2');
+      check(aim !== null, 'C1 the editor shows line 2 of src/sample.ts to right-click on');
+      await rightClick(aim);
+      let rows = await menuRows();
+      const at = rows.indexOf(ADD);
+      check(
+        at >= 0 && rows[at + 1] === EXPLAIN && rows[at + 2] === FIX,
+        `C1 the editor right-click menu lists "${ADD}", "${EXPLAIN}" and "${FIX}" in that order (${JSON.stringify(rows)})`,
+      );
+      await shot('26a-editor-menu');
+      const usersBefore = (await ctx()).users.length;
+      await choose(EXPLAIN);
+      const asked = await waitFor(
+        async () => (await ctx()).users.length > usersBefore,
+        20_000,
+        200,
+      );
+      let state = await ctx();
+      check(
+        asked === true && state.users.at(-1) === 'Explain what @src/sample.ts#2-3 does.',
+        `C3 Explain from the editor sends "Explain what @src/sample.ts#2-3 does." (${JSON.stringify(state.users.at(-1))})`,
+      );
+      check(
+        state.sentChips.length === 1 && state.sentChips[0] === 'src/sample.ts#2-3',
+        `C3 the sent message carries the chip src/sample.ts#2-3 (${JSON.stringify(state.sentChips)})`,
+      );
+      check(
+        state.value === 'my draft' && state.chips.length === 0,
+        `C3 the draft the user was writing is untouched (${JSON.stringify(state.value)}, ${String(state.chips.length)} chips)`,
+      );
+      await shot('26b-explain-sent');
+      check(await waitIdle(60_000), 'C3 the turn of the Explain prompt ends');
+      await clearBox();
+
+      // --- C4: Fix lists the diagnostics of the TypeScript server --------------------------------
+      await quickOpen('src/broken26.ts', 'broken26.ts');
+      const squiggles = await waitFor(
+        async () => (await page.locator('.monaco-editor .squiggly-error').count()) >= 2,
+        30_000,
+        500,
+      );
+      check(
+        squiggles === true,
+        'C4 the editor underlines the two errors of src/broken26.ts (the TypeScript server answered)',
+      );
+      await page.keyboard.press('ControlOrMeta+A');
+      const aimBroken = await linePoint('const x');
+      check(aimBroken !== null, 'C4 the editor shows line 1 of src/broken26.ts to right-click on');
+      await rightClick(aimBroken);
+      const usersBeforeFix = (await ctx()).users.length;
+      await choose(FIX);
+      const fixed = await waitFor(
+        async () => (await ctx()).users.length > usersBeforeFix,
+        20_000,
+        200,
+      );
+      state = await ctx();
+      const fixText = state.users.at(-1) ?? '';
+      check(
+        fixed === true &&
+          fixText.startsWith('Fix the problems in @src/broken26.ts') &&
+          fixText.includes('Problems reported by VS Code:') &&
+          fixText.includes("Line 1: Type 'string' is not assignable to type 'number'.") &&
+          fixText.includes("Line 2: Type 'number' is not assignable to type 'string'."),
+        `C4 Fix sends the problems of both lines (${JSON.stringify(fixText)})`,
+      );
+      await shot('26c-fix-sent');
+      check(await waitIdle(60_000), 'C4 the turn of the Fix prompt ends');
+
+      // --- C6: a busy session makes Fix fall to the prompt box ----------------------------------
+      await dismissNotices();
+      await removeChips();
+      await quickOpen('src/broken26.ts', 'broken26.ts');
+      await page.keyboard.press('ControlOrMeta+A');
+      await send('Count from 1 to 400, one number per line. Do not use tools. LONG');
+      check((await waitFor(isBusy, 30_000, 300)) === true, 'C6 a LONG turn is running');
+      const usersWhileBusy = (await ctx()).users.length;
+      const aimBusy = await linePoint('const x');
+      await rightClick(aimBusy);
+      await choose(FIX);
+      const fell = await waitFor(
+        async () => (await ctx()).value.startsWith('Fix the problems in @src/broken26.ts'),
+        15_000,
+        200,
+      );
+      state = await ctx();
+      check(
+        fell === true &&
+          state.value.includes('Problems reported by VS Code:') &&
+          state.chips.some((chip) => chip.startsWith('src/broken26.ts')) &&
+          state.users.length === usersWhileBusy,
+        `C6 while a turn runs, Fix goes to the prompt box with its text and its chip and sends nothing (${JSON.stringify(state.value.slice(0, 60))}, ${JSON.stringify(state.chips)})`,
+      );
+      check(
+        state.notices.some((text) => text === 'OpenCode is busy: the prompt is in the box'),
+        `C6 the notice says "OpenCode is busy: the prompt is in the box" (${JSON.stringify(state.notices)})`,
+      );
+      const focused = await waitFor(async () => (await ctx()).focusOnBox, 3_000, 200);
+      check(focused === true, 'C6 the prompt box has the focus');
+      check(await clickButton('Stop'), 'C6 Stop is pressed');
+      check(await waitIdle(30_000), 'C6 the LONG turn ends');
+      for (const [themeName, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        await waitFor(async () => (await ctx()).view !== undefined, 60_000, 500);
+        const look = await web.inDoc(measureText, {
+          notice: '.status-bar .alert:not(.alert-error) .alert-text',
+        });
+        check(
+          look.notice != null && look.notice.ratio >= 4.5,
+          `C6 at 300 px, ${themeName}: the notice has contrast >= 4.5 (${look.notice ? look.notice.ratio.toFixed(2) : 'not found'})`,
+        );
+        if (themeName === 'dark') {
+          await shot('26d-busy-draft-300-dark');
+          state = await ctx();
+          check(
+            state.scrollOverflow <= 1 &&
+              state.styled === 0 &&
+              inView(state.field, state.view) &&
+              inView(state.prompt, state.view) &&
+              state.fieldOverflow <= 1,
+            `C6 at 300 px, dark: the box with ${String(state.value.split('\n').length)} lines does not overflow (page ${String(state.scrollOverflow)} px, box ${String(state.fieldOverflow)} px, ${JSON.stringify(state.field)})`,
+          );
+        }
+      }
+      await setTheme(DARK);
+      let narrow;
+      try {
+        narrow = await setSideBarWidth(150);
+      } catch {
+        narrow = await sideBarPx();
+      }
+      if (narrow < 200) {
+        await waitFor(async () => (await ctx()).view !== undefined, 60_000, 500);
+        state = await ctx();
+        await shot('26e-busy-draft-narrow-dark');
+        check(
+          state.scrollOverflow <= 1 &&
+            state.styled === 0 &&
+            inView(state.field, state.view) &&
+            inView(state.prompt, state.view) &&
+            state.fieldOverflow <= 1,
+          `C6 under 200 px (bar ${String(Math.round(narrow))} px), dark: the box with several lines does not overflow (page ${String(state.scrollOverflow)} px, box ${String(state.fieldOverflow)} px, ${JSON.stringify(state.field)})`,
+        );
+      } else {
+        warn(
+          `context menus: the side bar did not go under 200 px (${String(narrow)} px): not judged`,
+        );
+      }
+      try {
+        await setSideBarWidth(300);
+      } catch {
+        // The sash did not go back; the Explorer cells below do not depend on the width.
+      }
+      await clearBox();
+      await removeChips();
+      await dismissNotices();
+
+      // --- C2 + C5: the Explorer menu, Explain on two files and a folder with the chat HIDDEN ----
+      await command('View: Show Explorer');
+      const rowOf = (label) =>
+        page.locator(`.explorer-folders-view [role="treeitem"][aria-label^="${label}"]`);
+      const folderRow = page.locator('.explorer-folders-view [role="treeitem"][aria-label="src"]');
+      await waitFor(
+        async () => (await rowOf('sample.ts').count()) > 0 || (await folderRow.count()) > 0,
+        4_000,
+        100,
+      );
+      if ((await rowOf('sample.ts').count()) === 0) {
+        await folderRow.first().click();
+      }
+      await waitFor(
+        async () =>
+          (await rowOf('sample.ts').count()) > 0 && (await rowOf('context-b.ts').count()) > 0,
+        5_000,
+        100,
+      );
+      check(
+        (await rowOf('sample.ts').count()) > 0 && (await rowOf('context-b.ts').count()) > 0,
+        'C2 the Explorer lists src/sample.ts and src/context-b.ts (the chat view is hidden while it is shown)',
+      );
+      await rowOf('sample.ts').first().click();
+      await rowOf('context-b.ts')
+        .first()
+        .click({ modifiers: ['ControlOrMeta'] });
+      const selectedRows = () =>
+        page.locator('.explorer-folders-view .monaco-list-row.selected').count();
+      await waitFor(async () => (await selectedRows()) === 2, 2_000, 100);
+      check((await selectedRows()) === 2, 'C2 two files are selected in the Explorer');
+      await rowOf('context-b.ts').first().click({ button: 'right' });
+      await waitFor(async () => (await menuRows()).length > 0, 3_000, 100);
+      rows = await menuRows();
+      const explorerAt = rows.indexOf(ADD);
+      check(
+        explorerAt >= 0 && rows[explorerAt + 1] === EXPLAIN && !rows.includes(FIX),
+        `C2 the Explorer right-click menu lists "${ADD}" then "${EXPLAIN}" and no Fix (${JSON.stringify(rows)})`,
+      );
+      await shot('26f-explorer-menu');
+      await closeMenu();
+      await folderRow.first().click({ modifiers: ['ControlOrMeta'] });
+      await waitFor(async () => (await selectedRows()) === 3, 2_000, 100);
+      check((await selectedRows()) === 3, 'C5 two files and the folder src are selected');
+      await folderRow.first().click({ button: 'right' });
+      await waitFor(async () => (await menuRows()).length > 0, 3_000, 100);
+      await choose(EXPLAIN);
+      await openChat();
+      const arrived = await waitFor(
+        async () => /^Explain what @\S+ and @\S+ do\.$/.test((await ctx()).users.at(-1) ?? ''),
+        20_000,
+        300,
+      );
+      state = await ctx();
+      const explorerText = state.users.at(-1) ?? '';
+      check(
+        arrived === true &&
+          explorerText.includes('@src/sample.ts') &&
+          explorerText.includes('@src/context-b.ts'),
+        `C5 the chat that was hidden when the command ran sends "Explain what @… and @… do." (${JSON.stringify(explorerText)})`,
+      );
+      check(
+        state.sentChips.length === 2 &&
+          state.sentChips.includes('src/sample.ts') &&
+          state.sentChips.includes('src/context-b.ts'),
+        `C5 the sent message carries two chips, one per file (${JSON.stringify(state.sentChips)})`,
+      );
+      const skippedNotices = state.notices.filter((text) => text.includes('not added'));
+      check(
+        skippedNotices.length === 1 &&
+          skippedNotices[0].startsWith('1 selected item was not added'),
+        `C5 ONE notice counts the skipped folder (${JSON.stringify(state.notices)})`,
+      );
+      await shot('26g-explorer-explain');
+      check(await waitIdle(60_000), 'C5 the turn of the Explorer prompt ends');
+      await dismissNotices();
+
+      // --- C7: no entries on an untitled document; a file outside the workspace is refused -------
+      // The shortcut, not the palette: the palette's best match for the title opened a diff of two
+      // untitled files (seen 29/10/2026), and a stray tab would carry stale editor boxes.
+      await closeAllEditors();
+      await page.keyboard.press('ControlOrMeta+n');
+      await waitFor(
+        async () => (await page.locator('.tab.active[aria-label*="Untitled"]').count()) > 0,
+        5_000,
+        100,
+      );
+      await waitFor(editorHasFocus, 3_000, 100);
+      const aimUntitled = await linePoint(undefined);
+      check(aimUntitled !== null, 'C7 the untitled editor shows a line to right-click on');
+      await rightClick(aimUntitled);
+      await shot('26i-untitled-menu');
+      rows = await menuRows();
+      check(
+        rows.some((row) => row.startsWith('Command Palette')) &&
+          ![ADD, EXPLAIN, FIX].some((label) => rows.includes(label)),
+        `C7 the right-click menu of an untitled document has no OpenCode entry (${JSON.stringify(rows)})`,
+      );
+      await closeMenu();
+      await closeAllEditors();
+      await quickOpen(outsideFile, 'outside26.ts');
+      const aimOutside = await linePoint(undefined);
+      await rightClick(aimOutside);
+      const usersBeforeOutside = (await ctx()).users.length;
+      await choose(EXPLAIN);
+      const warned = await waitFor(
+        async () =>
+          (await page.locator('.notifications-toasts .notification-toast').allInnerTexts()).some(
+            (text) => text.includes('Only files inside the workspace folder can be added'),
+          ),
+        8_000,
+        200,
+      );
+      check(
+        warned === true,
+        'C7 Explain on a file outside the workspace folder raises the native warning "Only files inside the workspace folder can be added"',
+      );
+      await shot('26h-outside-warning');
+      await sleep(1_000); // negative check after the positive wait: nothing may reach the chat
+      check(
+        (await ctx()).users.length === usersBeforeOutside,
+        'C7 and the refused Explain sends nothing to the chat',
+      );
+      await closeAllEditors();
+      assertNoWebviewErrors('context menus');
+    } finally {
+      for (const file of [brokenFile, otherFile, outsideFile]) fs.rmSync(file, { force: true });
+    }
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
