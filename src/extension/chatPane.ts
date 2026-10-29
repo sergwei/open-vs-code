@@ -31,6 +31,16 @@ export const FOCUS_REQUEST_TTL_MS = 10_000;
 export const MAX_KEPT_MENU_MESSAGES = 64;
 
 /**
+ * Most `prompt.compose` a hidden pane keeps (issue #36). Our choice: each is a deliberate menu
+ * click, so a handful is plenty, and the oldest goes first like the chips of
+ * {@link MAX_KEPT_MENU_MESSAGES}.
+ */
+export const MAX_KEPT_COMPOSES = 8;
+
+/** The `prompt.compose` variant of {@link HostToWebview}. */
+export type ComposeMessage = Extract<HostToWebview, { type: 'prompt.compose' }>;
+
+/**
  * What the VS Code side gives the host for one chat surface. `post` may drop what it cannot
  * deliver (document not ready, surface hidden); `canDeliver` says whether it would deliver now,
  * and its absence means "always" (tests that do not model a hidden view).
@@ -48,7 +58,9 @@ export type MessageRoute = 'session' | 'all' | 'origin';
  *
  * `session`: the content of one session (`message.*`, `part.*`, `session.diff`, `session.revert`),
  * only for the panes showing it. `origin`: an answer to something one pane asked (`request.result`,
- * `sessions.page`, `attachments.picked`, `files.found`, `ui.focus`, `ui.command`, `snapshot`,
+ * `sessions.page`, `attachments.picked`, `files.found`, `ui.focus`, `ui.command`,
+ * `prompt.compose` (issue #36: the prompt of one menu action goes to the one pane it was aimed
+ * at, or two panes would send it twice), `snapshot`,
  * `setup.binary` of issue #86: the answer of the file dialog one pane opened), only for that pane; broadcasting a `request.result` would close a request with the same id in another
  * pane (ids are a per-document counter). Everything else (`connection.state`, `catalog`,
  * `session.upserted|removed|status`, `permission.*`, `form.*`, `notice`) belongs to the location and
@@ -70,6 +82,7 @@ export function routeOf(message: HostToWebview): MessageRoute {
     case 'files.found':
     case 'ui.focus':
     case 'ui.command':
+    case 'prompt.compose':
     case 'snapshot':
     case 'setup.binary':
       return 'origin';
@@ -147,6 +160,8 @@ export class ChatPane {
   private undeliveredMenu: HostToWebview[] = [];
   /** `ui.command`s the webview could not receive yet; see {@link runUiCommand}. */
   private keptUiCommands: Array<{ command: UiCommand; at: number }> = [];
+  /** `prompt.compose`s the webview could not receive yet; see {@link compose}. */
+  private keptComposes: Array<{ message: ComposeMessage; at: number }> = [];
 
   /**
    * `id` is unique among the panes of one controller. `build` makes the holders once the pane
@@ -265,6 +280,77 @@ export class ChatPane {
       } else {
         this.keepUiCommand(command, at);
       }
+    }
+    return posted;
+  }
+
+  /**
+   * Hands the webview a prompt written by the host (`prompt.compose`, issue #36). With the webview
+   * able to take it, it goes out now. With the view hidden (revealing it loads a new document and a
+   * message sent before its `ready` is dropped) it is kept, at most {@link MAX_KEPT_COMPOSES} (the
+   * oldest is forgotten first), and {@link flushComposes} sends it after the snapshot of the next
+   * `ready`. Unlike a `ui.command`, equal ones are NOT merged: two Explain clicks on different
+   * files are two prompts.
+   * VERIFIED in a real hidden view (`npm run test:visual`, Windows 11, VS Code 1.144.0,
+   * 29/10/2026, full run): with the Explorer shown in the side bar, the chat view hidden, "C5 the
+   * chat that was hidden when the command ran sends "Explain what @… and @… do."" and "C5 the sent
+   * message carries two chips, one per file", read in the DOM of the new document. Not observed:
+   * the TTL expiring in a real window (only the unit tests run it).
+   */
+  compose(message: ComposeMessage): void {
+    if (this.deliverable()) {
+      this.log.info(`compose: sent (send=${String(message.send)})`);
+      this.post(message);
+      return;
+    }
+    this.log.info('compose: kept for the next ready');
+    this.keepCompose(message, Date.now());
+  }
+
+  /** Queues `message`; `at` is when the user asked, not when it was re-kept. Drops the oldest beyond the cap. */
+  private keepCompose(message: ComposeMessage, at: number): void {
+    this.keptComposes.push({ message, at });
+    if (this.keptComposes.length > MAX_KEPT_COMPOSES) this.keptComposes.shift();
+  }
+
+  /**
+   * Sends what {@link compose} kept, in the order asked, after the snapshot of a `ready`. One older
+   * than {@link FOCUS_REQUEST_TTL_MS} is NOT dropped: a menu click must not vanish, but sending it
+   * minutes later would surprise (a turn that spends quota with nobody watching), so it is posted
+   * with `send` false and ends up in the prompt box, followed by a `ComposeExpired` info notice
+   * ("The prompt waited too long: it is in the box", decision W1=1 of Sergio, 29/10/2026) so the
+   * text does not appear unexplained; one that was already a draft (`send` false) gets no such
+   * notice. Each goes through the same gate as a fresh one: a view hidden again during the resync
+   * keeps it, with its original time. Returns `true` when at least one went out, so the caller can
+   * hand the keyboard to the iframe again.
+   * VERIFIED by `chatPane.test.ts` "delivers a compose older than the TTL as a draft instead of
+   * dropping it, with a notice" and "adds no expiry notice to an old compose that was already a draft" (fake
+   * surface and fake clock, 29/10/2026). Not observed: the TTL expiring in a real window.
+   */
+  flushComposes(): boolean {
+    const kept = this.keptComposes;
+    this.keptComposes = [];
+    const now = Date.now();
+    let posted = false;
+    for (const { message, at } of kept) {
+      if (!this.deliverable()) {
+        this.keepCompose(message, at);
+        continue;
+      }
+      const stale = now - at > FOCUS_REQUEST_TTL_MS;
+      this.log.info(`compose: sent after ready (send=${String(message.send && !stale)})`);
+      this.post(stale ? { ...message, send: false } : message);
+      if (stale && message.send) {
+        this.post({
+          type: 'notice',
+          level: 'info',
+          error: {
+            code: 'ComposeExpired',
+            message: 'The prompt waited too long: it is in the box',
+          },
+        });
+      }
+      posted = true;
     }
     return posted;
   }

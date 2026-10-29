@@ -735,6 +735,27 @@ describe('requests', () => {
     });
   });
 
+  // Issue #36: like the ui.command queue, two composes of one `batch` must both be there, in order,
+  // with the file refs copied as plain objects. Fabricated messages, no server involved.
+  it('prompt.compose queues every message of a batch, oldest first, until they are taken', () => {
+    withStore((store) => {
+      const file = { uri: 'file:///ws/a.ts?start=2&end=3', name: 'a.ts#2-3' };
+      batch(() => {
+        store.apply({ type: 'prompt.compose', text: 'one', files: [file], send: true });
+        store.apply({ type: 'prompt.compose', text: 'two', files: [], send: false });
+      });
+      expect(store.state.composes.map((entry) => entry.text)).toEqual(['one', 'two']);
+      const seqs = store.state.composes.map((entry) => entry.seq);
+      expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+      expect(new Set(seqs).size).toBe(2);
+      expect(store.takeComposes()).toEqual([
+        { text: 'one', files: [file], send: true },
+        { text: 'two', files: [], send: false },
+      ]);
+      expect(store.state.composes).toEqual([]);
+    });
+  });
+
   it('removing the open session does not touch the pending requests of other sessions', () => {
     withStore((store) => {
       store.apply({ type: 'permission.asked', permission: permission('per_1', 'ses_child') });

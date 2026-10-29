@@ -3,17 +3,29 @@
 // attaches its panes itself (`chatLifecycle.ts`).
 
 import type { HostToWebview, UiCommand, WebviewToHost } from '../../shared/protocol';
-import type { ChatController, FocusTarget } from '../chatController';
+import type { ChatController, ComposeOutcome, FocusTarget } from '../chatController';
+import type { ContextAction } from '../contextPrompts';
 import type { ChatPane, PaneSurface } from '../chatPane';
 
 /**
  * The controller as the old tests see it: `handle(message)`, `onWebviewReady()`, `runUiCommand`,
- * `focusRequest` and `addToChat` without a pane id, every other member as it is.
+ * `focusRequest`, `addToChat` and (issue #36) `composeFromEditor` / `composeFromFiles` without a
+ * pane id, every other member as it is.
  */
 export type OnePaneController = Omit<
   ChatController,
-  'handle' | 'runUiCommand' | 'focusRequest' | 'addToChat' | 'onPaneReady'
+  | 'handle'
+  | 'runUiCommand'
+  | 'focusRequest'
+  | 'addToChat'
+  | 'onPaneReady'
+  | 'composeFromEditor'
+  | 'composeFromFiles'
+  | 'addEditorToChat'
 > & {
+  addEditorToChat(uri?: string): Promise<ComposeOutcome>;
+  composeFromEditor(action: ContextAction, uri?: string): Promise<ComposeOutcome>;
+  composeFromFiles(action: ContextAction, uris: readonly string[]): Promise<ComposeOutcome>;
   handle(message: WebviewToHost): Promise<void>;
   onWebviewReady(): Promise<void>;
   runUiCommand(command: UiCommand): void;
@@ -27,7 +39,7 @@ export type OnePaneController = Omit<
  * Attaches ONE pane to `controller` and returns a view of the controller that talks to it.
  *
  * Why a Proxy and not a subclass: the tests call dozens of members, and most pass straight through;
- * only the five that now take a pane id are wrapped. Methods are bound to the real controller, so
+ * only the ones that take a pane id are wrapped. Methods are bound to the real controller, so
  * its private state is never written through the proxy. Call it BEFORE `onServerState`, as the
  * real wiring does, so the pane exists when the first snapshot goes out.
  * Provenance: it carries no logic of its own, so what the pre-existing controller battery proves
@@ -49,6 +61,11 @@ export function onePane(
       controller.focusRequest(pane.id, target);
     },
     addToChat: (uris: readonly string[]) => controller.addToChat(pane.id, uris),
+    composeFromEditor: (action: ContextAction, uri?: string) =>
+      controller.composeFromEditor(pane.id, action, uri),
+    addEditorToChat: (uri?: string) => controller.addEditorToChat(pane.id, uri),
+    composeFromFiles: (action: ContextAction, uris: readonly string[]) =>
+      controller.composeFromFiles(pane.id, action, uris),
     pane,
   };
   return new Proxy(controller, {

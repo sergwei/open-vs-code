@@ -597,8 +597,13 @@ function fakeEditor(
   };
   const editor: EditorActions = {
     open: (path, line, column, folder) => run('open', path, line, column, folder),
-    editorContext: (folder) => {
-      calls.push(['editorContext', folder]);
+    editorContext: (folder, contextOptions) => {
+      // Options are recorded only when given, so the older cases keep `['editorContext', folder]`.
+      calls.push(
+        contextOptions === undefined
+          ? ['editorContext', folder]
+          : ['editorContext', folder, contextOptions],
+      );
       if (options.failWith !== undefined) return Promise.reject(options.failWith);
       return Promise.resolve(options.context ?? { refs: [], ranged: 0, unsaved: false });
     },
@@ -2010,6 +2015,222 @@ describe('file mentions and editor context (issues #28/#29)', () => {
     });
     expect(apiCalls).not.toContain('session.prompt');
     expect(posted.at(-1)).toMatchObject({ error: { code: 'AttachmentRejected' } });
+  });
+
+  // Issue #36 (Explain / Fix from the context menus). Protects: the prompt is the approved text with
+  // the references of the editor or the Explorer, the references join the `prompt.send` whitelist,
+  // a refusal composes and whitelists nothing, a dirty buffer goes to the box with the existing
+  // notice, a hidden chat gets the message after its next `ready`, and the log has counts only.
+  // The editor, the diagnostics and the Explorer are FAKES (`fakeEditor`): that the real menu hands
+  // the right `Uri` is what the integration check "reads the editor of the clicked document, not the
+  // active one" and the `test:visual` check "C3 Explain from the editor sends ..." ran.
+  describe('composeFromEditor and composeFromFiles (issue #36)', () => {
+    const SEL = refOf('src/a.ts#2-3');
+    const composes = (posted: HostToWebview[]) => posted.filter((m) => m.type === 'prompt.compose');
+
+    it('composes Explain for a selection, whitelists it and logs counts only', async () => {
+      const { editor, calls } = fakeEditor({ context: { refs: [SEL], ranged: 1, unsaved: false } });
+      const { api, prompts } = fakeApi();
+      const { controller, posted, logs } = setup(api, 'ses_old', editor);
+      controller.onServerState(RUNNING);
+      const outcome = await controller.composeFromEditor('explain', 'file:///C:/work/src/a.ts');
+      expect(outcome).toEqual({ status: 'composed' });
+      expect(calls).toEqual([
+        ['editorContext', 'C:\\work', { uri: 'file:///C:/work/src/a.ts', diagnostics: false }],
+      ]);
+      expect(composes(posted)).toEqual([
+        {
+          type: 'prompt.compose',
+          text: 'Explain what @src/a.ts#2-3 does.',
+          files: [SEL],
+          send: true,
+        },
+      ]);
+      expect(logs).toContain('info: context action explain: 0 file(s), 1 selection(s)');
+      expect(logs.join(' | ')).not.toContain('src/a.ts');
+      await controller.handle(sendWith([SEL]));
+      expect(prompts).toHaveLength(1);
+    });
+
+    // Protects the editor entry "Add to OpenCode Chat": chips only (no compose), whitelisted, kept
+    // for a hidden chat, and a refusal returned for the native warning. Fake editor.
+    it('addEditorToChat attaches the chips without composing, and rejects a refusal', async () => {
+      const { editor, calls } = fakeEditor({ context: { refs: [SEL], ranged: 1, unsaved: true } });
+      const { api, prompts } = fakeApi();
+      const { controller, posted, logs } = setup(api, 'ses_old', editor);
+      controller.onServerState(RUNNING);
+      const outcome = await controller.addEditorToChat('file:///C:/work/src/a.ts');
+      expect(outcome).toEqual({ status: 'composed' });
+      expect(calls).toEqual([['editorContext', 'C:\\work', { uri: 'file:///C:/work/src/a.ts' }]]);
+      expect(composes(posted)).toEqual([]);
+      expect(posted).toContainEqual({
+        type: 'attachments.picked',
+        requestId: 'menu-1',
+        files: [SEL],
+      });
+      expect(posted).toContainEqual({
+        type: 'notice',
+        level: 'warning',
+        error: {
+          code: 'UnsavedChanges',
+          message: 'Unsaved changes: the model reads the saved version',
+        },
+      });
+      expect(logs).toContain('info: context action add: 0 file(s), 1 selection(s)');
+      await controller.handle(sendWith([SEL]));
+      expect(prompts).toHaveLength(1);
+
+      const failure = Object.assign(new Error('Save the file first'), { name: 'NoFileOnDisk' });
+      const refused = setup(fakeApi().api, 'ses_old', fakeEditor({ failWith: failure }).editor);
+      refused.controller.onServerState(RUNNING);
+      expect(await refused.controller.addEditorToChat()).toEqual({
+        status: 'rejected',
+        error: { code: 'NoFileOnDisk', message: 'Save the file first' },
+      });
+      expect(refused.logs).toContain('warn: context action add: refused (NoFileOnDisk)');
+    });
+
+    it('asks for diagnostics on Fix and prints them in the prompt', async () => {
+      const { editor, calls } = fakeEditor({
+        context: {
+          refs: [refOf('src/a.ts')],
+          ranged: 0,
+          unsaved: false,
+          diagnostics: [{ line: 12, message: "Cannot find name 'x'.", source: 'ts', code: '2304' }],
+        },
+      });
+      const { controller, posted } = setup(fakeApi().api, 'ses_old', editor);
+      controller.onServerState(RUNNING);
+      await controller.composeFromEditor('fix');
+      expect(calls).toEqual([['editorContext', 'C:\\work', { diagnostics: true }]]);
+      expect(composes(posted)).toMatchObject([
+        {
+          text: "Fix the problems in @src/a.ts.\n\nProblems reported by VS Code:\n- Line 12: Cannot find name 'x'. (ts 2304)",
+          send: true,
+        },
+      ]);
+    });
+
+    it('does not send a dirty buffer: it goes to the box with the existing notice', async () => {
+      const { editor } = fakeEditor({
+        context: { refs: [refOf('src/a.ts')], ranged: 0, unsaved: true },
+      });
+      const { controller, posted, logs } = setup(fakeApi().api, 'ses_old', editor);
+      controller.onServerState(RUNNING);
+      await controller.composeFromEditor('explain');
+      expect(composes(posted)).toMatchObject([{ send: false }]);
+      expect(posted).toContainEqual({
+        type: 'notice',
+        level: 'warning',
+        error: {
+          code: 'UnsavedChanges',
+          message: 'Unsaved changes: the model reads the saved version',
+        },
+      });
+      expect(logs).toContain(
+        'warn: context action explain: the buffer has unsaved changes, the prompt goes to the box',
+      );
+    });
+
+    it('rejects, composes and whitelists nothing when the editor refuses', async () => {
+      const failure = Object.assign(new Error('Save the file first'), { name: 'NoFileOnDisk' });
+      const { editor } = fakeEditor({ failWith: failure });
+      const { api, calls: apiCalls } = fakeApi();
+      const { controller, posted, logs } = setup(api, 'ses_old', editor);
+      controller.onServerState(RUNNING);
+      const outcome = await controller.composeFromEditor('fix');
+      expect(outcome).toEqual({
+        status: 'rejected',
+        error: { code: 'NoFileOnDisk', message: 'Save the file first' },
+      });
+      expect(composes(posted)).toEqual([]);
+      expect(logs).toContain('warn: context action fix: refused (NoFileOnDisk)');
+      await controller.handle(sendWith([SEL]));
+      expect(apiCalls).not.toContain('session.prompt');
+    });
+
+    it('keeps the compose of a hidden chat for the next ready and then hands the keyboard back', async () => {
+      const { editor } = fakeEditor({ context: { refs: [SEL], ranged: 1, unsaved: false } });
+      const { controller, posted, view, viewFocuses } = setup(fakeApi().api, 'ses_old', editor);
+      controller.onServerState(RUNNING);
+      view.ready = false;
+      await controller.composeFromEditor('explain');
+      expect(composes(posted)).toEqual([]);
+      view.ready = true;
+      await controller.onWebviewReady();
+      const types = posted.map((m) => m.type);
+      expect(types.indexOf('prompt.compose')).toBeGreaterThan(types.lastIndexOf('snapshot'));
+      expect(viewFocuses.count).toBe(1);
+    });
+
+    it('composes ONE prompt for the valid Explorer files and counts what it skipped', async () => {
+      const A = refOf('src/a.ts');
+      const B = refOf('src/b.ts');
+      const { editor, calls } = fakeEditor({
+        dropped: { refs: [A, B], skipped: { folders: 1, outside: 1, remote: 0, missing: 1 } },
+      });
+      const { api, prompts } = fakeApi();
+      const { controller, posted, logs } = setup(api, 'ses_old', editor);
+      controller.onServerState(RUNNING);
+      const outcome = await controller.composeFromFiles('explain', ['file:///c%3A/work/src/a.ts']);
+      expect(outcome).toEqual({ status: 'composed' });
+      expect(calls).toEqual([['droppedFiles', 'C:\\work', ['file:///c%3A/work/src/a.ts']]]);
+      expect(composes(posted)).toEqual([
+        {
+          type: 'prompt.compose',
+          text: 'Explain what @src/a.ts and @src/b.ts do.',
+          files: [A, B],
+          send: true,
+        },
+      ]);
+      expect(posted).toContainEqual({
+        type: 'notice',
+        level: 'warning',
+        error: {
+          code: 'DroppedItemsSkipped',
+          message:
+            '3 selected items were not added: folders and files outside the workspace folder cannot be attached',
+        },
+      });
+      expect(logs).toContain('info: context action explain: 2 file(s), 0 selection(s)');
+      expect(logs).toContain(
+        'info: context action explain: skipped 3 (1 folder(s), 1 outside, 0 remote, 1 missing)',
+      );
+      await controller.handle(sendWith([A, B]));
+      expect(prompts).toHaveLength(1);
+    });
+
+    it('shows only the notice when the Explorer selection has nothing valid', async () => {
+      const { editor } = fakeEditor({
+        dropped: { refs: [], skipped: { folders: 1, outside: 0, remote: 0, missing: 0 } },
+      });
+      const { controller, posted } = setup(fakeApi().api, 'ses_old', editor);
+      controller.onServerState(RUNNING);
+      const outcome = await controller.composeFromFiles('explain', ['file:///c%3A/work/src']);
+      expect(outcome).toEqual({ status: 'notified' });
+      expect(composes(posted)).toEqual([]);
+      expect(posted).toContainEqual({
+        type: 'notice',
+        level: 'warning',
+        error: {
+          code: 'DroppedItemsSkipped',
+          message:
+            '1 selected item was not added: folders and files outside the workspace folder cannot be attached',
+        },
+      });
+    });
+
+    it('rejects an Explorer selection when the editor side refuses it', async () => {
+      const failure = Object.assign(
+        new Error('Only files inside the workspace folder can be added'),
+        { name: 'OutsideWorkspace' },
+      );
+      const { editor } = fakeEditor({ failWith: failure });
+      const { controller, posted } = setup(fakeApi().api, undefined, editor);
+      const outcome = await controller.composeFromFiles('explain', ['file:///c%3A/x/a.ts']);
+      expect(outcome).toMatchObject({ status: 'rejected', error: { code: 'OutsideWorkspace' } });
+      expect(composes(posted)).toEqual([]);
+    });
   });
 
   it('opens a chip against the folder the server serves', async () => {

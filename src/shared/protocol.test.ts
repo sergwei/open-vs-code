@@ -26,6 +26,7 @@ import {
   contentPartId,
   dispatch,
   HOST_TO_WEBVIEW_TYPES,
+  isComposeInBounds,
   isHostToWebview,
   isWebviewToHost,
   MAX_DIFF_PATH_LENGTH,
@@ -192,6 +193,12 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
   },
   'ui.focus': { type: 'ui.focus', target: { kind: 'permission', sessionID: 's1', id: 'perm1' } },
   'ui.command': { type: 'ui.command', command: 'session.stop' },
+  'prompt.compose': {
+    type: 'prompt.compose',
+    text: 'Explain what @src/a.ts#2-3 does.',
+    files: [{ uri: 'file:///ws/src/a.ts?start=2&end=3', name: 'src/a.ts#2-3' }],
+    send: true,
+  },
   'session.diff': {
     type: 'session.diff',
     sessionID: 's1',
@@ -779,6 +786,40 @@ describe('isHostToWebview', () => {
   it('is deliberately shallow: accepts a part.delta without delta', () => {
     // Documents the trade-off recorded in the guard header; change it only as a decision.
     expect(isHostToWebview({ type: 'part.delta' })).toBe(true);
+  });
+});
+
+/**
+ * Protects `prompt.compose` (issue #36): the type is known to the host-to-webview guard, and
+ * `isComposeInBounds` refuses what a `prompt.send` validator would drop without a
+ * `request.result` (blank text, too many files, an empty uri or name), which would leave Send
+ * locked. Fabricated data.
+ */
+describe('prompt.compose', () => {
+  const ref = { uri: 'file:///ws/a.ts', name: 'a.ts' };
+
+  it('is accepted by the host-to-webview guard', () => {
+    expect(
+      isHostToWebview({ type: 'prompt.compose', text: 'Explain', files: [], send: false }),
+    ).toBe(true);
+  });
+
+  it('accepts a text with files up to MAX_DROPPED_ITEMS', () => {
+    const files = Array.from({ length: MAX_DROPPED_ITEMS }, (_, n) => ({
+      uri: `file:///ws/${String(n)}.ts`,
+      name: `${String(n)}.ts`,
+    }));
+    expect(isComposeInBounds({ text: 'Explain', files })).toBe(true);
+  });
+
+  it('refuses blank text, too many files and empty uri or name', () => {
+    expect(isComposeInBounds({ text: '  \n ', files: [ref] })).toBe(false);
+    const many = Array.from({ length: MAX_DROPPED_ITEMS + 1 }, () => ref);
+    expect(isComposeInBounds({ text: 'Explain', files: many })).toBe(false);
+    expect(isComposeInBounds({ text: 'Explain', files: [{ uri: '', name: 'a' }] })).toBe(false);
+    expect(isComposeInBounds({ text: 'Explain', files: [{ uri: 'file:///a', name: '' }] })).toBe(
+      false,
+    );
   });
 });
 

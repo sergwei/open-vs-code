@@ -2766,6 +2766,161 @@ describe('host commands (ui.command)', () => {
   });
 });
 
+// Issue #36 (Explain / Fix from the context menus). Protects: a compose sends through the Send code
+// (mention computed, chips as files) without touching the user's draft or chips; it falls to the
+// draft (P6: set when empty, appended on a new line otherwise, chips added once) when it cannot or
+// must not send, with a notice that says why; two in one batch do not both send; an out-of-bounds
+// one begins no request; a failed compose adds its text to the user's draft. FABRICATED host
+// messages in jsdom: that the real host produces them and a real Send works with them is what the
+// integration checks "Explorer Explain sends one prompt for the files and counts the folder it
+// skipped" and "reads the editor of the clicked document, not the active one" and the `test:visual`
+// checks "C3 Explain from the editor sends ..." and "C5 the chat that was hidden when the command
+// ran sends ..." ran.
+describe('prompt.compose (issue #36)', () => {
+  const FILE = { uri: 'file:///ws/src/a.ts?start=2&end=3', name: 'src/a.ts#2-3' };
+  const TEXT = 'Explain what @src/a.ts#2-3 does.';
+  const chipNames = (h: Harness): (string | null)[] =>
+    [...h.container.querySelectorAll('.chips .chip-open')].map((c) => c.textContent);
+  const prompts = (h: Harness) => h.sent.filter((m) => m.type === 'prompt.send');
+
+  it('sends with the mention and leaves the draft and the chips of the user alone', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    h.type('half written');
+    h.store.addDraftFiles([{ uri: 'file:///ws/b.ts', name: 'b.ts' }]);
+    h.apply({ type: 'prompt.compose', text: TEXT, files: [FILE], send: true });
+    const sent = prompts(h);
+    expect(sent).toHaveLength(1);
+    const message = sent[0];
+    if (message?.type !== 'prompt.send') throw new Error('not a prompt.send');
+    expect(message.text).toBe(TEXT);
+    expect(message.delivery).toBe('queue');
+    expect(message.files).toEqual([
+      { ...FILE, mention: { start: 13, end: 13 + 1 + FILE.name.length, text: `@${FILE.name}` } },
+    ]);
+    expect(h.textarea().value).toBe('half written');
+    expect(chipNames(h)).toEqual(['b.ts']);
+    expect(h.store.state.pending).toHaveLength(1);
+  });
+
+  it('puts text and chips in an empty draft when send is false, with no notice', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    h.apply({ type: 'prompt.compose', text: TEXT, files: [FILE], send: false });
+    expect(prompts(h)).toHaveLength(0);
+    expect(h.textarea().value).toBe(TEXT);
+    expect(chipNames(h)).toEqual(['src/a.ts#2-3']);
+    expect(h.store.state.notices).toEqual([]);
+    expect(document.activeElement).toBe(h.textarea());
+  });
+
+  it('appends to a draft that has text on a new line and does not repeat a chip', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    h.type('my notes');
+    h.store.addDraftFiles([FILE]);
+    h.apply({ type: 'prompt.compose', text: TEXT, files: [FILE], send: false });
+    expect(h.textarea().value).toBe(`my notes\n${TEXT}`);
+    expect(chipNames(h)).toEqual(['src/a.ts#2-3']);
+  });
+
+  it('falls to the draft with a notice when the session is busy', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    h.apply({ type: 'prompt.compose', text: TEXT, files: [FILE], send: true });
+    expect(prompts(h)).toHaveLength(0);
+    expect(h.textarea().value).toBe(TEXT);
+    expect(h.container.textContent).toContain('OpenCode is busy: the prompt is in the box');
+  });
+
+  it('falls to the draft with a notice when it is not connected', () => {
+    const h = start();
+    h.apply({ type: 'connection.state', connection: { state: 'starting' } });
+    h.apply({ type: 'prompt.compose', text: TEXT, files: [FILE], send: true });
+    expect(prompts(h)).toHaveLength(0);
+    expect(h.textarea().value).toBe(TEXT);
+    expect(h.container.textContent).toContain(
+      'OpenCode is not connected yet: the prompt is in the box',
+    );
+  });
+
+  it('sends the first of two composes of one batch and drafts the second', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    batch(() => {
+      h.apply(
+        { type: 'prompt.compose', text: 'Explain what @a.ts does.', files: [], send: true },
+        { type: 'prompt.compose', text: 'Fix the problems in @b.ts.', files: [], send: true },
+      );
+    });
+    const sent = prompts(h);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ text: 'Explain what @a.ts does.' });
+    expect(h.textarea().value).toBe('Fix the problems in @b.ts.');
+  });
+
+  it('refuses a message out of bounds before beginning a request', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    h.apply({ type: 'prompt.compose', text: '   ', files: [], send: true });
+    expect(h.sent).toEqual([]);
+    expect(h.store.state.pending).toEqual([]);
+    expect(h.textarea().value).toBe('');
+  });
+
+  it('gives the text and the chips back when the send fails', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    h.apply({ type: 'prompt.compose', text: TEXT, files: [FILE], send: true });
+    const message = prompts(h)[0];
+    if (message?.type !== 'prompt.send') throw new Error('not a prompt.send');
+    h.apply({
+      type: 'request.result',
+      requestId: message.requestId,
+      error: { code: 'Boom', message: 'it broke' },
+    });
+    expect(h.textarea().value).toBe(TEXT);
+    expect(chipNames(h)).toEqual(['src/a.ts#2-3']);
+  });
+
+  // Protects W2 (Sergio, 29/10/2026): the compose left the user's draft alone, so a failure must
+  // ADD its text to that draft (new last line, chips once) instead of dropping it.
+  it('appends the text of a failed compose to the draft the user had, chips once', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    h.type('half written');
+    h.store.addDraftFiles([FILE]);
+    h.apply({ type: 'prompt.compose', text: TEXT, files: [FILE], send: true });
+    const message = prompts(h)[0];
+    if (message?.type !== 'prompt.send') throw new Error('not a prompt.send');
+    h.apply({
+      type: 'request.result',
+      requestId: message.requestId,
+      error: { code: 'Boom', message: 'it broke' },
+    });
+    expect(h.textarea().value).toBe(`half written\n${TEXT}`);
+    expect(chipNames(h)).toEqual(['src/a.ts#2-3']);
+  });
+
+  // The normal Send is unchanged: its box was emptied, so a user who typed again meanwhile keeps
+  // what they typed and the failed text is not appended (restore only into an empty box).
+  it('does not append the text of a failed normal send to a newer draft', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    h.type('first');
+    h.button('Send').click();
+    const message = prompts(h)[0];
+    if (message?.type !== 'prompt.send') throw new Error('not a prompt.send');
+    h.type('typed meanwhile');
+    h.apply({
+      type: 'request.result',
+      requestId: message.requestId,
+      error: { code: 'Boom', message: 'it broke' },
+    });
+    expect(h.textarea().value).toBe('typed meanwhile');
+  });
+});
+
 // Issue #33 (slash commands): what `prompt.send` carries when the draft starts with a listed
 // command. FABRICATED catalog and snapshots (`init`/`review` are the built-in names of opencode
 // v2.0.32; the wire shape is the one `protocol.ts` validates). They prove the wiring between the
