@@ -4,6 +4,7 @@ import * as ids from './ids';
 
 interface Manifest {
   engines: { vscode: string };
+  activationEvents: string[];
   devDependencies: Record<string, string>;
   capabilities?: { untrustedWorkspaces?: { supported?: unknown; description?: string } };
   contributes: {
@@ -296,6 +297,22 @@ describe('context menus (issue #36)', () => {
     ]) {
       expect(palette).not.toContain(id);
     }
+  });
+});
+
+/**
+ * Protects the activation of the extension by a restored chat tab (issue #77): without
+ * `onWebviewPanel:<viewType>` VS Code never calls the panel serializer after Reload Window (it is
+ * not implicit, `vscode-extension` skill section 1) and the tabs come back as blank pages. The data
+ * is the REAL package.json. That VS Code does activate the extension for a revived tab is not
+ * checked here. VERIFIED in a real window (`npm run test:visual`, full run, Windows 11, VS Code
+ * 1.144.0, 29/10/2026): "the serializer restored 4 tabs (log lines \"chat tab restored (pane N)\"),
+ * none skipped" after Reload Window. Not isolated: that run does not remove the activation event
+ * to see the tabs fail, so it shows the tabs come back, not that this event is what wakes the host.
+ */
+describe('activation by a restored chat tab (issue #77)', () => {
+  it('activates on the chat panel view type and on nothing else', () => {
+    expect(manifest.activationEvents).toEqual([`onWebviewPanel:${ids.CHAT_PANEL_VIEW_TYPE}`]);
   });
 });
 

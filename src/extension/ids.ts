@@ -50,6 +50,16 @@ export const SHOW_LOGS_COMMAND_ID = 'openVsCode.showLogs';
  */
 export const INJECT_WEBVIEW_MESSAGE_COMMAND_ID = 'openVsCode.test.injectWebviewMessage';
 
+/**
+ * Internal command that creates a `WebviewPanel` of {@link CHAT_PANEL_VIEW_TYPE} and hands it to
+ * the SAME `ChatPanels.restore` the panel serializer uses (issue #77), because the test API cannot
+ * make VS Code call a serializer (a real Reload Window kills the test host). Argument:
+ * `{ state?: unknown, title?: string }`, the persisted webview state and the title the revived tab
+ * would carry. Registered ONLY in `ExtensionMode.Test` and NOT declared in `contributes`, like
+ * {@link INJECT_WEBVIEW_MESSAGE_COMMAND_ID}.
+ */
+export const RESTORE_CHAT_TAB_TEST_COMMAND_ID = 'openVsCode.test.restoreChatTab';
+
 /** Command id of "OpenCode: Restart Server" (contributed; issue #10). */
 export const RESTART_SERVER_COMMAND_ID = 'openVsCode.restartServer';
 
