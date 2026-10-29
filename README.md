@@ -35,6 +35,12 @@ affiliated with opencode or with Microsoft.
 
   ![The model picker open above the prompt box, with a search field and a list of models grouped by provider](docs/images/model-picker.png)
 
+- **Slash commands (issue #33):** type `/` at the start of the prompt, or press the **/** button
+  next to the "+", to list opencode's commands (the built-in `init` and `review`, the ones in your
+  project's `.opencode/command` folder and the ones from MCP servers). Choosing one writes
+  `/name` and a space into the box so you can add arguments; Enter runs it. A `/word` that is not on the list
+  is sent as a normal prompt. The conversation shows the expanded text of the command, as opencode
+  stores it, not what you typed.
 - **Collapsible tool cards** for shell, read, grep and edit calls, with diffs for edits.
 - **`@` mentions** to add files to the prompt, and a "+" menu in the prompt bar with **Add
   selection** (attaches the editor selection), **Attach file…**, **Attach image…** and **Mention a
@@ -163,10 +169,17 @@ always `opencode`.
 - The default shortcuts use Ctrl+Alt (Cmd+Alt on macOS), which is AltGr on Windows; see
   [Keyboard shortcuts](#keyboard-shortcuts) to rebind them. They are checked against the default
   shortcuts of VS Code, not against those of your desktop environment or other extensions.
-- Not yet: slash commands (issue #33).
 - Mostly tested on Windows; CI builds and tests on Windows, macOS and Linux.
 
 ## Privacy and security
+
+**Workspace Trust.** The extension does not support untrusted workspaces
+(`capabilities.untrustedWorkspaces.supported: false`): while a folder is in Restricted Mode, VS Code
+does not load it. The reason is that opencode can run what the project defines, with the
+permissions of your user: a slash command in `.opencode/command` whose text contains `` !`cmd` ``
+runs that shell command on your machine when you run the command. Trust the folder only if you
+trust whoever wrote its `.opencode` files, its `opencode.json` and its `AGENTS.md`. (Checked by
+`npm run test:visual`, step 25, on VS Code 1.144.0 and Windows 11 only.)
 
 The chat view never talks to the opencode server. The port and the password live only in the
 extension host, and the server password you set is kept in VS Code's SecretStorage. The extension
