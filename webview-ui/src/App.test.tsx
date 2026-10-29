@@ -2765,3 +2765,135 @@ describe('host commands (ui.command)', () => {
     expect(h.focusReports).toHaveLength(3);
   });
 });
+
+// Issue #33 (slash commands): what `prompt.send` carries when the draft starts with a listed
+// command. FABRICATED catalog and snapshots (`init`/`review` are the built-in names of opencode
+// v2.0.32; the wire shape is the one `protocol.ts` validates). They prove the wiring between the
+// draft, the catalog and the message, not what the server does with a command.
+describe('slash commands (issue #33)', () => {
+  const withCommands = (commands?: { name: string; description?: string }[]): HostToWebview => ({
+    type: 'catalog',
+    catalog: {
+      models: [],
+      providers: [],
+      agents: [],
+      ...(commands === undefined ? {} : { commands }),
+    },
+  });
+  const COMMANDS = [{ name: 'init', description: 'guided AGENTS.md setup' }, { name: 'hello' }];
+  const lastSent = (h: Harness) => {
+    const message = h.sent.at(-1);
+    if (message?.type !== 'prompt.send') throw new Error('the last message is not a prompt.send');
+    return message;
+  };
+
+  it('sends a listed command with its arguments as text and the full text kept for the draft', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+    h.type('/hello world');
+    h.button('Send').click();
+    expect(lastSent(h)).toMatchObject({
+      command: 'hello',
+      text: 'world',
+      delivery: 'queue',
+      sessionID: SES,
+    });
+    expect(h.saved.at(-1)).toMatchObject({ history: ['/hello world'] });
+  });
+
+  it('sends a command without arguments as an empty text', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+    h.type('/init');
+    h.button('Send').click();
+    expect(lastSent(h)).toMatchObject({ command: 'init', text: '' });
+  });
+
+  it('sends the chips without a mention when a command runs', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+    h.apply({
+      type: 'attachments.picked',
+      requestId: 'pick',
+      files: [{ uri: 'file:///x.ts', name: 'x.ts' }],
+    });
+    h.type('/hello @x.ts');
+    h.button('Send').click();
+    expect(lastSent(h).files).toEqual([{ uri: 'file:///x.ts', name: 'x.ts' }]);
+  });
+
+  it('sends an unlisted /name as a normal prompt with the full text (P4=1)', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+    h.type('/nope x');
+    h.button('Send').click();
+    const sent = lastSent(h);
+    expect(sent.text).toBe('/nope x');
+    expect(sent.command).toBeUndefined();
+  });
+
+  it('sends a normal prompt when the catalog has no command list at all', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]), withCommands(undefined));
+    h.type('/init');
+    h.button('Send').click();
+    const sent = lastSent(h);
+    expect(sent.text).toBe('/init');
+    expect(sent.command).toBeUndefined();
+  });
+
+  it('gives the full typed text and the chips back when the command fails', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+    h.apply({
+      type: 'attachments.picked',
+      requestId: 'pick',
+      files: [{ uri: 'file:///x.ts', name: 'x.ts' }],
+    });
+    h.type('/hello world');
+    h.button('Send').click();
+    const request = lastSent(h);
+    expect(h.textarea().value).toBe('');
+    h.apply({
+      type: 'request.result',
+      requestId: request.requestId,
+      error: {
+        code: 'CommandUnavailable',
+        message: 'The command /hello is not available on this server',
+      },
+    });
+    expect(h.textarea().value).toBe('/hello world');
+    expect(h.container.querySelector('.chip')?.textContent).toContain('x.ts');
+    expect(must(h.container, '[role="alert"]').textContent).toContain('/hello is not available');
+  });
+
+  it('lists the catalog commands in the "/" button', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+    must<HTMLButtonElement>(h.container, 'button[aria-label="Commands"]').click();
+    expect(
+      [...h.container.querySelectorAll('.command-menu [role="menuitem"]')].map(
+        (i) => i.textContent,
+      ),
+    ).toEqual(['/initguided AGENTS.md setup', '/hello']);
+  });
+
+  // Engram #1425: the same absent `commands` reads "Loading commands…" before the catalog arrives
+  // and "Commands could not be loaded" once a catalog came without them.
+  it('tells "loading" (no catalog yet) from "could not be loaded" (a catalog without commands)', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]));
+    const item = () => h.container.querySelector('.command-menu [role="menuitem"]')?.textContent;
+    must<HTMLButtonElement>(h.container, 'button[aria-label="Commands"]').click();
+    expect(item()).toBe('Loading commands…');
+    h.apply(withCommands(undefined)); // the open menu follows the catalog
+    expect(item()).toBe('Commands could not be loaded');
+  });
+
+  it('keeps the "/" button aria-disabled without a connection', () => {
+    const h = start();
+    const trigger = must<HTMLButtonElement>(h.container, 'button[aria-label="Commands"]');
+    expect(trigger.getAttribute('aria-disabled')).toBe('true');
+    expect(trigger.disabled).toBe(false);
+  });
+});

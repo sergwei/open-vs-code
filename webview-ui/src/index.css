@@ -1691,6 +1691,46 @@ button.plus-item[aria-disabled='true'] {
   cursor: default;
 }
 
+/*
+ * The slash commands (issue #33). The "/" button and its menu wear the "+" classes (same wrapper,
+ * trigger, menu and item); only the row inside differs: `/name` and the server's description on one
+ * line, the description cut with an ellipsis (whole in the `title`). The typed popup wears the `@`
+ * popup classes and uses the same two spans.
+ */
+button.command-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.command-name {
+  flex: none;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-description {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* On a highlighted or hovered row the description takes the row's own colour: a grey tint would lose contrast. */
+.mention-option[aria-selected='true'] .command-description,
+button.command-item:hover .command-description,
+button.command-item:focus-visible .command-description {
+  color: inherit;
+}
+
+.command-menu-status {
+  padding: 4px 8px;
+  color: var(--vscode-foreground);
+}
+
 /* ---------- agent and model chip and panel (issues #23/#24, E2 #85) ---------- */
 
 button.secondary[aria-disabled='true'] {
@@ -1993,6 +2033,8 @@ button.secondary[aria-disabled='true'] {
 [class*='vscode-high-contrast'] .session-picker,
 [class*='vscode-high-contrast'] .model-panel,
 [class*='vscode-high-contrast'] .mention-popup,
+[class*='vscode-high-contrast'] .command-popup,
+[class*='vscode-high-contrast'] .command-menu,
 [class*='vscode-high-contrast'] .agent-model-chip,
 [class*='vscode-high-contrast'] .session-search,
 [class*='vscode-high-contrast'] .subagent-sessions,
