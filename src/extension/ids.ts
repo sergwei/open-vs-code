@@ -59,6 +59,33 @@ export const REPLY_PERMISSION_COMMAND_ID = 'openVsCode.internal.replyPermission'
  */
 export const ADD_TO_CHAT_COMMAND_ID = 'openVsCode.addToChat';
 
+/**
+ * Command id of "Add to OpenCode Chat" in the EDITOR context menu (contributed in
+ * `menus.editor/context`; issue #36, decision T2=1 of Sergio): attaches the selection, or the
+ * whole file, of the right-clicked document. A separate id from {@link ADD_TO_CHAT_COMMAND_ID},
+ * which takes the Explorer's arguments.
+ */
+export const ADD_SELECTION_TO_CHAT_COMMAND_ID = 'openVsCode.addSelectionToChat';
+
+/**
+ * Command id of "Explain with OpenCode" in the EDITOR context menu and the palette (contributed;
+ * issue #36): asks the chat to explain the selection, or the whole file.
+ */
+export const EXPLAIN_SELECTION_COMMAND_ID = 'openVsCode.explainSelection';
+
+/**
+ * Command id of "Fix with OpenCode" in the EDITOR context menu and the palette (contributed;
+ * issue #36): asks the chat to fix the selection, or the whole file, with the problems VS Code
+ * reports for it.
+ */
+export const FIX_SELECTION_COMMAND_ID = 'openVsCode.fixSelection';
+
+/**
+ * Command id of "Explain with OpenCode" in the EXPLORER context menu (contributed, hidden from
+ * the palette because it needs the Explorer's arguments; issue #36, decision P2b=1 of Sergio).
+ */
+export const EXPLAIN_FILES_COMMAND_ID = 'openVsCode.explainFiles';
+
 /** Configuration section (the prefix of every setting id). */
 export const CONFIG_SECTION = 'openVsCode';
 

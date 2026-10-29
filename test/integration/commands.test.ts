@@ -16,6 +16,11 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
 import {
+  ADD_SELECTION_TO_CHAT_COMMAND_ID,
+  ADD_TO_CHAT_COMMAND_ID,
+  EXPLAIN_FILES_COMMAND_ID,
+  EXPLAIN_SELECTION_COMMAND_ID,
+  FIX_SELECTION_COMMAND_ID,
   FOCUS_PROMPT_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
   OPEN_CHAT_COMMAND_ID,
@@ -121,6 +126,24 @@ describe('palette commands and keybindings', () => {
       FOCUS_PROMPT_COMMAND_ID,
       NEW_SESSION_COMMAND_ID,
       STOP_RESPONSE_COMMAND_ID,
+    ]) {
+      assert.ok(commands.includes(id), `${id} is not registered`);
+    }
+  });
+
+  /**
+   * The context-menu commands of issue #36 are registered, not just listed in the manifest (a
+   * menu entry whose command is not registered shows and does nothing). Registration only: the
+   * right-click itself cannot be driven by the test API (`test:visual` does that).
+   */
+  it('registers the context-menu commands', async () => {
+    const commands = await vscode.commands.getCommands(true);
+    for (const id of [
+      ADD_TO_CHAT_COMMAND_ID,
+      ADD_SELECTION_TO_CHAT_COMMAND_ID,
+      EXPLAIN_SELECTION_COMMAND_ID,
+      FIX_SELECTION_COMMAND_ID,
+      EXPLAIN_FILES_COMMAND_ID,
     ]) {
       assert.ok(commands.includes(id), `${id} is not registered`);
     }
