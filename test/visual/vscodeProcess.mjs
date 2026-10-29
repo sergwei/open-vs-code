@@ -91,8 +91,12 @@ export function writeSettings(userDataDir, patch) {
 
 /**
  * Creates the temporary workspace the run opens: `src/sample.ts` (30 lines, so a link to line 20
- * is meaningful) and a `.env` whose read makes opencode ask for a permission. The content is
- * dummy; nothing here is a real secret. Returns the folder.
+ * is meaningful), a `.env` whose read makes opencode ask for a permission, and the two project
+ * slash commands of step 24 (issue #33): `.opencode/command/hello.md` (description "Say hello to
+ * someone", a template with `$ARGUMENTS`) and `.opencode/command/broken.md` (a template with
+ * `FAIL_COMMAND`, which the fixture answers with a 500 `CommandExecutionError`). The content is
+ * dummy; nothing here is a real secret. The fixture's file search skips folders that start with a
+ * dot, so the `.opencode` folder adds no row to the `@` popup of step 16. Returns the folder.
  */
 export function createWorkspace() {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'open-vs-code-visual-'));
@@ -107,7 +111,67 @@ export function createWorkspace() {
   }
   fs.writeFileSync(path.join(folder, 'src', 'sample.ts'), `${lines.join('\n')}\n`);
   fs.writeFileSync(path.join(folder, '.env'), 'API_KEY=dummy-value-not-a-secret\n');
+  const commands = path.join(folder, '.opencode', 'command');
+  fs.mkdirSync(commands, { recursive: true });
+  fs.writeFileSync(
+    path.join(commands, 'hello.md'),
+    '---\ndescription: Say hello to someone\n---\nSay hello to $ARGUMENTS in one short sentence.\n',
+  );
+  fs.writeFileSync(
+    path.join(commands, 'broken.md'),
+    '---\ndescription: A command that always fails\n---\nFAIL_COMMAND\n',
+  );
   return folder;
+}
+
+/**
+ * Installs the extension into `extensionsDir` the way a `.vsix` would, without packaging one: copies
+ * the manifest and the files it points at (`dist`, `media`, the README, the license and the
+ * changelog) into `<publisher>.<name>-<version>` and registers that folder in the
+ * `extensions.json` of the directory. Returns the folder.
+ *
+ * Why: an extension loaded with `--extensionDevelopmentPath` was NOT disabled by Workspace Trust in
+ * a first run of step 25 (Windows 11, VS Code 1.144.0, 28/10/2026), even with `capabilities.
+ * untrustedWorkspaces.supported: false` in the manifest: a Restricted Mode window still showed the
+ * OpenCode item and its commands. HYPOTHESIS: an extension under development is exempt; step 25
+ * compares the two ways of loading it, and the check "in Restricted Mode the OpenCode item is NOT
+ * in the activity bar" passes only with the installed copy (the exemption itself was not tested
+ * in isolation). The `extensions.json` entry is written by hand in the shape VS Code itself
+ * writes (a `file` location and `relativeLocation`). VERIFIED that VS Code reads it (Windows 11,
+ * VS Code 1.144.0, 28/10/2026): the check "control: the OpenCode item is in the activity bar of
+ * the installed extension when trust is off" would fail if the entry were not read.
+ */
+function installExtension(repoRoot, extensionsDir) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+  const relative = `${manifest.publisher}.${manifest.name}-${manifest.version}`;
+  const target = path.join(extensionsDir, relative);
+  fs.mkdirSync(target, { recursive: true });
+  for (const entry of ['package.json', 'dist', 'media', 'README.md', 'LICENSE', 'CHANGELOG.md']) {
+    const from = path.join(repoRoot, entry);
+    if (fs.existsSync(from)) fs.cpSync(from, path.join(target, entry), { recursive: true });
+  }
+  const uriPath = `/${target.replaceAll('\\', '/')}`;
+  fs.writeFileSync(
+    path.join(extensionsDir, 'extensions.json'),
+    JSON.stringify([
+      {
+        identifier: { id: `${manifest.publisher}.${manifest.name}`.toLowerCase() },
+        version: manifest.version,
+        location: { $mid: 1, path: uriPath, scheme: 'file' },
+        relativeLocation: relative,
+        metadata: {
+          installedTimestamp: Date.now(),
+          pinned: true,
+          source: 'vsix',
+          isApplicationScoped: false,
+          isMachineScoped: false,
+          isBuiltin: false,
+          targetPlatform: 'undefined',
+        },
+      },
+    ]),
+  );
+  return target;
 }
 
 /**
@@ -116,8 +180,14 @@ export function createWorkspace() {
  * Uses the same `stable` build that `@vscode/test-electron` caches in `.vscode-test/` for the
  * integration suite (downloaded on the first run). `--disable-extensions` is required (with the
  * user's extensions the extension host crashed on Windows, Engram 851) and still loads the
- * extension under development. `--disable-workspace-trust` because the extension does not
- * activate in Restricted Mode. The profile, the extensions dir and the opencode data dir
+ * extension under development. `--disable-workspace-trust` (and `security.workspace.trust.enabled:
+ * false`) because the trust prompt would otherwise stand in the way of the run and a folder nobody
+ * trusted is Restricted Mode, which the extension declares unsupported; except when `restricted` is
+ * true (step 25, Workspace Trust): then trust is ENABLED, the start-up prompt is turned off
+ * (`security.workspace.startupPrompt: never`) and the flag is left out, so the folder, which no
+ * profile has ever trusted, opens in Restricted Mode. `installed` installs the extension into the
+ * extensions dir (see {@link installExtension}) instead of loading it from the repo: the only way
+ * to see what Restricted Mode does to it. The profile, the extensions dir and the opencode data dir
  * (`opencode-xdg`, see {@link cleanEnv}) are wiped at start so every run begins from the same
  * state.
  *
@@ -128,12 +198,21 @@ export function createWorkspace() {
  * xdgRoot, exited, stateFile }`; `stop()` kills the whole process tree (the server child of the
  * extension host included) and waits until the main process is gone.
  */
-export async function startVSCode({ repoRoot, workDir, workspace, opencodePath, startDown }) {
+export async function startVSCode({
+  repoRoot,
+  workDir,
+  workspace,
+  opencodePath,
+  startDown,
+  restricted,
+  installed,
+}) {
   const executable = await downloadAndUnzipVSCode('stable');
   const userDataDir = path.join(workDir, 'user-data');
   const extensionsDir = path.join(workDir, 'extensions');
   fs.rmSync(userDataDir, { recursive: true, force: true });
   fs.rmSync(extensionsDir, { recursive: true, force: true });
+  if (installed === true) installExtension(repoRoot, extensionsDir);
   const xdgRoot = path.join(workDir, 'opencode-xdg');
   fs.rmSync(xdgRoot, { recursive: true, force: true });
   const stateFile = path.join(workDir, 'fake-opencode-state.json');
@@ -149,7 +228,8 @@ export async function startVSCode({ repoRoot, workDir, workspace, opencodePath, 
       opencodePath ?? path.join(repoRoot, 'src', 'extension', 'test-fixtures', 'fake-opencode.mjs'),
     'workbench.startupEditor': 'none',
     'workbench.colorTheme': 'Default Dark Modern',
-    'security.workspace.trust.enabled': false,
+    'security.workspace.trust.enabled': restricted === true,
+    ...(restricted === true ? { 'security.workspace.startupPrompt': 'never' } : {}),
     'update.mode': 'none',
     'extensions.autoUpdate': false,
     'telemetry.telemetryLevel': 'off',
@@ -184,9 +264,12 @@ export async function startVSCode({ repoRoot, workDir, workspace, opencodePath, 
       workspace,
       `--user-data-dir=${userDataDir}`,
       `--extensions-dir=${extensionsDir}`,
-      '--disable-extensions',
-      `--extensionDevelopmentPath=${repoRoot}`,
-      '--disable-workspace-trust',
+      // An installed extension (step 25) must not be disabled; the extensions dir is isolated, so
+      // no extension of the user's is there to crash the extension host.
+      ...(installed === true
+        ? []
+        : ['--disable-extensions', `--extensionDevelopmentPath=${repoRoot}`]),
+      ...(restricted === true ? [] : ['--disable-workspace-trust']),
       '--skip-release-notes',
       '--skip-welcome',
       `--remote-debugging-port=${String(port)}`,

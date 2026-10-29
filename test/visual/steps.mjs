@@ -29,7 +29,11 @@
  * "Allowed once" that the step 5 leaves) survive Restart Server, and `--steps 7` alone failed with
  * "the answered-request lines are the same after Restart Server ([] -> [])" (28/10/2026, Windows
  * 11, VS Code 1.143.1; the other 24 ids passed alone). With `needs: ['5']` the 7 passed 2 runs of 2.
- * Every step after the 1 needs the 1:
+ * Steps 24 (slash commands, issue #33) and 25 (Workspace Trust, same issue) came after that
+ * measurement: the 24 needs the 1 (it drives the chat) and sends prompts; the 25 needs nothing
+ * (it starts two more VS Code windows of its own, a control and one in Restricted Mode, and never
+ * touches the main one).
+ * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
  * (Windows 11): without the 1 every step threw "Cannot read properties of undefined (reading
@@ -61,6 +65,8 @@ export const STEPS = [
   { id: '21', needs: ['1'], sendsPrompt: false },
   { id: '22', needs: ['2'], sendsPrompt: true },
   { id: '23', needs: ['1'], sendsPrompt: false },
+  { id: '24', needs: ['1'], sendsPrompt: true },
+  { id: '25', needs: [], sendsPrompt: false },
 ];
 
 /** Every valid id, in canonical order. */
