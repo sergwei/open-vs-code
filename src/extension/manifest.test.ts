@@ -10,6 +10,7 @@ interface Manifest {
     viewsContainers: { activitybar: { id: string }[] };
     views: Record<string, { id: string }[]>;
     commands: { command: string; title?: string; category?: string }[];
+    menus?: Record<string, { command: string; group?: string; when?: string }[]>;
     configuration: {
       properties: Record<
         string,
@@ -219,6 +220,78 @@ describe('keybindings in package.json', () => {
       ids.STOP_RESPONSE_COMMAND_ID,
     ]) {
       expect(contributed).toContain(id);
+    }
+  });
+});
+
+/**
+ * Protects the context-menu entries of issue #36 (decisions P1, P2, P2b and T2 of Sergio,
+ * 29/10/2026): the four commands with their constants and titles, the editor entries in their own
+ * ordered group, the extra Explorer entry next to the existing one, `resourceScheme == file` on
+ * every entry (so untitled, `git:` and `output:` documents never show them) and the palette
+ * (editor commands visible, the Explorer ones hidden because they need the Explorer's arguments).
+ * The data is the REAL package.json. How VS Code RENDERS the menus is not covered here: that is
+ * the `test:visual` checks "C1 the editor right-click menu lists "Add to OpenCode Chat", "Explain with
+ * OpenCode" and "Fix with OpenCode" in that order" and "C2 the Explorer
+ * right-click menu lists "Add to OpenCode Chat" then "Explain with OpenCode" and no Fix".
+ */
+describe('context menus (issue #36)', () => {
+  const menus = manifest.contributes.menus ?? {};
+  const entries = (menu: string): { command: string; group?: string; when?: string }[] =>
+    menus[menu] ?? [];
+  const titleOf = (id: string): string | undefined =>
+    manifest.contributes.commands.find((c) => c.command === id)?.title;
+
+  it('contributes the four commands with the approved titles and no category', () => {
+    const wanted: [string, string][] = [
+      [ids.ADD_SELECTION_TO_CHAT_COMMAND_ID, 'Add to OpenCode Chat'],
+      [ids.EXPLAIN_SELECTION_COMMAND_ID, 'Explain with OpenCode'],
+      [ids.FIX_SELECTION_COMMAND_ID, 'Fix with OpenCode'],
+      [ids.EXPLAIN_FILES_COMMAND_ID, 'Explain with OpenCode'],
+    ];
+    for (const [id, title] of wanted) {
+      const command = manifest.contributes.commands.find((c) => c.command === id);
+      expect(command?.title, id).toBe(title);
+      expect(command?.category, id).toBeUndefined();
+    }
+    expect(titleOf(ids.ADD_TO_CHAT_COMMAND_ID)).toBe('Add to OpenCode Chat');
+  });
+
+  it('puts Add, Explain and Fix in their own editor group, in that order', () => {
+    expect(entries('editor/context').map((e) => [e.command, e.group])).toEqual([
+      [ids.ADD_SELECTION_TO_CHAT_COMMAND_ID, 'openVsCode@1'],
+      [ids.EXPLAIN_SELECTION_COMMAND_ID, 'openVsCode@2'],
+      [ids.FIX_SELECTION_COMMAND_ID, 'openVsCode@3'],
+    ]);
+  });
+
+  it('adds Explain next to Add in the Explorer menu, with no Fix', () => {
+    expect(entries('explorer/context').map((e) => [e.command, e.group])).toEqual([
+      [ids.ADD_TO_CHAT_COMMAND_ID, '6_copypath@99'],
+      [ids.EXPLAIN_FILES_COMMAND_ID, '6_copypath@100'],
+    ]);
+  });
+
+  it('shows every entry only for documents that live on disk', () => {
+    for (const entry of [...entries('editor/context'), ...entries('explorer/context')]) {
+      expect(entry.when, entry.command).toBe('resourceScheme == file');
+    }
+  });
+
+  it('hides from the palette the Explorer commands and leaves the editor ones visible', () => {
+    const hidden = entries('commandPalette')
+      .filter((e) => e.when === 'false')
+      .map((e) => e.command);
+    expect(hidden.sort()).toEqual(
+      [ids.ADD_TO_CHAT_COMMAND_ID, ids.EXPLAIN_FILES_COMMAND_ID].sort(),
+    );
+    const palette = entries('commandPalette').map((e) => e.command);
+    for (const id of [
+      ids.ADD_SELECTION_TO_CHAT_COMMAND_ID,
+      ids.EXPLAIN_SELECTION_COMMAND_ID,
+      ids.FIX_SELECTION_COMMAND_ID,
+    ]) {
+      expect(palette).not.toContain(id);
     }
   });
 });

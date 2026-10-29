@@ -32,7 +32,11 @@ import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
 import { toEditorRef } from '../../src/extension/fileMentions';
 import {
+  ADD_SELECTION_TO_CHAT_COMMAND_ID,
   ADD_TO_CHAT_COMMAND_ID,
+  EXPLAIN_FILES_COMMAND_ID,
+  EXPLAIN_SELECTION_COMMAND_ID,
+  FIX_SELECTION_COMMAND_ID,
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
@@ -511,6 +515,164 @@ describe('fake server', function () {
       'dropped files added: 1, skipped: 0 (0 folder(s), 0 outside, 0 remote, 0 missing, 0 ignored)',
       10_000,
     );
+  });
+
+  /**
+   * "Explain with OpenCode" of the editor menu sends the selection through the real webview.
+   *
+   * Protects (issue #36): the command takes the `Uri` the menu passes, the host reads the selection
+   * (`0 file(s), 1 selection(s)`), hands `prompt.compose` to the pane and the REAL webview sends it
+   * (`prompt accepted for ses_` can only come from the webview: the command itself sends nothing),
+   * the reference passes the whitelist (no `rejected: an attachment`) and the turn ends once. The
+   * right-click is NOT driven (the test API cannot; `test:visual` does it); the argument is built
+   * by hand. The fixture is synthetic.
+   */
+  it('Explain with OpenCode sends the selection of the clicked document', async function () {
+    const editor = await openSample();
+    editor.selection = new vscode.Selection(1, 0, 2, 4);
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(EXPLAIN_SELECTION_COMMAND_ID, editor.document.uri);
+    await log.waitFor('context action explain: 0 file(s), 1 selection(s)', 10_000);
+    await log.waitFor('prompt accepted for ses_', 15_000);
+    await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+    await sleep(SETTLE_MS);
+    log.assertAbsent('rejected: ');
+    log.assertAbsent('turn finished: failed');
+  });
+
+  /**
+   * The menu's `Uri` wins over the active editor (risk R1 of issue #36).
+   *
+   * A second editor in the other column becomes the active one; Explain is run with the `Uri` of
+   * the FIRST one, which holds a selection. `0 file(s), 1 selection(s)` can only be that selection:
+   * had the host read the active editor (no selection) it would log `1 file(s), 0 selection(s)`.
+   * What is NOT shown: a real right-click on the non-active side of a split (the argument is
+   * built by hand), and two editors on the same document.
+   */
+  it('reads the editor of the clicked document, not the active one', async function () {
+    const folder = workspaceFolderPath();
+    const other = path.join(folder, 'src', 'other.ts');
+    fs.writeFileSync(other, 'export const other = 1;\n');
+    try {
+      const editor = await openSample();
+      editor.selection = new vscode.Selection(0, 0, 1, 5);
+      const second = await vscode.workspace.openTextDocument(vscode.Uri.file(other));
+      await vscode.window.showTextDocument(second, vscode.ViewColumn.Two);
+      assert.strictEqual(vscode.window.activeTextEditor?.document.uri.fsPath, other);
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(EXPLAIN_SELECTION_COMMAND_ID, editor.document.uri);
+      await log.waitFor('context action explain: 0 file(s), 1 selection(s)', 10_000);
+      log.assertAbsent('1 file(s), 0 selection(s)');
+      await log.waitFor('turn finished:', TURN_WAIT_MS);
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      fs.rmSync(other, { force: true });
+    }
+  });
+
+  /**
+   * "Fix with OpenCode" on a file with a real TypeScript error.
+   *
+   * Protects (issue #36): that `vscode.languages.getDiagnostics` has an error for a `.ts` file in
+   * the test profile (`--disable-extensions`; the built-in TypeScript language features are what
+   * produces it), which is the premise of decision P4=1, and that Fix then runs through the real
+   * webview (`context action fix: 1 file(s), 0 selection(s)`, `prompt accepted for ses_`). The
+   * LOG cannot show the text, so that the diagnostic line is in the prompt is covered by the unit
+   * tests of `contextPrompts` and `chatController`, not here. Waits up to 40 s for the language
+   * service, our own margin for a cold start on a slow runner.
+   */
+  it('Fix with OpenCode runs on a file the TypeScript server reports an error for', async function () {
+    this.timeout(90_000);
+    const file = path.join(workspaceFolderPath(), 'src', 'broken.ts');
+    fs.writeFileSync(file, "export const broken: number = 'text';\n");
+    try {
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+      await vscode.window.showTextDocument(document);
+      const deadline = Date.now() + 40_000;
+      let found = vscode.languages.getDiagnostics(document.uri);
+      while (found.length === 0 && Date.now() < deadline) {
+        await sleep(500);
+        found = vscode.languages.getDiagnostics(document.uri);
+      }
+      assert.ok(
+        found.some((d) => d.severity === vscode.DiagnosticSeverity.Error),
+        `no TypeScript error for broken.ts after 40 s: ${JSON.stringify(found.map((d) => d.message))}`,
+      );
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(FIX_SELECTION_COMMAND_ID, document.uri);
+      await log.waitFor('context action fix: 1 file(s), 0 selection(s)', 10_000);
+      await log.waitFor('prompt accepted for ses_', 15_000);
+      await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+      log.assertAbsent('rejected: ');
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      fs.rmSync(file, { force: true });
+    }
+  });
+
+  /**
+   * "Add to OpenCode Chat" of the editor menu attaches the selection and sends nothing.
+   *
+   * Protects (issue #36): `0 file(s), 1 selection(s)` and NO `prompt accepted` after a margin (the
+   * entry only adds a chip; sending is for Explain and Fix). Whether the chip shows is
+   * `test:visual`'s to say.
+   */
+  it('Add to OpenCode Chat from the editor attaches the selection and sends nothing', async function () {
+    const editor = await openSample();
+    editor.selection = new vscode.Selection(0, 0, 0, 6);
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(ADD_SELECTION_TO_CHAT_COMMAND_ID, editor.document.uri);
+    await log.waitFor('context action add: 0 file(s), 1 selection(s)', 10_000);
+    await sleep(SETTLE_MS);
+    log.assertAbsent('prompt accepted');
+  });
+
+  /**
+   * Explorer "Explain with OpenCode" with a folder in the multi-selection: one prompt, the folder
+   * counted and skipped.
+   *
+   * Protects (issue #36, decision P8=1): `1 file(s), 0 selection(s)`, the skipped-count line
+   * (`skipped 1 (1 folder(s), 0 outside, 0 remote, 0 missing)`) and that the one file is sent
+   * through the real webview. Arguments built by hand as the Explorer passes them
+   * `(clicked, selected)`.
+   */
+  it('Explorer Explain sends one prompt for the files and counts the folder it skipped', async function () {
+    const editor = await openSample();
+    const file = editor.document.uri;
+    const folder = vscode.Uri.file(path.join(workspaceFolderPath(), 'src'));
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(EXPLAIN_FILES_COMMAND_ID, file, [file, folder]);
+    await log.waitFor('context action explain: 1 file(s), 0 selection(s)', 10_000);
+    await log.waitFor(
+      'context action explain: skipped 1 (1 folder(s), 0 outside, 0 remote, 0 missing)',
+      10_000,
+    );
+    await log.waitFor('prompt accepted for ses_', 15_000);
+    await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+    log.assertAbsent('rejected: ');
+  });
+
+  /**
+   * A document that is not on disk is refused and nothing is composed or sent.
+   *
+   * Protects (issue #36, P11=1): the `Uri` of an untitled document makes the host log
+   * `context action explain: refused (NoFileOnDisk)` and send no prompt. The NATIVE warning that
+   * the lifecycle shows is not readable by the test API, so it is not checked here (the menu does
+   * not even offer the entry for untitled: `resourceScheme == file`, only reachable from the
+   * palette); `test:visual` looks at the notification.
+   */
+  it('refuses to explain an untitled document and sends nothing', async function () {
+    const document = await vscode.workspace.openTextDocument({ content: 'let x = 1;\n' });
+    await vscode.window.showTextDocument(document);
+    try {
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(EXPLAIN_SELECTION_COMMAND_ID, document.uri);
+      await log.waitFor('context action explain: refused (NoFileOnDisk)', 10_000);
+      await sleep(SETTLE_MS);
+      log.assertAbsent('prompt accepted');
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    }
   });
 
   /**

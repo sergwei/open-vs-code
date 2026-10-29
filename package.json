@@ -134,6 +134,22 @@
         "title": "Add to OpenCode Chat"
       },
       {
+        "command": "openVsCode.addSelectionToChat",
+        "title": "Add to OpenCode Chat"
+      },
+      {
+        "command": "openVsCode.explainSelection",
+        "title": "Explain with OpenCode"
+      },
+      {
+        "command": "openVsCode.fixSelection",
+        "title": "Fix with OpenCode"
+      },
+      {
+        "command": "openVsCode.explainFiles",
+        "title": "Explain with OpenCode"
+      },
+      {
         "command": "openVsCode.openChat",
         "title": "Open Chat",
         "category": "OpenCode"
@@ -193,11 +209,37 @@
           "command": "openVsCode.addToChat",
           "group": "6_copypath@99",
           "when": "resourceScheme == file"
+        },
+        {
+          "command": "openVsCode.explainFiles",
+          "group": "6_copypath@100",
+          "when": "resourceScheme == file"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "openVsCode.addSelectionToChat",
+          "group": "openVsCode@1",
+          "when": "resourceScheme == file"
+        },
+        {
+          "command": "openVsCode.explainSelection",
+          "group": "openVsCode@2",
+          "when": "resourceScheme == file"
+        },
+        {
+          "command": "openVsCode.fixSelection",
+          "group": "openVsCode@3",
+          "when": "resourceScheme == file"
         }
       ],
       "commandPalette": [
         {
           "command": "openVsCode.addToChat",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.explainFiles",
           "when": "false"
         }
       ]

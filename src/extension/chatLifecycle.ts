@@ -1,18 +1,22 @@
 import * as vscode from 'vscode';
 import { isWebviewToHost, type UiCommand } from '../shared/protocol';
 import { createAttention } from './attention';
-import { ChatController, type FocusTarget } from './chatController';
+import { ChatController, type ComposeOutcome, type FocusTarget } from './chatController';
 import type { ChatSurfaceGate } from './chatSurfaceGate';
 import { registerChatView } from './chatViewProvider';
 import { createEditorActions } from './editorActions';
 import type { ModelRef } from '../shared/model';
 import {
+  ADD_SELECTION_TO_CHAT_COMMAND_ID,
   ADD_TO_CHAT_COMMAND_ID,
   CHAT_FOCUSED_CONTEXT_KEY,
   CHAT_VIEW_ID,
   CONFIG_SECTION,
   DEFAULT_MODEL_KEY,
   DEFAULT_MODEL_SETTING,
+  EXPLAIN_FILES_COMMAND_ID,
+  EXPLAIN_SELECTION_COMMAND_ID,
+  FIX_SELECTION_COMMAND_ID,
   FOCUS_PROMPT_COMMAND_ID,
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
   MANAGE_PERMISSIONS_COMMAND_ID,
@@ -124,6 +128,26 @@ function focusPromptTarget(raw: unknown, chatFocused: boolean): 'chat' | 'editor
 }
 
 /**
+ * The `file:` URIs of the Explorer's `(clicked, selected)` arguments, as strings: all of the
+ * selection when there is one, else the clicked item. Anything that is not a `Uri` is dropped (a
+ * command can be run with any arguments).
+ */
+function explorerUris(clicked: unknown, selected: unknown): string[] {
+  const items = Array.isArray(selected) && selected.length > 0 ? selected : [clicked];
+  return items
+    .filter((item): item is vscode.Uri => item instanceof vscode.Uri)
+    .map((uri) => uri.toString());
+}
+
+/**
+ * The document `Uri` an `editor/context` entry receives, as a string, or `undefined` from the
+ * palette or with any other argument (the host then reads the active editor).
+ */
+function editorUri(raw: unknown): string | undefined {
+  return raw instanceof vscode.Uri ? raw.toString() : undefined;
+}
+
+/**
  * Reads the argument of the "Allow once" / "Reject" links. `always` is refused on purpose: it
  * stores a rule for the whole project and must be chosen in the chat, where the rule is shown.
  */
@@ -223,6 +247,27 @@ function parseReply(
  * setup guide and the error card run through it. VERIFIED for "Choose binary…" on Windows 11 (27/10/2026,
  * visual check "Choose binary… through the real file dialog wrote the setting and step 1 is done");
  * the other setup actions are UNVERIFIED in a real window (see `setupActions.ts`).
+ *
+ * Issue #36 registers the context-menu entries: `ADD_SELECTION_TO_CHAT_COMMAND_ID`,
+ * `EXPLAIN_SELECTION_COMMAND_ID` and `FIX_SELECTION_COMMAND_ID` (`editor/context`, they get the
+ * `Uri` of the clicked document) and `EXPLAIN_FILES_COMMAND_ID` (`explorer/context`, the same
+ * `(clicked, selected)` pair as Add to OpenCode Chat). Each asks the controller first and reveals
+ * the chat after, only when the outcome is not `rejected`: a refusal is shown as a native
+ * `showWarningMessage` and the chat stays closed (decision P11=1). The pane they talk to comes
+ * from the single helper `targetPane`. VERIFIED on Windows 11 (29/10/2026, `npm run test:integration`,
+ * the commands run with hand-built arguments): "registers the context-menu commands", "Explain with
+ * OpenCode sends the selection of the clicked document", "Explorer Explain sends one prompt for the
+ * files and counts the folder it skipped" and "Add to OpenCode Chat from the editor attaches the
+ * selection and sends nothing". VERIFIED with the real right mouse button (`npm run test:visual`,
+ * Windows 11, VS Code 1.144.0, 29/10/2026, full run): "C1 the editor right-click menu lists "Add to
+ * OpenCode Chat", "Explain with OpenCode" and "Fix with OpenCode" in that order", "C3 Explain from
+ * the editor sends "Explain what @src/sample.ts#2-3 does."", "C2 the Explorer right-click menu
+ * lists "Add to OpenCode Chat" then "Explain with OpenCode" and no Fix", "C5 the chat that was
+ * hidden when the command ran sends "Explain what @… and @… do."" and the native warning: "C7
+ * Explain on a file outside the workspace folder raises the native warning "Only files inside the
+ * workspace folder can be added"" (read in `.notifications-toasts`). UNVERIFIED: the chat being
+ * CLOSED (not only hidden behind the Explorer) when the command runs, and that a refusal leaves a
+ * closed chat closed (the chat was open during C7).
  *
  * The two internal commands (`SHOW_REQUEST_COMMAND_ID`, `REPLY_PERMISSION_COMMAND_ID`) are always
  * registered and not contributed: they are the targets of the links of an attention
@@ -328,6 +373,24 @@ export function registerChat(
   });
   // P3=2 (issue #85): the notifications ask whether this view can show the failure itself.
   gate?.attach(() => view.provider.canDeliver);
+  /**
+   * The pane every command of the menus talks to: the side-bar one, the only chat surface until
+   * #77 phase 2 picks the surface that is active. The ONE place to change then (risk R8 of #36).
+   */
+  const targetPane = (): typeof pane => pane;
+  /**
+   * Closes a context-menu entry (issue #36). `rejected` (nothing valid to send) shows the reason
+   * as a native warning and does NOT open the chat (decision P11=1 of Sergio); `composed` and
+   * `notified` reveal it, `notified` because its "items were not added" notice is waiting there.
+   * The warning is not awaited: `showWarningMessage` settles when the user dismisses it.
+   */
+  const finishContextAction = async (outcome: ComposeOutcome): Promise<void> => {
+    if (outcome.status === 'rejected') {
+      void vscode.window.showWarningMessage(outcome.error.message);
+      return;
+    }
+    await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
+  };
   /** Reveals the chat (the view's generated focus command) and relays `command` to its webview. */
   const runInChat = async (command: UiCommand): Promise<void> => {
     await vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
@@ -373,12 +436,35 @@ export function registerChat(
     vscode.commands.registerCommand(
       ADD_TO_CHAT_COMMAND_ID,
       async (clicked: unknown, selected: unknown) => {
-        const items = Array.isArray(selected) && selected.length > 0 ? selected : [clicked];
-        const uris = items
-          .filter((item): item is vscode.Uri => item instanceof vscode.Uri)
-          .map((uri) => uri.toString());
         await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
-        await controller.addToChat(pane.id, uris);
+        await controller.addToChat(targetPane().id, explorerUris(clicked, selected));
+      },
+    ),
+    // Issue #36: the context-menu entries. The editor ones receive the `Uri` of the right-clicked
+    // document (nothing from the palette), the Explorer one the same pair as Add to OpenCode Chat.
+    vscode.commands.registerCommand(ADD_SELECTION_TO_CHAT_COMMAND_ID, async (uri: unknown) => {
+      await finishContextAction(await controller.addEditorToChat(targetPane().id, editorUri(uri)));
+    }),
+    vscode.commands.registerCommand(EXPLAIN_SELECTION_COMMAND_ID, async (uri: unknown) => {
+      await finishContextAction(
+        await controller.composeFromEditor(targetPane().id, 'explain', editorUri(uri)),
+      );
+    }),
+    vscode.commands.registerCommand(FIX_SELECTION_COMMAND_ID, async (uri: unknown) => {
+      await finishContextAction(
+        await controller.composeFromEditor(targetPane().id, 'fix', editorUri(uri)),
+      );
+    }),
+    vscode.commands.registerCommand(
+      EXPLAIN_FILES_COMMAND_ID,
+      async (clicked: unknown, selected: unknown) => {
+        await finishContextAction(
+          await controller.composeFromFiles(
+            targetPane().id,
+            'explain',
+            explorerUris(clicked, selected),
+          ),
+        );
       },
     ),
     vscode.commands.registerCommand(SHOW_REQUEST_COMMAND_ID, async (raw: unknown) => {

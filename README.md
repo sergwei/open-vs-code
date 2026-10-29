@@ -41,6 +41,19 @@ affiliated with opencode or with Microsoft.
   `/name` and a space into the box so you can add arguments; Enter runs it. A `/word` that is not on the list
   is sent as a normal prompt. The conversation shows the expanded text of the command, as opencode
   stores it, not what you typed.
+- **Editor and Explorer context menus (issue #36):** right-click in a text editor for **Add to
+  OpenCode Chat** (attaches the selection, or the whole file when nothing is selected),
+  **Explain with OpenCode** and **Fix with OpenCode**. Explain and Fix send a ready-made prompt at
+  once (`Explain what @src/a.ts#2-3 does.`, `Fix the problems in @src/a.ts#2-3.`) with the
+  selection attached; Fix also lists the errors and warnings VS Code reports for that range (up to
+  20). In the Explorer, **Explain with OpenCode** works on one or several files. If the chat cannot
+  send right then (a turn is running, or the server is not connected yet), the prompt is left in
+  the prompt box with a notice, and your own draft is never overwritten. The entries only appear
+  on files that exist on disk. From the Explorer, folders and files outside the workspace folder
+  are counted in a notice inside the chat ("1 selected item was not added…"); from the editor
+  and the Command Palette, a refused file (outside the workspace folder) shows a native VS Code
+  warning. A prompt that waited too long for the chat to be shown (over 10 seconds) is left in
+  the prompt box, with a notice, instead of being sent.
 - **Collapsible tool cards** for shell, read, grep and edit calls, with diffs for edits.
 - **`@` mentions** to add files to the prompt, and a "+" menu in the prompt bar with **Add
   selection** (attaches the editor selection), **Attach file…**, **Attach image…** and **Mention a
@@ -102,6 +115,11 @@ The extension is not on the Marketplace yet; issue #43 will publish it there. Un
    press Ctrl+Alt+P (Cmd+Alt+P on macOS) to jump to the prompt; press it again to come back to the
    editor (see [Keyboard shortcuts](#keyboard-shortcuts)).
 
+To ask about code without opening the chat first, select it in the editor, right-click and choose
+**Explain with OpenCode** or **Fix with OpenCode**; to send whole files, right-click them in the
+Explorer and choose **Explain with OpenCode**. The chat opens by itself and the prompt is sent in
+the open session.
+
 In a multi-root workspace, choose the folder opencode works in with **OpenCode: Select Workspace
 Folder**.
 
@@ -115,8 +133,9 @@ Folder**.
 
 ## Commands
 
-All commands are in the Command Palette under the **OpenCode** category, except **Add to OpenCode
-Chat**, which lives in the Explorer's right-click menu.
+All commands are in the Command Palette under the **OpenCode** category, except the ones without a
+category below, which live in the right-click menus. The three editor entries are also in the
+Command Palette (they act on the active editor); the two Explorer entries are not.
 
 | Command | What it does |
 | --- | --- |
@@ -131,6 +150,10 @@ Chat**, which lives in the Explorer's right-click menu.
 | **OpenCode: New Session** | Same as the **New session** button: the next prompt starts a new session and your draft is kept. |
 | **OpenCode: Stop Response** | Same as **Stop**: interrupts the running turn. Run from the editor it also shows the chat; with no turn running it only says "No response is running". |
 | **Add to OpenCode Chat** | Explorer right-click menu: attaches the selected files to the prompt. |
+| **Add to OpenCode Chat** | Editor right-click menu: attaches the selection (the whole file when nothing is selected). |
+| **Explain with OpenCode** | Editor right-click menu: sends "Explain what @file#lines does." with the selection (or the file) attached. |
+| **Explain with OpenCode** | Explorer right-click menu: sends "Explain what @a and @b do." with the selected files attached. |
+| **Fix with OpenCode** | Editor right-click menu: sends "Fix the problems in @file#lines." with the selection attached and the errors and warnings VS Code reports there (up to 20). |
 
 ## Keyboard shortcuts
 
@@ -169,6 +192,13 @@ always `opencode`.
 - The default shortcuts use Ctrl+Alt (Cmd+Alt on macOS), which is AltGr on Windows; see
   [Keyboard shortcuts](#keyboard-shortcuts) to rebind them. They are checked against the default
   shortcuts of VS Code, not against those of your desktop environment or other extensions.
+- The editor and Explorer context menus were only tried on Windows. On macOS and Linux (and on
+  macOS with `window.titleBarStyle` set to `native`) VS Code may draw the menus natively; they
+  should work the same, but this project has not run them there.
+- The editor menu entries read the **saved** file: opencode reads the file from disk, so with
+  unsaved changes the line numbers may not match what the model sees. Explain and Fix then do not
+  send by themselves: they leave the prompt in the box with an "Unsaved changes" notice. Files that
+  are not on disk (untitled, `git:` or output documents) have no entries.
 - Mostly tested on Windows; CI builds and tests on Windows, macOS and Linux.
 
 ## Privacy and security
