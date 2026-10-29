@@ -31,6 +31,7 @@ import {
   MAX_DIFF_PATH_LENGTH,
   MAX_DROPPED_ITEMS,
   MAX_DROPPED_URI_LENGTH,
+  MAX_COMMAND_NAME_LENGTH,
   MAX_FILE_SEARCH_LENGTH,
   MAX_IMAGE_BASE64_LENGTH,
   MAX_SESSION_SEARCH_LENGTH,
@@ -383,6 +384,32 @@ describe('isWebviewToHost', () => {
       { ...base, model: null },
       { ...base, agent: '' },
       { ...base, agent: 3 },
+    ];
+    for (const value of bad) {
+      expect(isWebviewToHost(value), JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  // Issue #33. Fabricated messages pinning the guard: a command alone is a whole prompt, and the
+  // name is checked for shape only (that the host lists it is the controller's check).
+  it('validates the optional command of prompt.send', () => {
+    const base = WEBVIEW_SAMPLES['prompt.send'];
+    const empty = { ...base, text: '', files: [] };
+    expect(isWebviewToHost({ ...empty, command: 'init' })).toBe(true);
+    expect(isWebviewToHost({ ...empty, command: 'docs/my cmd' })).toBe(true);
+    expect(isWebviewToHost({ ...empty, command: 'docs:search', text: 'a b' })).toBe(true);
+    expect(isWebviewToHost({ ...empty, command: 'x'.repeat(MAX_COMMAND_NAME_LENGTH) })).toBe(true);
+    const bad: unknown[] = [
+      { ...empty, command: '' },
+      { ...empty, command: '  x' },
+      { ...empty, command: 'x ' },
+      { ...empty, command: 'a\0b' },
+      { ...empty, command: 'x'.repeat(MAX_COMMAND_NAME_LENGTH + 1) },
+      { ...empty, command: 3 },
+      { ...empty, command: null },
+      { ...empty, command: ['init'] },
+      // Without a command, blank text and no files is still not a prompt.
+      empty,
     ];
     for (const value of bad) {
       expect(isWebviewToHost(value), JSON.stringify(value)).toBe(false);

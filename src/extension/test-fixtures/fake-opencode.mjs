@@ -160,6 +160,15 @@
 // were NEVER compared with a real server's. `GET /api/session/:id/message` now honours `type`,
 // `order` and `limit`. Only in `visual` mode do the changes also touch the served folder (see
 // `applyEdits`); elsewhere nothing is written.
+// E8-slash-commands (issue #33): `GET /api/command` (`{location, data: [{name, description?}]}`,
+// not unwrapped) lists `init` and `review` (descriptions copied from the tag v2.0.32 source) plus
+// every `*.md` under `<served folder>/.opencode/{command,commands}/**` (name = relative path
+// without `.md`, `/` as separator; `description` from the frontmatter), and `POST
+// /api/session/:id/command` answers 204 and plays the turn of the expanded template (`$ARGUMENTS`,
+// `$1..$N`, else the arguments appended). An unlisted name is 404 `CommandNotFoundError`, a template
+// containing FAIL_COMMAND is 500 `CommandExecutionError` (both tags READ in the sources, never
+// seen). SYNTHETIC: the templates of the built-ins, the frontmatter parser (only `description`),
+// and, INVENTED, that `command.updated` is NEVER emitted (the real server watches the folders).
 // E7-message-revert (issue #32): `POST /api/session/:id/revert/stage`, `DELETE .../revert`, `POST
 // .../revert/commit` and `GET .../message/:mid`, with the `session.revert.staged|cleared|committed`
 // events and a `revert` field on the session row (so `GET /api/session[/:id]` carries it). The
@@ -1914,6 +1923,131 @@ function toWireFiles(files) {
 }
 
 /**
+ * The two built-in commands `GET /api/command` lists, with the descriptions of the source at the tag
+ * v2.0.32 (`core/src/command.ts`, read 28/10/2026). The TEMPLATES are INVENTED (the real ones are
+ * long prompts); only their being a template that becomes the user message is copied.
+ */
+const BUILTIN_COMMANDS = [
+  {
+    name: 'init',
+    description: 'guided AGENTS.md setup',
+    template: 'Create or update the AGENTS.md of this project.',
+  },
+  {
+    name: 'review',
+    description: 'review changes [commit|branch|pr], defaults to uncommitted',
+    template: 'Review the changes.',
+  },
+];
+
+/**
+ * The commands of the folder `directory`: the built-ins plus every `*.md` under
+ * `<directory>/.opencode/command` and `<directory>/.opencode/commands` (E8-slash-commands, issue
+ * #33). The name is the path relative to that folder without `.md`, always with `/` (upstream
+ * replaces `\` the same way, read in `config/plugin/command.ts@843a6c51`); `description` comes from
+ * the frontmatter, the rest of the file is the template. A file with the name of a built-in
+ * replaces it (HYPOTHESIS: read, not run). Read from disk on every call, so a file written a moment
+ * ago is listed at once. INVENTED: the real server watches the folders and publishes
+ * `command.updated`; this fake does NOT, so a test that adds a file reloads the catalog itself.
+ * The frontmatter parser takes only `description:` and tolerates CRLF, which a `.md` written on
+ * Windows has. SYNTHETIC: the real parser reads YAML and more keys (`agent`, `model`, `subagent`).
+ *
+ * @returns {Array<{ name: string, description?: string, template: string }>}
+ */
+function commandsOf(directory) {
+  const found = new Map(BUILTIN_COMMANDS.map((command) => [command.name, command]));
+  for (const folder of ['command', 'commands']) {
+    const root = nodePath.join(directory, '.opencode', folder);
+    const walk = (relative) => {
+      let entries;
+      try {
+        entries = fs.readdirSync(nodePath.join(root, relative), { withFileTypes: true });
+      } catch {
+        return;
+      }
+      entries.sort((x, y) => (x.name < y.name ? -1 : 1));
+      for (const entry of entries) {
+        const shown = relative === '' ? entry.name : `${relative}/${entry.name}`;
+        if (entry.isDirectory()) walk(shown);
+        else if (entry.name.endsWith('.md')) {
+          let text;
+          try {
+            text = fs.readFileSync(nodePath.join(root, shown), 'utf8').replace(/\r\n/g, '\n');
+          } catch {
+            continue;
+          }
+          const parts = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
+          const description = /^description:[ \t]*(.*)$/m.exec(parts?.[1] ?? '')?.[1]?.trim();
+          const name = shown.slice(0, -'.md'.length);
+          found.set(name, {
+            name,
+            ...(description === undefined || description === '' ? {} : { description }),
+            template: (parts === null ? text : parts[2]).trim(),
+          });
+        }
+      }
+    };
+    walk('');
+  }
+  return [...found.values()];
+}
+
+/**
+ * The text a command turns into: `$ARGUMENTS` becomes all the arguments and `$1..$N` the
+ * whitespace-separated ones; a template with neither gets the arguments appended after a blank
+ * line (upstream does the same, read in `config/plugin/command.ts@843a6c51`; the exact separator is
+ * INVENTED). An empty argument list leaves the template as it is.
+ */
+function expandTemplate(template, args) {
+  const words = args.split(/\s+/).filter((word) => word !== '');
+  const marked = /\$ARGUMENTS|\$\d+/.test(template);
+  if (!marked) return args === '' ? template : `${template}\n\n${args}`;
+  return template
+    .replace(/\$ARGUMENTS/g, args)
+    .replace(/\$(\d+)/g, (_, index) => words[Number(index) - 1] ?? '');
+}
+
+/**
+ * Imitates `POST /api/session/:id/command` (E8-slash-commands, issue #33): 204 with no body, then
+ * the same turn a prompt plays, with the expanded template as the user message. A name the folder
+ * does not list answers 404 `CommandNotFoundError { command, message }`; a template that contains
+ * `FAIL_COMMAND` answers 500 `CommandExecutionError` and plays nothing (INVENTED trigger, to test the
+ * error path; the tags and statuses are READ in `protocol/src/errors.ts@843a6c51`, not seen).
+ * Like a prompt, it commits a staged revert first (UNVERIFIED for a command: a command ends in
+ * `session.prompt`, so it should).
+ */
+function runCommand(response, session, body, directory) {
+  const name = typeof body.name === 'string' ? body.name : '';
+  const command = commandsOf(directory).find((candidate) => candidate.name === name);
+  if (command === undefined) {
+    json(response, 404, {
+      _tag: 'CommandNotFoundError',
+      command: name,
+      message: `Command not found: ${name}`,
+    });
+    return;
+  }
+  if (command.template.includes('FAIL_COMMAND')) {
+    json(response, 500, {
+      _tag: 'CommandExecutionError',
+      command: name,
+      message: `Command failed: ${name}`,
+    });
+    return;
+  }
+  commitStaged(session);
+  const inboxID = nextId('msg');
+  running.add(session.id);
+  noContent(response);
+  playTurn(
+    session.id,
+    inboxID,
+    expandTemplate(command.template, typeof body.text === 'string' ? body.text : ''),
+    toWireFiles(body.files),
+  );
+}
+
+/**
  * Answers the chat routes; returns false when the request is not one of them.
  * Authentication was already checked by the caller.
  */
@@ -2016,6 +2150,16 @@ function handleChat(request, response) {
     json(response, 200, { location, data: CATALOG_AGENTS });
     return true;
   }
+  if (method === 'GET' && path === '/api/command') {
+    json(response, 200, {
+      location,
+      data: commandsOf(location.directory).map(({ name, description }) => ({
+        name,
+        ...(description === undefined ? {} : { description }),
+      })),
+    });
+    return true;
+  }
   if (method === 'GET' && path === '/api/permission/request') {
     json(response, 200, { location, data: [...pendingPermissions.values()] });
     return true;
@@ -2035,7 +2179,7 @@ function handleChat(request, response) {
   const act = /^\/api\/session\/([^/]+)\/(permission|form)\/([^/]+)(?:\/(reply))?$/.exec(path);
   if (act !== null) return handleAnswer(request, response, act);
   const match =
-    /^\/api\/session\/([^/]+)(?:\/(message\/[^/]+|message|permission|form|prompt|interrupt|fork|model|agent|diff|revert\/stage|revert\/commit|revert))?$/.exec(
+    /^\/api\/session\/([^/]+)(?:\/(message\/[^/]+|message|permission|form|prompt|command|interrupt|fork|model|agent|diff|revert\/stage|revert\/commit|revert))?$/.exec(
       path,
     );
   if (match === null) return false;
@@ -2132,6 +2276,10 @@ function handleChat(request, response) {
   }
   if (method === 'POST' && sub === 'interrupt') {
     readBody(request).then(() => json(response, 200, { interrupted: interrupt(session.id) }));
+    return true;
+  }
+  if (method === 'POST' && sub === 'command') {
+    readBody(request).then((body) => runCommand(response, session, body, location.directory));
     return true;
   }
   if (method === 'POST' && sub === 'prompt') {

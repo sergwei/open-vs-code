@@ -236,6 +236,79 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     expect(posted.at(-1)).toMatchObject({ requestId: 'r2', error: { code: 'AttachmentRejected' } });
   }, 20_000);
 
+  // E8-slash-commands (#33). What can break only over HTTP: `GET /api/command` answering
+  // `{location, data}` that the client does not unwrap, `POST /api/session/:id/command` answering a
+  // 204 with NO body (a client that expected JSON would throw `MalformedResponse` there), the 404
+  // and 500 bodies arriving as thrown objects with their `_tag`, and the turn coming through the
+  // stream as the expanded template. The command files, the 404/500 bodies and the templates are
+  // SYNTHETIC (the fixture's); the `.opencode/command` layout is read in upstream, not run here.
+  it('lists the project commands, runs one over HTTP and reports the 404 and the 500', async () => {
+    const { controller, posted, state } = await boot('ok');
+    const commandsFolder = path.join(state.server.folder, '.opencode', 'command');
+    await mkdir(path.join(commandsFolder, 'docs'), { recursive: true });
+    await writeFile(
+      path.join(commandsFolder, 'hello.md'),
+      '---\r\ndescription: Say hello\r\n---\r\nGreet $1 warmly.\r\n',
+    );
+    await writeFile(path.join(commandsFolder, 'docs', 'search.md'), 'Search the docs for: ');
+    await writeFile(path.join(commandsFolder, 'broken.md'), 'Do FAIL_COMMAND now');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'catalog'), 'the catalog');
+    const catalog = posted.flatMap((m) => (m.type === 'catalog' ? [m.catalog] : [])).at(-1);
+    expect(catalog?.commands).toEqual([
+      { name: 'init', description: 'guided AGENTS.md setup' },
+      { name: 'review', description: 'review changes [commit|branch|pr], defaults to uncommitted' },
+      { name: 'broken' },
+      { name: 'docs/search' },
+      { name: 'hello', description: 'Say hello' },
+    ]);
+
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'r1',
+      text: 'Ana and more',
+      delivery: 'queue',
+      files: [],
+      command: 'hello',
+    });
+    expect(posted).toContainEqual({ type: 'request.result', requestId: 'r1' });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the command turn to finish',
+    );
+    const user = posted.find((m) => m.type === 'message.upserted' && m.message.kind === 'user');
+    expect(user).toMatchObject({ message: { text: 'Greet Ana warmly.' } });
+
+    // The 500 of a command that fails, with its tag, and the draft stays the webview's to restore.
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'r2',
+      text: '',
+      delivery: 'queue',
+      files: [],
+      command: 'broken',
+    });
+    expect(posted.at(-1)).toMatchObject({
+      requestId: 'r2',
+      error: { code: 'CommandExecutionError' },
+    });
+
+    // A file deleted after the catalog was read: the host still lists it, the server answers 404.
+    await rm(path.join(commandsFolder, 'docs', 'search.md'));
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'r3',
+      text: '',
+      delivery: 'queue',
+      files: [],
+      command: 'docs/search',
+    });
+    expect(posted.filter((m) => m.type === 'request.result').at(-1)).toMatchObject({
+      requestId: 'r3',
+      error: { code: 'CommandNotFoundError' },
+    });
+  }, 20_000);
+
   it('shows the error of a failed run and accepts another prompt afterwards', async () => {
     const { controller, posted, state } = await boot('ok');
     controller.onServerState(state);

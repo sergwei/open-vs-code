@@ -29,6 +29,7 @@
 // against a synthetic server.
 import type {
   AgentInfo,
+  CommandInfo,
   FileDiffInfo,
   FileFindInput,
   FileFindOutput,
@@ -135,6 +136,12 @@ type FakeOptions = Partial<{
   agents: AgentInfo[];
   /** Rejects `model.list` (the catalog load) with this server error body. */
   catalogError: object;
+  /** Commands `command.list` answers with (default: {@link DEFAULT_COMMANDS}); issue #33. */
+  commands: CommandInfo[];
+  /** Rejects `command.list` with this body; the rest of the catalog still loads (issue #33). */
+  commandListError: object;
+  /** Rejects `session.command` with this server error body (issue #33). */
+  commandError: object;
   /** `agent` / `model` fields `session.get` adds to every row (issues #23/#24). */
   sessionSelection: {
     agent?: string;
@@ -204,6 +211,16 @@ const DEFAULT_AGENTS: AgentInfo[] = [
 
 const LOCATION = wire<FormListOutput['location']>('{"directory":"C:\\\\work"}');
 
+/**
+ * The commands of a default fake server (issue #33): the two built-ins with their descriptions as
+ * the tag v2.0.32 source has them, plus a project command with a sub-folder name. SYNTHETIC.
+ */
+const DEFAULT_COMMANDS: CommandInfo[] = [
+  { name: 'init', description: 'guided AGENTS.md setup' },
+  { name: 'review', description: 'review changes [commit|branch|pr], defaults to uncommitted' },
+  { name: 'docs/hello' },
+];
+
 /** A pending permission as `permission.request.list` and the event carry it. */
 const permissionRequest = (id: string, sessionID = 'ses_old'): PermissionRequest =>
   wire<PermissionRequest>(
@@ -236,6 +253,13 @@ function fakeApi(options: FakeOptions = {}) {
     text: string;
     delivery?: string;
     files?: ReadonlyArray<{ uri: string; name?: string }>;
+  }> = [];
+  const commandRuns: Array<{
+    sessionID: string;
+    name: string;
+    text: string;
+    delivery?: string | null;
+    files?: ReadonlyArray<{ uri: string; name?: string; mention?: object }>;
   }> = [];
   const interrupts: unknown[] = [];
   const permissionReplies: unknown[] = [];
@@ -396,6 +420,19 @@ function fakeApi(options: FakeOptions = {}) {
           ChatApi['session']['prompt']
         >;
       },
+      command: (input) => {
+        calls.push('session.command');
+        commandRuns.push({
+          sessionID: input.sessionID,
+          name: input.name,
+          text: input.text,
+          ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
+          ...(input.files ? { files: input.files } : {}),
+        });
+        return options.commandError === undefined
+          ? Promise.resolve()
+          : failWith(options.commandError);
+      },
       interrupt: (input) => {
         calls.push('session.interrupt');
         interrupts.push(input);
@@ -467,6 +504,13 @@ function fakeApi(options: FakeOptions = {}) {
         return Promise.resolve({ location: LOCATION, data: options.agents ?? DEFAULT_AGENTS });
       },
     },
+    command: {
+      list: () => {
+        calls.push('command.list');
+        if (options.commandListError !== undefined) return failWith(options.commandListError);
+        return Promise.resolve({ location: LOCATION, data: options.commands ?? DEFAULT_COMMANDS });
+      },
+    },
     file: {
       find: (input, requestOptions) => {
         calls.push('file.find');
@@ -513,6 +557,7 @@ function fakeApi(options: FakeOptions = {}) {
     api,
     calls,
     prompts,
+    commandRuns,
     interrupts,
     permissionReplies,
     formReplies,
@@ -3900,7 +3945,7 @@ describe('catalog and selection (issues #23/#24)', () => {
     expect(catalog?.defaultAgent).toBe('build');
     expect(catalog?.serverDefault).toEqual(PICKLE);
     expect(catalog?.preferredModel).toBeUndefined();
-    expect(logs).toContain('info: catalog loaded (2 models, 2 agents)');
+    expect(logs).toContain('info: catalog loaded (2 models, 2 agents, 3 commands)');
   });
 
   it('does not make the snapshot wait for a slow model.list', async () => {
@@ -4905,4 +4950,407 @@ describe('message revert (issue #32)', () => {
       expect(await controller.revertedOriginal('ses_1', 'src/a.ts')).toBe('one\ntwo\n');
     });
   });
+});
+
+/**
+ * Protects against (issue #33): the command list leaving the catalog when `command.list` fails
+ * (or the catalog failing because of it); `command.updated` not reloading it; a command sent as a
+ * plain prompt, or with the whole `/x args` as text; an unlisted name reaching the server or
+ * creating an empty session; a mention surviving into a command (the template rewrites the text,
+ * so its offsets would lie: decision P9); and a server refusal losing its tag in the
+ * `request.result`. SYNTHETIC: a fake client with hand-made `CommandInfo`; the wire shapes are
+ * covered by `chatController.e2e.test.ts` and the fake-server integration suite.
+ */
+describe('slash commands (issue #33)', () => {
+  type PromptSend = Extract<WebviewToHost, { type: 'prompt.send' }>;
+  const send = (extra: Partial<PromptSend> = {}): PromptSend => ({
+    type: 'prompt.send',
+    requestId: 'r1',
+    text: '',
+    delivery: 'queue',
+    files: [],
+    ...extra,
+  });
+  const catalogs = (posted: HostToWebview[]) =>
+    posted.flatMap((m) => (m.type === 'catalog' ? [m.catalog] : []));
+  const lastResult = (posted: HostToWebview[]) =>
+    posted.filter((m) => m.type === 'request.result').at(-1);
+
+  it('publishes the commands in the catalog, mapped to name and optional description', async () => {
+    const { api } = fakeApi();
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.loadCatalog();
+    expect(catalogs(posted).at(-1)?.commands).toEqual([
+      { name: 'init', description: 'guided AGENTS.md setup' },
+      { name: 'review', description: 'review changes [commit|branch|pr], defaults to uncommitted' },
+      { name: 'docs/hello' },
+    ]);
+  });
+
+  it('publishes an empty list as [], not as absent', async () => {
+    const { api } = fakeApi({ commands: [] });
+    const { controller, posted, logs } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.loadCatalog();
+    expect(catalogs(posted).at(-1)?.commands).toEqual([]);
+    expect(logs).toContain('info: catalog loaded (2 models, 2 agents, 0 commands)');
+  });
+
+  it('a failing command.list still publishes models and agents, without commands, and warns', async () => {
+    const { api } = fakeApi({ commandListError: { _tag: 'ServerError', message: 'boom' } });
+    const { controller, posted, logs } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.loadCatalog();
+    const catalog = catalogs(posted).at(-1);
+    expect(catalog?.models.map((m) => m.id)).toEqual(['big-pickle', 'glm-5.3-flash-free']);
+    expect(catalog?.commands).toBeUndefined();
+    expect(logs).toContain('warn: command list failed: ServerError: boom');
+    expect(logs).toContain('info: catalog loaded (2 models, 2 agents, no commands)');
+  });
+
+  it('a later failing command.list keeps the commands of the previous catalog', async () => {
+    let failing = false;
+    const fake = fakeApi();
+    const api: ChatApi = {
+      ...fake.api,
+      command: {
+        list: (input) =>
+          failing ? Promise.reject(new Error('down')) : fake.api.command.list(input),
+      },
+    };
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.loadCatalog();
+    failing = true;
+    await controller.loadCatalog();
+    expect(catalogs(posted)).toHaveLength(2);
+    expect(
+      catalogs(posted)
+        .at(-1)
+        ?.commands?.map((c) => c.name),
+    ).toEqual(['init', 'review', 'docs/hello']);
+  });
+
+  // Sergio's decision of 28/10/2026 after a real opencode 2.0.32 answered `[]` to its first
+  // `command.list`: re-read ONLY that call after 1, 2 and 4 s. SYNTHETIC: the fake answers from a
+  // queue of lists; fake timers stand in for the waits.
+  describe('retry of an empty list', () => {
+    /** An api whose `command.list` answers the given lists in order (the last one repeats). */
+    const sequence = (...lists: CommandInfo[][]) => {
+      const fake = fakeApi();
+      let reads = 0;
+      const api: ChatApi = {
+        ...fake.api,
+        command: {
+          list: () => {
+            const data = lists[Math.min(reads, lists.length - 1)] ?? [];
+            reads += 1;
+            return Promise.resolve({ location: LOCATION, data });
+          },
+        },
+      };
+      return { api, reads: () => reads };
+    };
+    const withTimers = async (body: () => Promise<void>) => {
+      vi.useFakeTimers();
+      try {
+        await body();
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+
+    it('[] then [] then a list: the list is published at the second retry, with no full reload', async () => {
+      await withTimers(async () => {
+        const { api, reads } = sequence([], [], [{ name: 'hello' }]);
+        const { controller, posted, logs } = setup(api);
+        controller.onServerState(RUNNING);
+        await controller.loadCatalog();
+        expect(catalogs(posted).at(-1)?.commands).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(reads()).toBe(2);
+        expect(catalogs(posted)).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(reads()).toBe(3);
+        expect(catalogs(posted).at(-1)?.commands).toEqual([{ name: 'hello' }]);
+        expect(catalogs(posted).at(-1)?.models).toHaveLength(2);
+        expect(logs).toContain('info: commands loaded after retry 2 (1 commands)');
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(reads()).toBe(3);
+        expect(vi.getTimerCount()).toBe(0);
+      });
+    });
+
+    it('three empty answers in a row: it stops, with no more reads', async () => {
+      await withTimers(async () => {
+        const { api, reads } = sequence([]);
+        const { controller, logs } = setup(api);
+        controller.onServerState(RUNNING);
+        await controller.loadCatalog();
+        await vi.advanceTimersByTimeAsync(1_000 + 2_000 + 4_000);
+        expect(reads()).toBe(4);
+        expect(logs).toContain('info: command list still empty after 3 retries');
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(reads()).toBe(4);
+        expect(vi.getTimerCount()).toBe(0);
+      });
+    });
+
+    it('stopping the server halfway leaves no timer and no later read', async () => {
+      await withTimers(async () => {
+        const { api, reads } = sequence([]);
+        const { controller } = setup(api);
+        controller.onServerState(RUNNING);
+        await controller.loadCatalog();
+        expect(vi.getTimerCount()).toBe(1);
+        controller.onServerState({ kind: 'stopped' });
+        expect(vi.getTimerCount()).toBe(0);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(reads()).toBe(1);
+      });
+    });
+
+    // Protects against the race of review C1 (Engram #1423): clearing the timer does not stop a
+    // re-read already awaiting the server. SYNTHETIC: the second answer is held by hand. Mutated:
+    // without the generation comparison in `retryCommands` this test fails (VERIFIED 28/10/2026,
+    // Windows 11: the stale list overwrote the fresh one).
+    it('a full reload while a retry is in flight: the new list stays and nothing else is read', async () => {
+      await withTimers(async () => {
+        const fake = fakeApi();
+        let reads = 0;
+        let releaseOld: (() => void) | undefined;
+        const api: ChatApi = {
+          ...fake.api,
+          command: {
+            list: () => {
+              reads += 1;
+              if (reads === 2) {
+                // The retry: held until the test lets it answer, with an OLDER list.
+                return new Promise((resolve) => {
+                  releaseOld = () => {
+                    resolve({ location: LOCATION, data: [{ name: 'old' }] });
+                  };
+                });
+              }
+              return Promise.resolve({
+                location: LOCATION,
+                data: reads === 1 ? [] : [{ name: 'fresh' }],
+              });
+            },
+          },
+        };
+        const { controller, posted, logs } = setup(api);
+        controller.onServerState(RUNNING);
+        await controller.loadCatalog();
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(reads).toBe(2); // the retry is in flight
+        await controller.loadCatalog(); // e.g. `command.updated`: a full load publishes the fresh list
+        expect(catalogs(posted).at(-1)?.commands).toEqual([{ name: 'fresh' }]);
+        releaseOld?.();
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(catalogs(posted).at(-1)?.commands).toEqual([{ name: 'fresh' }]);
+        expect(catalogs(posted)).toHaveLength(2);
+        expect(reads).toBe(3);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(logs.some((l) => l.includes('after retry'))).toBe(false);
+      });
+    });
+
+    // Protects the other two exits of `retryCommands` guarded by `stale()` (review 2, W-C, Engram
+    // #1427): a retry held across a full reload that comes back EMPTY must not reschedule or log
+    // "still empty", and one that REJECTS must not write the warn. SYNTHETIC: the held answer is
+    // settled by hand. Mutated 29/10/2026 (Windows 11): without `if (stale()) return;` in the catch
+    // the second test fails (the warn is written); without `stale() ||` in the success exit the
+    // first fails (a timer is left and a fourth read happens).
+    describe.each([
+      { name: 'a stale read that returns [] does not schedule another read', throws: false },
+      { name: 'a stale read that throws writes no warn and schedules nothing', throws: true },
+    ])('stale retry outcome', ({ name, throws }) => {
+      it(name, async () => {
+        await withTimers(async () => {
+          const fake = fakeApi();
+          let reads = 0;
+          let release: (() => void) | undefined;
+          const api: ChatApi = {
+            ...fake.api,
+            command: {
+              list: () => {
+                reads += 1;
+                if (reads === 2) {
+                  return new Promise((resolve, reject) => {
+                    release = () => {
+                      if (throws) reject(new Error('late failure'));
+                      else resolve({ location: LOCATION, data: [] });
+                    };
+                  });
+                }
+                return Promise.resolve({
+                  location: LOCATION,
+                  data: reads === 1 ? [] : [{ name: 'fresh' }],
+                });
+              },
+            },
+          };
+          const { controller, posted, logs } = setup(api);
+          controller.onServerState(RUNNING);
+          await controller.loadCatalog();
+          await vi.advanceTimersByTimeAsync(1_000);
+          expect(reads).toBe(2);
+          await controller.loadCatalog();
+          const before = logs.length;
+          release?.();
+          await vi.advanceTimersByTimeAsync(60_000);
+          expect(reads).toBe(3);
+          expect(vi.getTimerCount()).toBe(0);
+          expect(catalogs(posted).at(-1)?.commands).toEqual([{ name: 'fresh' }]);
+          expect(logs.slice(before)).toEqual([]);
+        });
+      });
+    });
+
+    it('a list that is not empty from the start is not retried', async () => {
+      await withTimers(async () => {
+        const { api, reads } = sequence([{ name: 'init' }]);
+        const { controller } = setup(api);
+        controller.onServerState(RUNNING);
+        await controller.loadCatalog();
+        expect(vi.getTimerCount()).toBe(0);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(reads()).toBe(1);
+      });
+    });
+  });
+
+  it('command.updated reloads the catalog', async () => {
+    const { api, calls } = fakeApi();
+    const { controller, streams } = setup(api);
+    controller.onServerState(RUNNING);
+    emit(streams, 'command.updated', {});
+    await flush();
+    await flush();
+    expect(calls.filter((c) => c === 'command.list').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('runs the command with session.command, not session.prompt: name, arguments, queue', async () => {
+    const { api, calls, commandRuns, creates } = fakeApi();
+    const { controller, posted, logs } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle(send({ command: 'docs/hello', text: 'Ana' }));
+    expect(calls).toContain('session.command');
+    expect(calls).not.toContain('session.prompt');
+    expect(creates).toEqual([{}]);
+    expect(commandRuns).toEqual([
+      { sessionID: 'ses_new', name: 'docs/hello', text: 'Ana', delivery: 'queue' },
+    ]);
+    expect(lastResult(posted)).toEqual({ type: 'request.result', requestId: 'r1' });
+    expect(logs).toContain('info: command accepted /docs/hello for ses_new');
+  });
+
+  it('accepts a command with empty arguments (/init alone)', async () => {
+    const { api, commandRuns } = fakeApi();
+    const { controller } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle(send({ command: 'init' }));
+    expect(commandRuns).toMatchObject([{ name: 'init', text: '' }]);
+  });
+
+  it('applies the chosen agent and model BEFORE the command, as it does for a prompt', async () => {
+    const { api, calls, switches } = fakeApi({ sessions: ['ses_old'] });
+    const { controller } = setup(api, 'ses_old');
+    controller.onServerState(RUNNING);
+    calls.length = 0;
+    await controller.handle(
+      send({
+        sessionID: 'ses_old',
+        command: 'init',
+        agent: 'plan',
+        model: { providerID: 'opencode', id: 'glm-5.3-flash-free' },
+      }),
+    );
+    expect(switches).toEqual(['agent:plan', 'model:opencode/glm-5.3-flash-free']);
+    expect(calls.filter((c) => c === 'session.command' || c.startsWith('session.switch'))).toEqual([
+      'session.switchAgent',
+      'session.switchModel',
+      'session.command',
+    ]);
+  });
+
+  it('refuses an unlisted name: CommandUnavailable, no server call, no session, catalog reloaded', async () => {
+    const { api, calls, creates } = fakeApi();
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle(send({ command: 'nope', text: 'x' }));
+    expect(lastResult(posted)).toMatchObject({
+      requestId: 'r1',
+      error: {
+        code: 'CommandUnavailable',
+        message: 'The command /nope is not available on this server',
+      },
+    });
+    expect(creates).toEqual([]);
+    expect(calls).not.toContain('session.command');
+    expect(calls).not.toContain('session.prompt');
+    await flush();
+    await flush();
+    expect(calls.filter((c) => c === 'command.list')).toHaveLength(2);
+  });
+
+  it('refuses a command when the list could not be read at all', async () => {
+    const { api, calls } = fakeApi({ commandListError: { _tag: 'ServerError', message: 'x' } });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle(send({ command: 'init' }));
+    expect(lastResult(posted)).toMatchObject({ error: { code: 'CommandUnavailable' } });
+    expect(calls).not.toContain('session.command');
+  });
+
+  it('sends the files WITHOUT their mention when there is a command (decision P9)', async () => {
+    const { api, commandRuns, prompts } = fakeApi({
+      findImpl: () =>
+        Promise.resolve({ location: LOCATION, data: [{ path: 'src/a.ts', type: 'file' }] }),
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'files.search', requestId: 's1', query: 'a' });
+    const found = posted.flatMap((m) => (m.type === 'files.found' ? m.files : []));
+    const file = found[0];
+    if (file === undefined) throw new Error('the fake search found no file');
+    await controller.handle(
+      send({
+        command: 'review',
+        text: '@src/a.ts',
+        files: [{ ...file, mention: { start: 0, end: 9, text: '@src/a.ts' } }],
+      }),
+    );
+    expect(prompts).toHaveLength(0);
+    expect(commandRuns).toHaveLength(1);
+    expect(commandRuns[0]?.files).toHaveLength(1);
+    expect(commandRuns[0]?.files?.[0]).not.toHaveProperty('mention');
+  });
+
+  it('keeps the AttachmentRejected rule for a file the host never emitted', async () => {
+    const { api, calls } = fakeApi();
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle(
+      send({ command: 'init', files: [{ uri: 'file:///etc/passwd', name: 'passwd' }] }),
+    );
+    expect(lastResult(posted)).toMatchObject({ error: { code: 'AttachmentRejected' } });
+    expect(calls).not.toContain('session.command');
+  });
+
+  it.each(['CommandNotFoundError', 'CommandExecutionError'])(
+    'answers %s with its tag when the server throws it',
+    async (tag) => {
+      const { api } = fakeApi({ commandError: { _tag: tag, command: 'init', message: 'refused' } });
+      const { controller, posted } = setup(api);
+      controller.onServerState(RUNNING);
+      await controller.handle(send({ command: 'init' }));
+      expect(lastResult(posted)).toMatchObject({
+        requestId: 'r1',
+        error: { code: tag, message: 'refused' },
+      });
+    },
+  );
 });
