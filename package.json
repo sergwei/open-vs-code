@@ -42,6 +42,12 @@
     "Chat"
   ],
   "activationEvents": [],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "opencode can run commands and tools defined by the project, such as slash commands with !`cmd` in .opencode/command, with the permissions of your user. Trust the folder before using this extension."
+    }
+  },
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {

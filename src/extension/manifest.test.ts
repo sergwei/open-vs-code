@@ -5,6 +5,7 @@ import * as ids from './ids';
 interface Manifest {
   engines: { vscode: string };
   devDependencies: Record<string, string>;
+  capabilities?: { untrustedWorkspaces?: { supported?: unknown; description?: string } };
   contributes: {
     viewsContainers: { activitybar: { id: string }[] };
     views: Record<string, { id: string }[]>;
@@ -69,6 +70,16 @@ describe('ids.ts matches package.json contributes', () => {
     expect(commands).toContain(ids.MANAGE_PERMISSIONS_COMMAND_ID);
   });
 
+  // Issue #33 (decision of Sergio, 28/10/2026): opencode can run what the project defines, for
+  // example a slash command with !`cmd`, with the permissions of the user, so the extension is not
+  // loaded in Restricted Mode. The real behaviour of the declaration is `test:visual` step 25; this
+  // only keeps the manifest from losing it. Reading the real package.json, not a fixture.
+  it('declares that untrusted workspaces are not supported, and says why', () => {
+    const declared = manifest.capabilities?.untrustedWorkspaces;
+    expect(declared?.supported).toBe(false);
+    expect(declared?.description).toMatch(/commands/i);
+  });
+
   it('does NOT contribute the internal commands (they take link arguments)', () => {
     const commands = manifest.contributes.commands.map((c) => c.command);
     expect(commands).not.toContain(ids.SHOW_REQUEST_COMMAND_ID);
@@ -77,7 +88,7 @@ describe('ids.ts matches package.json contributes', () => {
 
   // Issue #23. Scope `window` (user and workspace), unlike the executable path: the value can only
   // pick among models the server already offers, and a workspace in Restricted Mode never reaches
-  // this extension (it declares no `untrustedWorkspaces` capability).
+  // this extension (it declares `untrustedWorkspaces.supported: false`, issue #33).
   it('declares the default-model setting with its id, type, default and scope', () => {
     const setting = manifest.contributes.configuration.properties[ids.DEFAULT_MODEL_SETTING];
     expect(ids.DEFAULT_MODEL_SETTING).toBe(`${ids.CONFIG_SECTION}.${ids.DEFAULT_MODEL_KEY}`);
