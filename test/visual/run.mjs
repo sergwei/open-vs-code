@@ -7980,17 +7980,17 @@ try {
   // from a tab reach the last text editor; C8 a file link and a diff of "Changed files" open
   // outside the chat's group; C9 Explain with every tab hidden goes to the most recent tab; C10
   // the switch of mode in both directions; C11 a request with no chat on screen raises a toast and
-  // a badge, and "Open chat" reveals the tab of its session; C12 what Reload Window does to the
-  // tabs (a record, for the serializer of E2). The widths are measured and printed, not assumed.
-  // VERIFIED on Windows 11, VS Code 1.144.0 (29/10/2026), the final FULL `npm run test:visual` run
-  // of this task (every step, after the last change of `src` and of this file) ended "all visual
+  // a badge, and "Open chat" reveals the tab of its session. What Reload Window does to the tabs
+  // is step 28 (it was C12 here, a record taken before the serializer existed: "kept 0 of 5
+  // tabs"). The widths are measured and printed, not assumed.
+  // VERIFIED on Windows 11, VS Code 1.144.0 (29/10/2026), the FULL `npm run test:visual` run of
+  // the E1 task (every step, after the last change of `src` and of this file) ended "all visual
   // checks passed" and printed: "ok C10 sidebar -> editor opens ONE tab with the side
   // bar session beside the code, and the side bar has no chat", "ok C4 coming back to A shows the
   // whole reply once: 400 numbers, from 1 to 400, in order, no repeats", "ok C9 Explain with every
-  // tab hidden reveals the most recent tab and sends there", "ok C11 "Open chat" of the
+  // tab hidden reveals the most recent tab and sends there" and "ok C11 "Open chat" of the
   // notification reveals the tab of the session and its permission card is there (tab true, card
-  // true)" and "ok C12 after Reload Window VS Code kept 0 of 5 tabs, and Open Chat reopens the last
-  // session". Found by it and not by any unit test: the same file open in two groups makes Explain
+  // true)". Found by it and not by any unit test: the same file open in two groups makes Explain
   // lose its range (`editorForMenu`, hence `other27.ts`), and a toast that covers the prompt box.
   // NOT measured: macOS, Linux, the launcher's badge in `sidebar` mode, two windows.
   await step('27 chat in editor tabs (issue #77)', async () => {
@@ -8713,46 +8713,6 @@ try {
           tabState.lastAssistant.trim() !== '',
         `C10 and a tab left open still works after the switch (title ${JSON.stringify(tabState.title)}, prompt ${JSON.stringify(tabState.users.at(-1))} answered ${JSON.stringify(tabState.lastAssistant)})`,
       );
-
-      // --- C12: Reload Window in editor mode (no serializer yet) ------------------------------------
-      setLocation('editor');
-      await sleep(1_500); // the setting has no signal the page shows; the reload below reads the tabs
-      const tabsBeforeReload = (await tabsNow()).map((tab) => tab.text);
-      await page.evaluate(() => {
-        globalThis.__visualPreReload27 = true;
-      });
-      await command('Developer: Reload Window');
-      web?.close();
-      await browser.close().catch(() => undefined);
-      let reloaded = false;
-      for (let tries = 0; tries < 120 && !reloaded; tries++) {
-        await connectWorkbench(90_000);
-        const stale = await page
-          .evaluate(() => globalThis.__visualPreReload27 === true)
-          .catch(() => true);
-        reloaded = !stale;
-        if (reloaded) break;
-        await browser.close().catch(() => undefined);
-        await sleep(250); // between two attempts to reach the new page, not a wait for it
-      }
-      if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
-      await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
-      await sleep(4_000); // fixed on purpose: nothing says VS Code has finished restoring editors
-      const tabsAfterReload = (await tabsNow()).map((tab) => tab.text);
-      console.log(
-        `  C12 tabs before Reload Window ${JSON.stringify(tabsBeforeReload)}, after ${JSON.stringify(tabsAfterReload)}`,
-      );
-      await command('OpenCode: Open Chat');
-      await waitFor(async () => (await visibleChatId()) !== undefined, 20_000, 200);
-      await openChat(40_000);
-      await waitFor(async () => (await view()).messages > 0, 20_000, 300);
-      const reopened = await view();
-      check(
-        reopened.title !== 'Untitled session' && reopened.messages >= 2,
-        `C12 after Reload Window VS Code kept ${String(tabsAfterReload.filter((text) => !/\.ts\b/.test(text)).length)} of ${String(tabsBeforeReload.length)} tabs, and Open Chat reopens the last session (${JSON.stringify(reopened.title)}, ${String(reopened.messages)} blocks)`,
-      );
-      assertNoWebviewErrors('C12 after Reload Window');
-      await shot('27i-after-reload');
     } finally {
       // Leave the workspace as the step found it: no chat tab or file tab, the setting back to
       // `sidebar`, `sample.ts` as it was (C8 edits it) and the files EDIT_FILES creates removed.
@@ -8767,6 +8727,607 @@ try {
       ]) {
         fs.rmSync(file, { force: true });
       }
+    }
+  });
+
+  // Step 28 (issue #77, delivery E2, plan E9-chat-tabs-restore section 9): the chat tabs after a
+  // REAL Reload Window, judged in the DOM of the workbench and of each tab's webview. Cells: R1 the
+  // labels of the four tabs right after the reload (same text, same count); R2 the active tab A is
+  // back with its title, its conversation, its draft, the dark theme and no webview error; R3 the
+  // background tab B is not deserialized until it is opened (the iframe count is printed as data)
+  // and then shows title and conversation; R4 the lazy tab C comes back empty with its draft; R5
+  // the tab D, whose session was deleted while D was hidden, shows the notice with its exact text,
+  // "Untitled session" and the draft it had; R6 Focus Prompt puts the caret in A's prompt and New Session opens in
+  // the chat's group; R7 a prompt typed in the restored B is answered; R8 in `sidebar` mode a
+  // second Reload brings A back and answering, and the side bar view does not show A's session; R9
+  // the notice of R5 reads with contrast >= 4.5 in the four themes; R10 the second Reload keeps
+  // the number of tabs. Also measured: the log lines of the serializer, `retainContextWhenHidden`
+  // of a revived panel (a mark set in A's document survives hiding A) and T7 (R1 counts the tabs
+  // after a Reload with `detachAll`).
+  // T7 MUTATION (29/10/2026, run once, `--steps 28`): with `ChatPanels.detachAll` replaced by a
+  // loop that closes every panel (`panel.dispose()`), R1 STILL passed with the same four tabs and
+  // the step ended "all visual checks passed". So R1 does not tell `detachAll` from closing the
+  // panels in `deactivate`: in this Reload Window harness both keep the tabs. HYPOTHESIS that
+  // closing would lose them on a plain window close; this step does not exercise that.
+  // VERIFIED on Windows 11, VS Code 1.144.0 (29/10/2026), in the final FULL run of
+  // `npm run test:visual` (every step, after the last change to src and to this file), which
+  // ended "all visual checks passed" and printed: "ok R1 right after Reload Window the 4 chat tabs
+  // read as before", "ok R2 A comes back active: title "Tab28A: Reply with exactly: alpha28. Do",
+  // 2 blocks, draft "draft28-A", kind vscode-dark", "ok R5 D says ["This session no longer exists.
+  // Your next prompt starts a new one."] with title "Untitled session", 0 blocks and draft
+  // "draft28-D"", "ok the
+  // serializer restored 4 tabs (log lines "chat tab restored (pane N)"), none skipped", "ok R9 the
+  // notice of D has contrast 7.56 >= 4.5 in dark (tab 541 px)" (9.14 light, 21.00 hc-dark, 14.55
+  // hc-light), "ok R7 the restored B answers" (now also one more assistant block than before the
+  // prompt), "ok a revived panel keeps its document while hidden
+  // (the mark set in A before it was hidden: true, same webview true)", "ok R10 after the second
+  // Reload Window the workbench has 5 chat tabs (5 before it)" and "ok R8 the side bar view
+  // resolved to another session, not A's". The data line "R3 chat iframes in the workbench before
+  // any background tab is opened: 1" shows the lazy deserialization. Found by it and not by any
+  // unit test: the toast "All installed extensions are temporarily disabled" shows up seconds
+  // after a Reload and covers the prompt box (hence `clearToasts`). NOT measured: macOS, Linux,
+  // a restored tab and the side bar view holding the SAME session (the side bar had its own, so
+  // the dedupe of Q3 after a real Reload is covered only by the integration tests), a tab hidden
+  // from the moment it was bound (R2 of the plan), more than one group of chat tabs.
+  await step('28 chat tabs come back after Reload Window (issue #77, E2)', async () => {
+    const DARK = 'Default Dark Modern';
+    const GONE = 'This session no longer exists. Your next prompt starts a new one.';
+    const titleOf = (prompt) => prompt.slice(0, 40).trim(); // the fixture titles a session so
+    const PROMPT_A = 'Tab28A: Reply with exactly: alpha28. Do not use any tools.';
+    const PROMPT_B = 'Tab28B: Reply with exactly: beta28. Do not use any tools.';
+    const PROMPT_D = 'Tab28D: Reply with exactly: delta28. Do not use any tools.';
+    const PROMPT_L = 'Tab28L: Reply with exactly: lateral28. Do not use any tools.';
+    const [TITLE_A, TITLE_B, TITLE_D, TITLE_L] = [PROMPT_A, PROMPT_B, PROMPT_D, PROMPT_L].map(
+      titleOf,
+    );
+    const sampleFile = path.join(workspace, 'src', 'sample.ts');
+    const sampleBefore = fs.readFileSync(sampleFile, 'utf8');
+    const setLocation = (value) => {
+      writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
+    };
+    const tabsNow = () =>
+      page.evaluate(() => {
+        const groups = [...globalThis.document.querySelectorAll('.editor-group-container')];
+        return [...globalThis.document.querySelectorAll('.tab')].map((tab) => ({
+          label: tab.getAttribute('aria-label') ?? '',
+          text: (tab.innerText ?? '').trim(),
+          active: tab.classList.contains('active'),
+          group: groups.indexOf(tab.closest('.editor-group-container')),
+        }));
+      });
+    // A chat tab is any tab that is not a TypeScript file (no title of this step has ".ts").
+    const isChatTab = (tab) => !/\.ts\b/.test(`${tab.label} ${tab.text}`);
+    const chatTabs = async () => (await tabsNow()).filter(isChatTab);
+    const hostLog = () => {
+      const files = [];
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'OpenCode.log') files.push(full);
+        }
+      };
+      try {
+        walk(path.join(vscode.userDataDir, 'logs'));
+      } catch {
+        return '';
+      }
+      return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+    };
+    const logCount = (pattern) => (hostLog().match(pattern) ?? []).length;
+    const view = () =>
+      web.inDoc((doc) => {
+        const field = doc.querySelector('textarea.prompt-text');
+        return {
+          title: doc.querySelector('.chat-title')?.textContent ?? '',
+          messages: doc.querySelectorAll('[role="log"] > *').length,
+          value: field?.value ?? '',
+          focusOnBox: field !== null && doc.activeElement === field && doc.hasFocus(),
+          users: [...doc.querySelectorAll('[role="log"] .message-user .part-text')].map((m) =>
+            (m.textContent ?? '').replace(/\s+/g, ' ').trim(),
+          ),
+          assistants: doc.querySelectorAll('[role="log"] .message-assistant').length,
+          lastAssistant:
+            [...doc.querySelectorAll('[role="log"] .message-assistant .markdown')].at(-1)
+              ?.innerText ?? '',
+          notices: [...doc.querySelectorAll('.status-bar .alert .alert-text')].map((n) =>
+            (n.textContent ?? '').trim(),
+          ),
+          kind: doc.body.getAttribute('data-vscode-theme-kind') ?? '',
+        };
+      });
+    // Waits for a chat other than `previous` to be on screen and connects to it.
+    const connectToNew = async (previous) => {
+      await waitFor(
+        async () => {
+          const id = await visibleChatId();
+          return id !== undefined && id !== previous ? id : undefined;
+        },
+        10_000,
+        100,
+      );
+      await openChat(30_000);
+    };
+    // Presses the chat tab at `position` among the chat tabs, in the order the strip shows them.
+    const clickChatTab = async (position) => {
+      const previous = drivenChatId;
+      const all = await tabsNow();
+      const indexes = all.flatMap((tab, index) => (isChatTab(tab) ? [index] : []));
+      await page.locator('.tab').nth(indexes[position]).click();
+      await connectToNew(previous);
+    };
+    const clickTabNamed = async (needle) => {
+      const previous = drivenChatId;
+      await page.locator('.tab', { hasText: needle }).first().click();
+      await connectToNew(previous);
+    };
+    const editorHasFocus = () =>
+      page.evaluate(() => globalThis.document.activeElement?.closest('.monaco-editor') != null);
+    const quickOpen = async (spec, tabName) => {
+      await page.keyboard.press('ControlOrMeta+p');
+      await waitFor(async () => !(await quickInputHidden()), 2_000, 50);
+      await page.keyboard.type(spec);
+      await waitFor(
+        () =>
+          page.evaluate(
+            (name) =>
+              (
+                globalThis.document.querySelector('.quick-input-list .monaco-list-row.focused')
+                  ?.textContent ?? ''
+              ).includes(name),
+            tabName,
+          ),
+        3_000,
+        50,
+      );
+      await page.keyboard.press('Enter');
+      await waitFor(
+        async () => (await page.locator(`.tab.active[aria-label*="${tabName}"]`).count()) > 0,
+        5_000,
+        100,
+      );
+      await waitFor(editorHasFocus, 3_000, 100);
+    };
+    // The chat in the side bar view, and the ones in editor tabs, by the box each iframe sits in.
+    const chatIds = () =>
+      page.evaluate((selector) => {
+        const sideBox = globalThis.document.querySelector('.part.sidebar')?.getBoundingClientRect();
+        const shown = [...globalThis.document.querySelectorAll(selector)].filter(
+          (frame) =>
+            frame.checkVisibility({ checkVisibilityCSS: true }) &&
+            frame.getBoundingClientRect().width > 0,
+        );
+        const inSide = (frame) => {
+          const box = frame.getBoundingClientRect();
+          const x = box.left + box.width / 2;
+          return sideBox !== undefined && x >= sideBox.left && x <= sideBox.right;
+        };
+        return {
+          side: shown.find(inSide)?.name,
+          tabs: shown.filter((frame) => !inSide(frame)).map((frame) => frame.name),
+        };
+      }, CHAT_FRAME);
+    // Reload Window with a mark on the OLD page: the first page without it is the new workbench.
+    const reloadWindow = async (mark) => {
+      await page.evaluate((key) => {
+        globalThis[key] = true;
+      }, mark);
+      await command('Developer: Reload Window');
+      web?.close();
+      await browser.close().catch(() => undefined);
+      let reloaded = false;
+      for (let tries = 0; tries < 120 && !reloaded; tries++) {
+        await connectWorkbench(90_000);
+        const stale = await page
+          .evaluate((key) => globalThis[key] === true, mark)
+          .catch(() => true);
+        reloaded = !stale;
+        if (reloaded) break;
+        await browser.close().catch(() => undefined);
+        await sleep(250); // between two attempts to reach the new page, not a wait for it
+      }
+      if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
+      await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
+      drivenChatId = undefined;
+    };
+    // The toast "All installed extensions are temporarily disabled" shows up some seconds AFTER a
+    // Reload (seen in the second run of this step: it appeared after a clear made right away), so
+    // the clear waits up to 8 s for ANY toast (it returns as soon as one exists, not only that one;
+    // without a toast the wait just expires) and prints the text of every toast it finds before
+    // clearing, so an error toast of the extension after a Reload is not wiped without a trace.
+    const clearToasts = async () => {
+      await waitFor(
+        () => page.locator('.notifications-toasts .notification-toast').count(),
+        8_000,
+        200,
+      );
+      const texts = await page
+        .locator('.notifications-toasts .notification-toast')
+        .allInnerTexts()
+        .catch(() => []);
+      for (const text of texts) console.log(`  toast cleared: ${text.replace(/\s+/g, ' ').trim()}`);
+      await command('Notifications: Clear All Notifications');
+    };
+    const typeDraft = async (text) => {
+      await focusPromptBox();
+      await page.keyboard.type(text);
+      await waitFor(async () => (await view()).value === text, 5_000, 100);
+    };
+    const newSessionTab = async () => {
+      const previous = drivenChatId;
+      const before = (await chatTabs()).length;
+      await command('OpenCode: New Session');
+      await waitFor(async () => (await chatTabs()).length === before + 1, 10_000, 200);
+      await connectToNew(previous);
+    };
+
+    // Step 27 leaves `web` on a tab it closed (the full run) or on the side bar chat (a filtered
+    // run): connect to the side bar chat before the first read, as the full run failed on it once.
+    // A second press on the activity bar item would hide a side bar that is already showing it, so
+    // it is pressed only when no chat shows up within 8 s.
+    setLocation('sidebar');
+    if (
+      (await waitFor(async () => (await visibleChatId()) !== undefined, 8_000, 200)) === undefined
+    ) {
+      await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+      await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+    }
+    await openChat(30_000);
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    await closeAllEditors();
+    try {
+      await setTheme(DARK);
+      await command('Notifications: Clear All Notifications');
+      await quickOpen('src/sample.ts', 'sample.ts');
+
+      // --- Montage: B (answered), C (lazy, draft), D (answered), A (answered, draft, active) ----------
+      await waitConnected();
+      check(await clickButton('New session'), 'the New session button is pressed in the side bar');
+      await waitEmptyView();
+      await send(PROMPT_B);
+      check(await waitIdle(30_000), 'the turn of B ends');
+      setLocation('editor');
+      await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
+      await connectToNew(drivenChatId);
+      await waitFor(async () => (await view()).title === TITLE_B, 15_000, 200);
+      await newSessionTab(); // C
+      await typeDraft('draft28-C');
+      await newSessionTab(); // D
+      await send(PROMPT_D);
+      check(await waitIdle(30_000), 'the turn of D ends');
+      await typeDraft('draft28-D'); // D keeps it although its session is deleted later (R5)
+      await newSessionTab(); // A
+      await send(PROMPT_A);
+      check(await waitIdle(30_000), 'the turn of A ends');
+      // D's session is deleted from A's picker while D is hidden: D's document keeps believing it.
+      check(await clickButton('Sessions'), 'the Sessions button of A is pressed');
+      await waitFor(
+        () => web.inDoc((doc) => doc.querySelectorAll('.session-row').length > 0),
+        10_000,
+        200,
+      );
+      await web.inDoc((doc, title) => {
+        for (const row of doc.querySelectorAll('.session-row')) {
+          if ((row.querySelector('.session-title')?.textContent ?? '').trim() === title) {
+            row.setAttribute('data-visual-pick', 'true');
+          }
+        }
+      }, TITLE_D);
+      check(
+        await clickIn(
+          '.session-row[data-visual-pick="true"] .session-action[aria-label^="Delete"]',
+        ),
+        "Delete is pressed on D's row in A's picker",
+      );
+      const dialog = page.locator('.monaco-dialog-box');
+      const modal = await waitFor(
+        async () => ((await dialog.count()) ? await dialog.first().innerText() : null),
+        10_000,
+        300,
+      );
+      check(
+        typeof modal === 'string' && modal.includes(TITLE_D),
+        `the modal names D's session (${String(modal).replace(/\s+/g, ' ').slice(0, 120)})`,
+      );
+      await dialog
+        .first()
+        .getByRole('button', { name: /^Delete$/ })
+        .click();
+      const deleted = await waitFor(
+        () =>
+          web.inDoc(
+            (doc, title) =>
+              ![...doc.querySelectorAll('.session-row')].some(
+                (row) => (row.querySelector('.session-title')?.textContent ?? '').trim() === title,
+              ),
+            TITLE_D,
+          ),
+        20_000,
+        300,
+      );
+      check(deleted === true, "D's session leaves the picker of A");
+      await clickIn('input[type="search"]'); // the native dialog took the keyboard focus
+      await page.keyboard.press('Escape');
+      await waitFor(
+        () => web.inDoc((doc) => doc.querySelectorAll('.session-row').length === 0),
+        3_000,
+        100,
+      );
+      await typeDraft('draft28-A');
+      await sleep(1_000); // the workbench gets the webview's state through a message; no signal
+      const before = await chatTabs();
+      const beforeTexts = before.map((tab) => tab.text);
+      check(
+        before.length === 4 && before.at(-1)?.active === true,
+        `the montage has four chat tabs with A active (${JSON.stringify(before.map((t) => [t.text, t.active, t.group]))})`,
+      );
+      assertNoWebviewErrors('step 28 montage');
+      await shot('28a-before-reload');
+
+      // --- Reload Window #1 (editor mode) -------------------------------------------------------
+      await reloadWindow('__visualPreReload28a');
+
+      // R1: the labels, before anything is touched.
+      const back = await waitFor(
+        async () => {
+          const tabs = await chatTabs();
+          return tabs.length === before.length ? tabs : undefined;
+        },
+        20_000,
+        250,
+      );
+      const backTexts = (back ?? (await chatTabs())).map((tab) => tab.text);
+      check(
+        back !== undefined && JSON.stringify(backTexts) === JSON.stringify(beforeTexts),
+        `R1 right after Reload Window the ${String(backTexts.length)} chat tabs read as before (${JSON.stringify(beforeTexts)} -> ${JSON.stringify(backTexts)})`,
+      );
+
+      // R2: A, the active tab, is deserialized at once.
+      const seen = await waitFor(async () => (await visibleChatId()) !== undefined, 60_000, 250);
+      await openChat(40_000);
+      await waitFor(
+        async () => {
+          const state = await view();
+          return state.title === TITLE_A && state.messages >= 2;
+        },
+        30_000,
+        250,
+      );
+      const restoredA = await view();
+      check(
+        seen === true &&
+          restoredA.title === TITLE_A &&
+          restoredA.messages >= 2 &&
+          restoredA.value === 'draft28-A' &&
+          restoredA.kind === 'vscode-dark',
+        `R2 A comes back active: title ${JSON.stringify(restoredA.title)}, ${String(restoredA.messages)} blocks, draft ${JSON.stringify(restoredA.value)}, kind ${restoredA.kind}`,
+      );
+      assertNoWebviewErrors('R2 A restored');
+      await shot('28b-restored-A');
+      const idA = drivenChatId;
+      await web.inDoc(() => {
+        globalThis.__retained28 = true;
+      });
+
+      // R3 (data): the background tabs are not deserialized yet.
+      const framesBeforeOpening = await page.locator(CHAT_FRAME).count();
+      console.log(
+        `  R3 chat iframes in the workbench before any background tab is opened: ${String(framesBeforeOpening)}`,
+      );
+
+      // R6 (Focus Prompt): from the editor, the command puts the caret in A's prompt.
+      await page.locator('.tab', { hasText: 'sample.ts' }).first().click();
+      await page.locator('.monaco-editor:visible .view-lines').first().click();
+      const focusStart = await waitFor(editorHasFocus, 3_000, 100);
+      await command('OpenCode: Focus Prompt');
+      const focused = await waitFor(async () => (await view()).focusOnBox, 6_000, 200);
+      check(
+        focusStart === true && focused === true && (await visibleChatId()) === idA,
+        `R6 Focus Prompt from the editor puts the caret in the prompt of A, the active tab before the reload (editor had the focus ${String(focusStart)}, caret ${String(focused)})`,
+      );
+
+      // R3 (opening): B, a background tab, is deserialized when it is opened.
+      await clickChatTab(0);
+      await waitFor(async () => (await view()).messages >= 2, 15_000, 250);
+      const restoredB = await view();
+      check(
+        restoredB.title === TITLE_B && restoredB.messages >= 2,
+        `R3 B, restored when opened (${String(framesBeforeOpening)} chat iframe before): title ${JSON.stringify(restoredB.title)}, ${String(restoredB.messages)} blocks`,
+      );
+      assertNoWebviewErrors('R3 B restored');
+
+      // R4: C, the lazy tab.
+      await clickChatTab(1);
+      await waitFor(async () => (await view()).value === 'draft28-C', 15_000, 250);
+      const restoredC = await view();
+      check(
+        restoredC.title === 'Untitled session' &&
+          restoredC.messages === 0 &&
+          restoredC.value === 'draft28-C',
+        `R4 C comes back lazy: title ${JSON.stringify(restoredC.title)}, ${String(restoredC.messages)} blocks, draft ${JSON.stringify(restoredC.value)}`,
+      );
+      assertNoWebviewErrors('R4 C restored');
+
+      // R5: D, whose session no longer exists.
+      await clickChatTab(2);
+      await waitFor(async () => (await view()).notices.includes(GONE), 15_000, 250);
+      const restoredD = await view();
+      check(
+        restoredD.notices.includes(GONE) &&
+          restoredD.title === 'Untitled session' &&
+          restoredD.messages === 0 &&
+          restoredD.value === 'draft28-D',
+        `R5 D says ${JSON.stringify(restoredD.notices)} with title ${JSON.stringify(restoredD.title)}, ${String(restoredD.messages)} blocks and draft ${JSON.stringify(restoredD.value)}`,
+      );
+      await shot('28c-notice-D');
+      const restoredLines = logCount(/chat tab restored/g);
+      check(
+        restoredLines === 4 && logCount(/chat tab restore skipped/g) === 0,
+        `the serializer restored ${String(restoredLines)} tabs (log lines "chat tab restored (pane N)"), none skipped`,
+      );
+
+      // R9: the notice of D in the four themes, tab beside the code.
+      const mediaWidth = (await chatFrameBox())?.width ?? 0;
+      for (const [name, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        const look = await web.inDoc(measureText, { notice: '.status-bar .alert .alert-text' });
+        check(
+          look.notice !== null && look.notice !== undefined && look.notice.ratio >= 4.5,
+          `R9 the notice of D has contrast ${look.notice ? look.notice.ratio.toFixed(2) : 'not found'} >= 4.5 in ${name} (tab ${String(Math.round(mediaWidth))} px)`,
+        );
+        await shot(`28d-notice-${name}`);
+      }
+      await setTheme(DARK);
+      assertNoWebviewErrors('R5 D restored');
+
+      // R7: B answers a prompt.
+      await clickChatTab(0);
+      // The toast "All installed extensions are temporarily disabled" (from `--disable-extensions`)
+      // comes back after a Reload and covered the prompt box in the first runs of this step: the
+      // click missed the box and the keys went nowhere.
+      await clearToasts();
+      await waitFor(async () => (await view()).messages >= 2, 15_000, 250);
+      // B already had an answer ("hello there", the fake always says it), so "it answers" is one
+      // more assistant block than before, not just a non-empty last reply.
+      const beforeB = await view();
+      await send(`${titleOf(PROMPT_B)} Reply with exactly: again28. Do not use any tools.`);
+      await waitFor(
+        async () => (await view()).users.length === beforeB.users.length + 1,
+        10_000,
+        200,
+      );
+      const answeredB = await waitIdle(30_000);
+      const afterB = await view();
+      check(
+        answeredB &&
+          afterB.title === TITLE_B &&
+          afterB.users.length === beforeB.users.length + 1 &&
+          (afterB.users.at(-1) ?? '').includes('again28') &&
+          afterB.assistants === beforeB.assistants + 1 &&
+          afterB.lastAssistant.trim() !== '',
+        `R7 the restored B answers (prompt ${JSON.stringify(afterB.users.at(-1))}, reply ${JSON.stringify(afterB.lastAssistant)})`,
+      );
+
+      // R6 (New Session): the new tab opens in the group of the chat.
+      const chatGroups = new Set((await chatTabs()).map((tab) => tab.group));
+      const countBeforeNew = (await chatTabs()).length;
+      await newSessionTab();
+      const afterNew = await chatTabs();
+      const newTab = afterNew.find((tab) => tab.active);
+      check(
+        afterNew.length === countBeforeNew + 1 &&
+          newTab !== undefined &&
+          chatGroups.has(newTab.group) &&
+          chatGroups.size === 1,
+        `R6 New Session after the reload opens a new tab in the chat's group (${String(countBeforeNew)} -> ${String(afterNew.length)} tabs, groups ${JSON.stringify([...chatGroups])}, new tab in ${String(newTab?.group)})`,
+      );
+
+      // retainContextWhenHidden of the revived panel: the mark set in A's document survived.
+      await clickTabNamed('Tab28A');
+      const retained = await web.inDoc(() => globalThis.__retained28 === true);
+      check(
+        drivenChatId === idA && retained === true,
+        `a revived panel keeps its document while hidden (the mark set in A before it was hidden: ${String(retained)}, same webview ${String(drivenChatId === idA)})`,
+      );
+
+      // --- Reload Window #2 (sidebar mode) ------------------------------------------------------
+      setLocation('sidebar');
+      await waitFor(async () => (await chatIds()).side !== undefined, 8_000, 200);
+      let ids = await chatIds();
+      if (ids.side === undefined) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        ids =
+          (await waitFor(
+            async () => ((await chatIds()).side ? chatIds() : undefined),
+            15_000,
+            200,
+          )) ?? ids;
+      }
+      await openChat(30_000, ids.side);
+      await waitFor(() => web.inDoc((doc) => doc.querySelector('textarea') !== null), 15_000, 200);
+      check(await clickButton('New session'), 'New session is pressed in the side bar chat');
+      await waitEmptyView();
+      await send(PROMPT_L);
+      check(await waitIdle(30_000), 'the turn of the side bar session ends');
+      await clickTabNamed('Tab28A'); // A is the visible, active tab when the window reloads
+      await sleep(1_000); // the workbench gets the webview's state through a message; no signal
+      const tabsBeforeSecond = (await chatTabs()).length;
+      await shot('28e-before-second-reload');
+      await reloadWindow('__visualPreReload28b');
+
+      // R10: the same number of tabs.
+      const second = await waitFor(
+        async () => {
+          const tabs = await chatTabs();
+          return tabs.length === tabsBeforeSecond ? tabs : undefined;
+        },
+        20_000,
+        250,
+      );
+      check(
+        second !== undefined,
+        `R10 after the second Reload Window the workbench has ${String((await chatTabs()).length)} chat tabs (${String(tabsBeforeSecond)} before it)`,
+      );
+
+      // R8: A is back and answers; the side bar view resolves and does not show A's session.
+      const shownIds = await waitFor(
+        async () => {
+          const found = await chatIds();
+          return found.side !== undefined && found.tabs.length > 0 ? found : undefined;
+        },
+        60_000,
+        300,
+      );
+      const seenIds = shownIds ?? (await chatIds());
+      if (seenIds.tabs[0] === undefined)
+        throw new Error('no chat tab came back after the second reload');
+      await openChat(40_000, seenIds.tabs[0]);
+      await waitFor(
+        async () => {
+          const state = await view();
+          return state.title === TITLE_A && state.messages >= 2;
+        },
+        30_000,
+        250,
+      );
+      await clearToasts();
+      const beforeA = await view();
+      await send(`${titleOf(PROMPT_A)} Reply with exactly: after28. Do not use any tools.`);
+      // As R7: wait for the user message to arrive (the fake publishes it by SSE) before judging idle.
+      await waitFor(
+        async () => (await view()).users.length === beforeA.users.length + 1,
+        10_000,
+        200,
+      );
+      const answeredA = await waitIdle(30_000);
+      const afterA = await view();
+      check(
+        answeredA &&
+          afterA.title === TITLE_A &&
+          afterA.users.length === beforeA.users.length + 1 &&
+          (afterA.users.at(-1) ?? '').includes('after28') &&
+          afterA.assistants === beforeA.assistants + 1 &&
+          afterA.lastAssistant.trim() !== '',
+        `R8 in sidebar mode the tab A comes back and answers (title ${JSON.stringify(afterA.title)}, prompt ${JSON.stringify(afterA.users.at(-1))}, reply ${JSON.stringify(afterA.lastAssistant)})`,
+      );
+      if (seenIds.side === undefined)
+        throw new Error('the side bar chat did not show after the second reload');
+      await openChat(30_000, seenIds.side);
+      await waitFor(async () => (await view()).messages > 0, 20_000, 250);
+      const lateral = await view();
+      check(
+        lateral.title !== TITLE_A && lateral.title === TITLE_L && lateral.messages > 0,
+        `R8 the side bar view resolved to another session, not A's (title ${JSON.stringify(lateral.title)} against ${JSON.stringify(TITLE_A)}, ${String(lateral.messages)} blocks)`,
+      );
+      assertNoWebviewErrors('R8 after the second reload');
+      await shot('28f-sidebar-and-tab');
+    } finally {
+      // Leave the workspace as the step found it: no editor open, the setting back to `sidebar`
+      // and `sample.ts` as it was. The sessions it created stay in the fixture, like any other step.
+      setLocation('sidebar');
+      await closeAllEditors().catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined); // R9 leaves another theme if it fails midway
+      fs.writeFileSync(sampleFile, sampleBefore);
     }
   });
 } catch (error) {
