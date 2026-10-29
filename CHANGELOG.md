@@ -9,14 +9,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Setting `openVsCode.chatLocation` (`sidebar` by default, or `editor`): with `editor` every session
+  opens in its own editor tab beside the code and the OpenCode view becomes a launcher (New
+  Session, Open Chat, Open Settings). Opening a session that already has a tab reveals it, New
+  Session opens a new tab, and Insert at cursor and Add selection write into the last text editor,
+  while file links and diffs open outside the chat's group. A tab with no session opens the
+  session you pick in it, instead of leaving an empty tab behind. Changing the setting applies at
+  once: the side bar session opens in a tab, and going back to `sidebar` leaves the tabs open.
+  Known limits: the tabs are closed by Reload Window (Open Chat reopens the last session), every
+  tab shows every pending request, the draft in the prompt box does not move when the setting
+  changes, and changing the served folder with tabs open leaves them empty (issue #77).
 - Editor and Explorer context menus: **Add to OpenCode Chat**, **Explain with OpenCode** and **Fix
   with OpenCode** (Fix includes the errors and warnings VS Code reports for the selection)
   in the editor, and **Explain with OpenCode** on one or more files in the Explorer. The prompt is
   sent at once in the open session, or left in the prompt box with a notice when the chat is busy,
   not connected, or the buffer has unsaved changes, or when the chat took more than 10 s to open
   (issue #36).
-- Settings editor: the three settings are listed in a fixed order (executable, server address,
-  default model) and link to each other (issue #38).
+- Settings editor: the settings are listed in a fixed order (executable, server address,
+  default model, chat location) and link to each other (issue #38).
 - opencode v2 detection: finds `opencode2` or `opencode` (or the `openVsCode.opencodePath`
   executable), accepts only major version 2, and resolves npm `.cmd` shims to the real executable
   on Windows (issue #7).
