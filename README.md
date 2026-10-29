@@ -33,7 +33,9 @@ affiliated with opencode or with Microsoft.
   every session opens in its own editor tab, beside your code, and the OpenCode view becomes a small
   launcher with New Session and Open Chat. Opening a session that already has a tab brings that tab
   to the front instead of opening another. Changing the setting takes effect at once: the session
-  of the side bar opens in a tab, and going back leaves the tabs open.
+  of the side bar opens in a tab, and going back leaves the tabs open. After **Developer: Reload
+  Window** the tabs come back, each with its session, its draft and its
+  title.
 
 - **One chip for agent and model:** the prompt bar shows "agent · model" (with the reasoning level
   and a connection dot); it opens a panel where you choose the agent (Build, Plan…), the model and,
@@ -215,9 +217,14 @@ always `opencode`.
   are not on disk (untitled, `git:` or output documents) have no entries.
 - In `editor` mode every chat tab keeps its page in memory while it is hidden
   (`retainContextWhenHidden`), so each open tab costs memory; there is no cap on the number of tabs.
-- Chat tabs do **not** survive **Developer: Reload Window** yet: VS Code closes them (observed on
-  VS Code 1.144.0, Windows 11) and **Open Chat** opens the last session of the folder again. Restoring
-  the tabs is planned.
+- Chat tabs are restored after **Developer: Reload Window**, but VS Code only brings back a tab
+  when it is shown: the tabs in the background are restored when you open them, not before. A
+  restored tab whose session is already open in another tab (or in the side bar view) closes itself
+  and reveals the one that has it. One whose session was deleted comes back empty, with the notice
+  "This session no longer exists", and keeps its draft. With `sidebar` the restored tabs stay open
+  next to the view, as extra tabs.
+- While chat tabs are open, the extension starts when the window opens (VS Code needs it to restore
+  them), so the opencode server starts even if you do not touch the chat.
 - In `editor` mode a pending permission or question shows in **every** open tab, not only in the
   tab of its session; the native notification and the badge appear when no chat is on screen.
   Showing it only in the tab it belongs to is planned.

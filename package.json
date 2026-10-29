@@ -41,7 +41,9 @@
     "AI",
     "Chat"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onWebviewPanel:openVsCode.chatPanel"
+  ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,

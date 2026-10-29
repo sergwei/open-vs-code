@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { isWebviewToHost, type UiCommand } from '../shared/protocol';
+import { EMPTY_TITLE } from '../shared/sessionLabel';
 import { createAttention } from './attention';
 import { ChatController, type ComposeOutcome, type FocusTarget } from './chatController';
 import {
@@ -13,6 +14,7 @@ import { ChatPanels } from './chatPanels';
 import type { ChatSurfaceGate } from './chatSurfaceGate';
 import { ChatTabs } from './chatTabs';
 import { registerChatView } from './chatViewProvider';
+import { chatWebviewOptions } from './chatWebview';
 import { createEditorActions, trackLastTextEditor } from './editorActions';
 import type { ModelRef } from '../shared/model';
 import {
@@ -21,6 +23,7 @@ import {
   CHAT_FOCUSED_CONTEXT_KEY,
   CHAT_LOCATION_KEY,
   CHAT_LOCATION_SETTING,
+  CHAT_PANEL_VIEW_TYPE,
   CHAT_VIEW_ID,
   CONFIG_SECTION,
   DEFAULT_MODEL_KEY,
@@ -35,6 +38,7 @@ import {
   OPEN_CHAT_COMMAND_ID,
   OPEN_SETTINGS_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
+  RESTORE_CHAT_TAB_TEST_COMMAND_ID,
   SHOW_REQUEST_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
   VIEW_CONTAINER_ID,
@@ -294,6 +298,11 @@ function parseReply(
  *   duplicated, wherever it already is (the controller asks `revealPane`/`openElsewhere`).
  * - An EMPTY tab that opens a session no other surface shows adopts it instead of opening another
  *   tab (decision of Sergio, 29/10/2026; the rule is in `ChatController.openRequested`).
+ * - The tabs survive Reload Window: a panel serializer for `CHAT_PANEL_VIEW_TYPE` is registered in
+ *   BOTH modes (VS Code only saves a tab whose view type has one) and hands each revived panel to
+ *   `ChatPanels.restore`, which binds the session the tab's webview saved. Deactivation releases
+ *   the tabs (`detachAll`) instead of closing them. In `ExtensionMode.Test` the internal command
+ *   `RESTORE_CHAT_TAB_TEST_COMMAND_ID` feeds a panel it creates through that same `restore`.
  * - `anySurfaceVisible` (not the view alone) drives the attention feature, and the badge goes to
  *   the view in `sidebar` and to the launcher view in `editor`. `chatFocused` is true while ANY
  *   surface has the focus; a surface that hides gets a synthetic blur.
@@ -601,6 +610,13 @@ export function registerChat(
       });
     },
     onSurfaceChange,
+    restoreSession: (paneId, sessionID) => {
+      controller.restorePane(paneId, sessionID);
+    },
+    paneShowing,
+    revealSurface: (paneId) => {
+      revealSurface(paneId, false);
+    },
   });
   // In `sidebar` mode the side-bar view's pane exists from the start, attached BEFORE the server
   // state is applied so it receives the remembered session. Its callbacks read the pane lazily.
@@ -694,7 +710,16 @@ export function registerChat(
   const disposables: vscode.Disposable[] = [
     view.disposable,
     launcher.disposable,
-    { dispose: () => panels.dispose() },
+    // Not `dispose`: the tabs stay open so the workbench can save them for the next start.
+    { dispose: () => panels.detachAll() },
+    // Registered in BOTH modes: VS Code only persists a chat tab if a serializer exists for its
+    // view type, and a tab left over from `editor` mode must come back after `sidebar` too (Q2=1).
+    vscode.window.registerWebviewPanelSerializer(CHAT_PANEL_VIEW_TYPE, {
+      deserializeWebviewPanel: (panel, state: unknown) => {
+        panels.restore(panel, state);
+        return Promise.resolve();
+      },
+    }),
     { dispose: () => lastEditor.dispose() },
     manager.onDidChangeState((state) => {
       controller.onServerState(state);
@@ -845,6 +870,20 @@ export function registerChat(
 
   if (context.extensionMode === vscode.ExtensionMode.Test) {
     disposables.push(
+      vscode.commands.registerCommand(RESTORE_CHAT_TAB_TEST_COMMAND_ID, (raw: unknown) => {
+        // The persisted state and title of a tab "revived by VS Code"; a panel we create stands in
+        // for the revived one and goes through the SAME `restore` as the serializer.
+        const args =
+          typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+        const title = typeof args.title === 'string' ? args.title : EMPTY_TITLE;
+        const panel = vscode.window.createWebviewPanel(
+          CHAT_PANEL_VIEW_TYPE,
+          title,
+          { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+          { ...chatWebviewOptions(context.extensionUri), retainContextWhenHidden: true },
+        );
+        panels.restore(panel, args.state);
+      }),
       vscode.commands.registerCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, async (raw: unknown) => {
         if (!isWebviewToHost(raw)) {
           log.warn('injected message rejected by isWebviewToHost');

@@ -1,11 +1,12 @@
 // The editor tabs that show the chat (issue #77, `openVsCode.chatLocation` = `editor`): one
 // `WebviewPanel` per tab, each one a chat pane of the controller. The rules that break silently
 // (which tab a command goes to, the column, the title) live in `chatTabs.ts`, which Vitest checks;
-// this file only creates, reveals and closes panels and reports what VS Code tells it.
+// this file only creates, restores, reveals and closes panels and reports what VS Code tells it.
 
 import * as vscode from 'vscode';
 import type { HostToWebview, WebviewToHost } from '../shared/protocol';
 import { EMPTY_TITLE } from '../shared/sessionLabel';
+import { readPersistedSessionID } from '../shared/tabState';
 import type { PaneSurface } from './chatPane';
 import type { ChatTabs } from './chatTabs';
 import { chatWebviewOptions, parseWebviewMessage, renderChatWebview } from './chatWebview';
@@ -29,11 +30,22 @@ export interface ChatPanelsHost {
   onResync(paneId: number): void;
   /** The visibility or the active tab changed (also after a tab opened or closed). */
   onSurfaceChange(): void;
+  /** Binds the session a restored tab had to its new pane (no server needed, memory untouched). */
+  restoreSession(paneId: number, sessionID: string): void;
+  /** The pane (a tab or the side bar) that already shows `sessionID`, if any. */
+  paneShowing(sessionID: string): number | undefined;
+  /** Brings the surface of `paneId` forward (a tab or the side-bar view). */
+  revealSurface(paneId: number): void;
 }
+
+/** How a panel reaches {@link ChatPanels.adopt}: created by us, or handed back by VS Code. */
+type PanelOrigin = { kind: 'created' } | { kind: 'restored'; sessionID: string | undefined };
 
 /** One open tab: its panel and what the host knows of its document. */
 interface PanelEntry {
   panel: vscode.WebviewPanel;
+  /** The listeners of the panel; released on close and by {@link ChatPanels.detachAll}. */
+  subscriptions: vscode.Disposable[];
   /** The document sent `ready`; it stays true while hidden, because the context is retained. */
   ready: boolean;
   /** Last visibility seen, to spot the hidden-to-visible transition. */
@@ -42,7 +54,13 @@ interface PanelEntry {
 }
 
 /**
- * Creates and tracks the chat tabs.
+ * Creates, restores and tracks the chat tabs.
+ *
+ * After Reload Window the tabs come back: the panel serializer (registered by `registerChat`)
+ * hands each revived panel to {@link ChatPanels.restore}, which wires it like a new one and binds
+ * the session its webview saved. VS Code revives only the tab that becomes visible; background
+ * tabs are restored when the user opens them. `detachAll` leaves the panels open on deactivation
+ * so the workbench can save them.
  *
  * `retainContextWhenHidden` is on (decision T2=1 of Sergio, 29/10/2026): switching between code and
  * chat neither reloads the document nor loses the scroll. The price is that VS Code cannot deliver
@@ -124,11 +142,70 @@ export class ChatPanels {
       { viewColumn, preserveFocus: !focus },
       { ...chatWebviewOptions(this.extensionUri), retainContextWhenHidden: true },
     );
+    return this.adopt(panel, { kind: 'created' });
+  }
+
+  /**
+   * Takes over a panel VS Code revived after Reload Window (the panel serializer, issue #77) and
+   * gives it the same wiring as a new tab, bound to the session in `state`. `state` is whatever the
+   * webview last saved with `setState`; only the session id is read from it
+   * (`readPersistedSessionID`), and an absent or invalid one gives a lazy tab that keeps its draft.
+   *
+   * If another surface already shows that session the restored panel is closed and the other one is
+   * revealed (decision Q3=1 of Sergio, 29/10/2026), logging `chat tab restore skipped: session
+   * already shown (pane M)`; otherwise `chat tab restored (pane N)`. The tab is seeded with the
+   * title VS Code persisted, so it reads as before until its first snapshot (Q4=1), and counts as
+   * the active one if VS Code says so. Never throws: VS Code paints its own failure page when the
+   * deserializer rejects, so an error is logged (`chat tab restore failed`) and the panel closed.
+   * VERIFIED in a real VS Code 1.144.0 on Windows 11 (29/10/2026, `npm run test:integration`,
+   * `fakeServer.test.ts`) through the test command, which hands a panel it created to this same
+   * method: "restores a tab with its session and its title", "restores a tab whose session no
+   * longer exists…", "closes a restored tab whose session another tab already shows…" and "restores
+   * a tab in sidebar mode…". Disposing the panel inside the deserializer (the duplicate branch) is
+   * only exercised there, with a panel we created. UNVERIFIED with a panel VS Code revived: the
+   * real Reload Window of `test:visual` step 28 logs no skipped tab ("none skipped"), so that branch
+   * is not reached there; to check it, reload a window where a restored session is open in two
+   * tabs.
+   */
+  restore(panel: vscode.WebviewPanel, state: unknown): void {
+    try {
+      const sessionID = readPersistedSessionID(state);
+      const other = sessionID === undefined ? undefined : this.host.paneShowing(sessionID);
+      if (other !== undefined) {
+        this.log.info(`chat tab restore skipped: session already shown (pane ${String(other)})`);
+        panel.dispose();
+        this.host.revealSurface(other);
+        return;
+      }
+      this.adopt(panel, { kind: 'restored', sessionID });
+    } catch (error) {
+      this.log.error(`chat tab restore failed: ${String(error)}`);
+      try {
+        panel.dispose();
+      } catch {
+        // already gone: nothing else to release
+      }
+    }
+  }
+
+  /**
+   * The wiring shared by a new tab and a restored one: attaches the pane, registers the tab,
+   * subscribes to the panel, renders the webview and logs `chat tab created (pane N)` or `chat tab
+   * restored (pane N)`. Returns the pane id. For a restored panel the session is bound to the pane
+   * before the document exists, so its `ready` is answered with that session.
+   */
+  private adopt(panel: vscode.WebviewPanel, origin: PanelOrigin): number {
     panel.iconPath = {
       light: vscode.Uri.joinPath(this.extensionUri, 'media', 'chat-tab-light.svg'),
       dark: vscode.Uri.joinPath(this.extensionUri, 'media', 'chat-tab-dark.svg'),
     };
-    const entry: PanelEntry = { panel, ready: false, visible: panel.visible, disposed: false };
+    const entry: PanelEntry = {
+      panel,
+      subscriptions: [],
+      ready: false,
+      visible: panel.visible,
+      disposed: false,
+    };
     let paneId = -1;
     const pane = this.host.attachPane({
       post: (message) => {
@@ -138,10 +215,15 @@ export class ChatPanels {
     });
     paneId = pane.id;
     this.entries.set(paneId, entry);
-    this.tabs.add(paneId, panel.viewColumn);
+    if (origin.kind === 'restored') {
+      this.tabs.add(paneId, panel.viewColumn, { sessionID: origin.sessionID, title: panel.title });
+      if (origin.sessionID !== undefined) this.host.restoreSession(paneId, origin.sessionID);
+    } else {
+      this.tabs.add(paneId, panel.viewColumn);
+    }
     this.tabs.setActive(paneId, panel.active);
 
-    const subscriptions = [
+    entry.subscriptions.push(
       panel.webview.onDidReceiveMessage((raw: unknown) => {
         const message = parseWebviewMessage(raw, this.channel);
         if (message === undefined) return;
@@ -170,11 +252,13 @@ export class ChatPanels {
         this.host.detachPane(paneId);
         this.log.info(`chat tab closed (pane ${String(paneId)})`);
         this.host.onSurfaceChange();
-        for (const subscription of subscriptions) subscription.dispose();
+        for (const subscription of entry.subscriptions) subscription.dispose();
       }),
-    ];
+    );
     renderChatWebview(panel.webview, this.extensionUri, this.channel);
-    this.log.info(`chat tab created (pane ${String(paneId)})`);
+    this.log.info(
+      `chat tab ${origin.kind === 'restored' ? 'restored' : 'created'} (pane ${String(paneId)})`,
+    );
     this.host.onSurfaceChange();
     return paneId;
   }
@@ -191,9 +275,29 @@ export class ChatPanels {
     return true;
   }
 
-  /** Closes every tab (the extension is deactivating); each one runs its own dispose handler. */
-  dispose(): void {
-    for (const entry of [...this.entries.values()]) entry.panel.dispose();
+  /**
+   * Lets go of every tab WITHOUT closing it (the extension is deactivating): listeners released,
+   * panes detached, entries forgotten, the panels left alone. Closing them from the host that is
+   * dying could drop them before the workbench saves its layout, and a tab that is not saved is
+   * not restored (decision T7=1 of Sergio, 29/10/2026). Logs nothing and does not call
+   * `onSurfaceChange`: there is nothing left to refresh.
+   * VERIFIED with this behaviour (`npm run test:visual`, full run, Windows 11, VS Code 1.144.0,
+   * 29/10/2026): "R1 right after Reload Window the 4 chat tabs read as before" and "R10 after the
+   * second Reload Window the workbench has 5 chat tabs (5 before it)". The alternative (closing the
+   * panels here) was run ONCE as a mutation of this method with `--steps 28`, and R1 still passed
+   * with the same 4 tabs: in that harness closing in `deactivate` did NOT lose the tabs, so the
+   * decision T7=1 rests on the risk, not on a measured difference. HYPOTHESIS that it would lose
+   * them on a plain window close or an update restart; nothing here exercises those.
+   */
+  detachAll(): void {
+    for (const [paneId, entry] of [...this.entries]) {
+      entry.disposed = true;
+      entry.ready = false;
+      for (const subscription of entry.subscriptions) subscription.dispose();
+      this.entries.delete(paneId);
+      this.tabs.remove(paneId);
+      this.host.detachPane(paneId);
+    }
   }
 
   /** Document ready and tab visible: the same condition `post` uses, so the two cannot disagree. */

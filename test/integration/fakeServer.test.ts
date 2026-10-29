@@ -31,6 +31,7 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
 import { toEditorRef } from '../../src/extension/fileMentions';
+import { EMPTY_TITLE } from '../../src/shared/sessionLabel';
 import {
   ADD_SELECTION_TO_CHAT_COMMAND_ID,
   ADD_TO_CHAT_COMMAND_ID,
@@ -41,6 +42,7 @@ import {
   NEW_SESSION_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
   RESTART_SERVER_COMMAND_ID,
+  RESTORE_CHAT_TAB_TEST_COMMAND_ID,
   SESSION_DIFF_SCHEME,
   STOP_RESPONSE_COMMAND_ID,
   VIEW_CONTAINER_ID,
@@ -1288,6 +1290,166 @@ describe('fake server', function () {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await setChatLocation(undefined, await openLogCursor());
     }
+  });
+
+  /**
+   * A chat tab revived by VS Code after Reload Window, against the synthetic server (issue #77,
+   * delivery E2). The test API cannot make VS Code call the panel serializer (a real Reload kills
+   * the test host), so the test-only command `RESTORE_CHAT_TAB_TEST_COMMAND_ID` creates a panel of
+   * the chat view type and hands it to the SAME `ChatPanels.restore` the serializer calls. The
+   * four cases below protect that path: wiring (`chat tab restored`, `webview ready`), the session
+   * and title the tab ends up with, the fallback to "Untitled session" for a session that no
+   * longer exists plus the host log line that the Q1 notice was sent to the tab (the notice's
+   * text is inside the iframe: `test:visual` step 28), the
+   * closing of a duplicate, and the `sidebar` mode. Provenance: SYNTHETIC server, fabricated
+   * state `{ sessionID }` (what the webview writes is checked by `uiState.test.ts`, what VS Code
+   * hands back after a real Reload is NOT checked here).
+   */
+  describe('a chat tab restored after Reload Window', function () {
+    /** Hands a panel carrying `state` and the persisted `title` to `ChatPanels.restore`. */
+    async function restoreTab(state: unknown, title: string): Promise<void> {
+      await vscode.commands.executeCommand(RESTORE_CHAT_TAB_TEST_COMMAND_ID, { state, title });
+    }
+
+    /** Starts a NEW session in the side bar, answers `text` to the end and returns its id. */
+    async function answeredSession(text: string): Promise<string> {
+      // The command goes through the webview and comes back as `session.new`: without the pause it
+      // would land AFTER the prompt and clear the session the prompt just created.
+      await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
+      await sleep(SETTLE_MS);
+      const log = await openLogCursor();
+      await sendPrompt(log, text);
+      const id = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+      assert.ok(id, `no session id in the log:\n${log.added()}`);
+      await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+      return id;
+    }
+
+    /** Waits until a chat tab carries `label`; fails with the labels it did see. */
+    async function waitForTabLabel(label: string): Promise<void> {
+      const deadline = Date.now() + 8_000;
+      while (!chatTabs().some((tab) => tab.label === label)) {
+        assert.ok(
+          Date.now() < deadline,
+          `no tab labelled "${label}"; labels: ${JSON.stringify(chatTabs().map((t) => t.label))}`,
+        );
+        await sleep(100);
+      }
+    }
+
+    /** Switches to `editor` and waits for the tab the session of the side bar opens in it. */
+    async function toEditorWithOneTab(log: LogCursor): Promise<void> {
+      await setChatLocation('editor', log);
+      try {
+        await waitForChatTabs(1);
+      } catch (error) {
+        throw new Error(`${String(error)}\nlog:\n${log.added()}`, { cause: error });
+      }
+    }
+
+    afterEach(async () => {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await setChatLocation(undefined, await openLogCursor());
+    });
+
+    it('restores a tab with its session and its title', async function () {
+      const log = await openLogCursor();
+      const sessionID = await answeredSession('Restore77 first');
+      await toEditorWithOneTab(log);
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await waitForChatTabs(0);
+      await sleep(SETTLE_MS);
+
+      log.mark();
+      await restoreTab({ sessionID }, 'Seeded old title');
+      await waitForChatTabs(1);
+      await log.waitFor('chat tab restored (pane', 8_000);
+      await log.waitFor('webview ready', 8_000);
+      await waitForTabLabel('Restore77 first');
+      await sleep(SETTLE_MS);
+      assert.strictEqual(chatTabs().length, 1, 'the restore opened more than one tab');
+      log.assertAbsent('chat tab restore skipped');
+      log.assertAbsent('chat tab restore failed');
+      log.assertAbsent('no longer exists');
+      log.assertAbsent('chat tab created (pane');
+    });
+
+    /**
+     * Protects the fallback of a tab whose session was deleted: it comes back as "Untitled session"
+     * (not the title VS Code persisted), the host forgets the session, and the Q1 notice is sent
+     * to that tab (log line "restored session gone: notice sent to pane"; the text it carries is
+     * judged by `test:visual` step 28, R5). Synthetic server, fabricated state `{ sessionID }`.
+     * UNVERIFIED in this suite: that the notice reaches the DOM of the iframe.
+     */
+    it('restores a tab whose session no longer exists as "Untitled session"', async function () {
+      const log = await openLogCursor();
+      await setChatLocation('editor', log);
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await waitForChatTabs(0);
+      await sleep(SETTLE_MS);
+
+      log.mark();
+      await restoreTab({ sessionID: 'ses_gone77' }, 'Seeded gone title');
+      await waitForChatTabs(1);
+      await log.waitFor('chat tab restored (pane', 8_000);
+      await log.waitFor('remembered session ses_gone77 no longer exists; forgetting it', 8_000);
+      // The Q1 notice itself is inside the iframe (`test:visual` step 28 reads it), but the host
+      // logs when it sends it to the tab, once.
+      await log.waitFor('restored session gone: notice sent to pane', 8_000);
+      await waitForTabLabel(EMPTY_TITLE);
+      await sleep(SETTLE_MS);
+      assert.strictEqual(chatTabs().length, 1, 'the restore opened more than one tab');
+      assert.ok(
+        !chatTabs().some((tab) => tab.label === 'Seeded gone title'),
+        'the tab kept the title of the session that is gone',
+      );
+      log.assertAbsent('chat tab restore skipped');
+      log.assertAbsent('chat tab restore failed');
+    });
+
+    it('closes a restored tab whose session another tab already shows, and reveals that tab', async function () {
+      const log = await openLogCursor();
+      const sessionID = await answeredSession('Restore77 duplicate');
+      await toEditorWithOneTab(log);
+      await sleep(SETTLE_MS);
+
+      log.mark();
+      await restoreTab({ sessionID }, 'Seeded duplicate title');
+      await log.waitFor('chat tab restore skipped: session already shown (pane', 8_000);
+      await log.waitFor('chat tab revealed (pane', 8_000);
+      await sleep(SETTLE_MS);
+      assert.strictEqual(chatTabs().length, 1, 'the duplicate tab stayed open');
+      log.assertAbsent('chat tab restored (pane');
+      log.assertAbsent('chat tab restore failed');
+    });
+
+    it('restores a tab in sidebar mode that shows its session while the side bar keeps its own', async function () {
+      const log = await openLogCursor();
+      const tabSession = await answeredSession('Restore77 second');
+      const sidebarSession = await answeredSession('Restore77 third');
+      assert.notStrictEqual(tabSession, sidebarSession);
+
+      log.mark();
+      await restoreTab({ sessionID: tabSession }, 'Seeded sidebar title');
+      await waitForChatTabs(1);
+      await log.waitFor('chat tab restored (pane', 8_000);
+      await log.waitFor('webview ready', 8_000);
+      await matchInLog(
+        log,
+        new RegExp(`snapshot sent \\(\\d+ sessions, open ${tabSession}\\)`),
+        8_000,
+        'the snapshot of the restored tab',
+      );
+      await waitForTabLabel('Restore77 second');
+      // The side bar still answers: injected messages go to ITS pane in sidebar mode.
+      const prompts = await openLogCursor();
+      await sendPrompt(prompts, 'Restore77 fourth');
+      await prompts.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+      await sleep(SETTLE_MS);
+      assert.strictEqual(chatTabs().length, 1, 'the restore opened more than one tab');
+      log.assertAbsent('chat tab restore skipped');
+      log.assertAbsent('chat tab restore failed');
+    });
   });
 
   /**
