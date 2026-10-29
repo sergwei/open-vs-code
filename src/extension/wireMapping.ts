@@ -10,6 +10,7 @@
 
 import type {
   AgentInfo,
+  CommandInfo,
   FormInfo,
   ModelInfo,
   PermissionRequest,
@@ -26,6 +27,7 @@ import type {
 import type {
   AgentOption,
   AttachmentInfo,
+  CommandOption,
   ErrorInfo,
   FormAsk,
   FormField,
@@ -212,6 +214,21 @@ export function toAgentOptions(list: readonly AgentInfo[]): AgentOption[] {
       if (agent.description !== undefined) option.description = agent.description;
       return option;
     });
+}
+
+/**
+ * Slash command of the wire to the shared option (issue #33): the same two fields, with an
+ * ABSENT `description` kept absent (not `undefined`, not ""), so the UI can tell "no help text".
+ * VERIFIED against a real opencode 2.0.32 (Windows 11, 28/10/2026): every entry of the real
+ * `command.list` went through this function in the case "lists the project commands and refuses an
+ * unknown one with CommandNotFoundError" of `realOpencode.test.ts`, which passed and checked
+ * `hello` kept its description `Say hello`. An entry WITHOUT a description was not observed (the
+ * three seen all had one).
+ */
+export function toCommandOption(info: CommandInfo): CommandOption {
+  const option: CommandOption = { name: info.name };
+  if (info.description !== undefined) option.description = info.description;
+  return option;
 }
 
 /**

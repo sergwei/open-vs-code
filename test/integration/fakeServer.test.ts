@@ -213,6 +213,55 @@ describe('fake server', function () {
   });
 
   /**
+   * Slash commands (issue #33): the catalog the host loaded lists the project command
+   * `.opencode/command/hello.md` of the served folder next to the two built-ins, and a `prompt.send`
+   * carrying `command: 'hello'` is run through `session.command`, the turn ending `succeeded`.
+   *
+   * Protects: `command.list` being read with the other catalog GETs (the log line counts three
+   * commands: `init`, `review` and `hello`), the host choosing `session.command` over
+   * `session.prompt` (`command accepted /hello for ses_` and NO `prompt accepted` in the added
+   * lines), and the unlisted name being refused before the server (`request fake-command-2 failed:
+   * CommandUnavailable`).
+   * The file is written by `.vscode-test.mjs` before VS Code starts (the fixture emits no
+   * `command.updated`). What it does NOT show: that a real opencode lists a `.opencode/command`
+   * file the same way, which only `realOpencode.test.ts` can say, and that the expanded template
+   * reaches the webview as the user message, which the e2e test and `test:visual` cover.
+   */
+  it('lists the project commands in the catalog and runs one with arguments', async function () {
+    const start = await openLogFromStart();
+    const loaded = /catalog loaded \(\d+ models, \d+ agents, (\w+) commands\)/.exec(start.added());
+    assert.ok(loaded, `no catalog line with commands yet; log:\n${start.added()}`);
+    assert.strictEqual(loaded[1], '3', `expected init, review and hello; log:\n${start.added()}`);
+
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'fake-command-1',
+      text: 'Ana',
+      delivery: 'queue',
+      files: [],
+      command: 'hello',
+    });
+    await log.waitFor('command accepted /hello for ses_', 10_000);
+    await log.waitFor('turn finished: ', TURN_WAIT_MS);
+    assert.ok(
+      log.added().includes('turn finished: succeeded'),
+      `the turn did not succeed; log:\n${log.added()}`,
+    );
+    log.assertAbsent('prompt accepted for');
+
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'prompt.send',
+      requestId: 'fake-command-2',
+      text: '',
+      delivery: 'queue',
+      files: [],
+      command: 'no-such-command',
+    });
+    await log.waitFor('request fake-command-2 failed: CommandUnavailable', 10_000);
+  });
+
+  /**
    * Stop interrupts a long (SLOW) turn through the same `session.abort` message the button sends.
    *
    * Protects: the bare `{interrupted}` body and the `session.execution.interrupted` event reaching

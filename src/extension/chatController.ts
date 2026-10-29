@@ -56,8 +56,17 @@
 // pushes it to the webview as `catalog` and reloads it on the reload events of the server. A
 // `prompt.send` may carry the model and agent the user chose; the choice is applied ON SEND, after
 // being validated against the catalog (the server validates neither). New stable log lines, ids
-// only: `catalog loaded (<n> models, <m> agents)`, `model selected <providerID>/<id> for <sid>`,
-// `agent selected <id> for <sid>`, `default model setting ignored: invalid|unavailable`.
+// only: `catalog loaded (<n> models, <m> agents, <k> commands)` (the third count since issue #33),
+// `model selected <providerID>/<id> for <sid>`, `agent selected <id> for <sid>`,
+// `default model setting ignored: invalid|unavailable`.
+//
+// E8-slash-commands (issue #33, plan Engram #1415, decisions #1416): the catalog also carries the
+// slash COMMANDS of the server (`command.list`, with its own failure handling; reloaded on
+// `command.updated`), and a `prompt.send` with `command` is run through `session.command` instead
+// of `session.prompt`, after the same checks (the host revalidates the name against its catalog).
+// New stable log lines: `command accepted /<name> for <sid>`, `command list failed: <code>: <msg>`,
+// and the three of the re-read of an empty list: `commands loaded after retry <n> (<k> commands)`,
+// `command list still empty after 3 retries`, `command list retry failed: <code>: <msg>`.
 //
 // E7-file-context (issues #28/#29, plan Engram #1059, decisions #1064/#1065): `@` mentions and the
 // editor context. The host searches files (`files.search` -> `files.found`) and builds every
@@ -125,6 +134,7 @@ import { createSessionReverts } from './sessionRevert';
 import {
   lastCompactionAt,
   toAgentOptions,
+  toCommandOption,
   toErrorInfo,
   toFormAsk,
   toMessage,
@@ -424,6 +434,7 @@ const CATALOG_RELOAD_EVENTS: ReadonlySet<string> = new Set([
   'integration.updated',
   'credential.updated',
   'config.updated',
+  'command.updated', // issue #33: command files changed or an MCP server's prompts did
 ]);
 
 /** Snapshot with no sessions, sent when there is no server to ask. */
@@ -611,6 +622,10 @@ export class ChatController {
   private catalogDirty = false;
   /** Bumped when the server goes away: a load that started for the old one must not publish. */
   private catalogEpoch = 0;
+  /** The pending re-read of an empty command list (issue #33), or `undefined`; see {@link scheduleCommandRetry}. */
+  private commandRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Bumped by every {@link cancelCommandRetry}; a re-read in flight compares it after its await. */
+  private commandRetryGeneration = 0;
   /** The `defaultModel` setting value the user was last told about, so it is told once. */
   private ignoredSettingNoticed: string | undefined;
 
@@ -859,6 +874,7 @@ export class ChatController {
     this.catalogEpoch++;
     this.catalogRun = undefined;
     this.catalogDirty = false;
+    this.cancelCommandRetry();
     this.clearPending();
     this.resolutions.forgetAsks();
   }
@@ -1704,6 +1720,18 @@ export class ChatController {
    * simply keep what they had). A load for a server that went away meanwhile is dropped.
    * All four answers are `{ location, data }` (VERIFIED, planner spike against opencode 2.0.32,
    * Windows 11, 21/10/2026; `model.default().data` is `null` when no model can be chosen).
+   *
+   * Issue #33: a fifth GET, `command.list`, runs in the same batch with its OWN failure handling:
+   * if it fails, the catalog is still published, with the `commands` of the previous catalog (or
+   * none the first time: absent, not `[]`) and a `warn` line `command list failed: <code>:
+   * <message>`. The log line is `catalog loaded (<n> models, <m> agents, <k> commands)`, where
+   * `<k>` is `no` when the list was never read. `command.updated` also triggers this reload.
+   * A real server answered `command.list` with `[]` on the first call after it started (VERIFIED
+   * in ONE run of the `real-opencode` case "lists the project commands and refuses an unknown one
+   * with CommandNotFoundError", Windows 11, opencode 2.0.32, 28/10/2026; not seen whether it
+   * happens every time or on other systems), so a load that reads `[]` also schedules
+   * {@link scheduleCommandRetry}: only `command.list` is read again, after 1, 2 and 4 s, until a
+   * list that is not empty arrives. A new full load, a stop or a restart of the server cancels it.
    */
   loadCatalog(): Promise<void> {
     if (this.client === undefined || this.disposed) return Promise.resolve();
@@ -1731,12 +1759,19 @@ export class ChatController {
   private async readCatalog(epoch: number): Promise<void> {
     const client = this.client;
     if (client === undefined) return;
+    this.cancelCommandRetry(); // this load reads the list itself, and schedules again if it is empty
     try {
-      const [models, providers, agents, fallback] = await Promise.all([
+      // Issue #33: the command list has its own catch, so a failing `command.list` never takes
+      // the models and agents down with it.
+      const [models, providers, agents, fallback, commands] = await Promise.all([
         client.model.list(),
         client.provider.list(),
         client.agent.list(),
         client.model.default(),
+        client.command.list().catch((error: unknown) => {
+          const info = toErrorInfo(error, this.secrets);
+          return { failure: `${info.code}: ${info.message}` };
+        }),
       ]);
       if (epoch !== this.catalogEpoch || this.disposed) return;
       const agentOptions = toAgentOptions(agents.data);
@@ -1745,6 +1780,12 @@ export class ChatController {
         providers: providers.data.map(toProviderOption),
         agents: agentOptions,
       };
+      if ('data' in commands) {
+        catalog.commands = commands.data.map(toCommandOption);
+      } else {
+        this.log.warn(`command list failed: ${commands.failure}`);
+        if (this.catalog?.commands !== undefined) catalog.commands = this.catalog.commands;
+      }
       if (fallback.data !== null) {
         catalog.serverDefault = { providerID: fallback.data.providerID, id: fallback.data.id };
       }
@@ -1753,13 +1794,85 @@ export class ChatController {
       if (first !== undefined) catalog.defaultAgent = first.id;
       this.catalog = this.withPreferredModel(catalog);
       this.log.info(
-        `catalog loaded (${String(catalog.models.length)} models, ${String(catalog.agents.length)} agents)`,
+        `catalog loaded (${String(catalog.models.length)} models, ${String(catalog.agents.length)} agents, ${catalog.commands === undefined ? 'no' : String(catalog.commands.length)} commands)`,
       );
       this.broadcast({ type: 'catalog', catalog: this.catalog });
+      if ('data' in commands && commands.data.length === 0) this.scheduleCommandRetry(epoch, 0);
     } catch (error) {
       if (epoch !== this.catalogEpoch) return;
       const info = toErrorInfo(error, this.secrets);
       this.log.warn(`catalog load failed: ${info.code}: ${info.message}`);
+    }
+  }
+
+  /**
+   * Cancels the pending command re-read, if any, and bumps `commandRetryGeneration` so a re-read
+   * already IN FLIGHT (its timer fired, its `command.list` not yet answered) is discarded when it
+   * resolves: clearing the timer alone cannot stop an await that is already running.
+   */
+  private cancelCommandRetry(): void {
+    if (this.commandRetryTimer !== undefined) clearTimeout(this.commandRetryTimer);
+    this.commandRetryTimer = undefined;
+    this.commandRetryGeneration++;
+  }
+
+  /**
+   * Re-reads ONLY `command.list` after an empty answer (issue #33): waits 1, 2 and 4 s (`attempt`
+   * 0, 1, 2; our choice, Sergio's decision of 28/10/2026), stops at the first list that is not
+   * empty, publishes the held catalog with it (a plain `catalog` message, no full reload) and logs
+   * `commands loaded after retry <n> (<k> commands)`. After the third empty answer it logs
+   * `command list still empty after 3 retries` and gives up; a read that fails logs `command list
+   * retry failed: <code>: <message>` and gives up too. No new read starts after the epoch changed,
+   * the controller was disposed or a full load replaced the catalog (each cancels the timer), and
+   * a read already in flight when that happens is discarded on arrival: `retryCommands` compares
+   * the generation it captured before the await (also in its catch), so it cannot overwrite a
+   * newer catalog, log, or schedule another read.
+   * VERIFIED by the unit cases of the describe "retry of an empty list" in `chatController.test.ts`
+   * (fake timers, a fake client): "three empty answers in a row: it stops, with no more reads",
+   * "a full reload while a retry is in flight: the new list stays and nothing else is read"
+   * (non-empty stale list), "a stale read that returns [] does not schedule another read" and
+   * "a stale read that throws writes no warn and schedules nothing". Each exit was mutated on
+   * 29/10/2026 (Windows 11): dropping `stale() ||` from the success exit fails "a full reload
+   * while a retry is in flight…" and "a stale read that returns []…", dropping
+   * `if (stale()) return;` from the catch fails "a stale read that throws…". UNVERIFIED against a
+   * real server: in the real-opencode runs the first full load gave "0 commands" and the next
+   * FULL load (not this retry) gave "2 commands", so this path and its timings were never seen
+   * there.
+   */
+  private scheduleCommandRetry(epoch: number, attempt: number): void {
+    this.cancelCommandRetry();
+    const delay = 1_000 * 2 ** attempt;
+    this.commandRetryTimer = setTimeout(() => {
+      this.commandRetryTimer = undefined;
+      void this.retryCommands(epoch, attempt);
+    }, delay);
+  }
+
+  /** One re-read of `command.list`; see {@link scheduleCommandRetry}. Never throws. */
+  private async retryCommands(epoch: number, attempt: number): Promise<void> {
+    const client = this.client;
+    if (client === undefined || epoch !== this.catalogEpoch || this.disposed) return;
+    const generation = this.commandRetryGeneration;
+    const stale = (): boolean =>
+      epoch !== this.catalogEpoch || this.disposed || generation !== this.commandRetryGeneration;
+    try {
+      const listed = await client.command.list();
+      if (stale() || this.catalog === undefined) return;
+      if (listed.data.length > 0) {
+        this.catalog = { ...this.catalog, commands: listed.data.map(toCommandOption) };
+        this.log.info(
+          `commands loaded after retry ${String(attempt + 1)} (${String(listed.data.length)} commands)`,
+        );
+        this.broadcast({ type: 'catalog', catalog: this.catalog });
+      } else if (attempt < 2) {
+        this.scheduleCommandRetry(epoch, attempt + 1);
+      } else {
+        this.log.info('command list still empty after 3 retries');
+      }
+    } catch (error) {
+      if (stale()) return;
+      const info = toErrorInfo(error, this.secrets);
+      this.log.warn(`command list retry failed: ${info.code}: ${info.message}`);
     }
   }
 
@@ -1780,6 +1893,7 @@ export class ChatController {
       providers: catalog.providers,
       agents: catalog.agents,
     };
+    if (catalog.commands !== undefined) next.commands = catalog.commands;
     if (catalog.serverDefault !== undefined) next.serverDefault = catalog.serverDefault;
     if (catalog.defaultAgent !== undefined) next.defaultAgent = catalog.defaultAgent;
     if (model !== undefined) next.preferredModel = model;
@@ -3325,7 +3439,25 @@ export class ChatController {
    * accepted the model becomes the last one used (`preferences.setLastModel`; a failure is a
    * `warn` line, the send stands) and the catalog is published again so a new session proposes
    * it. The model's own variant, if any, is kept, and the `model selected` log lines end in
-   * ` (variant <id>)` when there is one. VERIFIED by unit tests with a fake client. VERIFIED
+   * ` (variant <id>)` when there is one. VERIFIED by unit tests with a fake client.
+   *
+   * Issue #33: a message with `command` runs a slash command. The catalog is needed for it too, and
+   * a name it does not list answers `CommandUnavailable` ("The command /<name> is not available on
+   * this server") with no call to the server and no session created, reloading the catalog like the
+   * other unavailable answers. Everything else is the prompt path (lazy session, model and agent,
+   * revert commit, last model), except the last call: `session.command({ name, text })` replaces
+   * `session.prompt`, `text` being only the arguments, and the files go WITHOUT `mention` (the
+   * template rewrites the text). The log line is `command accepted /<name> for <sid>` instead of
+   * `prompt accepted`. A throw of the server (`CommandNotFoundError`, `CommandExecutionError`)
+   * is answered as the error of the `request.result`, like any other. UNVERIFIED against a real
+   * opencode: the opt-in suite never runs an existing command (it would spend quota).
+   * A command whose frontmatter sets `agent:` or `model:` changes the session's agent or model on the
+   * server; the next prompt goes back to whatever the chip says, because we send the chip's choice
+   * with every prompt (HYPOTHESIS from the plan of #33, Engram #1415: not run). With `subagent: true`
+   * the work goes to a child session and the parent may show nothing (HYPOTHESIS: check by running
+   * such a command against a real server).
+   *
+   * VERIFIED
    * against a real opencode 2.0.32 on Windows 11 (22/10/2026), on the final tree: the opt-in
    * `real-opencode` case "applies a chosen reasoning variant before the prompt" logged
    * `model selected opencode/glm-5.3-flash-free … (variant low)` at 09:50:12.869, `prompt
@@ -3363,10 +3495,10 @@ export class ChatController {
       });
     }
     try {
-      const { agent } = message;
+      const { agent, command } = message;
       const model = message.model === undefined ? undefined : withoutDefaultVariant(message.model);
       let catalog: Catalog | undefined;
-      if (model !== undefined || agent !== undefined) {
+      if (model !== undefined || agent !== undefined || command !== undefined) {
         catalog = await this.ensureCatalog();
         if (client !== this.client) return this.result(pane, requestId, unavailable());
         if (catalog === undefined) {
@@ -3376,7 +3508,15 @@ export class ChatController {
               'The models and agents of the server could not be read. Try again in a moment.',
           });
         }
-        const problem = this.checkSelection(catalog, model, agent);
+        // Issue #33: the webview parsed the name against ITS catalog; the host checks its own, and
+        // an unlisted one never reaches the server nor creates an empty session.
+        const problem =
+          command !== undefined && catalog.commands?.some((c) => c.name === command) !== true
+            ? {
+                _tag: 'CommandUnavailable',
+                message: `The command /${command} is not available on this server`,
+              }
+            : this.checkSelection(catalog, model, agent);
         if (problem !== undefined) {
           this.log.warn(`prompt ${requestId} rejected: ${problem._tag}`);
           void this.loadCatalog();
@@ -3408,17 +3548,17 @@ export class ChatController {
       // @843a6c51 L164-165), without asking; the banner says so. The host forgets the revert as
       // soon as the prompt is accepted (the event does it too).
       const committing = pane.reverts.boundary(sessionID) !== undefined;
-      const admitted = await client.session.prompt({
-        sessionID,
-        text: message.text,
-        delivery: message.delivery,
-        ...(message.files.length > 0
+      const files =
+        message.files.length > 0
           ? {
               files: message.files.map((file) => {
                 // A pasted image goes as its `data:` URL and without a mention (issue #30).
                 const data = imageData.get(file.uri);
                 if (data !== undefined) return { uri: data, name: file.name };
-                const mention = sameMention(file.mention, message.text);
+                // Issue #33 (decision P9): a command template rewrites the text, so the offsets
+                // of a mention would point at another text; the host forces it off.
+                const mention =
+                  command === undefined ? sameMention(file.mention, message.text) : undefined;
                 return {
                   uri: file.uri,
                   name: file.name,
@@ -3426,9 +3566,25 @@ export class ChatController {
                 };
               }),
             }
-          : {}),
-      });
-      this.log.info(`prompt accepted for ${sessionID} (input ${admitted.id})`);
+          : {};
+      if (command !== undefined) {
+        await client.session.command({
+          sessionID,
+          name: command,
+          text: message.text,
+          delivery: message.delivery,
+          ...files,
+        });
+        this.log.info(`command accepted /${command} for ${sessionID}`);
+      } else {
+        const admitted = await client.session.prompt({
+          sessionID,
+          text: message.text,
+          delivery: message.delivery,
+          ...files,
+        });
+        this.log.info(`prompt accepted for ${sessionID} (input ${admitted.id})`);
+      }
       for (const file of message.files) this.images.forget(file.uri);
       if (committing) this.afterCommit([pane], sessionID);
       this.result(pane, requestId);

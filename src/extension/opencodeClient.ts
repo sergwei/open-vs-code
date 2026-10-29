@@ -11,6 +11,8 @@ import { OpenCode } from '@opencode/client';
 import type {
   AgentListInput,
   AgentListOutput,
+  CommandListInput,
+  CommandListOutput,
   FileDiffInfo,
   FileFindInput,
   FileFindOutput,
@@ -30,6 +32,7 @@ import type {
   ProviderListInput,
   ProviderListOutput,
   SessionActive,
+  SessionCommandInput,
   SessionCreateInput,
   SessionDiffInput,
   SessionFormCancelInput,
@@ -103,6 +106,20 @@ export interface ChatApi {
      */
     fork(input: SessionForkInput): Promise<SessionInfo>;
     prompt(input: SessionPromptInput): Promise<SessionInboxUser>;
+    /**
+     * `POST /api/session/:id/command` (issue #33): runs a slash command. 204, empty body: unlike
+     * `prompt` it returns nothing, and the turn arrives through the stream like any other (a
+     * command ends in `session.prompt` with the template expanded, `core/src/session/command.ts`
+     * at 843a6c51, read). `text` holds only the arguments. `delivery` defaults to `steer` here too,
+     * so the controller always sends `queue`. An unknown name throws `CommandNotFoundError` (404,
+     * `{ _tag, command, message }`), an unknown session `SessionNotFoundError` and a failing
+     * template (a `!` shell line, MCP) `CommandExecutionError` (500). Read in the client types of
+     * 2.0.32 and `protocol/src/groups/session.ts`. VERIFIED against a real opencode 2.0.32 (Windows
+     * 11, 28/10/2026) only for the unknown name: the case "lists the project commands and refuses an
+     * unknown one with CommandNotFoundError" of `realOpencode.test.ts` passed. The 204 and the
+     * `CommandExecutionError` of a real command are UNVERIFIED (running one spends quota).
+     */
+    command(input: SessionCommandInput): Promise<void>;
     /**
      * `POST /api/session/:id/model` (issue #23): 204, empty body. The server DOES NOT validate: an
      * unknown model answers 204 and is stored; the next turn then fails BEFORE delivering the prompt
@@ -200,6 +217,19 @@ export interface ChatApi {
   };
   provider: { list(input?: ProviderListInput): Promise<ProviderListOutput> };
   agent: { list(input?: AgentListInput): Promise<AgentListOutput> };
+  /**
+   * `GET /api/command` (issue #33): the slash commands (built-in `init` and `review`, the project's
+   * and the user's command files, one per MCP prompt). The answer is `{ location, data }` and the
+   * client does NOT unwrap it, like the other catalog reads. Each entry is only `{ name,
+   * description? }`. VERIFIED against a real opencode 2.0.32 (Windows 11, 28/10/2026): the case
+   * "lists the project commands and refuses an unknown one with CommandNotFoundError" of
+   * `realOpencode.test.ts` passed, so `init`, `review` and a `.opencode/command/hello.md` file are
+   * listed with their descriptions. GOTCHA from the same run (it printed `command.list: first
+   * answer empty: true`): the FIRST call on a server that has just started answers `data: []`
+   * while the location loads, and the next one the full list, so an empty list is not proof that
+   * the server has no commands.
+   */
+  command: { list(input?: CommandListInput): Promise<CommandListOutput> };
   /**
    * File search of the @ mentions (issue #28). `find` is `GET /api/fs/find` (the `/find/file` of
    * the issue text is v1); the answer is `{location, data}` UNWRAPPED, `data` holding

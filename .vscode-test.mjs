@@ -261,6 +261,14 @@ try {
 }
 fs.mkdirSync(fakeWorkspace, { recursive: true });
 fs.mkdirSync(fakeOutside, { recursive: true });
+// Issue #33: a project command, written BEFORE VS Code starts because the fixture does not emit
+// `command.updated` when a file appears, so the host would only see it after a catalog reload. CRLF
+// on purpose: a `.md` written on Windows has it, and the fixture's frontmatter parser must cope.
+fs.mkdirSync(path.join(fakeWorkspace, '.opencode', 'command'), { recursive: true });
+fs.writeFileSync(
+  path.join(fakeWorkspace, '.opencode', 'command', 'hello.md'),
+  '---\r\ndescription: Say hello to someone\r\n---\r\nGreet $ARGUMENTS warmly.\r\n',
+);
 fs.mkdirSync(path.join(fakeUserDataDir, 'User'), { recursive: true });
 fs.writeFileSync(
   path.join(fakeUserDataDir, 'User', 'settings.json'),

@@ -48,6 +48,13 @@ export const MAX_SESSION_SEARCH_LENGTH = 200;
 export const MAX_FILE_SEARCH_LENGTH = 200;
 
 /**
+ * Longest slash command name `prompt.send` accepts in `command` (issue #33). Our choice, same
+ * reasoning as {@link MAX_FILE_SEARCH_LENGTH}: names come from file paths and MCP prompt names, and
+ * the host checks the name against its own catalog anyway.
+ */
+export const MAX_COMMAND_NAME_LENGTH = 200;
+
+/**
  * Longest `path` `session.diff.open` accepts (issue #31). Our choice: the path is one the host
  * listed itself, so a longer one is not a real file of the list; 4096 is the usual PATH_MAX of
  * Linux, above any path a repository realistically holds (Windows' own limit is 32767).
@@ -383,6 +390,11 @@ export type HostToWebview =
  * prepared revert undid in one file (left: the text before the revert, right: the file on disk); it
  * has no `requestId`, like `session.diff.open`, and `path` must be one the host listed in the
  * `RevertState` it sent.
+ * `prompt.send` may carry `command` (issue #33): the name of a slash command of the catalog, without
+ * the `/`. The prompt is then RUN as that command: `text` holds only the arguments (it may be
+ * empty), the host calls `session.command` instead of `session.prompt`, and the files travel
+ * without their `mention` because the command template rewrites the text. The host checks the
+ * name against its own catalog and answers `CommandUnavailable` for one it does not list.
  */
 export type WebviewToHost =
   | { type: 'ready' }
@@ -401,6 +413,7 @@ export type WebviewToHost =
       files: PromptFileRef[];
       model?: ModelRef;
       agent?: string;
+      command?: string;
     }
   | { type: 'session.abort'; requestId: string; sessionID: string }
   | {
@@ -655,11 +668,33 @@ const noFields: Validator = () => true;
 /** Validator for messages that carry only a `requestId`. */
 const requestOnly: Validator = (m) => isNonEmptyString(field(m, 'requestId'));
 
-/** A `prompt.send` must carry something: non-blank text or at least one attachment. */
+/**
+ * True for a slash command name the host would look up (issue #33): not empty, no leading or
+ * trailing whitespace, no `NUL`, at most `MAX_COMMAND_NAME_LENGTH`. Inner spaces are allowed on
+ * purpose: names come from file paths, which may contain them.
+ */
+function isCommandName(value: unknown): boolean {
+  return (
+    isString(value) &&
+    value.length > 0 &&
+    value.length <= MAX_COMMAND_NAME_LENGTH &&
+    value === value.trim() &&
+    !value.includes('\0')
+  );
+}
+
+/**
+ * A `prompt.send` must carry something: non-blank text, at least one attachment, or a `command`
+ * (issue #33: `/init` alone is a whole prompt, its arguments are empty).
+ */
 const hasPromptContent: Validator = (m) => {
   const text = field(m, 'text');
   const files = field(m, 'files');
-  return (isString(text) && text.trim().length > 0) || (Array.isArray(files) && files.length > 0);
+  return (
+    (isString(text) && text.trim().length > 0) ||
+    (Array.isArray(files) && files.length > 0) ||
+    field(m, 'command') !== undefined
+  );
 };
 
 /**
@@ -708,6 +743,7 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
     isAttachmentList(field(m, 'files')) &&
     isOptional(field(m, 'model'), isModelRef) &&
     isOptional(field(m, 'agent'), isNonEmptyString) &&
+    isOptional(field(m, 'command'), isCommandName) &&
     hasPromptContent(m),
   'session.abort': (m) =>
     isNonEmptyString(field(m, 'requestId')) && isNonEmptyString(field(m, 'sessionID')),

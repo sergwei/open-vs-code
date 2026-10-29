@@ -48,7 +48,7 @@ appears there, the real one keeps its modification time); POSIX is unchecked.
 `realOpencode.test.ts` never sends a prompt (tooling/tests-without-model), so it spends no quota
 and passes with the free model exhausted. It checks what can break between the extension and a
 real opencode v2 without a model answering: the start path inside a real VS Code, the chat view
-reaching the stream and loading the catalog (`catalog loaded (n models, m agents)`), the `@` file
+reaching the stream and loading the catalog (`catalog loaded (n models, m agents, k commands)`), the `@` file
 search, restart and crash recovery, the external-server connection with its real 401, and, with a
 server of its own (`startOwnServer` in `support/serverCases.ts`) and the full client, the shapes
 of the catalog, agents, providers, the session lifecycle and its first SSE events, the pending

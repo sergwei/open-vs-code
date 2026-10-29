@@ -73,8 +73,23 @@ export type ProviderOption = { id: string; name: string };
 export type AgentOption = { id: string; name: string; description?: string };
 
 /**
- * What the host knows about the server's models and agents (issues #23/#24), pushed to the
- * webview in the `catalog` message and replaced whole whenever it reloads.
+ * Slash command the user can run (issue #33): `name` is what `session.command` takes, WITHOUT the
+ * leading `/` and possibly containing `/`, `:` or spaces (sub-folders of a command folder, MCP
+ * prompts); `description` is the server's one-liner. The server does not say where a command comes
+ * from (built-in, project, MCP) nor which arguments it takes (`CommandInfo` is `{ name,
+ * description? }`, read in the client types of 2.0.32), so neither is invented here.
+ */
+export type CommandOption = { name: string; description?: string };
+
+/**
+ * What the host knows about the server's models, agents and commands (issues #23/#24/#33), pushed
+ * to the webview in the `catalog` message and replaced whole whenever it reloads.
+ *
+ * `commands` is ABSENT when the list could not be read (never read, or `command.list` failed and
+ * there was no previous list) and `[]` when the server has none: the UI says different things in
+ * each case ("could not be loaded" vs "no commands available"), so absence must not stand for empty.
+ * A missing CATALOG (none received yet) is a third state, "Loading commands…", told apart by the
+ * webview from the catalog itself.
  *
  * `serverDefault` is `model.default()` (the config `model` if enabled, else the first available);
  * `defaultAgent` is the first of `agent.list()` (the server puts the default first);
@@ -88,6 +103,7 @@ export type Catalog = {
   models: ModelOption[];
   providers: ProviderOption[];
   agents: AgentOption[];
+  commands?: CommandOption[];
   serverDefault?: ModelRef;
   defaultAgent?: string;
   preferredModel?: ModelRef;

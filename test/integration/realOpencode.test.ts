@@ -65,6 +65,7 @@ import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
 import { diffRoot } from '../../src/extension/sessionDiff';
 import {
   toAgentOptions,
+  toCommandOption,
   toModelOption,
   toProviderOption,
   toSessionSummary,
@@ -237,8 +238,18 @@ describe('real opencode', function () {
   /**
    * The chat view against a REAL server, with no prompt: the webview loads, the event stream
    * connects (first frame `server.connected`, read by the host) and the host loads the catalog
-   * (`catalog loaded (<n> models, <m> agents)` with n >= 1 and m >= 1: the four catalog GETs and
-   * their mapping worked on the real answers).
+   * (`catalog loaded (<n> models, <m> agents, <k> commands)` with n >= 1 and m >= 1: the four
+   * catalog GETs and their mapping worked on the real answers; since issue #33 the line also counts
+   * the commands, `no` when `command.list` failed). The first wait accepts any count, `no`
+   * included; a SECOND wait (issue #33) requires at least two commands, either in a `catalog loaded`
+   * line or in `commands loaded after retry <n> (<k> commands)` after an empty first answer. This
+   * folder has no project command, so the two are the built-ins `init` and `review`.
+   *
+   * VERIFIED for that second wait on Windows 11, opencode 2.0.32 (29/10/2026, the `real-opencode`
+   * label, no prompt, 16 passing): the log of the run showed "catalog loaded (8 models, 0 agents, 0
+   * commands)" followed by "catalog loaded (8 models, 2 agents, 2 commands)", so the commands
+   * arrived in a load and the retry path was not needed in that run. NOT observed in this case: the
+   * retry path against the real server (`commands loaded after retry` did not appear).
    *
    * VERIFIED on Windows 11, VS Code 1.143.0, opencode 2.0.32 (22/10/2026, the `real-opencode`
    * label, no prompt): the log of the run showed `webview ready`, `event stream connected` and three
@@ -266,9 +277,17 @@ describe('real opencode', function () {
     // of the case), so the wait is for a line that has both: it is the final state that matters.
     await matchInLog(
       log,
-      /catalog loaded \([1-9]\d* models, [1-9]\d* agents\)/,
+      /catalog loaded \([1-9]\d* models, [1-9]\d* agents, (?:no|\d+) commands\)/,
       15_000,
       'a catalog line with models and agents',
+    );
+    // Issue #33: the host's catalog must end with the built-ins (`init`, `review`), either in a
+    // load or through the retry of an empty first answer. This folder has no project command.
+    await matchInLog(
+      log,
+      /catalog loaded \(\d+ models, \d+ agents, [2-9]\d* commands\)|commands loaded after retry \d \([2-9]\d* commands\)/,
+      15_000,
+      'a catalog with at least the two built-in commands',
     );
     log.assertAbsent('prompt accepted');
   });
@@ -848,6 +867,89 @@ describe('real opencode', function () {
       } finally {
         await sub.stop();
         fs.rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      }
+    });
+
+    /**
+     * Slash commands (issue #33) against a REAL server, with NO prompt and NO existing command run
+     * (running `init`, `review` or `hello` would send a prompt to a model and spend quota): a third
+     * server of its own is started in a temporary folder that already holds
+     * `.opencode/command/hello.md` (frontmatter `description: Say hello`), and the case checks that
+     * `command.list()` is `{location, data}` with the built-ins `init` and `review` and the project
+     * file `hello` with its description (the plan only had HYPOTHESIS that `.opencode/command` is
+     * read), that every entry maps through `toCommandOption`, and that `session.command` with an
+     * unknown name is refused with the `CommandNotFoundError` body, which is what the host relays.
+     * The file is written BEFORE the server starts, so it needs no `command.updated` (a hot reload
+     * on a new file was not tried: UNVERIFIED). The folder is created and deleted by the case.
+     *
+     * The list is polled for up to 10 s, on purpose: the FIRST `GET /api/command` on a server that
+     * has just started answered `data: []` (the location is still loading) and the same request
+     * a moment later answered the three commands; the first version of this case, which read it
+     * once, failed with "command.list lacks \"init\"; got: " for that reason. So a catalog loaded
+     * right after the start can hold an empty command list.
+     * VERIFIED (28/10/2026, Windows 11, VS Code 1.144.0, opencode 2.0.32, `npm run test:integration
+     * -- --label real-opencode`, "16 passing"): the case "lists the project commands and refuses an
+     * unknown one with CommandNotFoundError" passed and printed `command.list: first answer empty:
+     * true`; so `init`, `review` and the `.opencode/command/hello.md` file are listed with its
+     * description, and an unknown name throws `CommandNotFoundError`. NOT observed: any existing
+     * command run (it would spend quota), `command.updated` on a new file, macOS and Linux.
+     */
+    it('lists the project commands and refuses an unknown one with CommandNotFoundError', async function () {
+      this.timeout(60_000);
+      const served = fs.mkdtempSync(path.join(os.tmpdir(), 'ovsc-contract-commands-'));
+      fs.mkdirSync(path.join(served, '.opencode', 'command'), { recursive: true });
+      fs.writeFileSync(
+        path.join(served, '.opencode', 'command', 'hello.md'),
+        '---\ndescription: Say hello\n---\nSay hello to $ARGUMENTS.\n',
+      );
+      const sub = await startOwnServer(binary, served, 'commands-pw');
+      try {
+        let listed = await sub.client.command.list();
+        assert.ok(Array.isArray(listed.data), 'command.list().data is not an array');
+        const firstWasEmpty = listed.data.length === 0;
+        const deadline = Date.now() + 10_000;
+        while (listed.data.length === 0 && Date.now() < deadline) {
+          await sleep(500);
+          listed = await sub.client.command.list();
+        }
+        console.log(`command.list: first answer empty: ${String(firstWasEmpty)}`);
+        const options = listed.data.map(toCommandOption);
+        const names = options.map((option) => option.name);
+        for (const wanted of ['init', 'review', 'hello']) {
+          assert.ok(
+            names.includes(wanted),
+            `command.list lacks "${wanted}"; got: ${names.join(', ')}`,
+          );
+        }
+        assert.strictEqual(
+          options.find((option) => option.name === 'hello')?.description,
+          'Say hello',
+        );
+        for (const option of options) {
+          assert.strictEqual(typeof option.name, 'string');
+          assert.ok(option.name.length > 0, 'a command with an empty name');
+        }
+
+        const created = await sub.client.session.create({});
+        try {
+          await assert.rejects(
+            sub.client.session.command({
+              sessionID: created.id,
+              name: 'no-such-command',
+              text: '',
+              delivery: 'queue',
+            }),
+            (error: unknown) => {
+              assert.strictEqual((error as { _tag?: string })._tag, 'CommandNotFoundError');
+              return true;
+            },
+          );
+        } finally {
+          await sub.client.session.remove({ sessionID: created.id });
+        }
+      } finally {
+        await sub.stop();
+        fs.rmSync(served, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
       }
     });
   });
