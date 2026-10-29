@@ -16,7 +16,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   while file links and diffs open outside the chat's group. A tab with no session opens the
   session you pick in it, instead of leaving an empty tab behind. Changing the setting applies at
   once: the side bar session opens in a tab, and going back to `sidebar` leaves the tabs open.
-  Known limits: the tabs are closed by Reload Window (Open Chat reopens the last session), every
+  The tabs are restored after Reload Window, each with its session, draft and title (the ones in
+  the background when you open them); a restored tab whose session is already open elsewhere
+  closes and reveals the other one, and one whose session was deleted comes back empty with a
+  notice. With tabs open the extension now activates when the window opens. Known limits: every
   tab shows every pending request, the draft in the prompt box does not move when the setting
   changes, and changing the served folder with tabs open leaves them empty (issue #77).
 - Editor and Explorer context menus: **Add to OpenCode Chat**, **Explain with OpenCode** and **Fix
