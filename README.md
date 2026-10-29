@@ -29,6 +29,12 @@ affiliated with opencode or with Microsoft.
 
   ![A forked session with a "Forked from" crumb above the first exchange and the Fork from here button on the message](docs/images/fork-session.png)
 
+- **The chat in the side bar or in editor tabs.** With `openVsCode.chatLocation` set to `editor`,
+  every session opens in its own editor tab, beside your code, and the OpenCode view becomes a small
+  launcher with New Session and Open Chat. Opening a session that already has a tab brings that tab
+  to the front instead of opening another. Changing the setting takes effect at once: the session
+  of the side bar opens in a tab, and going back leaves the tabs open.
+
 - **One chip for agent and model:** the prompt bar shows "agent · model" (with the reasoning level
   and a connection dot); it opens a panel where you choose the agent (Build, Plan…), the model and,
   when the model offers them, a reasoning variant.
@@ -120,6 +126,12 @@ To ask about code without opening the chat first, select it in the editor, right
 Explorer and choose **Explain with OpenCode**. The chat opens by itself and the prompt is sent in
 the open session.
 
+To keep the chat in editor tabs instead, set `openVsCode.chatLocation` to `editor` (Settings: Chat
+Location). **New Session** then opens a new tab, **Open Chat** brings the most recent tab to the
+front (or opens the last session of the folder when there is none). Insert at cursor and Add
+selection write into the last text editor you used, and file links and diffs open outside the
+chat's group.
+
 In a multi-root workspace, choose the folder opencode works in with **OpenCode: Select Workspace
 Folder**.
 
@@ -130,6 +142,7 @@ Folder**.
 | `openVsCode.opencodePath` | machine | empty | Absolute path to the opencode **v2** executable. Empty searches `PATH` for `opencode2`, then `opencode`. On Windows an npm `opencode.cmd` shim is accepted. Not used while `openVsCode.serverUrl` is set. |
 | `openVsCode.serverUrl` | machine | empty | Address of an opencode **v2** server that is already running on **this machine**, for example `http://127.0.0.1:4096`. Empty lets the extension launch its own server. The extension then does not use `openVsCode.opencodePath`. See [Using a server you started](#using-a-server-you-started). |
 | `openVsCode.defaultModel` | window | empty | Model every **new** chat session starts with, written `provider/model` (for example `opencode/big-pickle`). It wins over the last model you used. A badly written or unavailable value is ignored with a warning. |
+| `openVsCode.chatLocation` | window | `sidebar` | Where the chat lives: `sidebar` (one chat in the OpenCode view) or `editor` (one editor tab per session). |
 
 ## Commands
 
@@ -147,7 +160,8 @@ Command Palette (they act on the active editor); the two Explorer entries are no
 | **OpenCode: Forget Server Password** | Deletes that stored password. |
 | **OpenCode: Open Chat** | Shows the chat and puts the caret in the prompt. |
 | **OpenCode: Focus Prompt** | Puts the caret in the prompt; pressed again while the chat has the focus, it returns to the editor. |
-| **OpenCode: New Session** | Same as the **New session** button: the next prompt starts a new session and your draft is kept. |
+| **OpenCode: New Session** | Same as the **New session** button: the next prompt starts a new session and your draft is kept. With `chatLocation` set to `editor` it opens a new empty tab instead. |
+| **OpenCode: Open Settings** | Opens Settings filtered to this extension. |
 | **OpenCode: Stop Response** | Same as **Stop**: interrupts the running turn. Run from the editor it also shows the chat; with no turn running it only says "No response is running". |
 | **Add to OpenCode Chat** | Explorer right-click menu: attaches the selected files to the prompt. |
 | **Add to OpenCode Chat** | Editor right-click menu: attaches the selection (the whole file when nothing is selected). |
@@ -199,6 +213,21 @@ always `opencode`.
   unsaved changes the line numbers may not match what the model sees. Explain and Fix then do not
   send by themselves: they leave the prompt in the box with an "Unsaved changes" notice. Files that
   are not on disk (untitled, `git:` or output documents) have no entries.
+- In `editor` mode every chat tab keeps its page in memory while it is hidden
+  (`retainContextWhenHidden`), so each open tab costs memory; there is no cap on the number of tabs.
+- Chat tabs do **not** survive **Developer: Reload Window** yet: VS Code closes them (observed on
+  VS Code 1.144.0, Windows 11) and **Open Chat** opens the last session of the folder again. Restoring
+  the tabs is planned.
+- In `editor` mode a pending permission or question shows in **every** open tab, not only in the
+  tab of its session; the native notification and the badge appear when no chat is on screen.
+  Showing it only in the tab it belongs to is planned.
+- In `editor` mode, switching to another served folder (for example with **Select Workspace
+  Folder**) while tabs are open leaves them empty, with the old title, until they are reloaded; only
+  the first chat gets the session remembered for the new folder.
+- The draft in the prompt box does not travel when `openVsCode.chatLocation` changes: the text and the
+  attachments of the old surface stay with it.
+- The editor tabs were only tried on Windows; the integration tests run on Windows, macOS and Linux,
+  but the visual checks of the tabs do not.
 - Mostly tested on Windows; CI builds and tests on Windows, macOS and Linux.
 
 ## Privacy and security

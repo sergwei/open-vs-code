@@ -154,13 +154,27 @@ export function registerSessionDiffProvider(
  * opens in the active tab "sample.ts"", "Enter on the deleted row opens a diff editor", "a diff
  * editor opens for the added file" and "a binary opens no diff editor" passed. macOS and Linux
  * UNVERIFIED.
+ *
+ * Issue #77: `viewColumn`, when given, is passed in the options of `vscode.open` and `vscode.diff`
+ * so the diff opens in the column the caller picked (`ChatTabs.columnForFiles`: the last text
+ * editor's, or beside when that column holds a chat tab); this function opens wherever it is told.
+ * Absent, the options are the ones above. VERIFIED that `vscode.diff` honours `viewColumn` in its
+ * options (risk R8 of the plan): in VS Code 1.144.0 on Windows 11 (29/10/2026,
+ * `npm run test:integration --label fake-server`, synthetic server) the check "opens the diff
+ * beside a chat tab, and serves prompts and session.open from tabs" passed: with the sample file
+ * in column one and two chat tabs in another, the active diff tab's group was the sample's column
+ * and none of the chat columns. Not observed: the `vscode.open` branch (a binary), macOS, Linux.
  */
-export async function openSessionDiff(target: DiffTarget): Promise<'diff' | 'file'> {
+export async function openSessionDiff(
+  target: DiffTarget,
+  viewColumn?: vscode.ViewColumn,
+): Promise<'diff' | 'file'> {
   const file = vscode.Uri.file(target.absolute);
   const onDisk = await exists(file);
+  const columnOption = viewColumn === undefined ? {} : { viewColumn };
   if (target.binary) {
     if (!onDisk) throw codedError('FileNotFound', 'That file is not on disk any more');
-    await vscode.commands.executeCommand('vscode.open', file, { preview: true });
+    await vscode.commands.executeCommand('vscode.open', file, { preview: true, ...columnOption });
     return 'file';
   }
   const left = virtualUri(target, target.status === 'added' ? 'empty' : target.side, 'left');
@@ -173,7 +187,7 @@ export async function openSessionDiff(target: DiffTarget): Promise<'diff' | 'fil
     target.side === 'reverted'
       ? `${target.path} (before the revert)`
       : `${target.path} (OpenCode session)`,
-    { preview: true },
+    { preview: true, ...columnOption },
   );
   return 'diff';
 }
