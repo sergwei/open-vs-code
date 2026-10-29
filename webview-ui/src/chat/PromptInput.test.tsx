@@ -15,12 +15,20 @@
 // the look of the popup are `test:visual` step 16.
 import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { CommandOption } from '../../../src/shared/model';
 import type { AttachmentRef } from '../../../src/shared/protocol';
 import { must, mount, type Mounted } from '../testing';
 import type { DropContent } from './dropData';
 import type { FileSearchView } from './MentionPopup';
 import { PromptInput } from './PromptInput';
 import { createHistory } from './promptHistory';
+
+/** FABRICATED catalog commands; `init` and `review` are the built-in names of opencode v2.0.32. */
+const COMMANDS: readonly CommandOption[] = [
+  { name: 'init', description: 'guided AGENTS.md setup' },
+  { name: 'review', description: 'review changes' },
+  { name: 'hello', description: 'Say hello to someone' },
+];
 
 let mounted: Mounted | undefined;
 afterEach(() => {
@@ -40,6 +48,11 @@ function setup(
     attachDisabled?: boolean;
     waiting?: boolean;
     thumbs?: Record<string, string>;
+    /** Slash commands of the catalog; the default is `COMMANDS`, `null` is "could not be read". */
+    commands?: readonly CommandOption[] | null;
+    commandsDisabled?: boolean;
+    /** The catalog has not arrived: an absent `commands` then reads "Loading commands…". */
+    commandsLoading?: boolean;
   } = {},
 ) {
   const [draft, setDraft] = createSignal(options.draft ?? '');
@@ -73,6 +86,9 @@ function setup(
       waiting={options.waiting ?? false}
       sendDisabled={false}
       attachDisabled={options.attachDisabled ?? false}
+      commands={options.commands === null ? undefined : (options.commands ?? COMMANDS)}
+      commandsLoading={options.commandsLoading ?? false}
+      commandsDisabled={options.commandsDisabled ?? false}
       fileSearch={search()}
       onMentionQuery={calls.mentionQuery}
       onMentionPick={calls.mentionPick}
@@ -809,5 +825,219 @@ describe('drop and paste (issue #30)', () => {
     const { openMenu } = setup();
     openMenu();
     expect(menuItem('Attach file…')?.title).toBe('Hold Shift to drop files from the Explorer');
+  });
+});
+
+// Issue #33: the typed `/` popup. FABRICATED commands, events synthesized in jsdom; the real
+// keyboard, the look and the mouse are `test:visual` step 24 (Windows 11, VS Code 1.144.0,
+// 28/10/2026): "C2 typing "/" opens the popup with the rows /hello and its description, one
+// highlighted, the focus in the box", "C2 the popup is inside the view" and "C4 choosing a row with
+// the mouse writes "/hello " and leaves the focus in the box".
+describe('the / popup (issue #33)', () => {
+  const popup = () => mounted?.container.querySelector('.command-popup') ?? null;
+  const rowNames = () =>
+    [...(mounted?.container.querySelectorAll('.command-popup [role="option"]') ?? [])].map((row) =>
+      row.getAttribute('aria-label'),
+    );
+  const live = () => mounted?.container.querySelector('[role="status"]')?.textContent ?? '';
+
+  it('opens on a slash typed first, lists name and description, and filters', () => {
+    const { type, textarea } = setup();
+    type('/');
+    expect(popup()).not.toBeNull();
+    expect(rowNames()).toEqual(['/init', '/review', '/hello']);
+    expect(mounted?.container.querySelector('.command-popup [role="option"]')?.textContent).toBe(
+      '/initguided AGENTS.md setup',
+    );
+    expect(textarea.getAttribute('aria-controls')).toBe('command-list');
+    type('/re');
+    expect(rowNames()).toEqual(['/review']);
+    expect(textarea.getAttribute('aria-activedescendant')).toBe('command-list-option-0');
+  });
+
+  it('does not open for a slash that is not first or after the first word', () => {
+    const { type } = setup();
+    type('a /x');
+    expect(popup()).toBeNull();
+    type('/init args');
+    expect(popup()).toBeNull();
+  });
+
+  it('never opens on recalled history', () => {
+    const { press } = setup({ history: ['/init'] });
+    press('ArrowUp');
+    expect(popup()).toBeNull();
+  });
+
+  it('moves the highlight with the arrows and does not walk the history', () => {
+    const { type, press, textarea } = setup({ history: ['older'] });
+    type('/');
+    const down = press('ArrowDown');
+    expect(down.defaultPrevented).toBe(true);
+    expect(textarea.getAttribute('aria-activedescendant')).toBe('command-list-option-1');
+    expect(
+      mounted?.container.querySelector('.command-popup [aria-selected="true"]')?.textContent,
+    ).toContain('/review');
+    press('ArrowUp');
+    press('ArrowUp');
+    expect(textarea.getAttribute('aria-activedescendant')).toBe('command-list-option-2');
+  });
+
+  it('Enter picks the highlighted row, writes "/name " and does not send (P3=1)', async () => {
+    const { type, press, draft, calls, textarea } = setup();
+    type('/re');
+    const enter = press('Enter');
+    expect(enter.defaultPrevented).toBe(true);
+    expect(draft()).toBe('/review ');
+    expect(calls.submit).not.toHaveBeenCalled();
+    expect(popup()).toBeNull();
+    await Promise.resolve(); // the focus is restored in a microtask
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('Tab picks as well', () => {
+    const { type, press, draft } = setup();
+    type('/he');
+    press('Tab');
+    expect(draft()).toBe('/hello ');
+  });
+
+  it('Enter SENDS when the word typed is exactly a listed name (P5=1)', () => {
+    const { type, press, calls, draft } = setup();
+    type('/init');
+    press('Enter');
+    expect(calls.submit).toHaveBeenCalledTimes(1);
+    expect(draft()).toBe('/init');
+    expect(popup()).toBeNull();
+  });
+
+  it('Enter sends as usual when nothing matches', () => {
+    const { type, press, calls } = setup();
+    type('/zzz');
+    expect(mounted?.container.querySelector('.command-popup .mention-status')?.textContent).toBe(
+      'No commands match',
+    );
+    press('Enter');
+    expect(calls.submit).toHaveBeenCalledTimes(1);
+  });
+
+  // Engram #1425: three states that used to be two. Fabricated props; the catalog-less one is the
+  // case of the lesson `opcional-ausente-no-es-hecho` (nothing was tried yet).
+  it('says that the catalog is loading, that the list could not be read, and that there are none', () => {
+    const status = () =>
+      mounted?.container.querySelector('.command-popup .mention-status')?.textContent;
+    const loading = setup({ commands: null, commandsLoading: true });
+    loading.type('/');
+    expect(status()).toBe('Loading commands…');
+    mounted?.dispose();
+    const failed = setup({ commands: null });
+    failed.type('/');
+    expect(status()).toBe('Commands could not be loaded');
+    mounted?.dispose();
+    const none = setup({ commands: [] });
+    none.type('/');
+    expect(status()).toBe('No commands available');
+  });
+
+  it('Escape closes it, stops at the window and does NOT stop a running turn', () => {
+    const { type, press, calls } = setup({ busy: true });
+    type('/');
+    const spy = vi.fn();
+    window.addEventListener('keydown', spy);
+    const escape = press('Escape');
+    window.removeEventListener('keydown', spy);
+    expect(popup()).toBeNull();
+    expect(escape.defaultPrevented).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+    expect(calls.stop).not.toHaveBeenCalled();
+    press('Escape');
+    expect(calls.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('a mouse pick writes the command and keeps the focus in the box', () => {
+    const { type, draft, textarea } = setup();
+    textarea.focus();
+    type('/');
+    const row = mounted?.container.querySelectorAll<HTMLElement>(
+      '.command-popup [role="option"]',
+    )[1];
+    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    row?.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+    expect(draft()).toBe('/review ');
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('closes when the caret leaves the first word, and the @ popup takes over', () => {
+    const { type, calls } = setup();
+    type('/hello ');
+    expect(popup()).toBeNull();
+    type('/hello @sam');
+    expect(popup()).toBeNull();
+    expect(mounted?.container.querySelector('.mention-popup')).not.toBeNull();
+    expect(calls.mentionQuery).toHaveBeenLastCalledWith('sam');
+  });
+
+  it('closes on blur and on send', () => {
+    const { type, textarea, press } = setup();
+    type('/he');
+    textarea.dispatchEvent(new FocusEvent('blur'));
+    expect(popup()).toBeNull();
+    type('/he');
+    press('Enter'); // picks
+    expect(popup()).toBeNull();
+  });
+
+  it('announces the number of commands with a no-break space on a repeat', () => {
+    const { type } = setup();
+    type('/');
+    const first = live();
+    expect(first.trim()).toBe('3 commands');
+    type('/in');
+    expect(live().trim()).toBe('1 command');
+    type('/');
+    expect(live().trim()).toBe('3 commands');
+    const again = live();
+    type('/');
+    expect(live().trim()).toBe('3 commands');
+    expect(live()).not.toBe(again);
+  });
+});
+
+describe('the "/" button (issue #33)', () => {
+  const button = () =>
+    must<HTMLButtonElement>(mounted?.container ?? document.body, 'button[aria-label="Commands"]');
+  const items = () => [
+    ...(mounted?.container.querySelectorAll<HTMLElement>('.command-menu [role="menuitem"]') ?? []),
+  ];
+
+  it('picking from the menu writes the command over a normal draft and focuses the box', async () => {
+    const { draft, textarea } = setup({ draft: 'some text' });
+    button().click();
+    expect(items().map((item) => item.textContent)).toEqual([
+      '/initguided AGENTS.md setup',
+      '/reviewreview changes',
+      '/helloSay hello to someone',
+    ]);
+    items()[2]?.click();
+    expect(draft()).toBe('/hello some text');
+    await Promise.resolve();
+    expect(document.activeElement).toBe(textarea);
+    expect(mounted?.container.querySelector('.command-menu')).toBeNull();
+  });
+
+  it('replaces a previous /other token and keeps its arguments', () => {
+    const { draft } = setup({ draft: '/other the args' });
+    button().click();
+    items()[0]?.click();
+    expect(draft()).toBe('/init the args');
+  });
+
+  it('is aria-disabled, never disabled, without a connection, and does nothing', () => {
+    setup({ commandsDisabled: true });
+    expect(button().getAttribute('aria-disabled')).toBe('true');
+    expect(button().disabled).toBe(false);
+    button().click();
+    expect(items()).toHaveLength(0);
   });
 });

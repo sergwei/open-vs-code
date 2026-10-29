@@ -1,17 +1,24 @@
 import { createEffect, createSignal, For, on, onCleanup, Show, type JSX } from 'solid-js';
 import type { AttachmentRef } from '../../../src/shared/protocol';
+import type { CommandOption } from '../../../src/shared/model';
 import { AttachmentOpenButton } from './AttachmentOpenButton';
+import { CommandMenu } from './CommandMenu';
+import { CommandPopup, commandStatus } from './CommandPopup';
 import { hasDropPayload, imagesOf, readDrop, type DropContent } from './dropData';
 import { SendIcon, StopIcon } from './icons';
 import { applyMention, findMention, type MentionToken } from './mentionQuery';
 import { MentionPopup, mentionStatus, optionId, type FileSearchView } from './MentionPopup';
 import { PlusMenu } from './PlusMenu';
 import type { PromptHistory } from './promptHistory';
+import { applyCommand, filterCommands, findSlash, type SlashToken } from './slashCommand';
 
 let requestCounter = 0;
 
 /** Id of the popup's listbox; the textarea points at it with `aria-controls`. One prompt per document. */
 const MENTION_LIST_ID = 'mention-list';
+
+/** Id of the slash commands' listbox, the twin of {@link MENTION_LIST_ID}; never both open. */
+const COMMAND_LIST_ID = 'command-list';
 
 /** Built from its code point: a literal one in the source trips `no-irregular-whitespace`. */
 const NO_BREAK_SPACE = String.fromCharCode(0xa0);
@@ -116,6 +123,27 @@ export function nextRequestId(): string {
  * while the popup is open". The auto-grow, Tab (to pick, and to move on while pending), Enter
  * with an error or "No files match" showing, an IME composition and `aria-activedescendant` with
  * a real screen reader are UNVERIFIED in a real window (the Enter cases are jsdom-only).
+ *
+ * Issue #33, the slash commands (decisions P1-P7 of Sergio, 28/10/2026, Engram #1416). A `/` as the
+ * FIRST character of the draft, with the caret still in the first word (`findSlash`), opens the
+ * {@link CommandPopup} with the server's `commands` filtered by what follows the slash; the "/"
+ * button right of the "+" ({@link CommandMenu}) lists the same commands for the mouse. It is the
+ * twin of the `@` popup: it opens or updates ONLY on `input` events, closes on blur, Escape, a send,
+ * a pick, a recall or when the caret leaves the first word, never takes the focus, and ArrowUp/
+ * ArrowDown move the highlighted row (history when it is closed or has no rows). The two popups are
+ * never open together: typing resolves the slash first, and an `@` after the first word opens the
+ * file one as usual. Enter or Tab on a highlighted row WRITE `/name ` over the first word (P3=1,
+ * `applyCommand`) and do not send, EXCEPT Enter when the word typed is exactly a listed name
+ * (P5=1): then it sends, so `/init` + Enter works at once. With no rows (nothing matches, no list)
+ * Enter sends as usual. Escape closes the popup and does NOT stop a busy turn. Picking from the
+ * menu does the same writing, from any draft, and moves the focus to the box. The textarea
+ * `aria-controls` and `aria-activedescendant` point at whichever popup is open, and the live
+ * region announces "N commands", "1 command" or "No commands match".
+ * VERIFIED by `PromptInput.test.tsx` in jsdom (keys, ARIA, exclusion with the `@` popup, focus
+ * through `document.activeElement`), and in a real window (Windows 11, VS Code 1.144.0, 28/10/2026)
+ * by the `test:visual` checks "C4 Escape with the "/" popup open does NOT stop the running turn"
+ * and "C4 choosing a row with the mouse writes "/hello " and leaves the focus in the box". The
+ * live-region announcements and a screen reader are UNVERIFIED.
  */
 export function PromptInput(props: {
   draft: string;
@@ -132,6 +160,15 @@ export function PromptInput(props: {
   sendDisabled: boolean;
   /** The "+" menu is blocked (`aria-disabled`) while there is no server to attach for. */
   attachDisabled: boolean;
+  /**
+   * The server's slash commands (issue #33), from the catalog. ABSENT means "could not be read",
+   * which is not the same as `[]` ("none"): the popup and the menu say each one.
+   */
+  commands?: readonly CommandOption[];
+  /** True while the catalog has not arrived, so an absent `commands` reads "loading", not "failed". */
+  commandsLoading?: boolean;
+  /** The "/" button is blocked (`aria-disabled`) while there is no server to run a command on. */
+  commandsDisabled: boolean;
   /** The `@` popup's results, from the store. */
   fileSearch: FileSearchView;
   /** The text to search after an `@`, or `undefined` when the popup closed. Parent debounces. */
@@ -167,14 +204,20 @@ export function PromptInput(props: {
   const [announcement, setAnnouncement] = createSignal('');
   let announcementFlip = false;
 
+  /** The command word under the caret while the `/` popup is open; `undefined` when it is closed. */
+  const [slash, setSlash] = createSignal<SlashToken | undefined>(undefined);
+
   /** Closes the "+" menu; set by the menu itself. */
   let closePlusMenu: (() => void) | undefined;
+  /** Closes the "/" menu; set by the menu itself, for the same reason as {@link closePlusMenu}. */
+  let closeCommandMenu: (() => void) | undefined;
 
   // The parent focuses the box after sending, stopping, a new session (a shortcut of issue #35)...
   // An open "+" menu closes then: when the webview document does not own the focus at that moment
   // the browser fires no `focusout`, so the menu would stay open over the box (test:visual step 22).
   props.onFocusReady?.(() => {
     closePlusMenu?.();
+    closeCommandMenu?.();
     textarea?.focus();
     holdFocus();
   });
@@ -274,6 +317,34 @@ export function PromptInput(props: {
     applyToken(undefined);
   };
 
+  /** True while the `/` popup is open (the caret is in the first word of a draft that starts with `/`). */
+  const slashOpen = () => slash() !== undefined;
+  /** The commands the open `/` popup lists for the word under the caret. */
+  const slashRows = (): readonly CommandOption[] => {
+    const current = slash();
+    if (current === undefined || commandStatus(current.query, props.commands) !== 'list') return [];
+    return filterCommands(props.commands ?? [], current.query);
+  };
+
+  /** Opens, updates or closes the `/` popup; a new word puts the highlight on the first row. */
+  const applySlash = (next: SlashToken | undefined): void => {
+    const previous = slash();
+    setSlash(next);
+    if (next !== undefined && previous?.query !== next.query) setActive(0);
+  };
+
+  /** Writes `/name ` over the first word of the draft, keeps the focus in the box and the caret after it. */
+  const pickCommand = (name: string): void => {
+    const written = applyCommand(textarea?.value ?? props.draft, name);
+    props.history.reset();
+    props.onDraft(written.text);
+    applySlash(undefined);
+    queueMicrotask(() => {
+      textarea?.focus();
+      textarea?.setSelectionRange(written.caret, written.caret);
+    });
+  };
+
   // A new set of results starts at the first row.
   createEffect(
     on(
@@ -290,8 +361,13 @@ export function PromptInput(props: {
   createEffect(() => {
     const current = status();
     const count = props.fileSearch.files.length;
+    const typed = slash();
     let text = '';
-    if (current === 'list') text = `${String(count)} ${count === 1 ? 'file' : 'files'}`;
+    if (typed !== undefined) {
+      const rowCount = slashRows().length;
+      if (rowCount > 0) text = `${String(rowCount)} ${rowCount === 1 ? 'command' : 'commands'}`;
+      else if (commandStatus(typed.query, props.commands) === 'empty') text = 'No commands match';
+    } else if (current === 'list') text = `${String(count)} ${count === 1 ? 'file' : 'files'}`;
     else if (current === 'empty') text = 'No files match';
     else if (current === 'error') text = 'File search failed';
     if (text === '') {
@@ -305,6 +381,7 @@ export function PromptInput(props: {
   /** Puts recalled history text in the draft and the caret at its end. */
   const recall = (text: string): void => {
     closeMention();
+    applySlash(undefined);
     props.onDraft(text);
     queueMicrotask(() => {
       textarea?.setSelectionRange(text.length, text.length);
@@ -314,6 +391,7 @@ export function PromptInput(props: {
   /** Sends, closing the popup first: the text it was about is leaving. */
   const submit = (): void => {
     closeMention();
+    applySlash(undefined);
     props.onSubmit();
   };
 
@@ -352,13 +430,55 @@ export function PromptInput(props: {
     field.value = text;
     field.focus();
     field.setSelectionRange(caret, caret);
+    applySlash(undefined);
     applyToken(findMention(text, caret));
   };
 
   /** Re-reads the word under the caret after it moved (a click or a key), only to keep or close an open popup. */
   const refreshToken = (field: HTMLTextAreaElement): void => {
+    if (slashOpen()) applySlash(findSlash(field.value, field.selectionStart));
     if (!mentionOpen()) return;
     applyToken(findMention(field.value, field.selectionStart));
+  };
+
+  /**
+   * The keys of an open `/` popup. Returns true when the key was consumed. Enter on a word that is
+   * exactly a listed name is NOT consumed, so it sends (P5=1); any other Enter or Tab with rows
+   * picks the highlighted one.
+   */
+  const onSlashKey = (event: KeyboardEvent): boolean => {
+    const list = slashRows();
+    switch (event.key) {
+      case 'Escape':
+        // Closes the popup and nothing else, like the `@` one.
+        event.preventDefault();
+        event.stopPropagation();
+        applySlash(undefined);
+        return true;
+      case 'ArrowDown':
+      case 'ArrowUp': {
+        if (list.length === 0 || event.shiftKey) return false;
+        event.preventDefault();
+        const step = event.key === 'ArrowDown' ? 1 : -1;
+        setActive((index) => (index + step + list.length) % list.length);
+        return true;
+      }
+      case 'Enter':
+      case 'Tab': {
+        if (event.shiftKey) return false;
+        const typed = slash()?.query;
+        if (event.key === 'Enter' && props.commands?.some((command) => command.name === typed)) {
+          return false;
+        }
+        const chosen = list[active()];
+        if (chosen === undefined) return false;
+        event.preventDefault();
+        pickCommand(chosen.name);
+        return true;
+      }
+      default:
+        return false;
+    }
   };
 
   /** The keys of an open popup. Returns true when the key was consumed. */
@@ -404,6 +524,7 @@ export function PromptInput(props: {
   const onKeyDown = (event: KeyboardEvent & { currentTarget: HTMLTextAreaElement }): void => {
     if (event.isComposing) return;
     if (mentionOpen() && onMentionKey(event)) return;
+    if (slashOpen() && onSlashKey(event)) return;
     const field = event.currentTarget;
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
@@ -509,6 +630,18 @@ export function PromptInput(props: {
           />
         )}
       </Show>
+      <Show when={slash()}>
+        {(current) => (
+          <CommandPopup
+            id={COMMAND_LIST_ID}
+            query={current().query}
+            commands={props.commands}
+            loading={props.commandsLoading}
+            active={active()}
+            onPick={pickCommand}
+          />
+        )}
+      </Show>
       <textarea
         ref={(element) => {
           textarea = element;
@@ -517,9 +650,15 @@ export function PromptInput(props: {
         rows={1}
         aria-label="Message"
         aria-autocomplete="list"
-        aria-controls={mentionOpen() ? MENTION_LIST_ID : undefined}
+        aria-controls={slashOpen() ? COMMAND_LIST_ID : mentionOpen() ? MENTION_LIST_ID : undefined}
         aria-activedescendant={
-          status() === 'list' ? optionId(MENTION_LIST_ID, active()) : undefined
+          slashOpen()
+            ? slashRows().length > 0
+              ? optionId(COMMAND_LIST_ID, active())
+              : undefined
+            : status() === 'list'
+              ? optionId(MENTION_LIST_ID, active())
+              : undefined
         }
         placeholder={
           props.waiting
@@ -531,7 +670,13 @@ export function PromptInput(props: {
           const field = event.currentTarget;
           props.history.reset();
           props.onDraft(field.value);
-          applyToken(findMention(field.value, field.selectionStart));
+          // The slash is resolved first: a draft that starts with `/` and has the caret in its
+          // first word belongs to the command popup, and the two popups are never open together.
+          const typedSlash = findSlash(field.value, field.selectionStart);
+          applySlash(typedSlash);
+          applyToken(
+            typedSlash === undefined ? findMention(field.value, field.selectionStart) : undefined,
+          );
         }}
         onKeyDown={onKeyDown}
         onPaste={(event) => {
@@ -546,7 +691,10 @@ export function PromptInput(props: {
         onClick={(event) => {
           refreshToken(event.currentTarget);
         }}
-        onBlur={closeMention}
+        onBlur={() => {
+          closeMention();
+          applySlash(undefined);
+        }}
       />
       <div class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
         {announcement()}
@@ -566,6 +714,15 @@ export function PromptInput(props: {
           onMention={insertMention}
           onCloseReady={(close) => {
             closePlusMenu = close;
+          }}
+        />
+        <CommandMenu
+          commands={props.commands}
+          loading={props.commandsLoading}
+          disabled={props.commandsDisabled}
+          onPick={pickCommand}
+          onCloseReady={(close) => {
+            closeCommandMenu = close;
           }}
         />
         <div class="prompt-selectors">{props.selectors}</div>

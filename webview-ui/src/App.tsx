@@ -18,6 +18,7 @@ import { mentionsFor } from './chat/mentionQuery';
 import { MessageList, type UserMessage } from './chat/MessageList';
 import { nextRequestId, PromptInput } from './chat/PromptInput';
 import { createHistory } from './chat/promptHistory';
+import { parseCommand } from './chat/slashCommand';
 import { StatusBar } from './chat/StatusBar';
 import { RequestDock } from './requests/RequestDock';
 import { AgentModelMenu } from './selectors/AgentModelMenu';
@@ -124,6 +125,19 @@ interface LastRevert {
  * user deleted the text, and a typed `@name` without its chip is plain text. "Add selection" asks
  * the host for the active file or selection (`attachments.fromEditor`, the answer reuses
  * `attachments.picked`). The search is forgotten when a prompt is sent or the open session changes.
+ *
+ * Issue #33 (slash commands, decisions of Sergio 28/10/2026, Engram #1416): {@link submit} looks
+ * the sent text up in the catalog's commands (`parseCommand`, the webview parses and the host
+ * revalidates the name). A listed `/name args` goes as `prompt.send` with `command: name` and
+ * `text: args`, and its files WITHOUT `mention` (the template rewrites the text, P9=1); a name that
+ * is not listed, or no catalog list at all, goes as a normal prompt with the full text (P4=1).
+ * `lastSend.text` and the history keep the FULL typed text (`/name args`), so a failed send gives
+ * the draft back as it was typed. Retry resends the stored message text as a normal prompt: the
+ * server keeps the expanded template, not the command (P8=1, a known limit). The catalog's
+ * `commands` reach the prompt box as they are (absent stays absent). VERIFIED by `App.test.tsx`
+ * in jsdom with a fake host, and in a real window (Windows 11, VS Code 1.144.0, 28/10/2026) by the
+ * `test:visual` check "C4 the turn of /hello Ana ends" (the command runs end to end against the
+ * synthetic server).
  *
  * Issue #31: the header shows the "Changed files" list of the open session, and `openChangedFile`
  * turns a click on a row into `session.diff.open` for the open session (no `requestId`).
@@ -414,8 +428,16 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   // The results belong to the conversation the user was typing in.
   createEffect(on(() => state.open.sessionID, clearFileSearch, { defer: true }));
 
-  /** Sends a prompt and starts waiting for its result. */
-  const sendPrompt = (text: string, files: AttachmentRef[]): void => {
+  /**
+   * Sends a prompt and starts waiting for its result. With `command` (issue #33) the host runs that
+   * server command: `text` stays the full typed text for `lastSend` (what a failure gives back)
+   * while the message carries only the arguments, and the files go without `mention`.
+   */
+  const sendPrompt = (
+    text: string,
+    files: AttachmentRef[],
+    command?: { name: string; args: string },
+  ): void => {
     const requestId = nextRequestId();
     lastSend = { requestId, text, files };
     // Only the dock lines of other sessions' requests go; the answers of the open session are
@@ -427,24 +449,31 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       type: 'prompt.send',
       requestId,
       ...(state.open.sessionID === undefined ? {} : { sessionID: state.open.sessionID }),
-      text,
+      ...(command === undefined ? { text } : { command: command.name, text: command.args }),
       delivery: 'queue',
       // `lastSend.files` stays the plain refs: a failed send puts those back as chips.
-      files: mentionsFor(text, files),
+      files:
+        command === undefined
+          ? mentionsFor(text, files)
+          : files.map((file) => ({ uri: file.uri, name: file.name })),
       ...selectionToSend(selectionInput()),
     });
     focusInput?.();
   };
 
-  /** Sends the draft (and pending attachments) if sending is allowed; blank drafts are ignored. */
+  /**
+   * Sends the draft (and pending attachments) if sending is allowed; blank drafts are ignored. A
+   * draft that starts with a listed `/command` runs it (issue #33, see the header of {@link App}).
+   */
   const submit = (): void => {
     const text = draft().trim();
     if (!canSend() || (text === '' && state.draftFiles.length === 0)) return;
+    const command = parseCommand(text, state.catalog?.commands);
     const files = props.store.takeDraftFiles();
     history.push(text);
     setDraft('');
     persist();
-    sendPrompt(text, files);
+    sendPrompt(text, files, command);
   };
 
   /** Interrupts the running turn; the session goes idle when the host relays the event. */
@@ -826,6 +855,9 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
             waiting={!connected()}
             sendDisabled={!canSend()}
             attachDisabled={!connected()}
+            commands={state.catalog?.commands}
+            commandsLoading={state.catalog === undefined}
+            commandsDisabled={!connected()}
             fileSearch={state.fileSearch}
             onMentionQuery={searchFiles}
             onMentionPick={(file) => {
