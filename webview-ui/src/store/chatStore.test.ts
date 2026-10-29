@@ -54,6 +54,28 @@ function withStore(body: (store: ChatStore) => void): void {
   });
 }
 
+describe('synced', () => {
+  // Protects the Reload Window restore (issue #77): `App` keeps the restored session id until the
+  // host speaks, so the flag must flip on the first snapshot, even one with no open session.
+  it('is false until the first snapshot, then true', () => {
+    createRoot((dispose) => {
+      const store = createChatStore();
+      expect(store.state.synced).toBe(false);
+      store.apply({
+        type: 'snapshot',
+        snapshot: {
+          sessions: [],
+          statuses: {},
+          requests: { permissions: [], forms: [] },
+          resolutions: [],
+        },
+      });
+      expect(store.state.synced).toBe(true);
+      dispose();
+    });
+  });
+});
+
 describe('snapshot', () => {
   it('replaces the sessions, statuses and open session', () => {
     withStore((store) => {

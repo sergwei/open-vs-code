@@ -260,7 +260,13 @@ describe('sending', () => {
       { type: 'prompt.send', sessionID: SES, text: 'hello there', delivery: 'queue', files: [] },
     ]);
     expect(h.textarea().value).toBe('');
-    expect(h.saved.at(-1)).toEqual({ draft: '', history: ['hello there'], files: [] });
+    // The state also carries the session shown (issue #77), since a snapshot opened `SES`.
+    expect(h.saved.at(-1)).toEqual({
+      draft: '',
+      history: ['hello there'],
+      files: [],
+      sessionID: SES,
+    });
   });
 
   it('restores the draft and the attachments, and shows the error, when the send fails', () => {
@@ -1544,6 +1550,26 @@ describe('model and agent selectors (issues #23/#24)', () => {
     });
     other.apply(...withRow({ agent: 'build' }, 'ses_2'), catalog);
     expect(agentOf(other)).toBe('Build');
+  });
+
+  // Protects the Reload Window restore (issue #77): the mount-time `persist` must not erase the
+  // session restored from the previous document before the host's first snapshot arrives.
+  // Provenance: fabricated persisted state and snapshots.
+  it('persists the restored session before the first snapshot, then the one the host shows', () => {
+    const h = start({ draft: '', history: [], files: [], sessionID: 'ses_old' });
+    expect(h.saved.at(-1)).toMatchObject({ sessionID: 'ses_old' });
+    h.apply(...openSession([user('m1', 'hi')]));
+    expect(h.saved.at(-1)).toMatchObject({ sessionID: SES });
+    h.apply({
+      type: 'snapshot',
+      snapshot: {
+        sessions: [],
+        statuses: {},
+        requests: { permissions: [], forms: [] },
+        resolutions: [],
+      },
+    });
+    expect(h.saved.at(-1)).not.toHaveProperty('sessionID');
   });
 
   it('names the agent and model of each reply from the catalog', () => {

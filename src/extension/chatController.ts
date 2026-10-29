@@ -582,6 +582,20 @@ export class ChatController {
    */
   private lastFolder: string | undefined;
   /**
+   * Pane id -> the session {@link restorePane} bound to it, until the first read of that pane
+   * ({@link readPane}) consumes it. Only a restored session whose first read finds it deleted
+   * earns the Q1 notice; any other pane that loses its session keeps today's silent behaviour.
+   */
+  private readonly restored = new Map<number, string>();
+  /**
+   * Panes whose restored session turned out not to exist and whose Q1 notice has not been
+   * delivered yet. {@link readPane} adds the pane; {@link publishSnapshot} removes it only when
+   * the pane was deliverable, because a hidden or not-ready tab drops every post and the notice is
+   * one-shot (consume on delivery, not on read). Cleared by {@link detachPane} and by a real
+   * change of folder.
+   */
+  private readonly lostSession = new Set<number>();
+  /**
    * Bumped by every resync and when the server goes away. Only consulted by a resync that targets
    * NO pane (the controller can resync before any surface exists); with panes, their own
    * `generation` decides.
@@ -703,8 +717,9 @@ export class ChatController {
    * session through getters, so a new server or a session change is seen by a load that is
    * already in flight; its revert holder (issue #32) is the source of the boundary that bounds
    * that range and borrows its root lookup. Both post to this pane only. A pane starts with no
-   * session: when a server for a new folder reaches `running`, {@link onServerState} gives the
-   * primary pane (the side-bar view), else the first pane, the session remembered for that folder;
+   * session, unless {@link restorePane} binds one right after: when the first server reaches
+   * `running`, {@link onServerState} keeps those and gives the primary pane (the side-bar view),
+   * else the first pane, the session remembered for the folder if it is empty and nobody shows it;
    * a pane attached while the server already runs stays empty. Does not send anything: the
    * surface announces itself with `ready`.
    */
@@ -740,6 +755,25 @@ export class ChatController {
   }
 
   /**
+   * Binds `sessionID` to pane `paneId` for a tab restored after Reload Window (issue #77), with or
+   * without a server: only the pane's field and the tracked set change. It does NOT write the
+   * per-folder memory (restoring is not "touching" a session; otherwise the tab deserialized last
+   * would win the memory by chance of order) and does NOT publish: the `ready` of the new document
+   * does, through {@link onPaneReady}. It remembers the id as the pane's restored session, so if
+   * the first read finds it deleted the notice of decision Q1 goes to this pane only
+   * ({@link readPane}). Unknown pane ids are ignored.
+   * VERIFIED by `chatController.panes.test.ts` "binds a restored session without a server and
+   * leaves the memory alone" (fake surfaces, Windows 11, 29/10/2026).
+   */
+  restorePane(paneId: number, sessionID: string): void {
+    const pane = this.paneById(paneId);
+    if (pane === undefined) return;
+    pane.sessionID = sessionID;
+    this.restored.set(paneId, sessionID);
+    this.syncTracked();
+  }
+
+  /**
    * Removes a surface (it was closed): its pending work is cut off and it stops receiving. The
    * session it showed is no longer tracked by the translator. If it held the keyboard focus, the
    * focus state is recomputed from the panes left (false when none), so the context key does not
@@ -758,6 +792,8 @@ export class ChatController {
     pane.reverts.reset();
     pane.releaseDiffs?.();
     this.panes.delete(paneId);
+    this.restored.delete(paneId);
+    this.lostSession.delete(paneId);
     this.syncTracked();
   }
 
@@ -847,15 +883,20 @@ export class ChatController {
    * state stops the stream (so a `stop` never causes reconnection attempts) and is mirrored as
    * a `ConnectionState`. Re-entering `running` with the same URL and password is a no-op.
    *
-   * Phase 3: a server for a NEW folder gives one pane the session remembered for that folder
-   * (`memory.get(folder)`) and empties the other panes: the pane whose surface is `primary` (the
-   * side-bar view, even when leftover tabs were attached before it), else the one attached first.
-   * A server for the SAME folder (a restart) leaves every pane on its own session, because that
-   * memory is last-writer-wins across panes. At start in `editor` mode there are no panes yet, so
-   * nothing is given and Open Chat opens the remembered session itself. VERIFIED by
+   * Panes and sessions. The FIRST server this controller sees keeps every session a pane already
+   * holds (tabs bound by {@link restorePane} before any server existed) and gives the remembered
+   * session of the folder (`memory.get(folder)`) only to the receiver (the pane whose surface is
+   * `primary`, the side-bar view, even when leftover tabs were attached before it, else the one
+   * attached first), and only if the receiver has none and no other pane shows it. A later server
+   * for a NEW folder resets: the receiver gets the remembered session and the other panes start
+   * empty (a session lives in its location), restored sessions included. A server for the SAME
+   * folder (a restart) leaves every pane on its own session, because that memory is
+   * last-writer-wins across panes. At start in `editor` mode with no tab to restore there are no
+   * panes yet, so nothing is given and Open Chat opens the remembered session itself. VERIFIED by
    * `chatController.panes.test.ts` "gives the remembered session to the primary pane, not the
-   * oldest" (fake surfaces, 29/10/2026). HYPOTHESIS for a real window with several tabs open at a
-   * change of folder (risk R6 of the plan): the tabs keep a stale title until their next snapshot.
+   * oldest" and the first-server cases next to it (fake surfaces, 29/10/2026). HYPOTHESIS for a
+   * real window with several tabs open at a change of folder (risk R6 of the plan): the tabs keep
+   * a stale title until their next snapshot.
    * `restarting` and `connecting` (an external server being checked, issue #11) look like
    * `starting` to the webview; the `message` of an `unavailable` is copied as is to the webview,
    * which is why the external-server messages carry no URL, port or raw cause (the webview never
@@ -887,13 +928,30 @@ export class ChatController {
         // "last writer wins" across panes, so reading it here would move pane 1 to the session
         // another pane opened last. New folder: the primary pane (else the first) shows the
         // session remembered for it and the others start empty (a session lives in its location).
+        const firstServer = this.lastFolder === undefined;
         const sameFolder = this.lastFolder === next.folder;
         this.lastFolder = next.folder;
-        if (!sameFolder) {
-          const panes = [...this.panes.values()];
-          const receiver = panes.find((pane) => pane.primary) ?? panes[0];
+        const panes = [...this.panes.values()];
+        const receiver = panes.find((pane) => pane.primary) ?? panes[0];
+        if (firstServer) {
+          // The first server of this host: a pane may already hold a session bound by
+          // `restorePane` (a tab restored after Reload Window), which must survive. The receiver
+          // gets the remembered session only when it has none and no other pane shows it (the
+          // same session on two surfaces is what the restore refuses).
+          const remembered = this.deps.memory.get(next.folder);
+          if (
+            receiver !== undefined &&
+            receiver.sessionID === undefined &&
+            remembered !== undefined &&
+            !panes.some((pane) => pane.sessionID === remembered)
+          ) {
+            receiver.sessionID = remembered;
+          }
+        } else if (!sameFolder) {
           for (const pane of panes) {
             pane.sessionID = pane === receiver ? this.deps.memory.get(next.folder) : undefined;
+            this.restored.delete(pane.id);
+            this.lostSession.delete(pane.id);
           }
         }
         this.translator = createEventTranslator(this.secrets);
@@ -1344,7 +1402,8 @@ export class ChatController {
   /**
    * The webview of pane `paneId` loaded (it sends `ready` on every document load): publishes to
    * THAT pane the connection state and a fresh snapshot, or an empty one when there is no server
-   * yet; the other panes get nothing. Anything posted earlier was dropped by the provider, so this
+   * yet (except for a pane that already holds a restored session, which gets only the connection
+   * state: see {@link restorePane}); the other panes get nothing. Anything posted earlier was dropped by the provider, so this
    * is the only way a new document gets its state. If a `focusRequest` is waiting (an "Open chat" click that had to load the document first, so its
    * first `ui.focus` went nowhere) it is sent again after the snapshot, as long as it is fresher
    * than {@link FOCUS_REQUEST_TTL_MS}. The cached catalog, if any, is sent right after the snapshot
@@ -1362,7 +1421,10 @@ export class ChatController {
     this.log.info('webview ready');
     pane.post({ type: 'connection.state', connection: this.connection });
     if (this.client === undefined) {
-      pane.post({ type: 'snapshot', snapshot: EMPTY_SNAPSHOT });
+      // A pane bound to a restored session gets no empty snapshot: its document would persist "no
+      // session" and a second Reload with the server down would lose it (decision T3=1). The
+      // webview keeps the id it restored until its first real snapshot.
+      if (pane.sessionID === undefined) pane.post({ type: 'snapshot', snapshot: EMPTY_SNAPSHOT });
       pane.flushUndeliveredMenu();
       this.flushComposes(pane);
       this.flushUiCommands(pane);
@@ -1574,8 +1636,16 @@ export class ChatController {
    * (its messages, its children, its row and revert, its lineage) and works out the statuses of
    * the snapshot. Rows and statuses are copies, because every pane completes them its own way.
    * A remembered session that no longer exists is forgotten here (`pane.sessionID` cleared and the
-   * per-folder memory emptied), which the caller sees as `pane.sessionID !== openID`. Rejects with
-   * whatever the client throws other than `SessionNotFoundError`.
+   * per-folder memory emptied ONLY if it pointed at that session, because other tabs may have
+   * written it), which the caller sees as `pane.sessionID !== openID`. When the missing session is
+   * the one {@link ChatController.restorePane} bound to this pane, the pane goes into `lostSession` and {@link publishSnapshot} sends the Q1 notice to this pane
+   * after a snapshot it can deliver; the restored mark is consumed by this first read either way,
+   * which is why the pending notice lives in its own set (a read dropped as stale, or a hidden
+   * tab, must not lose it). Rejects with whatever the client throws other than
+   * `SessionNotFoundError`.
+   * VERIFIED by `chatController.panes.test.ts` "a restored session deleted meanwhile…" and by
+   * `chatController.test.ts` "forgets a remembered session that the server no longer has" (fake clients,
+   * not a real server; Windows 11, 29/10/2026).
    * Issue #32: an event about the revert that arrived during these reads (`pane.revertEvents`
    * moved since `revertEventsAtStart`) is newer than the row: it owns the state, and the snapshot
    * just carries what the host holds. The same when the row could not be read (not in the list and
@@ -1642,9 +1712,15 @@ export class ChatController {
         if (!isSessionNotFound(error)) throw error;
         this.log.warn(`remembered session ${openID} no longer exists; forgetting it`);
         pane.sessionID = undefined;
-        await this.deps.memory.set(server.folder, undefined);
+        // The memory holds ONE session per folder and several tabs read it: only empty it when
+        // it pointed at THIS session, or a deleted session of tab A would erase tab B's memory.
+        if (this.deps.memory.get(server.folder) === openID) {
+          await this.deps.memory.set(server.folder, undefined);
+        }
+        if (this.restored.get(pane.id) === openID) this.lostSession.add(pane.id);
       }
     }
+    this.restored.delete(pane.id);
     return { openID, open, rawMessages, sessions, statuses };
   }
 
@@ -1671,7 +1747,12 @@ export class ChatController {
    * fire and forget. If the pane changed session between the read and this call, the snapshot
    * carries no open session and the seed uses an empty session id so it prunes no tracker of the
    * session the pane moved to (another pane may show it). HYPOTHESIS: by reading; the window needs
-   * two panes and was not driven in a real VS Code.
+   * two panes and was not driven in a real VS Code. A pane in `lostSession` (its restored session
+   * did not exist) gets the Q1 notice, to this pane only, right after a snapshot it could deliver;
+   * if it could not, the flag stays for the snapshot of the next resync. VERIFIED with a fabricated
+   * surface by "keeps the notice of a restored session that is gone until the tab can receive it,
+   * then sends it once" (`chatController.panes.test.ts`, Windows 11, 29/10/2026). UNVERIFIED: a
+   * real tab that is hidden when the server comes up (R5 of `test:visual` step 28 opens D after it).
    */
   private publishSnapshot(
     pane: ChatPane,
@@ -1719,6 +1800,20 @@ export class ChatController {
     this.log.info(
       `snapshot sent (${String(rows.length)} sessions, open ${pane.sessionID ?? 'none'})`,
     );
+    if (this.lostSession.has(pane.id) && pane.deliverable()) {
+      // Decision Q1 of Sergio (29/10/2026): inside the tab, after its snapshot (the snapshot
+      // would clear a notice that came first), to this pane only. Consumed on delivery.
+      this.lostSession.delete(pane.id);
+      this.log.info(`restored session gone: notice sent to pane ${String(pane.id)}`);
+      pane.post({
+        type: 'notice',
+        level: 'info',
+        error: {
+          code: 'SessionDeleted',
+          message: 'This session no longer exists. Your next prompt starts a new one.',
+        },
+      });
+    }
     if (pane.sessionID !== undefined) {
       // Issue #32: a revert event applied while the snapshot was being built is newer than it.
       pane.reverts.resend(pane.sessionID, complete?.revert);

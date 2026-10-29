@@ -6,6 +6,7 @@
  */
 import type { ModelRef } from '../../src/shared/model';
 import type { AttachmentRef } from '../../src/shared/protocol';
+import { readPersistedSessionID } from '../../src/shared/tabState';
 import { MAX_HISTORY } from './chat/promptHistory';
 
 /** Most attachments kept. Our own cap, so a corrupt state cannot create hundreds of chips. */
@@ -28,12 +29,16 @@ export interface PersistedSelection {
   agent?: string;
 }
 
-/** What is persisted. */
+/**
+ * What is persisted. `sessionID` is the session the tab shows (issue #77): the host reads it back
+ * through `src/shared/tabState.ts` to rebind a restored editor tab to its session.
+ */
 export interface PersistedUi {
   draft: string;
   history: string[];
   files: AttachmentRef[];
   selection?: PersistedSelection;
+  sessionID?: string;
 }
 
 /** True for a non-empty string. */
@@ -73,6 +78,8 @@ export interface StateApi {
 export interface UiState extends PersistedUi {
   /** The restored model/agent draft; empty when nothing valid was saved. */
   selection: PersistedSelection;
+  /** The session the tab showed when the state was saved; absent when none or invalid. */
+  sessionID?: string;
   /** Persists `next` right away (no debounce: see {@link createUiState}). */
   save(next: PersistedUi): void;
 }
@@ -84,11 +91,18 @@ export interface UiState extends PersistedUi {
  * version of this extension. A value that is not `{ draft: string, history: string[] }` yields
  * the defaults for the broken part; non-string history items are dropped and the list is cut to
  * the newest {@link MAX_HISTORY}; pending attachments that are not `{ uri, name }` are dropped
- * (at most 20 kept); the selection keeps only its well-formed parts ({@link readSelection}). `save` writes on every call: one small message per keystroke.
+ * (at most 20 kept); the selection keeps only its well-formed parts ({@link readSelection}); the
+ * shown session is read with the host's own reader (`readPersistedSessionID`), so both sides
+ * agree on what is valid. `save` writes on every call: one small message per keystroke.
  * That cost was NOT measured (HYPOTHESIS: negligible at typing speed); if it shows up, debounce
  * with a flush on `pagehide`, which is not guaranteed to fire when VS Code destroys the iframe.
- * VERIFIED by `uiState.test.ts` with fabricated states; real persistence across hide/show is
- * UNVERIFIED until the F5.
+ * VERIFIED by `uiState.test.ts` with fabricated states (including the `sessionID` round trip and
+ * an old state without the field). VERIFIED across a real Reload Window (`npm run test:visual`,
+ * full run, Windows 11, VS Code 1.144.0, 29/10/2026): "R2 A comes back active: title
+ * \"Tab28A: Reply with exactly: alpha28. Do\", 2 blocks, draft \"draft28-A\", kind vscode-dark",
+ * "R4 C comes back lazy: title \"Untitled session\", 0 blocks, draft \"draft28-C\"" and "R10 after
+ * the second Reload Window the workbench has 5 chat tabs (5 before it)". Persistence across
+ * hide/show alone is UNVERIFIED (no check reads the state after only a hide).
  */
 export function createUiState(api: StateApi): UiState {
   const raw: unknown = api.getState();
@@ -101,17 +115,20 @@ export function createUiState(api: StateApi): UiState {
     ? record.files.filter(isAttachmentRef).slice(0, MAX_FILES)
     : [];
   const selection = readSelection(record.selection);
+  const sessionID = readPersistedSessionID(record);
   return {
     draft,
     history,
     files,
     selection,
+    ...(sessionID === undefined ? {} : { sessionID }),
     save(next) {
       api.setState({
         draft: next.draft,
         history: next.history.slice(-MAX_HISTORY),
         files: next.files.slice(0, MAX_FILES),
         ...(next.selection === undefined ? {} : { selection: next.selection }),
+        ...(next.sessionID === undefined ? {} : { sessionID: next.sessionID }),
       });
     },
   };

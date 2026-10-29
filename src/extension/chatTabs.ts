@@ -44,12 +44,17 @@ export class ChatTabs {
   /**
    * Registers a tab; it counts as the most recent one. `column` is where it opened, when known.
    * Adding an id twice replaces the first entry.
+   *
+   * `seed` is for a tab restored after Reload Window: the session it was bound to and the title
+   * VS Code persisted, so the tab reads as before until its first real snapshot replaces both
+   * (decision Q4=1 of Sergio, 29/10/2026). A blank seed title falls back to {@link EMPTY_TITLE}.
    */
-  add(paneId: number, column?: number): void {
+  add(paneId: number, column?: number, seed?: { sessionID?: string; title?: string }): void {
+    const seedTitle = seed?.title?.trim();
     this.tabs.set(paneId, {
       paneId,
-      sessionID: undefined,
-      title: EMPTY_TITLE,
+      sessionID: seed?.sessionID,
+      title: seedTitle === undefined || seedTitle === '' ? EMPTY_TITLE : seedTitle,
       column,
       active: false,
       recency: ++this.clock,

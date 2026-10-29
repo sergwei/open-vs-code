@@ -46,7 +46,7 @@ const row = (id: string): SessionInfo =>
 const LOCATION = wire<{ directory: string }>('{"directory":"C:\\\\work"}');
 
 /** A fake client with only what these cases reach; `calls` records the root list reads. */
-function fakeClient(sessions: string[]) {
+function fakeClient(sessions: string[], missing: ReadonlySet<string> = new Set()) {
   const calls: string[] = [];
   let created = 0;
   const api = {
@@ -79,7 +79,14 @@ function fakeClient(sessions: string[]) {
         },
       },
     },
-    message: { list: () => Promise.resolve({ data: [], cursor: {} }) },
+    message: {
+      list: ({ sessionID }: { sessionID: string }) =>
+        missing.has(sessionID)
+          ? // The real client throws the 404 body, not an Error.
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+            Promise.reject({ _tag: 'SessionNotFoundError', message: 'Session not found' })
+          : Promise.resolve({ data: [], cursor: {} }),
+    },
     model: {
       list: () => Promise.resolve({ location: LOCATION, data: [] }),
       default: () => Promise.resolve({ location: LOCATION, data: null }),
@@ -98,8 +105,9 @@ function setup(
   sessions: string[] = ['ses_a', 'ses_b'],
   ui: Partial<ChatUi> = {},
   primary?: number,
+  options: { start?: boolean; missing?: string[] } = {},
 ) {
-  const { api, calls } = fakeClient(sessions);
+  const { api, calls } = fakeClient(sessions, new Set(options.missing ?? []));
   const opened: string[] = [];
   const remembered = new Map<string, string | undefined>();
   const logs: string[] = [];
@@ -164,7 +172,7 @@ function setup(
       posted,
     });
   }
-  controller.onServerState({ kind: 'running', server: SERVER });
+  if (options.start !== false) controller.onServerState({ kind: 'running', server: SERVER });
   const emit = (type: string, data: object): void => {
     streams[0]?.onEvent(
       wire<V2Event>(JSON.stringify({ id: `evt_${type}`, created: 5, type, data })),
@@ -366,6 +374,131 @@ describe('connecting the server', () => {
     await controller.onPaneReady(panes[1]?.pane.id ?? -1);
     expect(typesOf(panes[0]?.posted ?? [])).toEqual([]);
     expect(typesOf(panes[1]?.posted ?? [])).toContain('snapshot');
+  });
+});
+
+// Protects the Reload Window restore (issue #77, phase 1): tabs restored BEFORE any server exists
+// keep their sessions through the first `running`, get no empty snapshot, never touch the folder
+// memory, and a restored session that is gone earns the Q1 notice in that tab only, after its
+// snapshot. Provenance: fake surfaces, memory and client (synthetic); nothing here shows what a
+// real Reload hands the serializer.
+describe('restoring panes before the server runs', () => {
+  const GONE = 'This session no longer exists. Your next prompt starts a new one.';
+  const idOf = (panes: ReturnType<typeof setup>['panes'], index: number): number =>
+    panes[index]?.pane.id ?? -1;
+  const notices = (posted: HostToWebview[]): HostToWebview[] =>
+    posted.filter((m) => m.type === 'notice');
+
+  it('binds a restored session without a server and leaves the memory alone', () => {
+    const { controller, panes, remembered } = setup(2, [], {}, undefined, { start: false });
+    remembered.set(SERVER.folder, 'ses_mem');
+    controller.restorePane(idOf(panes, 0), 'ses_a');
+    expect(controller.sessionOf(idOf(panes, 0))).toBe('ses_a');
+    expect(remembered.get(SERVER.folder)).toBe('ses_mem');
+    controller.restorePane(999, 'ses_x'); // unknown pane: ignored
+  });
+
+  it('sends no empty snapshot to a bound pane without a server, and does to an empty one', async () => {
+    const { controller, panes } = setup(2, [], {}, undefined, { start: false });
+    controller.restorePane(idOf(panes, 0), 'ses_a');
+    await controller.onPaneReady(idOf(panes, 0));
+    await controller.onPaneReady(idOf(panes, 1));
+    expect(typesOf(panes[0]?.posted ?? [])).toEqual(['connection.state']);
+    expect(typesOf(panes[1]?.posted ?? [])).toEqual(['connection.state', 'snapshot']);
+  });
+
+  it('keeps the restored sessions at the first running, and gives the memory to an empty primary nobody shadows', () => {
+    const { controller, panes, remembered } = setup(3, ['ses_a', 'ses_b', 'ses_m'], {}, 2, {
+      start: false,
+    });
+    remembered.set(SERVER.folder, 'ses_m');
+    controller.restorePane(idOf(panes, 0), 'ses_a');
+    controller.restorePane(idOf(panes, 1), 'ses_b');
+    controller.onServerState({ kind: 'running', server: SERVER });
+    expect(panes.map(({ pane }) => pane.sessionID)).toEqual(['ses_a', 'ses_b', 'ses_m']);
+  });
+
+  it('does not hand the memory to the primary when another pane already shows that session', () => {
+    const { controller, panes, remembered } = setup(2, ['ses_a'], {}, 1, { start: false });
+    remembered.set(SERVER.folder, 'ses_a');
+    controller.restorePane(idOf(panes, 0), 'ses_a');
+    controller.onServerState({ kind: 'running', server: SERVER });
+    expect(panes.map(({ pane }) => pane.sessionID)).toEqual(['ses_a', undefined]);
+  });
+
+  it('resets the restored sessions on a real change of folder, as before', () => {
+    const { controller, panes } = setup(2, ['ses_a'], {}, undefined, { start: false });
+    controller.restorePane(idOf(panes, 0), 'ses_a');
+    controller.onServerState({ kind: 'running', server: SERVER });
+    controller.onServerState({
+      kind: 'running',
+      server: { ...SERVER, url: 'http://127.0.0.1:43999', folder: 'C:\\other' },
+    });
+    expect(panes.map(({ pane }) => pane.sessionID)).toEqual([undefined, undefined]);
+  });
+
+  it('a restored session deleted meanwhile: snapshot without session, then the notice to that pane only, memory intact', async () => {
+    const { controller, panes, remembered } = setup(2, ['ses_a'], {}, undefined, {
+      start: false,
+      missing: ['ses_gone'],
+    });
+    remembered.set(SERVER.folder, 'ses_a'); // another tab's session, not the deleted one
+    controller.restorePane(idOf(panes, 0), 'ses_gone');
+    controller.restorePane(idOf(panes, 1), 'ses_a');
+    controller.onServerState({ kind: 'running', server: SERVER });
+    await controller.onPaneReady(idOf(panes, 0));
+    await controller.onPaneReady(idOf(panes, 1));
+    const first = panes[0]?.posted ?? [];
+    expect(notices(first)).toEqual([
+      { type: 'notice', level: 'info', error: { code: 'SessionDeleted', message: GONE } },
+    ]);
+    const lastSnapshot = first.map((m) => m.type).lastIndexOf('snapshot');
+    expect(first.findIndex((m) => m.type === 'notice')).toBeGreaterThan(lastSnapshot);
+    expect(panes[0]?.pane.sessionID).toBeUndefined();
+    expect(notices(panes[1]?.posted ?? [])).toEqual([]);
+    expect(remembered.get(SERVER.folder)).toBe('ses_a');
+  });
+
+  it('clears the memory when it pointed at the deleted session, and warns only once', async () => {
+    const { controller, panes, remembered } = setup(1, [], {}, undefined, {
+      start: false,
+      missing: ['ses_gone'],
+    });
+    remembered.set(SERVER.folder, 'ses_gone');
+    controller.restorePane(idOf(panes, 0), 'ses_gone');
+    controller.onServerState({ kind: 'running', server: SERVER });
+    await controller.onPaneReady(idOf(panes, 0));
+    expect(remembered.get(SERVER.folder)).toBeUndefined();
+    await controller.onPaneReady(idOf(panes, 0)); // the next resync must not warn again
+    expect(notices(panes[0]?.posted ?? [])).toHaveLength(1);
+  });
+
+  /**
+   * Protects the review W1 of E9-chat-tabs-restore: the Q1 notice is one-shot and ChatPane drops
+   * every post while the tab is hidden or not ready, so it must be consumed on delivery, not on
+   * the read that found the session gone. Fabricated surface (`canDeliver` is a closure) and a
+   * fake client with a missing session; no real VS Code tab (Windows 11, 29/10/2026).
+   */
+  it('keeps the notice of a restored session that is gone until the tab can receive it, then sends it once', async () => {
+    const { controller } = setup(1, [], {}, undefined, { start: false, missing: ['ses_gone'] });
+    let deliverable = false;
+    const posted: HostToWebview[] = [];
+    const hidden = controller.attachPane({
+      post: (m) => posted.push(m),
+      canDeliver: () => deliverable,
+    });
+    controller.restorePane(hidden.id, 'ses_gone');
+    controller.onServerState({ kind: 'running', server: SERVER });
+    await controller.onPaneReady(hidden.id); // read finds it gone, tab hidden: nothing goes out
+    expect(notices(posted)).toEqual([]);
+    expect(hidden.sessionID).toBeUndefined();
+    deliverable = true;
+    await controller.onPaneReady(hidden.id); // visible again: the pending notice goes out
+    expect(notices(posted)).toEqual([
+      { type: 'notice', level: 'info', error: { code: 'SessionDeleted', message: GONE } },
+    ]);
+    await controller.onPaneReady(hidden.id);
+    expect(notices(posted)).toHaveLength(1);
   });
 });
 

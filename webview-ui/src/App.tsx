@@ -276,8 +276,24 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     else setDraft(`${current.endsWith('\n') ? current : `${current}\n`}${text}`);
   };
 
-  /** Saves the draft, the history, the pending attachments and the model/agent draft; also tracked as an effect. */
+  /**
+   * Saves the draft, the history, the pending attachments, the model/agent draft and the session
+   * shown; also tracked as an effect.
+   *
+   * The session (issue #77) is what lets the host rebind a tab restored after Reload Window. Until
+   * the first `snapshot` (`state.synced`) `state.open` is the empty initial view, not the host's
+   * word, so the id restored from the previous document is kept; the effect runs once at mount and
+   * would otherwise overwrite it with "no session" before the host has said anything. After it,
+   * the session the host shows is the one saved, or none when it shows none.
+   * VERIFIED by `App.test.tsx` with a fake host and fake state API. VERIFIED across a real Reload
+   * Window (`npm run test:visual`, full run, Windows 11, VS Code 1.144.0, 29/10/2026): "R2 A comes
+   * back active: title \"Tab28A: Reply with exactly: alpha28. Do\", 2 blocks, draft \"draft28-A\",
+   * kind vscode-dark", "R4 C comes back lazy: title \"Untitled session\", 0 blocks, draft
+   * \"draft28-C\"" and "R10 after the second Reload Window the workbench has 5 chat tabs (5 before
+   * it)". Not observed: the first save before the first `snapshot` of a restored tab.
+   */
   const persist = (): void => {
+    const sessionID = state.synced ? state.open.sessionID : props.uiState.sessionID;
     const picked = state.selection;
     // Only a real pick is worth keeping: a bare session id says nothing the snapshot will not.
     const hasPick = picked.model !== undefined || picked.agent !== undefined;
@@ -285,6 +301,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       draft: draft(),
       history: history.entries(),
       files: state.draftFiles.map((file) => ({ uri: file.uri, name: file.name })),
+      ...(sessionID === undefined ? {} : { sessionID }),
       ...(hasPick
         ? {
             selection: {
