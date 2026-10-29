@@ -650,11 +650,7 @@ fs.rmSync(readmeDir, { recursive: true, force: true });
  * iframe. Not observed: other operating systems, or a frame that is partly off-screen.
  */
 async function cropWebview(name) {
-  const frame = await page
-    .locator('iframe.webview.ready')
-    .first()
-    .boundingBox({ timeout: 5_000 })
-    .catch(() => null);
+  const frame = await chatFrameBox({ timeout: 5_000 }).catch(() => null);
   if (!frame) {
     warn(`no webview frame to crop for ${name}`);
     return;
@@ -666,10 +662,77 @@ async function cropWebview(name) {
   });
 }
 
-/** (Re)opens the CDP connection to the webview target, replacing the previous one. */
-async function openChat(timeoutMs = 30_000) {
+/**
+ * The iframes of THIS extension's webviews (the chat view and the chat tabs). A foreign webview (the
+ * extension details page, a Markdown preview) is also an `iframe.webview.ready`, so every chat
+ * selector filters by the `extensionId` its `src` carries, as `webviewTarget` does for the CDP url.
+ */
+const CHAT_FRAME = 'iframe.webview.ready[src*="extensionId=sergwei.open-vs-code"]';
+
+/**
+ * Box of the chat webview iframe in page coordinates (what `boundingBox` returns).
+ *
+ * Order of preference: the iframe of the chat `web` is driving (`drivenChatId`), then a visible
+ * chat iframe, then the first one. With a single chat (every step but 27) all three are the same
+ * iframe; with several (chat tabs of `openVsCode.chatLocation: editor`, which keep their iframe when
+ * hidden) the first one can be a hidden tab. Only iframes of this extension count ({@link CHAT_FRAME}).
+ * `options` is passed to `boundingBox` (a `timeout`). Throws like `boundingBox` when there is no
+ * iframe at all.
+ * VERIFIED on Windows 11, VS Code 1.144.0 (29/10/2026) by the spike with two tabs: the hidden
+ * tab's iframe reported `checkVisibility()` false and the active one true; and by step 27 with up to
+ * four tabs and the side bar chat at once, where every click through it landed on the chat being
+ * driven ("ok C4 coming back to A shows the whole reply once: 400 numbers, from 1 to 400, in
+ * order, no repeats" and "ok C10 and a tab left open still works after the switch"). NOT
+ * observed: a hidden `drivenChatId` iframe with a visible other one (the fallback is not exercised
+ * with two chats).
+ */
+async function chatFrameBox(options) {
+  const driven =
+    drivenChatId === undefined ? null : page.locator(`${CHAT_FRAME}[name="${drivenChatId}"]`);
+  if (driven !== null && (await driven.count()) > 0) return driven.first().boundingBox(options);
+  const visible = page.locator(`${CHAT_FRAME}:visible`);
+  const locator = (await visible.count()) > 0 ? visible.first() : page.locator(CHAT_FRAME).first();
+  return locator.boundingBox(options);
+}
+
+/**
+ * The id of the chat webview `web` is connected to (the `name` of its iframe), or `undefined` when
+ * `openChat` found none visible and took the first target. `chatFrameBox` looks for that iframe
+ * first, so a click lands on the chat that is being driven even when two are visible (a chat tab and
+ * the side bar view, the end of step 27).
+ */
+let drivenChatId;
+
+/**
+ * The id of the chat webview that is on screen (the `name` of its {@link CHAT_FRAME}, which is the
+ * `id=` of its CDP target), or `undefined` when none is visible. Iframes of other extensions are not
+ * looked at. See `webviewTarget`.
+ */
+function visibleChatId() {
+  return page.evaluate(
+    (selector) =>
+      [...globalThis.document.querySelectorAll(selector)].find(
+        (frame) =>
+          frame.checkVisibility({ checkVisibilityCSS: true }) &&
+          frame.getBoundingClientRect().width > 0,
+      )?.name,
+    CHAT_FRAME,
+  );
+}
+
+/**
+ * (Re)opens the CDP connection to the chat webview that is on screen, replacing the previous one.
+ *
+ * The target is chosen by the id of the visible chat iframe (`visibleChatId`), not by the order of
+ * `/json`; a given `wantedId` wins. With no chat visible, the first target is taken (the one-chat
+ * case of every step but 27, and the start-up before the view shows). The id is read once: a tab
+ * that becomes visible after the read is not followed.
+ */
+async function openChat(timeoutMs = 30_000, wantedId = undefined) {
   web?.close();
-  web = await openWebview(vscode.port, webviewLogs, timeoutMs);
+  const id = wantedId ?? (await visibleChatId().catch(() => undefined)) ?? undefined;
+  drivenChatId = id || undefined;
+  web = await openWebview(vscode.port, webviewLogs, timeoutMs, drivenChatId);
 }
 
 /**
@@ -1070,7 +1133,7 @@ async function centreOf(selector) {
     return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
   }, selector);
   if (!box) return null;
-  const frame = await page.locator('iframe.webview.ready').first().boundingBox();
+  const frame = await chatFrameBox();
   if (!frame) return null;
   return { x: frame.x + box.x, y: frame.y + box.y };
 }
@@ -1132,7 +1195,7 @@ async function clickRowMain(selector) {
       `the pointer for the session row "${selector}" would land on ${target.hit}, not on the row button (${String(target.room)} px of row left of its actions)`,
     );
   }
-  const frame = await page.locator('iframe.webview.ready').first().boundingBox();
+  const frame = await chatFrameBox();
   if (!frame) return false;
   await page.mouse.click(frame.x + target.x, frame.y + target.y);
   return true;
@@ -1185,7 +1248,7 @@ async function clickButton(text) {
     if (/always/i.test(verdict.text) && !verdict.toggle) {
       throw new Error(`refusing to press "${verdict.text}"`);
     }
-    const frame = await page.locator('iframe.webview.ready').first().boundingBox();
+    const frame = await chatFrameBox();
     if (!frame) return false;
     await page.mouse.click(frame.x + target.x, frame.y + target.y);
     return true;
@@ -6209,8 +6272,8 @@ try {
   await step('20 drop and paste (issue #30)', withSavedClipboard(dropAndPaste));
 
   /**
-   * Step 21 (issue #38): how the Settings editor of a real VS Code shows the three contributed
-   * settings: filtered by `@ext:sergwei.open-vs-code`, in the `order` of the manifest, with the
+   * Step 21 (issue #38; four settings since E9 #77, `chatLocation` is the fourth): how the Settings
+   * editor of a real VS Code shows the four contributed settings: filtered by `@ext:sergwei.open-vs-code`, in the `order` of the manifest, with the
    * label the user reads, the first sentence of each description, and the `#id#` link of
    * `opencodePath` painted as a link and followed with a real mouse click.
    *
@@ -6229,11 +6292,13 @@ try {
    * kept; a bare `#id#` (no backticks) showed as the literal text with 0 links. What this step
    * does check is the backtick form (`` `#openVsCode.serverUrl#` ``): its link text is the
    * target's label ("Open Vs Code: Server Url") and a real mouse click on it focuses that setting.
-   * VERIFIED in `npm run test:visual` on Windows 11, VS Code 1.143.1 (2026-10-25): the checks
-   * "the Settings editor lists exactly 3 settings for the extension (3; selector
-   * .settings-editor .setting-item)", "the #id# link of the first setting is painted as a link
-   * ("Open Vs Code: Server Url", 1 link(s))" and "clicking the link focuses the second setting
-   * ("Server Url")" passed. Not observed: other VS Code versions or operating systems.
+   * VERIFIED in `npm run test:visual -- --steps 21` on Windows 11, VS Code 1.144.0 (2026-10-29):
+   * "ok the Settings editor lists exactly 4 settings for the extension (4; selector
+   * .settings-editor .setting-item)", "ok setting 4 is shown as "Open Vs Code: Chat Location", in
+   * the order of the manifest" and "ok setting 4 shows its description ("Where the chat lives.
+   * sidebar keeps one chat in the OpenCode…")" passed, as did the #id# link and the click check
+   * ("clicking the link focuses the second setting ("Server Url")"). Not observed: other VS Code
+   * versions or operating systems.
    */
   const settingsUi = async () => {
     await command('Preferences: Open Settings (UI)');
@@ -6265,20 +6330,22 @@ try {
       }, 20_000)) ?? (await readRows());
     console.log(`  rows: ${JSON.stringify(rows)}`);
     check(
-      rows.length === 3,
-      `the Settings editor lists exactly 3 settings for the extension (${String(rows.length)}; selector .settings-editor .setting-item)`,
+      rows.length === 4,
+      `the Settings editor lists exactly 4 settings for the extension (${String(rows.length)}; selector .settings-editor .setting-item)`,
     );
     const expected = [
       'Absolute path to the opencode v2 executable.',
       'Address of an opencode v2 server that is already running on this machine',
       'Model that every new chat session starts with',
+      'Where the chat lives.',
     ];
     const expectedLabels = [
       'Open Vs Code: Opencode Path',
       'Open Vs Code: Server Url',
       'Open Vs Code: Default Model',
+      'Open Vs Code: Chat Location',
     ];
-    rows.slice(0, 3).forEach((row, index) => {
+    rows.slice(0, 4).forEach((row, index) => {
       console.log(
         `  label ${String(index + 1)}: "${row.category}${row.category ? ' ' : ''}${row.label}"`,
       );
@@ -7899,6 +7966,807 @@ try {
       assertNoWebviewErrors('context menus');
     } finally {
       for (const file of [brokenFile, otherFile, outsideFile]) fs.rmSync(file, { force: true });
+    }
+  });
+
+  // Step 27 (issue #77, plan E9-chat-location sections 8 and 9): the chat in editor tabs
+  // (`openVsCode.chatLocation: editor`), judged in the DOM of the workbench (tabs, groups, the
+  // launcher, toasts, badge) and of each tab's webview. Cells: C1 the launcher; C2 the chat inside
+  // a tab in the four themes at a medium width (the tab beside the code) and in one theme at the
+  // full width; C3 the tab's title and icon in the four themes; C4 a LONG turn that ends while its
+  // tab is hidden shows complete and once when the tab returns; C5 opening A's session from B's
+  // picker reveals A; C6 New Session from the palette, from the launcher's title button and with
+  // Ctrl+Alt+N opens a new tab with the caret in its prompt; C7 Insert at cursor and Add selection
+  // from a tab reach the last text editor; C8 a file link and a diff of "Changed files" open
+  // outside the chat's group; C9 Explain with every tab hidden goes to the most recent tab; C10
+  // the switch of mode in both directions; C11 a request with no chat on screen raises a toast and
+  // a badge, and "Open chat" reveals the tab of its session; C12 what Reload Window does to the
+  // tabs (a record, for the serializer of E2). The widths are measured and printed, not assumed.
+  // VERIFIED on Windows 11, VS Code 1.144.0 (29/10/2026), the final FULL `npm run test:visual` run
+  // of this task (every step, after the last change of `src` and of this file) ended "all visual
+  // checks passed" and printed: "ok C10 sidebar -> editor opens ONE tab with the side
+  // bar session beside the code, and the side bar has no chat", "ok C4 coming back to A shows the
+  // whole reply once: 400 numbers, from 1 to 400, in order, no repeats", "ok C9 Explain with every
+  // tab hidden reveals the most recent tab and sends there", "ok C11 "Open chat" of the
+  // notification reveals the tab of the session and its permission card is there (tab true, card
+  // true)" and "ok C12 after Reload Window VS Code kept 0 of 5 tabs, and Open Chat reopens the last
+  // session". Found by it and not by any unit test: the same file open in two groups makes Explain
+  // lose its range (`editorForMenu`, hence `other27.ts`), and a toast that covers the prompt box.
+  // NOT measured: macOS, Linux, the launcher's badge in `sidebar` mode, two windows.
+  await step('27 chat in editor tabs (issue #77)', async () => {
+    const DARK = 'Default Dark Modern';
+    const EXPLAIN = 'Explain with OpenCode';
+    const PROMPT_A = 'Tab27A: Reply with exactly: alpha27. Do not use any tools.';
+    const PROMPT_B = 'Tab27B: Reply with exactly: beta27. Do not use any tools.';
+    const titleOf = (prompt) => prompt.slice(0, 40).trim(); // the fixture titles a session so
+    const TITLE_A = titleOf(PROMPT_A);
+    const srcDir = path.join(workspace, 'src');
+    const setLocation = (value) => {
+      writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
+    };
+    const tabsNow = () =>
+      page.evaluate(() => {
+        const groups = [...globalThis.document.querySelectorAll('.editor-group-container')];
+        return [...globalThis.document.querySelectorAll('.tab')].map((tab) => ({
+          label: tab.getAttribute('aria-label') ?? '',
+          text: (tab.innerText ?? '').trim(),
+          active: tab.classList.contains('active'),
+          group: groups.indexOf(tab.closest('.editor-group-container')),
+        }));
+      });
+    // A chat tab is any tab that is not a TypeScript file or a diff of one (no title here has ".ts").
+    const isChatTab = (tab) => !/\.ts\b/.test(`${tab.label} ${tab.text}`);
+    const chatTabs = async () => (await tabsNow()).filter(isChatTab);
+    const groupCount = () => page.locator('.editor-group-container').count();
+    const hostLog = () => {
+      const files = [];
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'OpenCode.log') files.push(full);
+        }
+      };
+      try {
+        walk(path.join(vscode.userDataDir, 'logs'));
+      } catch {
+        return '';
+      }
+      return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+    };
+    const logCount = (pattern) => (hostLog().match(pattern) ?? []).length;
+    const view = () =>
+      web.inDoc((doc) => {
+        const field = doc.querySelector('textarea.prompt-text');
+        return {
+          title: doc.querySelector('.chat-title')?.textContent ?? '',
+          messages: doc.querySelectorAll('[role="log"] > *').length,
+          value: field?.value ?? '',
+          focusOnBox: field !== null && doc.activeElement === field && doc.hasFocus(),
+          users: [...doc.querySelectorAll('[role="log"] .message-user .part-text')].map((m) =>
+            (m.textContent ?? '').replace(/\s+/g, ' ').trim(),
+          ),
+          lastAssistant:
+            // innerText, not textContent: the Markdown renders the line breaks as <br>.
+            [...doc.querySelectorAll('[role="log"] .message-assistant .markdown')].at(-1)
+              ?.innerText ?? '',
+          // How many assistant blocks mention 400: a reply shown twice (C4) makes it 2.
+          with400: [...doc.querySelectorAll('[role="log"] .message-assistant .markdown')].filter(
+            (block) => /\b400\b/.test(block.innerText),
+          ).length,
+          chips: [...doc.querySelectorAll('.chips .chip-open, .chips .chip-name')].map(
+            (c) => c.textContent ?? '',
+          ),
+          kind: doc.body.getAttribute('data-vscode-theme-kind') ?? '',
+        };
+      });
+    // Brings the chat tab whose label has `needle` to the front and connects to its webview.
+    const switchTo = async (needle) => {
+      const previous = drivenChatId;
+      const already = (await tabsNow()).some((tab) => tab.active && tab.text.includes(needle));
+      await page.locator('.tab', { hasText: needle }).first().click();
+      if (!already) {
+        await waitFor(
+          async () => {
+            const id = await visibleChatId();
+            return id !== undefined && id !== previous ? id : undefined;
+          },
+          8_000,
+          100,
+        );
+      }
+      await openChat(30_000);
+    };
+    // Waits for a chat other than `previous` to be on screen (a new tab) and connects to it.
+    const connectToNew = async (previous) => {
+      await waitFor(
+        async () => {
+          const id = await visibleChatId();
+          return id !== undefined && id !== previous ? id : undefined;
+        },
+        10_000,
+        100,
+      );
+      await openChat(30_000);
+    };
+    const editorHasFocus = () =>
+      page.evaluate(() => globalThis.document.activeElement?.closest('.monaco-editor') != null);
+    const quickOpen = async (spec, tabName) => {
+      await page.keyboard.press('ControlOrMeta+p');
+      await waitFor(async () => !(await quickInputHidden()), 2_000, 50);
+      await page.keyboard.type(spec);
+      await waitFor(
+        () =>
+          page.evaluate(
+            (name) =>
+              (
+                globalThis.document.querySelector('.quick-input-list .monaco-list-row.focused')
+                  ?.textContent ?? ''
+              ).includes(name),
+            tabName,
+          ),
+        3_000,
+        50,
+      );
+      await page.keyboard.press('Enter');
+      await waitFor(
+        async () => (await page.locator(`.tab.active[aria-label*="${tabName}"]`).count()) > 0,
+        5_000,
+        100,
+      );
+      await waitFor(editorHasFocus, 3_000, 100);
+    };
+    const editorSelection = () =>
+      page
+        .locator('#status\\.editor\\.selection')
+        .first()
+        .innerText()
+        .catch(() => '');
+    const selectLines2to3 = async () => {
+      await page.keyboard.press('ControlOrMeta+Home');
+      await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('Home');
+      await page.keyboard.press('Shift+ArrowDown');
+      await page.keyboard.press('Shift+ArrowDown');
+      await waitFor(async () => /\(\d+ selected\)/.test(await editorSelection()), 2_000, 100);
+    };
+    // Gives the focus to the text editor of `sample.ts` that sits in the first group, with the real
+    // mouse on its tab and then on its text.
+    const focusSampleEditor = async () => {
+      await page.locator('.tab', { hasText: 'sample.ts' }).first().click();
+      await page.locator('.monaco-editor:visible .view-lines').first().click();
+      await waitFor(editorHasFocus, 3_000, 100);
+    };
+    const menuRows = async () =>
+      (await page.locator('.monaco-menu .action-label').allInnerTexts())
+        .map((text) => text.trim())
+        .filter((text) => text !== '');
+    const launcher = () =>
+      page.evaluate((selector) => {
+        const side = globalThis.document.querySelector('.part.sidebar');
+        return {
+          text: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
+            .replace(/\s+/g, ' ')
+            .trim(),
+          buttons: [...(side?.querySelectorAll('.welcome-view-content .monaco-button') ?? [])].map(
+            (b) => (b.textContent ?? '').trim(),
+          ),
+          actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
+            (a) => a.getAttribute('aria-label') ?? '',
+          ),
+          // A webview is not a DOM child of the side bar (it floats over it), so a chat "in the
+          // side bar" is a visible chat iframe whose centre lies inside the side bar's box.
+          chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+            const sideBox = side?.getBoundingClientRect();
+            const box = frame.getBoundingClientRect();
+            const x = box.left + box.width / 2;
+            return (
+              sideBox !== undefined &&
+              frame.checkVisibility({ checkVisibilityCSS: true }) &&
+              box.width > 0 &&
+              x >= sideBox.left &&
+              x <= sideBox.right
+            );
+          }).length,
+        };
+      }, CHAT_FRAME);
+    const showOpenCodeBar = async () => {
+      const shows = async () =>
+        (await launcher()).actions.some((label) => label.startsWith('New Session'));
+      if (!(await shows())) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        await waitFor(shows, 5_000, 100);
+      }
+    };
+    const sidebarChatId = () =>
+      page.evaluate((selector) => {
+        const sideBox = globalThis.document.querySelector('.part.sidebar')?.getBoundingClientRect();
+        return [...globalThis.document.querySelectorAll(selector)].find((frame) => {
+          const box = frame.getBoundingClientRect();
+          const x = box.left + box.width / 2;
+          return (
+            sideBox !== undefined &&
+            frame.checkVisibility({ checkVisibilityCSS: true }) &&
+            box.width > 0 &&
+            x >= sideBox.left &&
+            x <= sideBox.right
+          );
+        })?.name;
+      }, CHAT_FRAME);
+    const clearBox = async () => {
+      await focusPromptBox();
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.press('Backspace');
+      await sleep(150); // the first typed character is lost without it (see `send`)
+    };
+    const removeChips = async () => {
+      for (let guard = 0; guard < 6 && (await view()).chips.length > 0; guard += 1) {
+        await clickIn('.chips .chip-remove');
+        await sleep(200); // one chip gone per round; the count read next is the only signal
+      }
+    };
+    const closeSampleTabs = async () => {
+      for (let guard = 0; guard < 6; guard += 1) {
+        const tab = page.locator('.tab', { hasText: '.ts' }).first();
+        if ((await tab.count()) === 0) break;
+        await tab.hover();
+        await tab.locator('.tab-actions .action-label').first().click({ timeout: 3_000 });
+        await sleep(200); // one tab gone per round; the count read next is the only signal
+      }
+    };
+    const channel = (value) => {
+      const s = value / 255;
+      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    };
+    const luminanceOf = ([r, g, b]) =>
+      0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+    const ratioOf = (a, b) => {
+      const [high, low] = [luminanceOf(a), luminanceOf(b)].sort((x, y) => y - x);
+      return (high + 0.05) / (low + 0.05);
+    };
+    const rgbOf = (css) => (css.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+    // The label, the icon file and the background of the tab whose text has `needle`.
+    const tabLook = (needle) =>
+      page.evaluate((text) => {
+        const tab = [...globalThis.document.querySelectorAll('.tab')].find((t) =>
+          (t.innerText ?? '').includes(text),
+        );
+        if (!tab) return null;
+        // The icon of a webview tab is the inline `background-image` of `.monaco-icon-label-iconpath`
+        // (read from the DOM of VS Code 1.144.0, 29/10/2026), not a pseudo-element.
+        const iconBox = tab.querySelector('.monaco-icon-label-iconpath');
+        const before = iconBox ? globalThis.getComputedStyle(iconBox) : null;
+        let background = null;
+        // The colour of a tab is painted by its `.tab-fill`; the ancestors are the fallback.
+        for (
+          let node = tab.querySelector('.tab-fill') ?? tab;
+          node && background === null;
+          node = node.parentElement
+        ) {
+          const css = globalThis.getComputedStyle(node).backgroundColor;
+          const parts = css.match(/[\d.]+/g) ?? [];
+          if (parts.length === 3 || Number(parts[3]) > 0.9) background = css;
+        }
+        return {
+          label: (tab.querySelector('.label-name')?.textContent ?? tab.innerText ?? '').trim(),
+          icon: before ? before.backgroundImage : '',
+          background,
+        };
+      }, needle);
+
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    await closeAllEditors();
+    const sampleFile = path.join(srcDir, 'sample.ts');
+    const sampleBefore = fs.readFileSync(sampleFile, 'utf8');
+    fs.writeFileSync(path.join(srcDir, 'removed.ts'), 'export const removed = true;\n');
+    fs.writeFileSync(
+      path.join(srcDir, 'other27.ts'),
+      'export const o27a = 1;\nexport const o27b = 2;\nexport const o27c = 3;\nexport const o27d = 4;\n',
+    );
+    try {
+      await setTheme(DARK);
+      // A toast ("All installed extensions are temporarily disabled", from `--disable-extensions`)
+      // sat over the prompt box in the first run of this step and swallowed the click on it.
+      await command('Notifications: Clear All Notifications');
+      await quickOpen('src/sample.ts', 'sample.ts');
+
+      // --- C10 (sidebar to editor): the side bar session opens in a tab beside the code ---------
+      // Step 26 leaves the Explorer in the side bar, but a filtered run finds the chat there: a
+      // second press on the activity bar item would hide the side bar.
+      if ((await visibleChatId()) === undefined) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+      }
+      await openChat(30_000);
+      check(
+        (await page.locator(`${CHAT_FRAME}[name="${String(drivenChatId)}"]`).count()) === 1,
+        'C10 the iframe of the chat carries extensionId=sergwei.open-vs-code in its src, so the chat selectors skip foreign webviews',
+      );
+      await waitConnected();
+      check(await clickButton('New session'), 'C10 New session is pressed in the side bar chat');
+      await waitEmptyView();
+      await send(PROMPT_A);
+      check(await waitIdle(30_000), 'C10 the turn of the side bar session ends');
+      const inSidebar = await view();
+      setLocation('editor');
+      const opened = await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
+      await connectToNew(drivenChatId);
+      await waitFor(async () => (await view()).title === TITLE_A, 15_000, 200);
+      const inTab = await view();
+      const afterSwitch = await tabsNow();
+      const sampleTab = afterSwitch.find((tab) => !isChatTab(tab));
+      const tabA = afterSwitch.find(isChatTab);
+      const idA = drivenChatId;
+      check(
+        opened === true &&
+          afterSwitch.filter(isChatTab).length === 1 &&
+          inTab.title === TITLE_A &&
+          inTab.title === inSidebar.title &&
+          inTab.messages === inSidebar.messages &&
+          (await launcher()).chatFrames === 0 &&
+          sampleTab !== undefined &&
+          tabA !== undefined &&
+          sampleTab.group !== tabA.group,
+        `C10 sidebar -> editor opens ONE tab with the side bar session beside the code, and the side bar has no chat (title ${JSON.stringify(inTab.title)}, ${String(inTab.messages)} of ${String(inSidebar.messages)} blocks, groups ${String(sampleTab?.group)}/${String(tabA?.group)})`,
+      );
+
+      // --- C1: the launcher in the side bar ------------------------------------------------------
+      await waitFor(async () => (await launcher()).text !== '', 8_000, 200);
+      await shot('27a-launcher');
+      const bar = await launcher();
+      check(
+        bar.text.includes('The chat opens in editor tabs, one per session.') &&
+          bar.buttons.includes('New Session') &&
+          bar.buttons.includes('Open Chat') &&
+          bar.actions.some((label) => label.startsWith('New Session')) &&
+          bar.actions.includes('Open Settings') &&
+          bar.chatFrames === 0,
+        `C1 the launcher shows its welcome text, its New Session and Open Chat buttons and the New Session and Open Settings title buttons, no chat (${JSON.stringify(bar)})`,
+      );
+
+      // --- C2 + C3: the tab beside the code, in the four themes ---------------------------------
+      const mediaWidth = (await chatFrameBox())?.width ?? 0;
+      console.log(`  chat tab ${String(Math.round(mediaWidth))} px wide beside the code`);
+      for (const [name, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        const state = await view();
+        const look = await web.inDoc(measureText, {
+          title: '.chat-title',
+          box: 'textarea.prompt-text',
+        });
+        const textRatio = Math.min(look.title?.ratio ?? 0, look.box?.ratio ?? 0);
+        check(
+          state.title === TITLE_A && state.kind === THEME_KINDS[theme].webview && textRatio >= 4.5,
+          `C2 ${name}, tab beside the code (${String(Math.round(mediaWidth))} px): the chat renders with kind ${state.kind} and text contrast ${textRatio.toFixed(2)} >= 4.5`,
+        );
+        assertNoWebviewErrors(`C2 ${name} tab`);
+        await shot(`27b-tab-${name}`);
+        const tab = await tabLook('Tab27A');
+        const file = /chat-tab-(light|dark)\.svg/.exec(tab?.icon ?? '')?.[1];
+        const wanted = name === 'light' || name === 'hc-light' ? 'light' : 'dark';
+        const stroke =
+          file === undefined
+            ? undefined
+            : /stroke="(#[0-9A-Fa-f]{6})"/.exec(
+                fs.readFileSync(path.join(repoRoot, 'media', `chat-tab-${file}.svg`), 'utf8'),
+              )?.[1];
+        const iconRgb =
+          stroke === undefined
+            ? []
+            : [1, 3, 5].map((index) => Number.parseInt(stroke.slice(index, index + 2), 16));
+        const tabRgb = tab?.background ? rgbOf(tab.background) : [];
+        const iconRatio =
+          iconRgb.length === 3 && tabRgb.length === 3 ? ratioOf(iconRgb, tabRgb) : 0;
+        check(
+          tab !== null && tab.label === TITLE_A && file === wanted && iconRatio >= 3,
+          `C3 ${name}: the tab reads ${JSON.stringify(tab?.label)}, its icon is chat-tab-${String(file)}.svg (wanted ${wanted}) and its stroke ${String(stroke)} has contrast ${iconRatio.toFixed(2)} >= 3 against the tab background ${String(tab?.background)}`,
+        );
+      }
+      await setTheme(DARK);
+
+      // --- C6 (palette): a new tab with the caret in its prompt ----------------------------------
+      const newTabCheck = async (label, trigger) => {
+        const before = (await chatTabs()).length;
+        const previous = drivenChatId;
+        await trigger();
+        await waitFor(async () => (await chatTabs()).length === before + 1, 10_000, 200);
+        await connectToNew(previous);
+        const focused = await waitFor(async () => (await view()).focusOnBox, 6_000, 200);
+        const now = await chatTabs();
+        const state = await view();
+        check(
+          now.length === before + 1 && focused === true && state.messages === 0,
+          `C6 ${label} opens a new empty tab with the caret in its prompt (${String(before)} -> ${String(now.length)} tabs, ${String(state.messages)} blocks, focus ${String(focused)})`,
+        );
+        return now.length;
+      };
+      await newTabCheck('New Session from the palette', () => command('OpenCode: New Session'));
+      const idB = drivenChatId;
+      const groupsOfChat = new Set((await chatTabs()).map((tab) => tab.group));
+      check(
+        groupsOfChat.size === 1,
+        `C6 the new tab is in the group of the first one (${JSON.stringify([...groupsOfChat])})`,
+      );
+
+      // --- C4: a LONG turn ends in A while B is on screen -----------------------------------------
+      await switchTo('Tab27A');
+      const finishedBefore = logCount(/turn finished/g);
+      await send(`${titleOf(PROMPT_A)} Count from 1 to 400, one number per line. LONG`);
+      const running = (await waitFor(isBusy, 15_000, 200)) === true;
+      if (!running) {
+        console.log(`  C4 A after the prompt: ${JSON.stringify(await view())}`);
+        await shot('27z-debug-c4');
+      }
+      check(running, 'C4 the LONG turn is running in A');
+      await switchTo('Untitled session');
+      check(
+        drivenChatId === idB,
+        'C4 B is on screen while the LONG turn of A runs (its webview is hidden)',
+      );
+      await waitFor(() => logCount(/turn finished/g) > finishedBefore, 60_000, 500);
+      await switchTo('Tab27A');
+      await waitFor(async () => /\b400\b/.test((await view()).lastAssistant), 10_000, 200);
+      const longState = await view();
+      const numbers = longState.lastAssistant.match(/\d+/g)?.map(Number) ?? [];
+      check(
+        numbers.length === 400 &&
+          numbers.every((value, index) => value === index + 1) &&
+          longState.with400 === 1,
+        `C4 coming back to A shows the whole reply once: ${String(numbers.length)} numbers, from ${String(numbers[0])} to ${String(numbers.at(-1))}, in order, no repeats (${String(longState.with400)} assistant block with the 400)`,
+      );
+      check(!(await isBusy()), 'C4 and A is no longer marked as running');
+      assertNoWebviewErrors('C4 tab return');
+      await shot('27c-tab-return');
+
+      // --- C5: B opens A's session from its picker; A is revealed, no tab is added -----------------
+      await switchTo('Untitled session');
+      const countBeforeOpen = (await chatTabs()).length;
+      check(await clickButton('Sessions'), 'C5 the Sessions button of B is pressed');
+      await waitFor(
+        () => web.inDoc((doc) => doc.querySelectorAll('.session-row').length > 0),
+        10_000,
+        200,
+      );
+      await web.inDoc((doc, title) => {
+        for (const row of doc.querySelectorAll('.session-row')) {
+          if ((row.querySelector('.session-title')?.textContent ?? '').trim() === title) {
+            row.querySelector('.session-main')?.setAttribute('data-visual-pick', 'true');
+          }
+        }
+      }, TITLE_A);
+      check(
+        await clickRowMain('[data-visual-pick="true"]'),
+        "C5 the row of A's session is pressed in the picker of B",
+      );
+      const revealed = await waitFor(async () => (await visibleChatId()) === idA, 8_000, 150);
+      await openChat(30_000);
+      check(
+        revealed === true && (await chatTabs()).length === countBeforeOpen,
+        `C5 opening A's session from B's picker reveals A and adds no tab (${String(countBeforeOpen)} -> ${String((await chatTabs()).length)} tabs)`,
+      );
+
+      // --- C6 (launcher title button, Ctrl+Alt+N) ---------------------------------------------------
+      await showOpenCodeBar();
+      await newTabCheck('New Session from the title button of the launcher', async () => {
+        await page
+          .locator('.part.sidebar .action-label[aria-label^="New Session"]')
+          .first()
+          .click();
+      });
+      await newTabCheck('Ctrl+Alt+N inside a tab', async () => {
+        await focusPromptBox();
+        await page.keyboard.press('ControlOrMeta+Alt+n');
+      });
+
+      // --- C7 + C8 (file link): Insert at cursor, the link of the reply, Add selection --------------
+      await switchTo('Tab27A');
+      await send(
+        'Reply with: a short TypeScript function in a ts code block and the inline code path `src/sample.ts:20`. Do not use any tools. MARKDOWN',
+      );
+      check(await waitIdle(30_000), 'C7 the MARKDOWN turn of A ends');
+      await focusSampleEditor();
+      await page.keyboard.press('ControlOrMeta+Home');
+      await switchTo('Tab27A');
+      check(
+        await clickIn('button[aria-label="Insert code at cursor"]'),
+        'C7 Insert code at cursor is pressed in the tab',
+      );
+      const firstLine = () =>
+        page.evaluate(() => {
+          const lines = [...globalThis.document.querySelectorAll('.monaco-editor .view-line')]
+            .map((line) => ({
+              top: line.getBoundingClientRect().top,
+              text: line.textContent ?? '',
+            }))
+            .filter((line) => line.top > 0)
+            .sort((x, y) => x.top - y.top);
+          return (lines[0]?.text ?? '').replace(/\xa0/g, ' ');
+        });
+      const inserted = await waitFor(
+        async () => (await firstLine()).startsWith('export function greet(name: string): string {'),
+        5_000,
+        150,
+      );
+      check(
+        inserted === true,
+        `C7 Insert at cursor from the tab wrote into src/sample.ts, the last text editor (first line ${JSON.stringify(await firstLine())})`,
+      );
+      await shot('27d-insert');
+      await focusSampleEditor();
+      await command('File: Revert File');
+      await focusSampleEditor();
+      await selectLines2to3();
+      await switchTo('Tab27A');
+      check(await clickButton('Add context'), 'C7 the "+" button is pressed in the tab');
+      await waitPresent('[role="menu"]');
+      check(await clickButton('Add selection'), 'C7 Add selection is pressed in the "+" menu');
+      const ranged = await waitFor(
+        async () => (await view()).chips.includes('src/sample.ts#2-3'),
+        10_000,
+        250,
+      );
+      check(
+        ranged === true,
+        `C7 Add selection from the tab adds the chip src/sample.ts#2-3 (${JSON.stringify((await view()).chips)})`,
+      );
+      await removeChips();
+      const chatGroups = new Set((await chatTabs()).map((tab) => tab.group));
+      check(
+        await clickIn('.file-ref[data-path="src/sample.ts"][data-line="20"]'),
+        'C8 the file link is pressed in the tab',
+      );
+      await waitFor(
+        async () =>
+          /Ln 20\b/.test(
+            await page.locator('#status\\.editor\\.selection').first().innerText({ timeout: 500 }),
+          ),
+        4_000,
+        100,
+      );
+      const afterLink = await tabsNow();
+      const linked = afterLink.find((tab) => tab.active && !isChatTab(tab));
+      check(
+        /Ln 20\b/.test(await editorSelection()) &&
+          linked !== undefined &&
+          !chatGroups.has(linked.group) &&
+          afterLink.filter((tab) => !isChatTab(tab) && chatGroups.has(tab.group)).length === 0,
+        `C8 a file link from the tab opens src/sample.ts at line 20 outside the chat's group (status "${(await editorSelection()).trim()}", groups of the tabs ${JSON.stringify([...chatGroups])}, link in ${String(linked?.group)})`,
+      );
+
+      // --- C9: Explain with every chat tab hidden goes to the most recent tab -----------------------
+      await switchTo('Tab27A');
+      const recentId = drivenChatId;
+      // Another file than `sample.ts`, which is open in the first group: with two editors on one
+      // document `editorForMenu` takes the first visible one, whose selection is another (seen in
+      // a first run of this step: "Explain what @src/sample.ts does." with no range).
+      await quickOpen('src/other27.ts', 'other27.ts');
+      await selectLines2to3();
+      const hiddenAll = (await visibleChatId()) === undefined;
+      const tabsBeforeExplain = (await chatTabs()).length;
+      const aim = await page
+        .locator('.editor-group-container.active .monaco-editor .view-lines .view-line')
+        .filter({ hasText: 'o27b' })
+        .first()
+        .boundingBox({ timeout: 3_000 })
+        .catch(() => null);
+      check(
+        aim !== null && hiddenAll,
+        `C9 no chat tab is on screen and the editor shows line 2 (hidden: ${String(hiddenAll)})`,
+      );
+      await page.mouse.click(aim.x + 40, aim.y + aim.height / 2, { button: 'right' });
+      await waitFor(async () => (await menuRows()).length > 0, 3_000, 100);
+      const entry = page.locator('.monaco-menu').getByText(EXPLAIN, { exact: true });
+      for (let attempt = 0; attempt < 3 && (await entry.count()) > 0; attempt += 1) {
+        await entry.first().click();
+        await waitFor(async () => (await entry.count()) === 0, 1_000, 100);
+      }
+      const shown = await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+      await openChat(30_000);
+      await waitFor(
+        async () => (await view()).users.at(-1) === 'Explain what @src/other27.ts#2-3 does.',
+        20_000,
+        200,
+      );
+      check(
+        shown !== undefined &&
+          drivenChatId === recentId &&
+          (await chatTabs()).length === tabsBeforeExplain &&
+          (await view()).users.at(-1) === 'Explain what @src/other27.ts#2-3 does.',
+        `C9 Explain with every tab hidden reveals the most recent tab and sends there (${JSON.stringify((await view()).users.at(-1))}, tabs ${String(tabsBeforeExplain)} -> ${String((await chatTabs()).length)}, same tab ${String(drivenChatId === recentId)})`,
+      );
+      check(await waitIdle(60_000), 'C9 the turn of the Explain prompt ends');
+
+      // --- C11: a request with no chat on screen; the toast opens the tab of its session --------------
+      await clearBox();
+      await removeChips();
+      await send(`${titleOf(PROMPT_A)} Read .env. ASK_PERMISSION`);
+      await waitFor(isBusy, 5_000, 100);
+      // The tab of `other27.ts` (C9) shares the chat group: pressing it hides every chat at once,
+      // as the title bar button does in step 5. A quick open took seconds, and the request had
+      // already arrived while the tab was still on screen (no toast then).
+      await page.locator('.tab', { hasText: 'other27.ts' }).first().click();
+      const hidden = (await visibleChatId()) === undefined;
+      const toast = await waitFor(async () => {
+        const toasts = page.locator('.notifications-toasts .notification-toast');
+        return (await toasts.count())
+          ? (await toasts.first().innerText()).replace(/\n/g, ' | ')
+          : null;
+      }, 30_000);
+      const badge = page.locator(
+        '.activitybar .action-item:has([aria-label^="OpenCode"]) .badge-content',
+      );
+      const badgeText =
+        (await waitFor(
+          async () => (await badge.allInnerTexts().catch(() => [])).join(','),
+          5_000,
+          100,
+        )) ?? '';
+      check(
+        hidden &&
+          toast !== undefined &&
+          toast !== null &&
+          /Permission requested/.test(toast) &&
+          badgeText !== '',
+        `C11 with every chat tab hidden a request raises a native notification ("${String(toast).slice(0, 80)}") and a badge on the OpenCode icon ("${badgeText}")`,
+      );
+      await shot('27e-request-hidden');
+      const open = page
+        .locator('.notifications-toasts .notification-toast a', { hasText: /open/i })
+        .first();
+      if (await open.count()) await open.click();
+      const back = await waitFor(async () => (await visibleChatId()) === idA, 10_000, 200);
+      await openChat(30_000);
+      const card = await waitFor(
+        () => web.inDoc((doc) => doc.querySelector('.permission-card') !== null),
+        15_000,
+        200,
+      );
+      check(
+        back === true && card === true,
+        `C11 "Open chat" of the notification reveals the tab of the session and its permission card is there (tab ${String(back)}, card ${String(card)})`,
+      );
+      check(await clickButton('Allow once'), 'C11 Allow once is pressed (never Always)');
+      check(await waitIdle(30_000), 'C11 the turn ends after Allow once');
+
+      // --- C8 (diff): "Changed files" opens its diff outside the chat's group -----------------------
+      await send(`${titleOf(PROMPT_A)} EDIT_FILES: change a few files`);
+      check(await waitIdle(30_000), 'C8 the edit turn ends');
+      await waitPresent('details.changed-files');
+      await clickIn('details.changed-files > summary');
+      await waitPresent('details.changed-files[open]');
+      const chatGroupsNow = new Set((await chatTabs()).map((tab) => tab.group));
+      check(
+        await clickIn('details.changed-files button.changed-file[aria-label*="src/sample.ts"]'),
+        'C8 the row of src/sample.ts is pressed in "Changed files"',
+      );
+      const diffTab = await waitFor(
+        async () =>
+          (await tabsNow()).find((tab) => tab.active && /OpenCode session/.test(tab.label)),
+        8_000,
+        150,
+      );
+      check(
+        diffTab !== undefined && !chatGroupsNow.has(diffTab.group),
+        `C8 the diff of "Changed files" opens outside the chat's group (diff in group ${String(diffTab?.group)}, chat tabs in ${JSON.stringify([...chatGroupsNow])})`,
+      );
+      await shot('27f-diff');
+
+      // --- C2 (full width): the same tab alone in its editor area ----------------------------------
+      await closeSampleTabs();
+      await waitFor(async () => (await groupCount()) === 1, 4_000, 150);
+      const fullWidth = (await chatFrameBox())?.width ?? 0;
+      await setTheme(DARK);
+      const fullState = await view();
+      const fullLook = await web.inDoc(measureText, {
+        title: '.chat-title',
+        box: 'textarea.prompt-text',
+      });
+      const fullRatio = Math.min(fullLook.title?.ratio ?? 0, fullLook.box?.ratio ?? 0);
+      check(
+        (await groupCount()) === 1 &&
+          fullWidth > mediaWidth * 1.5 &&
+          fullState.kind === THEME_KINDS[DARK].webview &&
+          fullRatio >= 4.5,
+        `C2 dark, tab alone in the editor area (${String(Math.round(fullWidth))} px against ${String(Math.round(mediaWidth))} px beside the code): the chat renders with kind ${fullState.kind} and text contrast ${fullRatio.toFixed(2)} >= 4.5`,
+      );
+      assertNoWebviewErrors('C2 full width tab');
+      await shot('27g-tab-full');
+
+      // --- C10 (editor to sidebar): the tabs stay and the side bar chat works -------------------------
+      const tabsBeforeBack = (await chatTabs()).map((tab) => tab.text);
+      setLocation('sidebar');
+      // The launcher goes and the chat view takes its place in the same container; if the side bar
+      // is not showing it (hidden, another container), the activity bar item brings it back.
+      await waitFor(async () => !(await launcher()).text.includes('The chat opens'), 8_000, 200);
+      let sidebarId = await waitFor(() => sidebarChatId(), 8_000, 200);
+      if (sidebarId === undefined) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        sidebarId = await waitFor(() => sidebarChatId(), 15_000, 200);
+      }
+      await openChat(30_000, sidebarId);
+      await waitFor(() => web.inDoc((doc) => doc.querySelector('textarea') !== null), 15_000, 200);
+      await send(PROMPT_B.replace('Tab27B', 'Tab27S'));
+      const answered = await waitIdle(30_000);
+      const sideState = await view();
+      const tabsAfterBack = (await chatTabs()).map((tab) => tab.text);
+      check(
+        sidebarId !== undefined &&
+          drivenChatId === sidebarId &&
+          answered &&
+          (sideState.users.at(-1) ?? '').includes('Tab27S') &&
+          sideState.lastAssistant.trim() !== '' &&
+          tabsAfterBack.length === tabsBeforeBack.length &&
+          tabsAfterBack.length >= 2,
+        `C10 editor -> sidebar leaves the ${String(tabsAfterBack.length)} tabs open (${JSON.stringify(tabsBeforeBack)} -> ${JSON.stringify(tabsAfterBack)}) and the side bar chat answers (prompt ${JSON.stringify(sideState.users.at(-1))}, reply ${JSON.stringify(sideState.lastAssistant)}, idle ${String(answered)}, view ${String(sidebarId)})`,
+      );
+      await shot('27h-back-to-sidebar');
+      await openChat(30_000, idA);
+      const usersBefore = (await view()).users.length;
+      await send(`${titleOf(PROMPT_A)} Reply with exactly: again27. Do not use any tools.`);
+      const tabAnswered = await waitIdle(30_000);
+      const tabState = await view();
+      check(
+        tabState.title === TITLE_A &&
+          tabAnswered &&
+          tabState.users.length === usersBefore + 1 &&
+          (tabState.users.at(-1) ?? '').includes('again27') &&
+          tabState.lastAssistant.trim() !== '',
+        `C10 and a tab left open still works after the switch (title ${JSON.stringify(tabState.title)}, prompt ${JSON.stringify(tabState.users.at(-1))} answered ${JSON.stringify(tabState.lastAssistant)})`,
+      );
+
+      // --- C12: Reload Window in editor mode (no serializer yet) ------------------------------------
+      setLocation('editor');
+      await sleep(1_500); // the setting has no signal the page shows; the reload below reads the tabs
+      const tabsBeforeReload = (await tabsNow()).map((tab) => tab.text);
+      await page.evaluate(() => {
+        globalThis.__visualPreReload27 = true;
+      });
+      await command('Developer: Reload Window');
+      web?.close();
+      await browser.close().catch(() => undefined);
+      let reloaded = false;
+      for (let tries = 0; tries < 120 && !reloaded; tries++) {
+        await connectWorkbench(90_000);
+        const stale = await page
+          .evaluate(() => globalThis.__visualPreReload27 === true)
+          .catch(() => true);
+        reloaded = !stale;
+        if (reloaded) break;
+        await browser.close().catch(() => undefined);
+        await sleep(250); // between two attempts to reach the new page, not a wait for it
+      }
+      if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
+      await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
+      await sleep(4_000); // fixed on purpose: nothing says VS Code has finished restoring editors
+      const tabsAfterReload = (await tabsNow()).map((tab) => tab.text);
+      console.log(
+        `  C12 tabs before Reload Window ${JSON.stringify(tabsBeforeReload)}, after ${JSON.stringify(tabsAfterReload)}`,
+      );
+      await command('OpenCode: Open Chat');
+      await waitFor(async () => (await visibleChatId()) !== undefined, 20_000, 200);
+      await openChat(40_000);
+      await waitFor(async () => (await view()).messages > 0, 20_000, 300);
+      const reopened = await view();
+      check(
+        reopened.title !== 'Untitled session' && reopened.messages >= 2,
+        `C12 after Reload Window VS Code kept ${String(tabsAfterReload.filter((text) => !/\.ts\b/.test(text)).length)} of ${String(tabsBeforeReload.length)} tabs, and Open Chat reopens the last session (${JSON.stringify(reopened.title)}, ${String(reopened.messages)} blocks)`,
+      );
+      assertNoWebviewErrors('C12 after Reload Window');
+      await shot('27i-after-reload');
+    } finally {
+      // Leave the workspace as the step found it: no chat tab or file tab, the setting back to
+      // `sidebar`, `sample.ts` as it was (C8 edits it) and the files EDIT_FILES creates removed.
+      setLocation('sidebar');
+      await closeAllEditors().catch(() => undefined);
+      fs.writeFileSync(sampleFile, sampleBefore);
+      for (const file of [
+        path.join(srcDir, 'removed.ts'),
+        path.join(srcDir, 'other27.ts'),
+        path.join(srcDir, 'added.ts'),
+        path.join(workspace, 'assets', 'logo.png'),
+      ]) {
+        fs.rmSync(file, { force: true });
+      }
     }
   });
 } catch (error) {

@@ -26,14 +26,32 @@ const CALL_TIMEOUT_MS = 20_000;
  */
 export const WEBVIEW_STUCK = 'the chat webview stopped answering CDP';
 
-/** Finds the webview target of the extension, polling the debugging endpoint. */
-async function webviewTarget(port, timeoutMs) {
+/**
+ * Finds the webview target of the extension, polling the debugging endpoint.
+ *
+ * With `wantedId` it returns the target whose URL carries `id=<wantedId>`, the id the workbench
+ * gives as the `name` attribute of that webview's `iframe.webview` (see `run.mjs` `openChat`);
+ * without it, the first target of the extension, which is the only choice while one chat exists.
+ * Why an id and not a state of the target: with two chat tabs open (`openVsCode.chatLocation:
+ * editor`) the order of `/json` does not follow the active tab, and in both targets
+ * `document.visibilityState` is "visible" (the tabs keep their context when hidden) and the two
+ * `.chat-title` read "Untitled session" until a prompt is sent; `document.hasFocus()` is true only
+ * in the active tab and only while VS Code holds the system focus. VERIFIED on Windows 11, VS Code
+ * 1.144.0 (29/10/2026), spike with two tabs: visibilityState "visible" in both, `hasFocus()` in
+ * one, and the hidden tab's workbench iframe reported `checkVisibility()` false with its `name`
+ * equal to the `id=` of its own target. NOT observed: a target of a tab in a hidden editor group
+ * other than by switching tabs, macOS, Linux.
+ */
+async function webviewTarget(port, timeoutMs, wantedId) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
     try {
       const list = await (await fetch(`http://127.0.0.1:${String(port)}/json`)).json();
       const target = list.find(
-        (entry) => entry.type === 'iframe' && entry.url.includes(`extensionId=${EXTENSION_ID}`),
+        (entry) =>
+          entry.type === 'iframe' &&
+          entry.url.includes(`extensionId=${EXTENSION_ID}`) &&
+          (wantedId === undefined || entry.url.includes(`id=${wantedId}&`)),
       );
       if (target) return target;
     } catch {
@@ -51,9 +69,10 @@ async function webviewTarget(port, timeoutMs) {
  * result. `fn` is serialized with `toString()`, so it must be self-contained (no closures); `arg`
  * must be JSON-able. `logs` receives one line per `Log` entry, console call and exception
  * (`[exception] ...`, `[error] ...`), which `run.mjs` filters for CSP violations and exceptions.
+ * `wantedId` (optional) picks one of several chat webviews, see {@link webviewTarget}.
  */
-export async function openWebview(port, logs, timeoutMs = 30_000) {
-  const target = await webviewTarget(port, timeoutMs);
+export async function openWebview(port, logs, timeoutMs = 30_000, wantedId = undefined) {
+  const target = await webviewTarget(port, timeoutMs, wantedId);
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
     ws.onopen = resolve;
