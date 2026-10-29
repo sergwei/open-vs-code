@@ -17,6 +17,28 @@ export const VIEW_CONTAINER_ID = 'openVsCode';
 /** Chat webview view id (`contributes.views.openVsCode[].id`). */
 export const CHAT_VIEW_ID = 'openVsCode.chat';
 
+/**
+ * Launcher view shown in place of the chat while `openVsCode.chatLocation` is `editor` (issue #77,
+ * `contributes.views.openVsCode[].id`). A tree view with a welcome message; it holds no chat.
+ */
+export const SESSIONS_VIEW_ID = 'openVsCode.sessions';
+
+/**
+ * `viewType` of the editor tabs that show the chat (issue #77). Not contributed: a
+ * `WebviewPanel` needs no entry in `contributes`. VS Code may prefix the type it reports in
+ * `TabInputWebview.viewType` (HYPOTHESIS), so tests compare with `endsWith`.
+ */
+export const CHAT_PANEL_VIEW_TYPE = 'openVsCode.chatPanel';
+
+/** Command id of "OpenCode: Open Settings" (contributed; issue #77): Settings filtered to this extension. */
+export const OPEN_SETTINGS_COMMAND_ID = 'openVsCode.openSettings';
+
+/** Key of the chat-location setting inside {@link CONFIG_SECTION} (issue #77): `sidebar` or `editor`. */
+export const CHAT_LOCATION_KEY = 'chatLocation';
+
+/** Full id of the chat-location setting (`contributes.configuration.properties`; also read by the `when` of the views). */
+export const CHAT_LOCATION_SETTING = 'openVsCode.chatLocation';
+
 /** Command id of "OpenCode: Show Logs" (`contributes.commands[].command`). */
 export const SHOW_LOGS_COMMAND_ID = 'openVsCode.showLogs';
 

@@ -64,10 +64,22 @@
         {
           "type": "webview",
           "id": "openVsCode.chat",
-          "name": "Chat"
+          "name": "Chat",
+          "when": "config.openVsCode.chatLocation != editor"
+        },
+        {
+          "id": "openVsCode.sessions",
+          "name": "Sessions",
+          "when": "config.openVsCode.chatLocation == editor"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "openVsCode.sessions",
+        "contents": "The chat opens in editor tabs, one per session.\n[New Session](command:openVsCode.newSession)\n[Open Chat](command:openVsCode.openChat)\nTo keep the chat here, change Chat Location in [Open Settings](command:openVsCode.openSettings)."
+      }
+    ],
     "configuration": {
       "title": "OpenCode",
       "properties": {
@@ -93,6 +105,21 @@
           "scope": "window",
           "order": 3,
           "markdownDescription": "Model that every **new** chat session starts with, written `provider/model` (for example `opencode/big-pickle`). It wins over the last model you sent a prompt with. Leave empty to start with that last model, or with opencode's own default if there is none. A value that is badly written or not offered by the server is ignored with a warning."
+        },
+        "openVsCode.chatLocation": {
+          "type": "string",
+          "enum": [
+            "sidebar",
+            "editor"
+          ],
+          "enumDescriptions": [
+            "Side bar: one chat in the OpenCode view.",
+            "Editor tabs: one tab per session; the OpenCode view becomes a launcher."
+          ],
+          "default": "sidebar",
+          "scope": "window",
+          "order": 4,
+          "markdownDescription": "Where the chat lives. **sidebar** keeps one chat in the OpenCode view. **editor** opens one editor tab per session and turns the OpenCode view into a launcher. A change applies at once, without reloading the window. Editor tabs are not restored by Reload Window yet; Open Chat reopens the last session of the folder."
         }
       }
     },
@@ -162,7 +189,14 @@
       {
         "command": "openVsCode.newSession",
         "title": "New Session",
-        "category": "OpenCode"
+        "category": "OpenCode",
+        "icon": "$(add)"
+      },
+      {
+        "command": "openVsCode.openSettings",
+        "title": "Open Settings",
+        "category": "OpenCode",
+        "icon": "$(gear)"
       },
       {
         "command": "openVsCode.stopResponse",
@@ -202,6 +236,21 @@
           "command": "openVsCode.restartServer",
           "group": "navigation",
           "when": "view == openVsCode.chat"
+        },
+        {
+          "command": "openVsCode.newSession",
+          "group": "navigation@1",
+          "when": "view == openVsCode.sessions"
+        },
+        {
+          "command": "openVsCode.openSettings",
+          "group": "navigation@2",
+          "when": "view == openVsCode.sessions"
+        },
+        {
+          "command": "openVsCode.restartServer",
+          "group": "9_server",
+          "when": "view == openVsCode.sessions"
         }
       ],
       "explorer/context": [

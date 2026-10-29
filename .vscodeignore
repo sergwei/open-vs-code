@@ -14,6 +14,8 @@
 !dist/extension.js
 !dist/webview/**
 !media/activity.svg
+!media/chat-tab-light.svg
+!media/chat-tab-dark.svg
 !media/icon.png
 !LICENSE*
 !CHANGELOG.md

@@ -1,13 +1,7 @@
 import * as vscode from 'vscode';
-import { isWebviewToHost, type HostToWebview, type WebviewToHost } from '../shared/protocol';
+import type { HostToWebview, WebviewToHost } from '../shared/protocol';
+import { parseWebviewMessage, renderChatWebview } from './chatWebview';
 import { CHAT_VIEW_ID } from './ids';
-import { buildWebviewHtml, createNonce } from './webviewHtml';
-
-// Contract with webview-ui/vite.config.mts: the output directory and the fixed
-// file names below must match `build.outDir`, `entryFileNames` and the CSS name.
-const WEBVIEW_DIST_SEGMENTS = ['dist', 'webview'];
-const SCRIPT_SEGMENTS = ['assets', 'index.js'];
-const STYLE_SEGMENTS = ['assets', 'style.css'];
 
 /** What the provider tells the chat controller; the controller never touches `vscode`. */
 export interface ChatViewHooks {
@@ -114,20 +108,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /**
    * Configures the webview, sets its HTML and wires the message listener.
    *
-   * `localResourceRoots` is limited to `dist/webview` (the default would expose the
-   * workspace; HYPOTHESIS, read in vscode.d.ts) and `options` is set before `html`,
-   * as the API requires. The listener, the visibility handler and the dispose handler are
-   * disposed with the view. Also kicks off a non-blocking check that the bundle exists and warns
-   * in the log channel if not, so a missing build does not look like a silent blank view.
+   * Options, HTML, nonce and the bundle check are {@link renderChatWebview}, shared with the
+   * editor tabs (`chatPanels.ts`). The listener, the visibility handler and the dispose handler
+   * are disposed with the view.
    * VERIFIED in F5 (Windows 11, 2026-10-20, issue #2): the bundle loads and "Chat view resolved"
    * appears. The message path is VERIFIED by the integration suite only as far as `webview ready`
    * reaching the log (`chatView.test.ts`); UNVERIFIED by eye until the F5 of issue #14.
    */
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     const webview = webviewView.webview;
-    const distWebview = vscode.Uri.joinPath(this.extensionUri, ...WEBVIEW_DIST_SEGMENTS);
-    const scriptUri = vscode.Uri.joinPath(distWebview, ...SCRIPT_SEGMENTS);
-    const styleUri = vscode.Uri.joinPath(distWebview, ...STYLE_SEGMENTS);
 
     this.view = webviewView;
     this.ready = false;
@@ -150,61 +139,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }),
     ];
 
-    webview.options = { enableScripts: true, localResourceRoots: [distWebview] };
-    webview.html = buildWebviewHtml({
-      cspSource: webview.cspSource,
-      scriptUri: webview.asWebviewUri(scriptUri).toString(),
-      styleUri: webview.asWebviewUri(styleUri).toString(),
-      nonce: createNonce(),
-    });
+    renderChatWebview(webview, this.extensionUri, this.channel);
     this.channel.info('Chat view resolved');
     this.applyBadge();
     this.hooks.onVisibilityChange?.(true);
-    void this.warnIfBundleMissing([scriptUri, styleUri]);
   }
 
   /**
-   * Validates one raw message from the webview and routes it.
+   * Validates one raw message from the webview ({@link parseWebviewMessage}) and routes it.
    *
    * `ready` marks the document ready BEFORE calling `onReady`, so what the controller posts in
-   * answer is delivered. A message that fails the guard is dropped with a warning that names its
-   * `type` (if it is a string) and nothing else, because the content is untrusted.
+   * answer is delivered. A message that fails the guard is dropped with a warning.
    */
   private receive(raw: unknown): void {
-    if (!isWebviewToHost(raw)) {
-      const type =
-        typeof raw === 'object' &&
-        raw !== null &&
-        typeof (raw as { type?: unknown }).type === 'string'
-          ? (raw as { type: string }).type.slice(0, 64) // untrusted text: bounded length
-          : 'unknown';
-      this.channel.warn(`rejected a message from the webview (type: ${type})`);
-      return;
-    }
-    if (raw.type === 'ready') {
+    const message = parseWebviewMessage(raw, this.channel);
+    if (message === undefined) return;
+    if (message.type === 'ready') {
       this.ready = true;
       this.hooks.onReady();
       return;
     }
-    this.hooks.onMessage(raw);
-  }
-
-  /**
-   * Logs a warning for each bundle file that cannot be stat'ed.
-   *
-   * Never throws: a failed `stat` is the expected signal here. Covers the day Vite
-   * renames `style.css` or packaging leaves `dist/webview` out of the .vsix.
-   */
-  private async warnIfBundleMissing(uris: vscode.Uri[]): Promise<void> {
-    for (const uri of uris) {
-      try {
-        await vscode.workspace.fs.stat(uri);
-      } catch {
-        this.channel.warn(
-          `Webview bundle file missing: ${uri.fsPath}. Run "npm run build:webview".`,
-        );
-      }
-    }
+    this.hooks.onMessage(message);
   }
 }
 

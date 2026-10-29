@@ -2,14 +2,25 @@ import * as vscode from 'vscode';
 import { isWebviewToHost, type UiCommand } from '../shared/protocol';
 import { createAttention } from './attention';
 import { ChatController, type ComposeOutcome, type FocusTarget } from './chatController';
+import {
+  planLocationSwitch,
+  readChatLocation,
+  type ChatLocation,
+  type TabSnapshot,
+} from './chatLocation';
+import type { ChatPane } from './chatPane';
+import { ChatPanels } from './chatPanels';
 import type { ChatSurfaceGate } from './chatSurfaceGate';
+import { ChatTabs } from './chatTabs';
 import { registerChatView } from './chatViewProvider';
-import { createEditorActions } from './editorActions';
+import { createEditorActions, trackLastTextEditor } from './editorActions';
 import type { ModelRef } from '../shared/model';
 import {
   ADD_SELECTION_TO_CHAT_COMMAND_ID,
   ADD_TO_CHAT_COMMAND_ID,
   CHAT_FOCUSED_CONTEXT_KEY,
+  CHAT_LOCATION_KEY,
+  CHAT_LOCATION_SETTING,
   CHAT_VIEW_ID,
   CONFIG_SECTION,
   DEFAULT_MODEL_KEY,
@@ -22,6 +33,7 @@ import {
   MANAGE_PERMISSIONS_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
   OPEN_CHAT_COMMAND_ID,
+  OPEN_SETTINGS_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
   SHOW_REQUEST_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
@@ -34,6 +46,7 @@ import { pickSavedPermissionsToRevoke } from './savedPermissionsUi';
 import { restartServerWithFeedback } from './serverLifecycle';
 import type { ServerManager } from './serverManager';
 import { registerSessionDiffProvider } from './sessionDiffEditor';
+import { registerSessionsLauncher } from './sessionsLauncher';
 import { confirmRevertDiscard, confirmSessionDelete } from './sessionUi';
 
 /**
@@ -162,9 +175,8 @@ function parseReply(
 }
 
 /**
- * Wires the chat (issues #9/#14) into VS Code: controller, view provider (attached to the
- * controller as pane 1, the only chat surface until the editor-tab phases of #77), server-state
- * subscription, the editor actions of the chat (`editorActions.ts`, phase 2), the attention
+ * Wires the chat (issues #9/#14) into VS Code: controller, the chat surfaces (the side-bar view
+ * and the editor tabs, see "Issue #77" below), server-state subscription, the editor actions of the chat (`editorActions.ts`, phase 2), the attention
  * feature with its internal commands (issue #19), the saved-permissions command (issue #18), the
  * native confirmation of a session delete (`sessionUi.ts`, issue #20), the model preferences of
  * issue #23 (the `openVsCode.defaultModel` setting, re-read when it changes without touching the
@@ -204,9 +216,10 @@ function parseReply(
  * itself (the integration suite calls the command with URIs, it cannot right-click).
  *
  * Issue #35 registers the four palette commands (Open Chat, Focus Prompt, New Session, Stop
- * Response). Each one first reveals the chat with the command VS Code generates for the view
- * (`openVsCode.chat.focus`), which also hands the keyboard to the iframe, and then asks the
- * webview through `controller.runUiCommand` to do what its button does. Focus Prompt is a toggle:
+ * Response). In `sidebar` mode each one first reveals the chat with the command VS Code generates
+ * for the view (`openVsCode.chat.focus`), which also hands the keyboard to the iframe, and then
+ * asks the webview through `controller.runUiCommand` to do what its button does (in `editor` mode
+ * the target is a tab, see below). Focus Prompt is a toggle:
  * with the chat focused it returns the focus to the editor instead; its two keybindings say the
  * direction in their argument instead of reading the flag (issue #92, {@link focusPromptTarget}),
  * so the keys go by `editorTextFocus` and the flag only decides the key inside the chat and the
@@ -254,7 +267,7 @@ function parseReply(
  * `(clicked, selected)` pair as Add to OpenCode Chat). Each asks the controller first and reveals
  * the chat after, only when the outcome is not `rejected`: a refusal is shown as a native
  * `showWarningMessage` and the chat stays closed (decision P11=1). The pane they talk to comes
- * from the single helper `targetPane`. VERIFIED on Windows 11 (29/10/2026, `npm run test:integration`,
+ * from the single helper `targetPane` (the surface of the current mode, see below). VERIFIED on Windows 11 (29/10/2026, `npm run test:integration`,
  * the commands run with hand-built arguments): "registers the context-menu commands", "Explain with
  * OpenCode sends the selection of the clicked document", "Explorer Explain sends one prompt for the
  * files and counts the folder it skipped" and "Add to OpenCode Chat from the editor attaches the
@@ -268,6 +281,43 @@ function parseReply(
  * workspace folder can be added"" (read in `.notifications-toasts`). UNVERIFIED: the chat being
  * CLOSED (not only hidden behind the Explorer) when the command runs, and that a refusal leaves a
  * closed chat closed (the chat was open during C7).
+ *
+ * Issue #77 (decisions Q1-Q10 and T1-T4 of Sergio, 29/10/2026): the setting
+ * `openVsCode.chatLocation` picks where the chat lives, read at start and on every change.
+ * - `sidebar` (the default): ONE pane, the view, attached at start as before.
+ * - `editor`: no side-bar pane. Every chat is an editor tab (`ChatPanels`), one pane each; New
+ *   Session always opens a NEW lazy tab; a command goes to the active tab, else the most recent
+ *   (`ChatTabs.commandTarget`), else it opens one with the last session of the folder.
+ * - A change runs `planLocationSwitch`: to `editor` the view's pane is dropped and its session
+ *   opens in a tab; to `sidebar` NO tab is closed (they keep working until the user closes them),
+ *   the view gets the remembered session only if no tab shows it, and a session is revealed, not
+ *   duplicated, wherever it already is (the controller asks `revealPane`/`openElsewhere`).
+ * - An EMPTY tab that opens a session no other surface shows adopts it instead of opening another
+ *   tab (decision of Sergio, 29/10/2026; the rule is in `ChatController.openRequested`).
+ * - `anySurfaceVisible` (not the view alone) drives the attention feature, and the badge goes to
+ *   the view in `sidebar` and to the launcher view in `editor`. `chatFocused` is true while ANY
+ *   surface has the focus; a surface that hides gets a synthetic blur.
+ * VERIFIED in a real VS Code 1.144.0 (Windows 11, `npm run test:integration`, 29/10/2026), with
+ * a synthetic server for the session cases: "opens one tab per New Session, each with a ready
+ * document", "reveals the existing tab on Open Chat instead of opening another", "opens a tab on
+ * Open Chat when none is open", "keeps the tabs open and the side-bar view working when going back
+ * to sidebar" (two tabs stay, `Chat view resolved` appears again, a probe reaches the view's pane)
+ * and "opens the diff beside a chat tab, and serves prompts and session.open from tabs" (the
+ * session of the side bar opens in a tab on the change to `editor`, `session.open` of it from a
+ * second tab logs `chat tab revealed` and no third tab, a prompt injected while a tab is the target
+ * is accepted). Then in a real window, `npm run test:visual` step 27 (Windows 11, VS Code 1.144.0,
+ * 29/10/2026, all visual checks passed): "ok C11 with every chat tab hidden a request raises a
+ * native notification ("Source: OpenCode GUI | Cancel | OpenCode: Permission requested: read:
+ * .env — Ope") and a badge on the OpenCode icon ("1")", "ok C11 "Open chat" of the notification
+ * reveals the tab of the session and its permission card is there (tab true, card true)", "ok C9
+ * Explain with every tab hidden reveals the most recent tab and sends there" and, for the iframe of
+ * a tab, "ok C4 coming back to A shows the whole reply once: 400 numbers, from 1 to 400, in order,
+ * no repeats". Focus Prompt to the chat and to the editor, Stop Response, the two Add to OpenCode
+ * Chat entries and Manage Saved Permissions in `editor` mode are run by the cases of
+ * `test/integration/chatPanel.test.ts` (log only). UNVERIFIED: macOS and Linux locally (the CI
+ * runs the integration suite there), the chips the Add entries give with a folder served (the
+ * suite serves none, so the host refuses them), and the badge with the launcher not in front (it
+ * was the view in front in C11).
  *
  * The two internal commands (`SHOW_REQUEST_COMMAND_ID`, `REPLY_PERMISSION_COMMAND_ID`) are always
  * registered and not contributed: they are the targets of the links of an attention
@@ -288,15 +338,46 @@ export function registerChat(
     chatFocused = focused;
     void vscode.commands.executeCommand('setContext', CHAT_FOCUSED_CONTEXT_KEY, focused);
   };
-  // `view` is assigned below; the attention feature and the controller only use it later, from
-  // events and from VS Code callbacks, never during this function.
+  /** Where the chat lives now (issue #77): the setting, read at start and again on each change. */
+  const readLocation = (): ChatLocation =>
+    readChatLocation(
+      vscode.workspace.getConfiguration(CONFIG_SECTION).get<unknown>(CHAT_LOCATION_KEY),
+    );
+  let mode = readLocation();
+  const tabs = new ChatTabs();
+  const lastEditor = trackLastTextEditor();
+  // The side-bar pane exists only in `sidebar` mode (decision T3=1).
+  let sidebarPane: ChatPane | undefined;
+  // Pending requests the badge must show; written to the view or to the launcher by `applyBadge`.
+  let badgeCount = 0;
+  // `view`, `launcher`, `panels` and `controller` are assigned below; the attention feature and the
+  // callbacks only use them later, from events and from VS Code callbacks, never during this
+  // function.
+  /**
+   * True while the side-bar view (only if its pane exists) or any chat tab is on screen: what the
+   * attention feature asks instead of "is the view visible". HYPOTHESIS for the pane-less case
+   * (`editor` mode with the view still visible): a check that reads the badge there would settle it.
+   */
+  const anySurfaceVisible = (): boolean =>
+    (sidebarPane !== undefined && view.provider.visible) || panels.anyVisible();
+  /**
+   * Writes the pending-request count to the surface that carries the badge: the view in `sidebar`
+   * mode, the launcher view in `editor` mode, and 0 to the other so it never keeps a stale number.
+   * VERIFIED in a real window for the launcher in front: "C11 … a badge on the OpenCode icon ("1")"
+   * of `test:visual` step 27 (Windows 11, 29/10/2026).
+   */
+  const applyBadge = (): void => {
+    view.provider.setBadge(mode === 'sidebar' ? badgeCount : 0);
+    launcher.setBadge(mode === 'editor' ? badgeCount : 0);
+  };
   const attention = createAttention({
     target: {
       setBadge: (count) => {
-        view.provider.setBadge(count);
+        badgeCount = count;
+        applyBadge();
       },
       get visible() {
-        return view.provider.visible;
+        return anySurfaceVisible();
       },
     },
     log,
@@ -304,7 +385,7 @@ export function registerChat(
   const controller = new ChatController({
     createClient: createOpencodeClient,
     log,
-    editor: createEditorActions(log),
+    editor: createEditorActions(log, { lastEditor, tabs }),
     memory: {
       get: (folder) => {
         const map = readSessionMap(context);
@@ -339,71 +420,294 @@ export function registerChat(
     setup: createSetupActions(redetect),
     ui: {
       setChatFocused,
-      focusView: () => {
-        void vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
+      focusView: (paneId) => {
+        revealSurface(paneId, false);
+      },
+      revealPane: (paneId) => {
+        revealSurface(paneId, false);
+      },
+      openElsewhere: (fromPaneId, sessionID) => {
+        if (mode !== 'editor') return false;
+        const existing = sessionID === undefined ? undefined : paneShowing(sessionID);
+        // The asker already shows it: not a duplicate, the controller resyncs it in place.
+        if (existing === fromPaneId) return false;
+        if (existing !== undefined) revealSurface(existing, false);
+        else openTab(sessionID, true);
+        return true;
       },
     },
   });
-  // The side-bar view is the only chat surface for now (E9 phase 1): pane 1. Its callbacks read
-  // `view` lazily, like the attention feature above.
-  const pane = controller.attachPane({
-    post: (message) => {
-      view.provider.post(message);
+
+  /** The session remembered for the folder the server serves now, if any. */
+  const rememberedSession = (): string | undefined => {
+    const state = manager.state;
+    if (state.kind !== 'running') return undefined;
+    const map = readSessionMap(context);
+    return Object.hasOwn(map, state.server.folder) ? map[state.server.folder] : undefined;
+  };
+  /**
+   * The pane (a tab, most recent first, then the side bar) that already shows `sessionID`, if any.
+   * Reads the controller's own state (`ChatController.sessionOf`), which changes the moment a
+   * session is bound; the registry of tabs only learns it from a posted snapshot and would let a
+   * duplicate through in between.
+   */
+  const paneShowing = (sessionID: string): number | undefined => {
+    const candidates = [...tabs.recent(), ...(sidebarPane === undefined ? [] : [sidebarPane.id])];
+    return candidates.find((paneId) => controller.sessionOf(paneId) === sessionID);
+  };
+  /** The open tabs with the session each shows (the controller's state), most recent first. */
+  const tabsSnapshot = (): TabSnapshot[] =>
+    tabs.recent().map((paneId) => ({ paneId, sessionID: controller.sessionOf(paneId) }));
+  /**
+   * Brings the surface of `paneId` forward: the tab in its own column, or the view with the
+   * keyboard in it. `preserveFocus` only applies to a tab.
+   */
+  const revealSurface = (paneId: number, preserveFocus: boolean): void => {
+    if (tabs.has(paneId)) panels.reveal(paneId, preserveFocus);
+    else void vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
+  };
+  /**
+   * Opens a NEW tab, bound to `sessionID` or lazy, and returns its pane id. `focus` puts the
+   * keyboard in its prompt box (kept by the controller until the document is ready); without it
+   * the tab opens in the background, which is what a change of location needs.
+   */
+  const openTab = (sessionID: string | undefined, focus: boolean): number => {
+    const paneId = panels.open(focus);
+    if (sessionID !== undefined) void controller.openInPane(paneId, sessionID);
+    if (focus) controller.runUiCommand(paneId, 'prompt.focus');
+    return paneId;
+  };
+  /**
+   * Attaches the side-bar pane, giving it `sessionID` when there is one (nothing else touches the
+   * memory). It is the `primary` surface: a server for a new folder gives IT the remembered session
+   * even when leftover tabs were attached before it.
+   */
+  const attachSidebar = (sessionID: string | undefined): ChatPane => {
+    const pane = controller.attachPane({
+      post: (message) => {
+        view.provider.post(message);
+      },
+      canDeliver: () => view.provider.canDeliver,
+      primary: true,
+    });
+    sidebarPane = pane;
+    if (sessionID !== undefined) void controller.openInPane(pane.id, sessionID);
+    return pane;
+  };
+  /**
+   * The side-bar pane. In `sidebar` mode it always exists: attached at start, or by
+   * `applyLocation` before the mode is observable from outside. Throws if called without it, which
+   * would be a bug in the callers, not a state to heal (the view that resolves BEFORE the setting
+   * change is handled by `applyLocation`, which answers the view's `ready` it had dropped).
+   */
+  const ensureSidebar = (): ChatPane => {
+    if (sidebarPane === undefined) throw new Error('the side-bar pane is not attached');
+    return sidebarPane;
+  };
+  /**
+   * Applies a new value of the setting: runs the actions of `planLocationSwitch` in order, then
+   * moves the badge and recomputes visibility. Closes nothing (decision Q4 of Sergio). When the
+   * side-bar pane is attached and the view can already deliver, the view's `ready` (dropped by
+   * `onReady` while the mode was still `editor`) is answered here, or the view would keep its
+   * initial state until it was hidden and shown again. That branch writes its own line, `side-bar
+   * view already resolved: replaying ready`, so a test can tell it from a view that resolved
+   * again after the switch (which logs `Chat view resolved`).
+   * VERIFIED in a real VS Code (Windows 11, 29/10/2026) by "keeps the tabs open and the side-bar
+   * view working when going back to sidebar" (the `chat location changed to` lines, no tab
+   * closed) and by "opens the diff beside a chat tab, and serves prompts and session.open from
+   * tabs" (the side-bar session opens in a tab).
+   * NOT observed in a real window: the replay branch. The integration case "answers an
+   * already-open side-bar view…" always saw the view resolve again instead (`Chat view resolved`).
+   */
+  const applyLocation = (next: ChatLocation): void => {
+    if (next === mode) return;
+    const actions = planLocationSwitch(mode, next, {
+      sidebarSession: sidebarPane?.sessionID,
+      rememberedSession: rememberedSession(),
+      tabs: tabsSnapshot(),
+    });
+    mode = next;
+    log.info(`chat location changed to ${next}`);
+    for (const action of actions) {
+      switch (action.kind) {
+        case 'detachSidebar':
+          if (sidebarPane !== undefined) controller.detachPane(sidebarPane.id);
+          sidebarPane = undefined;
+          break;
+        case 'openTab':
+          openTab(action.sessionID, false);
+          break;
+        case 'revealTab':
+          panels.reveal(action.paneId, true);
+          break;
+        case 'attachSidebar': {
+          const pane = attachSidebar(action.sessionID);
+          // A view that resolved while the mode was still `editor` had its `ready` dropped by the
+          // view's `onReady` and will not send another: answer it now.
+          if (view.provider.canDeliver) {
+            // Stable line, only this branch writes it: it tells a test which path answered.
+            log.info('side-bar view already resolved: replaying ready');
+            void controller.onPaneReady(pane.id).catch((error: unknown) => {
+              log.error(`answering webview ready failed: ${String(error)}`);
+            });
+          }
+          break;
+        }
+      }
+    }
+    applyBadge();
+    onSurfaceChange();
+  };
+  /**
+   * Gives a surface that is no longer on screen the blur its iframe may never send, so
+   * `openVsCode.chatFocused` cannot stay true for a hidden chat (issue #35, kept for tabs).
+   */
+  const blurHiddenSurfaces = (): void => {
+    if (!chatFocused) return;
+    const hidden = [
+      ...(sidebarPane !== undefined && !view.provider.visible ? [sidebarPane.id] : []),
+      ...panels.ids().filter((id) => !panels.isVisible(id)),
+    ];
+    for (const paneId of hidden) {
+      void controller.handle(paneId, { type: 'chat.focusChanged', focused: false });
+    }
+  };
+  /** A surface appeared, hid, was activated or closed: refresh what depends on "any surface visible". */
+  const onSurfaceChange = (): void => {
+    attention.onVisibility(anySurfaceVisible());
+    blurHiddenSurfaces();
+  };
+  const launcher = registerSessionsLauncher();
+  const panels = new ChatPanels(context.extensionUri, channel, log, tabs, {
+    attachPane: (surface) => controller.attachPane(surface),
+    detachPane: (paneId) => {
+      controller.detachPane(paneId);
     },
-    canDeliver: () => view.provider.canDeliver,
+    onReady: (paneId) => {
+      gate?.changed();
+      void controller.onPaneReady(paneId).catch((error: unknown) => {
+        log.error(`answering webview ready failed: ${String(error)}`);
+      });
+    },
+    onMessage: (paneId, message) => {
+      void controller.handle(paneId, message).catch((error: unknown) => {
+        log.error(`handling ${message.type} failed: ${String(error)}`);
+      });
+    },
+    onResync: (paneId) => {
+      gate?.changed();
+      void controller.onPaneReady(paneId).catch((error: unknown) => {
+        log.error(`resync of a returning chat tab failed: ${String(error)}`);
+      });
+    },
+    onSurfaceChange,
   });
+  // In `sidebar` mode the side-bar view's pane exists from the start, attached BEFORE the server
+  // state is applied so it receives the remembered session. Its callbacks read the pane lazily.
+  if (mode === 'sidebar') attachSidebar(undefined);
   const view = registerChatView(context.extensionUri, channel, {
     onReady: () => {
       // Issue #87: the provider marked the view `ready` before calling this, so `canDeliver` is
       // true now; wakes any native notification that is waiting to learn the chat is showing.
       gate?.changed();
+      if (mode !== 'sidebar') return;
+      const pane = ensureSidebar();
       void controller.onPaneReady(pane.id).catch((error: unknown) => {
         log.error(`answering webview ready failed: ${String(error)}`);
       });
     },
     onMessage: (message) => {
-      void controller.handle(pane.id, message).catch((error: unknown) => {
+      if (sidebarPane === undefined) return;
+      void controller.handle(sidebarPane.id, message).catch((error: unknown) => {
         log.error(`handling ${message.type} failed: ${String(error)}`);
       });
     },
-    onVisibilityChange: (visible) => {
-      attention.onVisibility(visible);
-      if (!visible && chatFocused) setChatFocused(false);
+    onVisibilityChange: () => {
+      onSurfaceChange();
     },
   });
-  // P3=2 (issue #85): the notifications ask whether this view can show the failure itself.
-  gate?.attach(() => view.provider.canDeliver);
+  // P3=2 (issue #85): the notifications ask whether a surface can show the failure itself.
+  gate?.attach(
+    () => (sidebarPane !== undefined && view.provider.canDeliver) || panels.anyCanDeliver(),
+  );
   /**
-   * The pane every command of the menus talks to: the side-bar one, the only chat surface until
-   * #77 phase 2 picks the surface that is active. The ONE place to change then (risk R8 of #36).
+   * The pane every command of the menus and the palette talks to (the ONE place to change, risk R8
+   * of #36), and whether it had to be created for the call. `sidebar`: the view's pane. `editor`:
+   * the active tab, else the most recent, else a NEW tab with the last session of the folder
+   * (decision P9=1). `focus` false opens that new tab in the background, for the entries that
+   * reveal the chat only if the action is not refused.
    */
-  const targetPane = (): typeof pane => pane;
-  /**
-   * Closes a context-menu entry (issue #36). `rejected` (nothing valid to send) shows the reason
-   * as a native warning and does NOT open the chat (decision P11=1 of Sergio); `composed` and
-   * `notified` reveal it, `notified` because its "items were not added" notice is waiting there.
-   * The warning is not awaited: `showWarningMessage` settles when the user dismisses it.
-   */
-  const finishContextAction = async (outcome: ComposeOutcome): Promise<void> => {
-    if (outcome.status === 'rejected') {
-      void vscode.window.showWarningMessage(outcome.error.message);
+  const targetPane = (focus: boolean): { paneId: number; created: boolean } => {
+    if (mode === 'sidebar') return { paneId: ensureSidebar().id, created: false };
+    const existing = tabs.commandTarget();
+    if (existing !== undefined) return { paneId: existing, created: false };
+    return { paneId: openTab(rememberedSession(), focus), created: true };
+  };
+  /** Shows the chat of `paneId` without moving the keyboard into it. */
+  const revealChat = async (paneId: number): Promise<void> => {
+    if (tabs.has(paneId)) {
+      panels.reveal(paneId, false);
       return;
     }
     await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
   };
-  /** Reveals the chat (the view's generated focus command) and relays `command` to its webview. */
+  /**
+   * Closes a context-menu entry (issue #36). `rejected` (nothing valid to send) shows the reason
+   * as a native warning and does NOT open the chat (decision P11=1 of Sergio): a tab that was
+   * opened just for this call is closed again. `composed` and `notified` reveal it, `notified`
+   * because its "items were not added" notice is waiting there. The warning is not awaited:
+   * `showWarningMessage` settles when the user dismisses it.
+   */
+  const finishContextAction = async (
+    outcome: ComposeOutcome,
+    target: { paneId: number; created: boolean },
+  ): Promise<void> => {
+    if (outcome.status === 'rejected') {
+      if (target.created) panels.close(target.paneId);
+      void vscode.window.showWarningMessage(outcome.error.message);
+      return;
+    }
+    await revealChat(target.paneId);
+  };
+  /**
+   * Reveals the chat and relays `command` to its webview. `sidebar`: the view's generated focus
+   * command, then the command. `editor`: the active or most recent tab; with none, a new tab with
+   * the last session (it focuses its own prompt) and nothing else, except Stop, which has nothing
+   * to stop and opens nothing.
+   */
   const runInChat = async (command: UiCommand): Promise<void> => {
-    await vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
-    controller.runUiCommand(pane.id, command);
+    if (mode === 'sidebar') {
+      const pane = ensureSidebar();
+      await vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
+      controller.runUiCommand(pane.id, command);
+      return;
+    }
+    const paneId = tabs.commandTarget();
+    if (paneId === undefined) {
+      if (command !== 'session.stop') openTab(rememberedSession(), true);
+      return;
+    }
+    panels.reveal(paneId, false);
+    controller.runUiCommand(paneId, command);
   };
 
   const disposables: vscode.Disposable[] = [
     view.disposable,
+    launcher.disposable,
+    { dispose: () => panels.dispose() },
+    { dispose: () => lastEditor.dispose() },
     manager.onDidChangeState((state) => {
       controller.onServerState(state);
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration(DEFAULT_MODEL_SETTING)) controller.onPreferencesChanged();
+      if (event.affectsConfiguration(CHAT_LOCATION_SETTING)) applyLocation(readLocation());
+    }),
+    vscode.commands.registerCommand(OPEN_SETTINGS_COMMAND_ID, async () => {
+      await vscode.commands.executeCommand(
+        'workbench.action.openSettings',
+        `@ext:${context.extension.id}`,
+      );
     }),
     // Issue #31: the original side of "Changed files" diffs. Registered now, not on first use, so
     // a diff tab restored by Reload Window finds its provider.
@@ -418,52 +722,87 @@ export function registerChat(
     { dispose: () => controller.dispose() },
     { dispose: () => attention.dispose() },
     vscode.commands.registerCommand(MANAGE_PERMISSIONS_COMMAND_ID, async () => {
-      await controller.handle(pane.id, { type: 'permissions.manage' });
+      const target = targetPane(false);
+      // `editor` mode with no tab: the tab opened just to host the picker is shown, not left in
+      // the background. VERIFIED in VS Code 1.144.0 on Windows 11 (29/10/2026): the integration
+      // check "Manage Saved Permissions uses the open tab, or opens and shows one" runs it with no
+      // tab open and asserts the new tab is active.
+      if (target.created) await revealChat(target.paneId);
+      await controller.handle(target.paneId, { type: 'permissions.manage' });
     }),
     // Issue #35.
     vscode.commands.registerCommand(OPEN_CHAT_COMMAND_ID, () => runInChat('prompt.focus')),
     vscode.commands.registerCommand(FOCUS_PROMPT_COMMAND_ID, async (args: unknown) => {
       if (focusPromptTarget(args, chatFocused) === 'editor') {
-        await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+        // With a chat tab open the active group may be the chat's own, so the focus goes to the
+        // last text editor (issue #77); with none, the group command is what it always was.
+        const editor = tabs.recent().length > 0 ? lastEditor.current() : undefined;
+        if (editor === undefined) {
+          await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+        } else {
+          await vscode.window.showTextDocument(editor.document, {
+            viewColumn: editor.viewColumn,
+            preserveFocus: false,
+          });
+        }
         return;
       }
       await runInChat('prompt.focus');
     }),
-    vscode.commands.registerCommand(NEW_SESSION_COMMAND_ID, () => runInChat('session.new')),
+    // In `editor` mode New Session is a new lazy tab; the button inside a tab asks the same
+    // through `session.new` (`openElsewhere`).
+    vscode.commands.registerCommand(NEW_SESSION_COMMAND_ID, async () => {
+      if (mode === 'editor') {
+        openTab(undefined, true);
+        return;
+      }
+      await runInChat('session.new');
+    }),
     vscode.commands.registerCommand(STOP_RESPONSE_COMMAND_ID, () => runInChat('session.stop')),
     // Issue #30: the Explorer passes (clicked item, all selected items). The strings go through
     // the same host checks as a drop (`dropFiles`), minus the `file.find` one.
     vscode.commands.registerCommand(
       ADD_TO_CHAT_COMMAND_ID,
       async (clicked: unknown, selected: unknown) => {
-        await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
-        await controller.addToChat(targetPane().id, explorerUris(clicked, selected));
+        const { paneId } = targetPane(false);
+        await revealChat(paneId);
+        await controller.addToChat(paneId, explorerUris(clicked, selected));
       },
     ),
     // Issue #36: the context-menu entries. The editor ones receive the `Uri` of the right-clicked
     // document (nothing from the palette), the Explorer one the same pair as Add to OpenCode Chat.
     vscode.commands.registerCommand(ADD_SELECTION_TO_CHAT_COMMAND_ID, async (uri: unknown) => {
-      await finishContextAction(await controller.addEditorToChat(targetPane().id, editorUri(uri)));
+      const target = targetPane(false);
+      await finishContextAction(
+        await controller.addEditorToChat(target.paneId, editorUri(uri)),
+        target,
+      );
     }),
     vscode.commands.registerCommand(EXPLAIN_SELECTION_COMMAND_ID, async (uri: unknown) => {
+      const target = targetPane(false);
       await finishContextAction(
-        await controller.composeFromEditor(targetPane().id, 'explain', editorUri(uri)),
+        await controller.composeFromEditor(target.paneId, 'explain', editorUri(uri)),
+        target,
       );
     }),
     vscode.commands.registerCommand(FIX_SELECTION_COMMAND_ID, async (uri: unknown) => {
+      const target = targetPane(false);
       await finishContextAction(
-        await controller.composeFromEditor(targetPane().id, 'fix', editorUri(uri)),
+        await controller.composeFromEditor(target.paneId, 'fix', editorUri(uri)),
+        target,
       );
     }),
     vscode.commands.registerCommand(
       EXPLAIN_FILES_COMMAND_ID,
       async (clicked: unknown, selected: unknown) => {
+        const target = targetPane(false);
         await finishContextAction(
           await controller.composeFromFiles(
-            targetPane().id,
+            target.paneId,
             'explain',
             explorerUris(clicked, selected),
           ),
+          target,
         );
       },
     ),
@@ -473,8 +812,16 @@ export function registerChat(
         log.warn(`${SHOW_REQUEST_COMMAND_ID} rejected: invalid arguments`);
         return;
       }
-      await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
-      controller.focusRequest(pane.id, target);
+      // The tab (or the view) that already shows the request's session, else the surface of the
+      // current mode; with no tab at all, one is opened on that session (decision Q10=1).
+      const shown = paneShowing(target.sessionID);
+      const paneId =
+        shown ??
+        (mode === 'sidebar'
+          ? ensureSidebar().id
+          : (tabs.commandTarget() ?? openTab(target.sessionID, false)));
+      await revealChat(paneId);
+      controller.focusRequest(paneId, target);
     }),
     vscode.commands.registerCommand(REPLY_PERMISSION_COMMAND_ID, async (raw: unknown) => {
       const reply = parseReply(raw);
@@ -503,7 +850,13 @@ export function registerChat(
           log.warn('injected message rejected by isWebviewToHost');
           return;
         }
-        await controller.handle(pane.id, raw);
+        // Same target rule as the commands, without opening anything: a test opens its tab first.
+        const paneId = mode === 'sidebar' ? sidebarPane?.id : tabs.commandTarget();
+        if (paneId === undefined) {
+          log.warn('injected message dropped: no chat surface is open');
+          return;
+        }
+        await controller.handle(paneId, raw);
       }),
     );
   }

@@ -24,6 +24,7 @@ import {
   FOCUS_PROMPT_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
   OPEN_CHAT_COMMAND_ID,
+  OPEN_SETTINGS_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
 } from '../../src/extension/ids';
 import { openLogFromStart } from './support/extensionLog';
@@ -129,6 +130,16 @@ describe('palette commands and keybindings', () => {
     ]) {
       assert.ok(commands.includes(id), `${id} is not registered`);
     }
+  });
+
+  /**
+   * Open Settings (issue #77: the button of the launcher view and the link of its welcome) is
+   * registered, not just listed: a welcome link to an unregistered command does nothing. It is
+   * only checked as registered; the Settings editor it opens cannot be read by the test API.
+   */
+  it('registers Open Settings', async () => {
+    const commands = await vscode.commands.getCommands(true);
+    assert.ok(commands.includes(OPEN_SETTINGS_COMMAND_ID), `${OPEN_SETTINGS_COMMAND_ID} missing`);
   });
 
   /**

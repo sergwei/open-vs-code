@@ -8,14 +8,17 @@ interface Manifest {
   capabilities?: { untrustedWorkspaces?: { supported?: unknown; description?: string } };
   contributes: {
     viewsContainers: { activitybar: { id: string }[] };
-    views: Record<string, { id: string }[]>;
-    commands: { command: string; title?: string; category?: string }[];
+    views: Record<string, { id: string; name?: string; when?: string }[]>;
+    viewsWelcome?: { view: string; contents: string }[];
+    commands: { command: string; title?: string; category?: string; icon?: string }[];
     menus?: Record<string, { command: string; group?: string; when?: string }[]>;
     configuration: {
       properties: Record<
         string,
         {
           type?: string;
+          enum?: string[];
+          enumDescriptions?: string[];
           default?: unknown;
           scope?: string;
           order?: number;
@@ -293,6 +296,83 @@ describe('context menus (issue #36)', () => {
     ]) {
       expect(palette).not.toContain(id);
     }
+  });
+});
+
+/**
+ * Protects the manifest side of the chat location (issue #77, decisions Q2=1, Q3=1, Q9=1 and T1=1
+ * of Sergio, 29/10/2026): the setting with its values and default, the two views excluded from each
+ * other by `when` on `config.openVsCode.chatLocation`, the welcome of the launcher with the texts
+ * of the approved sketch and commands that exist, and the title buttons. The data is the REAL
+ * package.json. What VS Code DOES with those `when` clauses is not checked here. VERIFIED only for
+ * the chat view, by `chatPanel.test.ts` "keeps the tabs open and the side-bar view working when
+ * going back to sidebar" (Windows 11, VS Code 1.144.0, 29/10/2026): `Chat view resolved` appears
+ * after the setting goes back to `sidebar`. HYPOTHESIS for the launcher view (that it shows with
+ * its welcome in `editor` mode) from this file alone: `test:visual` step 27 looks at it on screen.
+ */
+describe('chat location (issue #77)', () => {
+  const views = manifest.contributes.views[ids.VIEW_CONTAINER_ID] ?? [];
+  const commandIds = manifest.contributes.commands.map((c) => c.command);
+  const welcome = manifest.contributes.viewsWelcome ?? [];
+  const sessionsWelcome = welcome.find((w) => w.view === ids.SESSIONS_VIEW_ID);
+
+  it('declares the setting with both values, descriptions, default sidebar and order 4', () => {
+    const setting = manifest.contributes.configuration.properties[ids.CHAT_LOCATION_SETTING];
+    expect(ids.CHAT_LOCATION_SETTING).toBe(`${ids.CONFIG_SECTION}.${ids.CHAT_LOCATION_KEY}`);
+    expect(setting).toMatchObject({
+      type: 'string',
+      enum: ['sidebar', 'editor'],
+      default: 'sidebar',
+      scope: 'window',
+      order: 4,
+    });
+    expect(setting?.enumDescriptions).toHaveLength(2);
+  });
+
+  it('shows the chat view unless the location is editor, and the launcher only then', () => {
+    const chat = views.find((v) => v.id === ids.CHAT_VIEW_ID);
+    const sessions = views.find((v) => v.id === ids.SESSIONS_VIEW_ID);
+    expect(chat?.when).toBe(`config.${ids.CHAT_LOCATION_SETTING} != editor`);
+    expect(sessions?.when).toBe(`config.${ids.CHAT_LOCATION_SETTING} == editor`);
+  });
+
+  it('gives the launcher the welcome of the approved sketch, with buttons that exist', () => {
+    const contents = sessionsWelcome?.contents ?? '';
+    expect(contents).toContain('The chat opens in editor tabs, one per session.');
+    expect(contents).toContain('[New Session](command:openVsCode.newSession)');
+    expect(contents).toContain('[Open Chat](command:openVsCode.openChat)');
+    expect(contents).toContain('To keep the chat here, change Chat Location in [Open Settings]');
+    for (const [, command] of contents.matchAll(/\(command:([\w.]+)\)/g)) {
+      expect(commandIds, command).toContain(command);
+    }
+  });
+
+  it('points every welcome at a contributed view', () => {
+    const viewIds = Object.values(manifest.contributes.views).flatMap((list) =>
+      list.map((v) => v.id),
+    );
+    for (const entry of welcome) expect(viewIds).toContain(entry.view);
+  });
+
+  it('puts New Session and Open Settings on the launcher title, Restart Server in the overflow', () => {
+    const title = (manifest.contributes.menus?.['view/title'] ?? []).filter(
+      (e) => e.when === `view == ${ids.SESSIONS_VIEW_ID}`,
+    );
+    const group = (id: string): string | undefined => title.find((e) => e.command === id)?.group;
+    expect(group(ids.NEW_SESSION_COMMAND_ID)).toMatch(/^navigation/);
+    expect(group(ids.OPEN_SETTINGS_COMMAND_ID)).toMatch(/^navigation/);
+    expect(group(ids.RESTART_SERVER_COMMAND_ID)).not.toMatch(/^navigation/);
+    for (const entry of manifest.contributes.menus?.['view/title'] ?? []) {
+      expect(commandIds).toContain(entry.command);
+    }
+  });
+
+  it('gives the title buttons their icons and declares Open Settings', () => {
+    const icon = (id: string): string | undefined =>
+      manifest.contributes.commands.find((c) => c.command === id)?.icon;
+    expect(icon(ids.NEW_SESSION_COMMAND_ID)).toBe('$(add)');
+    expect(icon(ids.OPEN_SETTINGS_COMMAND_ID)).toBe('$(gear)');
+    expect(ids.OPEN_SETTINGS_COMMAND_ID).toBe('openVsCode.openSettings');
   });
 });
 

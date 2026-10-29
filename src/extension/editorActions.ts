@@ -12,6 +12,7 @@ import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
 import type { AttachmentRef } from '../shared/protocol';
 import type { EditorActions, EditorContext } from './chatController';
+import type { ChatTabs } from './chatTabs';
 import type { ContextDiagnostic } from './contextPrompts';
 import { classifyDropped } from './droppedFiles';
 import { isInServedFolder, selectionLines, toEditorRef } from './fileMentions';
@@ -78,6 +79,12 @@ function workspaceFolder(): string | undefined {
  * with `Line 1:` and `Line 2:`, in the user message of the conversation) and "C3 Explain from the
  * editor sends "Explain what @src/sample.ts#2-3 does."" (the selection of the clicked editor).
  * Not observed: macOS and Linux, where the context menu may be native.
+ * Issue #77 adds `lastEditor`: when `activeTextEditor` is `undefined` (a chat tab is the active
+ * editor, so no text editor is) the last text editor that is still visible is read instead, so
+ * Add selection works from a chat tab. Only the fallback is new: a defined `activeTextEditor`
+ * still wins, and with nothing visible the result is `NoActiveEditor` as before. UNVERIFIED for
+ * this function: the fallback ran for `insert` (see {@link LastTextEditor}) but no case reads the
+ * editor context with a chat tab active.
  * VERIFIED on Windows 11, VS Code 1.143.0 (22/10/2026), in two suites. `npm run test:integration`
  * (22 passing, 1 pending, no folder served): "refuses the editor context with no editor open
  * (NoActiveEditor)", "refuses an untitled document (NoFileOnDisk: Save the file first)" and
@@ -100,8 +107,10 @@ function workspaceFolder(): string | undefined {
 function readEditorContext(
   folder: string | undefined,
   options: { uri?: string; diagnostics?: boolean } = {},
+  lastEditor?: LastTextEditor,
 ): EditorContext {
-  const editor = editorForMenu(options.uri) ?? vscode.window.activeTextEditor;
+  const editor =
+    editorForMenu(options.uri) ?? vscode.window.activeTextEditor ?? lastEditor?.current();
   if (editor === undefined) {
     throw new EditorActionError('NoActiveEditor', 'Open a file in the editor to add it');
   }
@@ -211,6 +220,68 @@ function readDiagnostics(
 }
 
 /**
+ * The last text editor the user had, for the moments when the active editor is a chat tab (issue
+ * #77): `activeTextEditor` is documented as `undefined` while a non-text editor is active.
+ * VERIFIED for a webview tab (VS Code 1.144.0, Windows 11, 29/10/2026, `npm run test:integration`):
+ * the check "inserts into the last text editor while a chat tab is the active editor" printed
+ * "R1: activeTextEditor with a chat tab active is undefined" and the insert still reached the file
+ * in the other column.
+ */
+export interface LastTextEditor {
+  /** The last text editor that was active and is still visible, or `undefined`. */
+  current(): vscode.TextEditor | undefined;
+  dispose(): void;
+}
+
+/**
+ * Starts following the active text editor. An `undefined` active editor (a chat tab, a settings
+ * page) does NOT replace the remembered one: that is the point. `current` drops an editor that is
+ * no longer in `visibleTextEditors`, so a closed file is never written to. Starts with the editor
+ * that is active now. The caller disposes it.
+ */
+export function trackLastTextEditor(): LastTextEditor {
+  let last = vscode.window.activeTextEditor;
+  const subscription = vscode.window.onDidChangeActiveTextEditor((editor) => {
+    if (editor !== undefined) last = editor;
+  });
+  return {
+    current: () =>
+      last !== undefined && vscode.window.visibleTextEditors.includes(last) ? last : undefined,
+    dispose: () => {
+      subscription.dispose();
+    },
+  };
+}
+
+/**
+ * What the editor actions need to keep files out of the chat's editor group (issue #77): the last
+ * text editor and the registry of chat tabs. Both absent means the chat is not an editor, which is
+ * today's behavior.
+ */
+export interface EditorPlacement {
+  lastEditor?: LastTextEditor;
+  tabs?: ChatTabs;
+}
+
+/**
+ * The column where a file, a diff or a new file opened from the chat goes, or `undefined` for "let
+ * VS Code decide" (the active group, as before the chat could be a tab). It is only decided while
+ * a chat tab exists: the column of the last text editor unless that group holds a chat tab, else
+ * `Beside` (`ChatTabs.columnForFiles`, decision Q5=1 of Sergio). No group is locked.
+ * VERIFIED by `chatTabs.test.ts` ("columnForFiles") for the rule, and in a real window for the
+ * diff: see {@link openSessionDiff}. In `npm run test:visual` step 27 (Windows 11, VS Code 1.144.0,
+ * 29/10/2026): "ok C8 a file link from the tab opens src/sample.ts at line 20 outside the chat's
+ * group" and "ok C8 the diff of "Changed files" opens outside the chat's group". UNVERIFIED in a
+ * window: `newFile` (the "Open code in a new file" button) with a chat tab open.
+ */
+export function targetColumn(placement: EditorPlacement): vscode.ViewColumn | undefined {
+  const { tabs, lastEditor } = placement;
+  if (tabs === undefined || tabs.recent().length === 0) return undefined;
+  const column = tabs.columnForFiles(lastEditor?.current()?.viewColumn);
+  return column === 'beside' ? vscode.ViewColumn.Beside : column;
+}
+
+/**
  * Builds the {@link EditorActions} backed by the real VS Code API.
  *
  * Decisions (plan `E2-mvp-prototype/plan-fase2` §3): copy goes through `env.clipboard` and not
@@ -238,8 +309,16 @@ function readDiagnostics(
  * plus `hasImageExtension` on what comes back; the visual run does not drive "Attach image…"
  * through the dialog, so it was never run in a real window), and `insert` when the focus is in the side view (whether
  * `activeTextEditor` is still the last editor, HYPOTHESIS), macOS and Linux.
+ *
+ * Issue #77 adds `placement`: with a chat tab open, `open`, `newFile` and `openDiff` go to
+ * {@link targetColumn} instead of the active group (which would be the chat's), and `insert`
+ * falls back to the last text editor when `activeTextEditor` is `undefined`, as
+ * {@link readEditorContext} does. Without `placement`, or with no tab open, nothing changes.
  */
-export function createEditorActions(log: ServerLog): EditorActions {
+export function createEditorActions(
+  log: ServerLog,
+  placement: EditorPlacement = {},
+): EditorActions {
   return {
     async open(target, line, column, servedFolder) {
       const folder = servedFolder ?? workspaceFolder();
@@ -271,22 +350,24 @@ export function createEditorActions(log: ServerLog): EditorActions {
         Math.max(0, (line ?? 1) - 1),
         Math.max(0, (column ?? 1) - 1),
       );
+      const viewColumn = targetColumn(placement);
       await vscode.window.showTextDocument(document, {
         selection: new vscode.Range(position, position),
         preview: true,
+        ...(viewColumn === undefined ? {} : { viewColumn }),
       });
     },
 
     editorContext(folder, options) {
       try {
-        return Promise.resolve(readEditorContext(folder, options));
+        return Promise.resolve(readEditorContext(folder, options, placement.lastEditor));
       } catch (error) {
         return Promise.reject(error instanceof Error ? error : new Error(String(error)));
       }
     },
 
     async insert(text) {
-      const editor = vscode.window.activeTextEditor;
+      const editor = vscode.window.activeTextEditor ?? placement.lastEditor?.current();
       if (editor === undefined) {
         throw new EditorActionError('NoActiveEditor', 'Open a file to insert code');
       }
@@ -309,7 +390,11 @@ export function createEditorActions(log: ServerLog): EditorActions {
         content: text,
         ...(language !== undefined && known.includes(language) ? { language } : {}),
       });
-      await vscode.window.showTextDocument(document, { preview: false });
+      const viewColumn = targetColumn(placement);
+      await vscode.window.showTextDocument(document, {
+        preview: false,
+        ...(viewColumn === undefined ? {} : { viewColumn }),
+      });
     },
 
     async copy(text) {
@@ -317,7 +402,7 @@ export function createEditorActions(log: ServerLog): EditorActions {
     },
 
     openDiff(target) {
-      return openSessionDiff(target);
+      return openSessionDiff(target, targetColumn(placement));
     },
 
     async droppedFiles(folder, uris) {

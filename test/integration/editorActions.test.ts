@@ -18,7 +18,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { INJECT_WEBVIEW_MESSAGE_COMMAND_ID } from '../../src/extension/ids';
+import { INJECT_WEBVIEW_MESSAGE_COMMAND_ID, NEW_SESSION_COMMAND_ID } from '../../src/extension/ids';
+import { setChatLocation, waitForChatTabs } from './support/chatLocation';
 import { openLogCursor } from './support/extensionLog';
 
 const EXTENSION_ID = 'sergwei.open-vs-code';
@@ -113,6 +114,46 @@ describe('editor actions', () => {
     editor.selection = new vscode.Selection(0, 0, 0, 0);
     await inject({ type: 'editor.insert', text: 'const $1 = ${name}; ' });
     assert.strictEqual(document.getText(), 'const $1 = ${name}; world');
+  });
+
+  /**
+   * "Insert at cursor" while a CHAT TAB is the active editor writes into the last text editor
+   * (issue #77, risk R1 of the plan: `activeTextEditor` is documented as `undefined` while a
+   * non-text editor is active, which would make Insert say "Open a file…").
+   *
+   * Protects `LastTextEditor`: a file open in column one, a chat tab opened beside it and active,
+   * then the insert. The case logs what `activeTextEditor` was with the tab active, so the run
+   * says whether R1 happens in this VS Code; the assertion holds either way (a defined value is
+   * the same editor, an `undefined` one is rescued by the tracker). The text is untitled, so
+   * nothing touches the disk.
+   */
+  it('inserts into the last text editor while a chat tab is the active editor', async () => {
+    const log = await openLogCursor();
+    await setChatLocation('editor', log);
+    const document = await vscode.workspace.openTextDocument({ content: 'world' });
+    try {
+      const editor = await vscode.window.showTextDocument(document, vscode.ViewColumn.One);
+      editor.selection = new vscode.Selection(0, 0, 0, 0);
+      await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
+      await waitForChatTabs(1);
+      const deadline = Date.now() + 8000;
+      while (
+        !(vscode.window.tabGroups.activeTabGroup.activeTab?.input instanceof vscode.TabInputWebview)
+      ) {
+        assert.ok(Date.now() < deadline, 'the chat tab never became the active tab');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      console.log(
+        `R1: activeTextEditor with a chat tab active is ${
+          vscode.window.activeTextEditor === undefined ? 'undefined' : 'the text editor'
+        }`,
+      );
+      await inject({ type: 'editor.insert', text: 'hello ' });
+      assert.strictEqual(document.getText(), 'hello world');
+    } finally {
+      await vscode.window.showTextDocument(document, vscode.ViewColumn.One);
+      await setChatLocation(undefined, log);
+    }
   });
 
   /**

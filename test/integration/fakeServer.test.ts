@@ -46,6 +46,7 @@ import {
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
 import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
+import { chatTabs, setChatLocation, waitForChatTabs } from './support/chatLocation';
 import { openLogCursor, openLogFromStart, type LogCursor } from './support/extensionLog';
 import {
   lastReadyPid,
@@ -1208,6 +1209,85 @@ describe('fake server', function () {
     await sleep(SETTLE_MS);
     assert.strictEqual(countOf(log, 'turn finished:'), 1, `log:\n${log.added()}`);
     log.assertAbsent('failed:');
+  });
+
+  /**
+   * The chat served from editor tabs (issue #77), end to end against the synthetic server: the
+   * session of the side bar opens in a tab when the setting changes, a second tab is a lazy one,
+   * opening from it a session that the first already shows REVEALS the first (no third tab), a
+   * prompt injected while a tab is the target is accepted, and a "Changed files" diff opens in the
+   * group of the sample file, outside the groups holding the chat tabs.
+   *
+   * Protects `applyLocation` (sidebar to editor with a session), `openInPane`, the dedupe through
+   * `revealPane` and `targetColumn` in a real window. Provenance: the SYNTHETIC server; the
+   * session ids and titles are the fixture's, so what the tab SHOWS (title text, scroll) is not
+   * checked here. The diff column check is the one the header of `openSessionDiff` names: the
+   * assertion "the diff did not open in the editor column" below passing is what shows that
+   * `vscode.diff` honours `viewColumn` (VERIFIED on Windows 11, VS Code 1.144.0, 29/10/2026, in the
+   * final `npm run test:integration` of this task).
+   */
+  it('opens the diff beside a chat tab, and serves prompts and session.open from tabs', async function () {
+    const sample = await openSample();
+    const sampleColumn = sample.viewColumn;
+    assert.ok(sampleColumn, 'the sample file has no column');
+    const log = await openLogCursor();
+    try {
+      await sendPrompt(log, 'hello from the side bar');
+      const sessionID = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+      assert.ok(sessionID, `no session id in the log:\n${log.added()}`);
+
+      await setChatLocation('editor', log);
+      await waitForChatTabs(1);
+      await log.waitFor('chat tab created (pane', 8_000);
+      await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
+      await waitForChatTabs(2);
+      await sleep(SETTLE_MS);
+
+      log.mark();
+      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+        type: 'session.open',
+        requestId: 'tab-reveal-1',
+        sessionID,
+      });
+      await log.waitFor('chat tab revealed (pane', 8_000);
+      await sleep(SETTLE_MS);
+      log.assertAbsent('chat tab created (pane');
+      assert.strictEqual(chatTabs().length, 2, 'session.open opened a third tab');
+
+      log.mark();
+      await sendPrompt(log, 'EDIT_FILES: change a few files');
+      const listed = await matchInLog(
+        log,
+        /session diff: (\d+) files for (ses_\S+)/,
+        TURN_WAIT_MS,
+        'the changed files list',
+      );
+      await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+      await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+        type: 'session.diff.open',
+        sessionID: listed[2],
+        path: 'src/sample.ts',
+      });
+      const deadline = Date.now() + 8_000;
+      while (
+        !(
+          vscode.window.tabGroups.activeTabGroup.activeTab?.input instanceof vscode.TabInputTextDiff
+        )
+      ) {
+        assert.ok(Date.now() < deadline, `no diff tab opened; log:\n${log.added()}`);
+        await sleep(100);
+      }
+      const chatColumns = chatTabs().map((tab) => tab.group.viewColumn);
+      const diffColumn = vscode.window.tabGroups.activeTabGroup.viewColumn;
+      assert.strictEqual(diffColumn, sampleColumn, 'the diff did not open in the editor column');
+      assert.ok(
+        !chatColumns.includes(diffColumn),
+        `the diff opened in a chat column: ${String(chatColumns)}`,
+      );
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await setChatLocation(undefined, await openLogCursor());
+    }
   });
 
   /**
