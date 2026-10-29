@@ -256,6 +256,12 @@ export interface ChatState {
    * see it (a Stop lost behind a Focus Prompt). `seq` grows with every message.
    */
   uiCommands: { command: UiCommand; seq: number }[];
+  /**
+   * The `prompt.compose` messages (issue #36) `App` has not carried out yet, oldest first. A QUEUE
+   * for the same reason as {@link uiCommands}: two actions of one frame must both survive the
+   * `batch` of `listenHost`. `seq` grows with every message.
+   */
+  composes: { text: string; files: AttachmentRef[]; send: boolean; seq: number }[];
   /** `requestId`s sent and not answered yet; the input stays disabled while any is in flight. */
   pending: string[];
   notices: Notice[];
@@ -343,6 +349,11 @@ export interface ChatStore {
   clearFocusTarget: () => void;
   /** Empties the queue of `ui.command`s and returns them, oldest first, as plain values. */
   takeUiCommands: () => UiCommand[];
+  /**
+   * Empties the queue of `prompt.compose`s and returns them, oldest first, as PLAIN copies (the
+   * store's own elements are Proxies, which `postMessage` cannot clone).
+   */
+  takeComposes: () => { text: string; files: AttachmentRef[]; send: boolean }[];
   /** Picks the model for the next prompt of the open session (no message goes to the host). */
   selectModel: (model: ModelRef) => void;
   /** Picks the agent for the next prompt of the open session (no message goes to the host). */
@@ -400,6 +411,7 @@ export function createChatStore(): ChatStore {
     requestErrors: {},
     focusTarget: undefined,
     uiCommands: [],
+    composes: [],
     pending: [],
     notices: [],
     draftFiles: [],
@@ -412,6 +424,7 @@ export function createChatStore(): ChatStore {
   let partIndex = new Map<string, Map<string, number>>();
   let noticeCounter = 0;
   let uiCommandCounter = 0;
+  let composeCounter = 0;
 
   /** Rebuilds both indexes from the current store contents. */
   const rebuildIndexes = (): void => {
@@ -849,6 +862,15 @@ export function createChatStore(): ChatStore {
       });
     },
 
+    'prompt.compose': (m) => {
+      setState('composes', state.composes.length, {
+        text: m.text,
+        files: m.files.map((file) => ({ uri: file.uri, name: file.name })),
+        send: m.send,
+        seq: ++composeCounter,
+      });
+    },
+
     'session.diff': (m) => {
       // Only the open session's list is shown; the host sends the list of a session it just left
       // when a load finishes late, and that must not replace the one of the session on screen.
@@ -971,6 +993,15 @@ export function createChatStore(): ChatStore {
     takeUiCommands: () => {
       const taken = state.uiCommands.map((entry) => entry.command);
       setState('uiCommands', []);
+      return taken;
+    },
+    takeComposes: () => {
+      const taken = state.composes.map((entry) => ({
+        text: entry.text,
+        files: entry.files.map((file) => ({ uri: file.uri, name: file.name })),
+        send: entry.send,
+      }));
+      setState('composes', []);
       return taken;
     },
     selectModel: (model) => {

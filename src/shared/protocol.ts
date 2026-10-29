@@ -260,6 +260,17 @@ export type UiCommand = 'prompt.focus' | 'session.new' | 'session.stop';
  * `ui.command` (issue #35) is a palette or keyboard command of the host, relayed so the webview runs
  * the SAME code as the matching button ({@link UiCommand}); it is a one-shot action, never state,
  * so the host must not repeat one the webview already received.
+ * `prompt.compose` (issue #36, "Explain with OpenCode" and "Fix with OpenCode" of the editor and
+ * Explorer menus) hands the webview a prompt the HOST wrote, with the references the host emitted
+ * for it (they are already in its `pickedUris` whitelist). With `send` the webview sends it with
+ * the same code as the Send button, leaving the user's draft untouched; when it cannot (not
+ * connected, a request in flight, a busy session) or `send` is false it puts text and chips in the
+ * prompt box instead, never losing the text (a compose that was sent and then fails is appended to
+ * the draft too). Exceptions, on purpose: chips the host refused with `AttachmentRejected` do not
+ * come back, past `MAX_KEPT_COMPOSES` waiting in a hidden pane the oldest is dropped, and a compose
+ * out of bounds is refused whole (`ComposeRefused`). Like `ui.command` it is a one-shot action,
+ * never state.
+ * Check {@link isComposeInBounds} before acting on one.
  * `session.revert` (issue #32) REPLACES the revert the webview holds for ONE session; the webview
  * keeps it only if `sessionID` is the open session, and an absent `revert` means "no revert" (it
  * was restored, discarded for good, or never existed). The host sends it when a revert is prepared
@@ -324,6 +335,7 @@ export type HostToWebview =
     }
   | { type: 'ui.focus'; target: { kind: 'permission' | 'form'; sessionID: string; id: string } }
   | { type: 'ui.command'; command: UiCommand }
+  | { type: 'prompt.compose'; text: string; files: AttachmentRef[]; send: boolean }
   | { type: 'session.diff'; sessionID: string; files: ChangedFile[]; error?: ErrorInfo }
   | { type: 'session.revert'; sessionID: string; revert?: RevertState }
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; error: ErrorInfo }
@@ -856,6 +868,7 @@ const HOST_TYPE_SET: Record<HostToWebview['type'], true> = {
   'files.found': true,
   'ui.focus': true,
   'ui.command': true,
+  'prompt.compose': true,
   'session.diff': true,
   'session.revert': true,
   notice: true,
@@ -867,6 +880,28 @@ export const HOST_TO_WEBVIEW_TYPES = Object.keys(HOST_TYPE_SET) as HostToWebview
 
 /** Every `type` the webview may send; derived from the exhaustive validators. */
 export const WEBVIEW_TO_HOST_TYPES = Object.keys(WEBVIEW_VALIDATORS) as WebviewToHost['type'][];
+
+/**
+ * True when a `prompt.compose` could become a valid `prompt.send`: non-blank `text` and at most
+ * {@link MAX_DROPPED_ITEMS} files with a non-empty `uri` and `name`.
+ *
+ * Why it exists: {@link isHostToWebview} is shallow on purpose, and a `prompt.send` that breaks its
+ * validator is dropped by the host with NO `request.result`, which would leave the request pending
+ * and Send locked (`solid-webview` §3). The webview calls this BEFORE `begin`. The cap is the one
+ * of `attachments.drop` (our choice, issue #36: the host never composes more than one drop's worth);
+ * there is no text cap because `prompt.send` has none.
+ * VERIFIED by `protocol.test.ts` (fabricated messages, Windows 11, 29/10/2026).
+ */
+export function isComposeInBounds(message: {
+  text: string;
+  files: readonly AttachmentRef[];
+}): boolean {
+  return (
+    message.text.trim().length > 0 &&
+    message.files.length <= MAX_DROPPED_ITEMS &&
+    message.files.every((file) => file.uri !== '' && file.name !== '')
+  );
+}
 
 /**
  * Deep guard for messages arriving at the host from the webview.

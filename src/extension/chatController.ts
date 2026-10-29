@@ -119,6 +119,7 @@ import {
   type FocusTarget,
   type PaneSurface,
 } from './chatPane';
+import { buildContextPrompt, type ContextAction, type ContextDiagnostic } from './contextPrompts';
 import { createEventTranslator, type EventTranslator, type ResyncToken } from './eventTranslator';
 import { runEventStream, type StreamState } from './eventStream';
 import { toSearchRefs } from './fileMentions';
@@ -269,8 +270,15 @@ export interface EditorActions {
    * Issue #29: the references to attach for the active editor. Rejects with `NoActiveEditor`
    * (nothing open), `NoFileOnDisk` (untitled or a non-`file` scheme) or `OutsideWorkspace` (the
    * file is not inside `folder`, or there is no `folder`). See {@link EditorContext}.
+   * Issue #36: `options.uri` (a URI string) is the document the context menu was opened on, which
+   * is not always the active editor (a split, the left side of a diff); the editor showing it is
+   * used, and the active editor when none shows it. `options.diagnostics` also reads the errors
+   * and warnings of the selections (or of the whole file) into `EditorContext.diagnostics`.
    */
-  editorContext(folder: string | undefined): Promise<EditorContext>;
+  editorContext(
+    folder: string | undefined,
+    options?: { uri?: string; diagnostics?: boolean },
+  ): Promise<EditorContext>;
   /** Replaces every selection of the active editor with `text`. */
   insert(text: string): Promise<void>;
   /** Opens an untitled document with `text`; `language` is a VS Code language id. */
@@ -304,13 +312,29 @@ export interface EditorActions {
  * What the active editor contributes to a prompt (issue #29): the whole file, or one reference per
  * non-empty selection (`ranged` of them, each limited to its lines). `unsaved` is true when the
  * buffer differs from the disk: the server reads the SAVED file (decision Q3 of Sergio), so the
- * user is warned. Never carries the text of the buffer.
+ * user is warned. Never carries the text of the buffer. `diagnostics` (issue #36) is only filled
+ * when the caller asked for it (`options.diagnostics`): the errors and warnings VS Code reports for
+ * the selected lines, or for the whole file when nothing is selected; absent means "not asked or
+ * none", and carries messages of the language service, not file text.
  */
 export interface EditorContext {
   refs: AttachmentRef[];
   ranged: number;
   unsaved: boolean;
+  diagnostics?: ContextDiagnostic[];
 }
+
+/**
+ * What {@link ChatController.composeFromEditor} and {@link ChatController.composeFromFiles} did
+ * (issue #36). `composed`: a `prompt.compose` was handed to the pane. `rejected`: nothing was
+ * composed and `error` says why, for the caller to show as a NATIVE warning (decision P11=1 of
+ * Sergio, 29/10/2026: the click was in the editor or the Explorer, the chat may be closed and a
+ * `request.result` would be lost with its view). `notified`: nothing valid was left but the
+ * "N items were not added" notice is already in the chat (decision P8=1), so the caller has no
+ * second message to show.
+ */
+export type ComposeOutcome =
+  { status: 'composed' } | { status: 'rejected'; error: ErrorInfo } | { status: 'notified' };
 
 /**
  * What {@link EditorActions.droppedFiles} made of a drop: the chips of the regular files of the
@@ -1259,7 +1283,8 @@ export class ChatController {
    * (a new document starts without one; the load that produced it already went to the old
    * document or was dropped). Then the chips and notices that "Add to OpenCode Chat" produced
    * while the view was hidden ({@link ChatPane.postOrKeep}) go out, after the snapshot so nothing
-   * empties them. Last, the `ui.command`s of issue #35 that waited for this document
+   * empties them. Then the `prompt.compose`s of issue #36 that waited for this document
+   * ({@link ChatPane.flushComposes}; a stale one arrives with `send` false). Last, the `ui.command`s of issue #35 that waited for this document
    * ({@link runUiCommand}), so New Session or Stop act on the state the snapshot just set.
    * Unknown pane ids are ignored.
    */
@@ -1271,6 +1296,7 @@ export class ChatController {
     if (this.client === undefined) {
       pane.post({ type: 'snapshot', snapshot: EMPTY_SNAPSHOT });
       pane.flushUndeliveredMenu();
+      this.flushComposes(pane);
       this.flushUiCommands(pane);
       return;
     }
@@ -1282,7 +1308,19 @@ export class ChatController {
       pane.post({ type: 'ui.focus', target: requested.target });
     }
     pane.flushUndeliveredMenu();
+    this.flushComposes(pane);
     this.flushUiCommands(pane);
+  }
+
+  /**
+   * Sends the `prompt.compose`s a pane kept (see {@link ChatPane.flushComposes}), after the chips
+   * of "Add to OpenCode Chat" and before the `ui.command`s, and when at least one went out asks the
+   * VS Code side to hand the keyboard to the chat iframe again (same reason as
+   * {@link flushUiCommands}, same HYPOTHESIS: the focus given while the document loaded went
+   * nowhere).
+   */
+  private flushComposes(pane: ChatPane): void {
+    if (pane.flushComposes()) this.deps.ui.focusView();
   }
 
   /**
@@ -2589,6 +2627,198 @@ export class ChatController {
       uris.slice(0, MAX_DROPPED_ITEMS),
       false,
     );
+  }
+
+  /**
+   * "Explain with OpenCode" / "Fix with OpenCode" of the EDITOR context menu (issue #36): reads the
+   * selections (or the whole file) and the diagnostics of the document the menu was opened on
+   * (`uri`, a URI string; the active editor when absent), writes the prompt
+   * ({@link buildContextPrompt}) and hands it to the pane as `prompt.compose` (decision T1=1 of
+   * Sergio, 29/10/2026), to be sent in the act (P5=1) or, when the buffer has unsaved changes
+   * (P12=1), left in the prompt box with the `UnsavedChanges` notice, which goes through
+   * {@link ChatPane.postOrKeep} because the chat may be hidden. The references join `pickedUris`
+   * exactly as {@link attachFromEditor} does (same trust: the editor side limits them to the served
+   * folder), so the `prompt.send` that follows is accepted.
+   * An expected refusal (`NoActiveEditor`, `NoFileOnDisk`, `OutsideWorkspace`) returns `rejected`
+   * with the sanitized {@link ErrorInfo}; nothing is whitelisted or composed then. Logs counts and
+   * the action name only, never a path or text: `context action explain: 0 file(s), 1
+   * selection(s)`, `context action explain: refused (OutsideWorkspace)`, and for a dirty buffer
+   * `context action explain: the buffer has unsaved changes, the prompt goes to the box`. Needs no
+   * running server (the pane keeps the message until the webview can take it).
+   * VERIFIED by `chatController.test.ts` ("composeFromEditor", fake editor, 29/10/2026).
+   * VERIFIED in VS Code 1.144.0 on Windows 11 (29/10/2026): the integration check "reads the
+   * editor of the clicked document, not the active one" (`npm run test:integration`, a `Uri`
+   * passed by hand) and the `test:visual` check "C3 Explain from the editor sends "Explain what
+   * @src/sample.ts#2-3 does."" (a real right-click, one editor). NOT observed: a real right-click
+   * on the non-active side of a split.
+   */
+  async composeFromEditor(
+    paneId: number,
+    action: ContextAction,
+    uri?: string,
+  ): Promise<ComposeOutcome> {
+    const pane = this.paneById(paneId);
+    if (pane === undefined) return this.refused(action, new Error('The chat is not available'));
+    let context: EditorContext;
+    try {
+      context = await this.deps.editor.editorContext(this.server?.folder, {
+        ...(uri === undefined ? {} : { uri }),
+        diagnostics: action === 'fix',
+      });
+    } catch (error) {
+      return this.refused(action, error);
+    }
+    for (const ref of context.refs) this.pickedUris.add(ref.uri);
+    this.log.info(
+      `context action ${action}: ${String(context.refs.length - context.ranged)} file(s), ${String(context.ranged)} selection(s)`,
+    );
+    if (context.unsaved) {
+      this.log.warn(
+        `context action ${action}: the buffer has unsaved changes, the prompt goes to the box`,
+      );
+      pane.postOrKeep({
+        type: 'notice',
+        level: 'warning',
+        error: {
+          code: 'UnsavedChanges',
+          message: 'Unsaved changes: the model reads the saved version',
+        },
+      });
+    }
+    pane.compose({
+      type: 'prompt.compose',
+      text: buildContextPrompt({
+        action,
+        refs: context.refs,
+        ...(context.diagnostics === undefined ? {} : { diagnostics: context.diagnostics }),
+      }),
+      files: context.refs,
+      send: !context.unsaved,
+    });
+    return { status: 'composed' };
+  }
+
+  /**
+   * "Explain with OpenCode" of the EXPLORER context menu (issue #36): like {@link addToChat} it
+   * takes the `uris` VS Code handed the command (at most `MAX_DROPPED_ITEMS`), keeps the regular
+   * files inside the served folder without the `file.find` check of a drop (a click the host
+   * sees), whitelists them in `pickedUris`, and hands ONE `prompt.compose` with all of them
+   * (decision P8=1 of Sergio, 29/10/2026). Folders, files outside the workspace, remote and
+   * missing items are counted in ONE `DroppedItemsSkipped` warning notice with the wording of
+   * "Add to OpenCode Chat" (counts only, no names), through {@link ChatPane.postOrKeep}. With
+   * nothing valid left only that notice is shown and the outcome is `notified`; a refusal of the
+   * editor side (no served folder: `OutsideWorkspace`) is `rejected`. Logs `context action
+   * explain: 2 file(s), 0 selection(s)` and, when something was refused, `context action explain:
+   * skipped 3 (1 folder(s), 1 outside, 0 remote, 1 missing)`.
+   * VERIFIED by `chatController.test.ts` ("composeFromFiles", fake editor, 29/10/2026).
+   * VERIFIED in VS Code 1.144.0 on Windows 11 (29/10/2026) with a real multi-selection:
+   * `test:visual` "C5 two files and the folder src are selected", "C5 ONE notice counts the
+   * skipped folder" and "C5 the sent message carries two chips, one per file"; the integration
+   * check "Explorer Explain sends one prompt for the files and counts the folder it skipped".
+   * NOT observed: macOS and Linux.
+   */
+  async composeFromFiles(
+    paneId: number,
+    action: ContextAction,
+    uris: readonly string[],
+  ): Promise<ComposeOutcome> {
+    const pane = this.paneById(paneId);
+    if (pane === undefined) return this.refused(action, new Error('The chat is not available'));
+    let dropped: DroppedFiles;
+    try {
+      dropped = await this.deps.editor.droppedFiles(
+        this.server?.folder,
+        uris.slice(0, MAX_DROPPED_ITEMS),
+      );
+    } catch (error) {
+      return this.refused(action, error);
+    }
+    const refs = dropped.refs;
+    for (const ref of refs) this.pickedUris.add(ref.uri);
+    this.log.info(`context action ${action}: ${String(refs.length)} file(s), 0 selection(s)`);
+    const { folders, outside, remote, missing } = dropped.skipped;
+    const skipped = folders + outside + remote + missing;
+    if (skipped > 0) {
+      this.log.info(
+        `context action ${action}: skipped ${String(skipped)} (${String(folders)} folder(s), ${String(outside)} outside, ${String(remote)} remote, ${String(missing)} missing)`,
+      );
+      // Same wording as the "selected" variant of dropFiles, kept in step by hand.
+      pane.postOrKeep({
+        type: 'notice',
+        level: 'warning',
+        error: {
+          code: 'DroppedItemsSkipped',
+          message: `${String(skipped)} selected ${skipped === 1 ? 'item was' : 'items were'} not added: folders and files outside the workspace folder cannot be attached`,
+        },
+      });
+    }
+    if (refs.length === 0) return { status: 'notified' };
+    pane.compose({
+      type: 'prompt.compose',
+      text: buildContextPrompt({ action, refs }),
+      files: refs,
+      send: true,
+    });
+    return { status: 'composed' };
+  }
+
+  /**
+   * "Add to OpenCode Chat" of the EDITOR context menu (issue #36, decision P1=1 of Sergio): like
+   * {@link attachFromEditor} it attaches the file or each non-empty selection of the document the
+   * menu was opened on (`uri`, a URI string; the active editor when absent) and sends nothing. The
+   * chips and the `UnsavedChanges` notice go through {@link ChatPane.postOrKeep} with a request id
+   * of their own (`menu-N`), because the chat may be hidden when the entry is clicked. The
+   * references join `pickedUris`; an expected refusal (`NoActiveEditor`, `NoFileOnDisk`,
+   * `OutsideWorkspace`) returns `rejected` and whitelists nothing, for the caller to show as a
+   * native warning (P11=1). Logs `context action add: 0 file(s), 1 selection(s)` or `context
+   * action add: refused (<code>)`, counts and codes only.
+   * VERIFIED by `chatController.test.ts` ("addEditorToChat", fake editor, 29/10/2026).
+   * VERIFIED in VS Code 1.144.0 on Windows 11 (29/10/2026, `npm run test:integration`): the check
+   * "Add to OpenCode Chat from the editor attaches the selection and sends nothing". NOT observed
+   * in a real window: the chips of a hidden chat appearing after its next `ready`.
+   */
+  async addEditorToChat(paneId: number, uri?: string): Promise<ComposeOutcome> {
+    const pane = this.paneById(paneId);
+    if (pane === undefined) return this.refused('add', new Error('The chat is not available'));
+    let context: EditorContext;
+    try {
+      context = await this.deps.editor.editorContext(this.server?.folder, {
+        ...(uri === undefined ? {} : { uri }),
+      });
+    } catch (error) {
+      return this.refused('add', error);
+    }
+    for (const ref of context.refs) this.pickedUris.add(ref.uri);
+    this.menuRequests += 1;
+    pane.postOrKeep({
+      type: 'attachments.picked',
+      requestId: `menu-${String(this.menuRequests)}`,
+      files: context.refs,
+    });
+    if (context.unsaved) {
+      this.log.warn(
+        'context action add: the buffer has unsaved changes, the saved file is attached',
+      );
+      pane.postOrKeep({
+        type: 'notice',
+        level: 'warning',
+        error: {
+          code: 'UnsavedChanges',
+          message: 'Unsaved changes: the model reads the saved version',
+        },
+      });
+    }
+    this.log.info(
+      `context action add: ${String(context.refs.length - context.ranged)} file(s), ${String(context.ranged)} selection(s)`,
+    );
+    return { status: 'composed' };
+  }
+
+  /** The `rejected` outcome of a context action: sanitized error and a count-free log line. */
+  private refused(action: ContextAction | 'add', error: unknown): ComposeOutcome {
+    const info = toErrorInfo(error, this.secrets);
+    this.log.warn(`context action ${action}: refused (${info.code})`);
+    return { status: 'rejected', error: info };
   }
 
   /**

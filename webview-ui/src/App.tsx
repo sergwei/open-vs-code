@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, on, onCleanup, Show, untrack } from 'solid-js';
 import {
+  isComposeInBounds,
   MAX_DROPPED_ITEMS,
   MAX_DROPPED_URI_LENGTH,
   type AttachmentRef,
@@ -50,6 +51,8 @@ interface LastSend {
   requestId: string;
   text: string;
   files: AttachmentRef[];
+  /** True for a `prompt.compose` of the host: a failure then appends the text, see {@link runCompose}. */
+  compose?: boolean;
 }
 
 /** What the last `session.fork` carried: the text (and known files) to refill the prompt with. */
@@ -158,6 +161,10 @@ interface LastRevert {
  * no running turn raises the info notice "No response is running" instead of doing nothing. The
  * window's `focus`/`blur` and its value at mount go to the host as `chat.focusChanged`.
  *
+ * Issue #36: a `prompt.compose` from the host (Explain / Fix of the editor and Explorer menus) is
+ * carried out by {@link runCompose}: sent with the Send code, or put in the prompt box when that is
+ * not possible (decisions of Sergio, 29/10/2026, Engram `E9-context-menus/decisions/p1-p13-t1-t4`).
+ *
  * Decisions: Send is disabled while the session is busy and Stop takes its place (plan decision
  * 6; `steer`/`queue` while busy is not offered); every prompt goes with `delivery: 'queue'`;
  * Retry resends the text of the last user message of the open session, with the attachments of
@@ -259,6 +266,16 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     draft: { model: state.selection.model, agent: state.selection.agent },
   });
 
+  /**
+   * Puts `text` in the prompt box without losing what is there: a blank box is replaced, otherwise
+   * `text` goes on a new last line (P6). Chips are the caller's business.
+   */
+  const putInDraft = (text: string): void => {
+    const current = untrack(draft);
+    if (current.trim() === '') setDraft(text);
+    else setDraft(`${current.endsWith('\n') ? current : `${current}\n`}${text}`);
+  };
+
   /** Saves the draft, the history, the pending attachments and the model/agent draft; also tracked as an effect. */
   const persist = (): void => {
     const picked = state.selection;
@@ -304,7 +321,11 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       props.store.releaseThumbs(sent.files.map((file) => file.uri));
     }
     if (failure === undefined) return;
-    if (untrack(draft) === '') setDraft(sent.text);
+    // A compose left the user's own draft alone, so on failure its text is ADDED to what the user
+    // has written (W2=1, Sergio 29/10/2026); a normal send emptied the box, so only an empty one
+    // gets the text back.
+    if (sent.compose === true) putInDraft(sent.text);
+    else if (untrack(draft) === '') setDraft(sent.text);
     // An AttachmentRejected means the host refused those very files (it does not know their
     // URIs, e.g. after it restarted): putting the chips back would make the next send fail the
     // same way, so only the text comes back and the user attaches again.
@@ -431,15 +452,18 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   /**
    * Sends a prompt and starts waiting for its result. With `command` (issue #33) the host runs that
    * server command: `text` stays the full typed text for `lastSend` (what a failure gives back)
-   * while the message carries only the arguments, and the files go without `mention`.
+   * while the message carries only the arguments, and the files go without `mention`. With
+   * `fromCompose` (a `prompt.compose` of the host) a failure appends the text to the user's draft
+   * instead of restoring it only into an empty box.
    */
   const sendPrompt = (
     text: string,
     files: AttachmentRef[],
     command?: { name: string; args: string },
+    fromCompose = false,
   ): void => {
     const requestId = nextRequestId();
-    lastSend = { requestId, text, files };
+    lastSend = { requestId, text, files, ...(fromCompose ? { compose: true } : {}) };
     // Only the dock lines of other sessions' requests go; the answers of the open session are
     // history in the conversation (`state.resolutions`) and stay.
     props.store.clearResolved();
@@ -646,6 +670,65 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
             break;
         }
       }
+    });
+  });
+
+  /**
+   * Carries out one `prompt.compose` (issue #36, decisions P5/P6/P9/P12 of Sergio, 29/10/2026).
+   *
+   * With `send` and room to send ({@link canSend}) it goes through {@link sendPrompt}, the code of
+   * Send and Retry, so the chosen model and agent, `lastSend` and the restore-on-failure apply, and
+   * the user's draft and chips are left alone. Otherwise (`send` false: the host asks for a review,
+   * as with a buffer with unsaved changes or a message that waited too long; or not connected; or
+   * a request in flight or a busy session) the text goes to the prompt box: an empty draft is
+   * replaced, a draft with text gets it on a new last line, and the chips are added without
+   * duplicates, so nothing the user wrote is lost. A `send` that had to fall back says why in a
+   * notice of its own; one the host asked to be a draft (`send` false) adds none here because the
+   * HOST sent its own notice: `UnsavedChanges`, or `ComposeExpired` ("The prompt waited too
+   * long: it is in the box") when it waited in a hidden pane past the TTL. If a compose that WAS
+   * sent fails, the failure effect appends its text to the draft the same way (W2). A message out
+   * of bounds ({@link isComposeInBounds}) is refused here, BEFORE `begin`: the host would drop its
+   * `prompt.send` without a `request.result` and Send would stay locked.
+   * VERIFIED by `App.test.tsx` "prompt.compose" (jsdom, fabricated host messages, 29/10/2026).
+   * VERIFIED in a real window (`npm run test:visual`, Windows 11, VS Code 1.144.0, 29/10/2026,
+   * full run): "C3 the draft the user was writing is untouched ("my draft", 0 chips)", "C6 while
+   * a turn runs, Fix goes to the prompt box with its text and its chip and sends nothing", "C6 the
+   * notice says "OpenCode is busy: the prompt is in the box"" and "C6 the prompt box has the
+   * focus". UNVERIFIED in a real window: the not-connected fallback, a failed compose send (W2)
+   * and the out-of-bounds refusal (only jsdom runs them).
+   */
+  const runCompose = (compose: { text: string; files: AttachmentRef[]; send: boolean }): void => {
+    if (!isComposeInBounds(compose)) {
+      props.store.notify('warning', {
+        code: 'ComposeRefused',
+        message: 'The prompt from the context menu could not be used',
+      });
+      return;
+    }
+    if (compose.send && canSend()) {
+      sendPrompt(compose.text, compose.files, undefined, true);
+      return;
+    }
+    putInDraft(compose.text);
+    props.store.addDraftFiles(compose.files);
+    if (compose.send) {
+      props.store.notify('info', {
+        code: 'ComposeInDraft',
+        message: connected()
+          ? 'OpenCode is busy: the prompt is in the box'
+          : 'OpenCode is not connected yet: the prompt is in the box',
+      });
+    }
+    focusInput?.();
+  };
+
+  // `prompt.compose` queue (issue #36): reads the length BEFORE the early return so the effect keeps
+  // it as its dependency, then takes the WHOLE queue and runs it in order. Two composes in one
+  // frame are two runs: the first may begin a request, which makes the second fall to the draft.
+  createEffect(() => {
+    if (state.composes.length === 0) return;
+    untrack(() => {
+      for (const compose of props.store.takeComposes()) runCompose(compose);
     });
   });
 

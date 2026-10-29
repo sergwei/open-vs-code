@@ -12,6 +12,7 @@ import type { HostToWebview } from '../shared/protocol';
 import {
   ChatPane,
   FOCUS_REQUEST_TTL_MS,
+  MAX_KEPT_COMPOSES,
   MAX_KEPT_MENU_MESSAGES,
   routeOf,
   type PaneHolders,
@@ -91,6 +92,7 @@ describe('routeOf', () => {
       },
       { type: 'attachments.picked', requestId: 'r', files: [] },
       { type: 'ui.command', command: 'prompt.focus' },
+      { type: 'prompt.compose', text: 'Explain what @a.ts does.', files: [], send: true },
       { type: 'setup.binary', outcome: 'cancelled' },
     ] satisfies HostToWebview[]) {
       expect(routeOf(message)).toBe('origin');
@@ -213,5 +215,96 @@ describe('ui commands', () => {
     view.ready = true;
     expect(pane.flushUiCommands()).toBe(false);
     expect(posted).toEqual([]);
+  });
+});
+
+// Issue #36: `prompt.compose` is sent now when the surface can take it, kept in order (equal ones
+// included, up to the cap) when it cannot, and a stale one is delivered as a draft, not dropped.
+// FAKE surface and fake clock, like the blocks above.
+describe('prompt.compose kept for a hidden surface', () => {
+  const compose = (text: string, send = true): HostToWebview => ({
+    type: 'prompt.compose',
+    text,
+    files: [],
+    send,
+  });
+  const expiredNotice: HostToWebview = {
+    type: 'notice',
+    level: 'info',
+    error: { code: 'ComposeExpired', message: 'The prompt waited too long: it is in the box' },
+  };
+  /** The fields of {@link compose}, to spread into the message `pane.compose` takes. */
+  const asked = (text: string, send = true) => ({ text, files: [], send });
+
+  it('sends now and keeps nothing when the surface can take it', () => {
+    const { pane, posted, logs } = setup();
+    pane.compose({ type: 'prompt.compose', ...asked('one') });
+    expect(posted).toEqual([compose('one')]);
+    expect(logs).toContain('info: compose: sent (send=true)');
+    expect(pane.flushComposes()).toBe(false);
+  });
+
+  it('keeps every compose, equal ones too, and sends them in order after ready', () => {
+    const { pane, posted, view, logs } = setup();
+    view.ready = false;
+    pane.compose({ type: 'prompt.compose', ...asked('one') });
+    pane.compose({ type: 'prompt.compose', ...asked('one') });
+    pane.compose({ type: 'prompt.compose', ...asked('two') });
+    expect(posted).toEqual([]);
+    view.ready = true;
+    expect(pane.flushComposes()).toBe(true);
+    expect(posted).toEqual([compose('one'), compose('one'), compose('two')]);
+    expect(logs).toContain('info: compose: kept for the next ready');
+    expect(logs).toContain('info: compose: sent after ready (send=true)');
+    expect(pane.flushComposes()).toBe(false);
+  });
+
+  // Protects W1 (Sergio, 29/10/2026): a compose that falls to the box by age says why. Fake clock.
+  it('delivers a compose older than the TTL as a draft instead of dropping it, with a notice', () => {
+    vi.useFakeTimers();
+    const { pane, posted, view } = setup();
+    view.ready = false;
+    pane.compose({ type: 'prompt.compose', ...asked('late') });
+    vi.advanceTimersByTime(FOCUS_REQUEST_TTL_MS + 1);
+    view.ready = true;
+    expect(pane.flushComposes()).toBe(true);
+    expect(posted).toEqual([compose('late', false), expiredNotice]);
+  });
+
+  it('adds no expiry notice to an old compose that was already a draft', () => {
+    vi.useFakeTimers();
+    const { pane, posted, view } = setup();
+    view.ready = false;
+    pane.compose({ type: 'prompt.compose', ...asked('dirty', false) });
+    vi.advanceTimersByTime(FOCUS_REQUEST_TTL_MS + 1);
+    view.ready = true;
+    pane.flushComposes();
+    expect(posted).toEqual([compose('dirty', false)]);
+  });
+
+  // Also asserts that the re-kept compose, once old, is followed by the W1 expiry notice.
+  it('keeps it again with its original time when the surface hides during the flush', () => {
+    vi.useFakeTimers();
+    const { pane, posted, view } = setup();
+    view.ready = false;
+    pane.compose({ type: 'prompt.compose', ...asked('late') });
+    vi.advanceTimersByTime(FOCUS_REQUEST_TTL_MS - 1);
+    expect(pane.flushComposes()).toBe(false); // still hidden: kept
+    vi.advanceTimersByTime(2); // the original time, not the re-keeping time, is what counts
+    view.ready = true;
+    expect(pane.flushComposes()).toBe(true);
+    expect(posted).toEqual([compose('late', false), expiredNotice]);
+  });
+
+  it('forgets the oldest beyond the cap', () => {
+    const { pane, posted, view } = setup();
+    view.ready = false;
+    for (let n = 1; n <= MAX_KEPT_COMPOSES + 2; n++) {
+      pane.compose({ type: 'prompt.compose', ...asked(`c${String(n)}`) });
+    }
+    view.ready = true;
+    pane.flushComposes();
+    expect(posted).toHaveLength(MAX_KEPT_COMPOSES);
+    expect(posted[0]).toEqual(compose('c3'));
   });
 });

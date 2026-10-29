@@ -12,6 +12,7 @@ import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
 import type { AttachmentRef } from '../shared/protocol';
 import type { EditorActions, EditorContext } from './chatController';
+import type { ContextDiagnostic } from './contextPrompts';
 import { classifyDropped } from './droppedFiles';
 import { isInServedFolder, selectionLines, toEditorRef } from './fileMentions';
 import type { ServerLog } from './opencodeServer';
@@ -63,6 +64,20 @@ function workspaceFolder(): string | undefined {
  * reference; each distinct range is one reference (one chip), in the order
  * `TextEditor.selections` lists them. `ranged` is the number of references that carry a range (0
  * when the whole file was taken).
+ * Issue #36 adds `options`: `uri` picks the editor showing the document a context menu was opened
+ * on ({@link editorForMenu}) instead of the active one, and `diagnostics` fills
+ * `EditorContext.diagnostics` ({@link readDiagnostics}); without options nothing changes. The
+ * checks below ran WITHOUT options. The two new branches ran in `npm run test:integration` (Windows
+ * 11, VS Code stable, 29/10/2026, fake-server label: 32 passing): "reads the editor of the clicked
+ * document, not the active one" (the `uri` branch, with a hand-built `Uri` and a second active
+ * editor) and "Fix with OpenCode runs on a file the TypeScript server reports an error for" (the
+ * `diagnostics` branch ran without throwing and the prompt was accepted; that the diagnostic text
+ * reaches the prompt is HYPOTHESIS here, the log has no text: only unit tests with a fake editor
+ * show it). Then with a real right-click (`npm run test:visual`, Windows 11, VS Code 1.144.0,
+ * 29/10/2026, full run): "C4 Fix sends the problems of both lines" (the two TypeScript errors,
+ * with `Line 1:` and `Line 2:`, in the user message of the conversation) and "C3 Explain from the
+ * editor sends "Explain what @src/sample.ts#2-3 does."" (the selection of the clicked editor).
+ * Not observed: macOS and Linux, where the context menu may be native.
  * VERIFIED on Windows 11, VS Code 1.143.0 (22/10/2026), in two suites. `npm run test:integration`
  * (22 passing, 1 pending, no folder served): "refuses the editor context with no editor open
  * (NoActiveEditor)", "refuses an untitled document (NoFileOnDisk: Save the file first)" and
@@ -82,8 +97,11 @@ function workspaceFolder(): string | undefined {
  * a symlink inside the folder pointing outside it (the check is lexical, so it passes), a
  * notebook cell, the refusal notice in the webview, macOS and Linux.
  */
-function readEditorContext(folder: string | undefined): EditorContext {
-  const editor = vscode.window.activeTextEditor;
+function readEditorContext(
+  folder: string | undefined,
+  options: { uri?: string; diagnostics?: boolean } = {},
+): EditorContext {
+  const editor = editorForMenu(options.uri) ?? vscode.window.activeTextEditor;
   if (editor === undefined) {
     throw new EditorActionError('NoActiveEditor', 'Open a file in the editor to add it');
   }
@@ -111,7 +129,85 @@ function readEditorContext(folder: string | undefined): EditorContext {
   for (const selection of selections) {
     add(toEditorRef(folder, fsPath, selectionLines(selection.start, selection.end)));
   }
-  return { refs, ranged: selections.length === 0 ? 0 : refs.length, unsaved: document.isDirty };
+  return {
+    refs,
+    ranged: selections.length === 0 ? 0 : refs.length,
+    unsaved: document.isDirty,
+    ...(options.diagnostics === true
+      ? { diagnostics: readDiagnostics(document.uri, selections) }
+      : {}),
+  };
+}
+
+/**
+ * The visible editor showing the document a context menu was opened on (issue #36, risk R1: the
+ * active editor is not necessarily the one that was right-clicked, as in a split or the left side
+ * of a diff), or `undefined` when `uri` is absent, unparsable or shown by no visible editor, so
+ * the caller falls back to the active one. Two editors on the same document: the first one in
+ * `visibleTextEditors` wins, whichever held the click (HYPOTHESIS that this is acceptable: the
+ * selection of the other one is not read). Compares `Uri.toString()` on both sides.
+ * VERIFIED in VS Code 1.144.0 on Windows 11 (29/10/2026, `npm run test:integration`): the check
+ * "reads the editor of the clicked document, not the active one" passes a `Uri` by hand while
+ * another editor is active. UNVERIFIED in a real window with a split editor: no check
+ * right-clicks the non-active side of a split.
+ */
+function editorForMenu(uri: string | undefined): vscode.TextEditor | undefined {
+  if (uri === undefined) return undefined;
+  let wanted: string;
+  try {
+    wanted = vscode.Uri.parse(uri).toString();
+  } catch {
+    return undefined;
+  }
+  return vscode.window.visibleTextEditors.find(
+    (candidate) => candidate.document.uri.toString() === wanted,
+  );
+}
+
+/**
+ * The errors and warnings VS Code reports for `uri` (decision P4=1 of Sergio, 29/10/2026) that
+ * touch one of `selections`, or all of them when nothing is selected. Hints and information are
+ * left out: "fix" means the red and yellow squiggles. `line` is 1-based, the line the problem
+ * starts on; `code` is the plain value (`2304`), also when the language service wraps it in a
+ * `{ value, target }` object. A diagnostic with no source or code keeps only its message. The
+ * messages are the language service's text, never the file's.
+ * VERIFIED on Windows 11 (29/10/2026, `npm run test:integration`, profile with
+ * `--disable-extensions`): in the check "Fix with OpenCode runs on a file the TypeScript server
+ * reports an error for", `vscode.languages.getDiagnostics` returned an Error for
+ * `export const broken: number = 'text';` (the check asserts it) in under a second. UNVERIFIED: the
+ * `{ value, target }` shape of `code`, the selection filter EXCLUDING a diagnostic against a real
+ * server (the selection of the run below covered both errors; the unit tests use fakes), other
+ * languages, macOS and Linux.
+ * VERIFIED against the real TypeScript server (`npm run test:visual`, Windows 11, VS Code 1.144.0,
+ * 29/10/2026, full run): "C4 Fix sends the problems of both lines ("Fix the problems in
+ * @src/broken26.ts#1-2. Problems reported by VS Code: - Line 1: Type 'string' is not assignable to
+ * type 'number'. (ts 2322) - Line 2: ...")" with a selection over lines 1-2.
+ */
+function readDiagnostics(
+  uri: vscode.Uri,
+  selections: readonly vscode.Selection[],
+): ContextDiagnostic[] {
+  return vscode.languages
+    .getDiagnostics(uri)
+    .filter(
+      (diagnostic) =>
+        diagnostic.severity === vscode.DiagnosticSeverity.Error ||
+        diagnostic.severity === vscode.DiagnosticSeverity.Warning,
+    )
+    .filter(
+      (diagnostic) =>
+        selections.length === 0 ||
+        selections.some((selection) => selection.intersection(diagnostic.range) !== undefined),
+    )
+    .map((diagnostic): ContextDiagnostic => {
+      const code = typeof diagnostic.code === 'object' ? diagnostic.code.value : diagnostic.code;
+      return {
+        line: diagnostic.range.start.line + 1,
+        message: diagnostic.message,
+        ...(diagnostic.source === undefined ? {} : { source: diagnostic.source }),
+        ...(code === undefined ? {} : { code: String(code) }),
+      };
+    });
 }
 
 /**
@@ -181,9 +277,9 @@ export function createEditorActions(log: ServerLog): EditorActions {
       });
     },
 
-    editorContext(folder) {
+    editorContext(folder, options) {
       try {
-        return Promise.resolve(readEditorContext(folder));
+        return Promise.resolve(readEditorContext(folder, options));
       } catch (error) {
         return Promise.reject(error instanceof Error ? error : new Error(String(error)));
       }
