@@ -213,6 +213,12 @@ export type BinaryChoice =
 /** Everything the UI reads. */
 export interface ChatState {
   connection: ConnectionState;
+  /**
+   * True once this document has applied its first `snapshot` (issue #77). Until then `open` is the
+   * empty initial view, not the host's word, so the tab must keep the session id it restored
+   * instead of persisting "no session".
+   */
+  synced: boolean;
   /** The "Choose binary…" flow of the setup guide. See {@link BinaryChoice}. */
   binaryCheck: BinaryChoice;
   /** Models, providers and selectable agents of the server; `undefined` until the host sends it. */
@@ -387,6 +393,7 @@ function emptyOpen(): OpenView {
 export function createChatStore(): ChatStore {
   const [state, setState] = createStore<ChatState>({
     connection: { state: 'starting' },
+    synced: false,
     binaryCheck: { kind: 'idle' },
     catalog: undefined,
     selection: { sessionID: undefined, model: undefined, agent: undefined },
@@ -531,6 +538,7 @@ export function createChatStore(): ChatStore {
 
     snapshot: (m) => {
       const { snapshot } = m;
+      setState('synced', true);
       setState(
         'sessions',
         reconcile(Object.fromEntries(snapshot.sessions.map((session) => [session.id, session]))),

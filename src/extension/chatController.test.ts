@@ -987,11 +987,14 @@ describe('open session memory', () => {
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
         Promise.reject({ _tag: 'SessionNotFoundError', message: 'Session not found' }),
     });
-    const { controller, memoryWrites, snapshots } = setup(api, 'ses_gone');
+    const { controller, memoryWrites, snapshots, posted } = setup(api, 'ses_gone');
     controller.onServerState(RUNNING);
     await controller.resync();
     expect(memoryWrites).toEqual([{ folder: SERVER.folder, id: undefined }]);
     expect(snapshots().at(-1)?.open).toBeUndefined();
+    // Not a restored tab (issue #77): the remembered session of the side-bar view is forgotten
+    // silently, as before; only a session bound by `restorePane` earns the notice.
+    expect(posted.filter((m) => m.type === 'notice')).toEqual([]);
   });
 
   it('reopens the remembered session with its history on startup', async () => {

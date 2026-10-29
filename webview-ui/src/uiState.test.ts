@@ -45,6 +45,22 @@ describe('createUiState', () => {
     });
   });
 
+  // Protects the Reload Window restore (issue #77): the shown session must round-trip through
+  // setState/getState, and a state saved before the field existed must yield no session.
+  it('saves the shown session and reads it back; an old state has none', () => {
+    const { api, writes } = fakeApi({ draft: 'd', history: [] });
+    const first = createUiState(api);
+    expect(first.sessionID).toBeUndefined();
+    first.save({ draft: '', history: [], files: [], sessionID: 'ses_9' });
+    expect(writes[0]).toMatchObject({ sessionID: 'ses_9' });
+    expect(createUiState(fakeApi(writes[0]).api).sessionID).toBe('ses_9');
+    first.save({ draft: '', history: [], files: [] });
+    expect(writes[1]).not.toHaveProperty('sessionID');
+    expect(
+      createUiState(fakeApi({ draft: '', history: [], sessionID: 5 }).api).sessionID,
+    ).toBeUndefined();
+  });
+
   it('cuts an oversized history to the newest entries', () => {
     const history = Array.from({ length: MAX_HISTORY + 5 }, (_, index) => `p${String(index)}`);
     const state = createUiState(fakeApi({ draft: '', history }).api);

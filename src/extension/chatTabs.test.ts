@@ -35,6 +35,53 @@ const upserted = (session: SessionSummary): HostToWebview => ({
   session,
 });
 
+describe('a tab seeded for a restore', () => {
+  // Protects the Reload Window restore (issue #77, Q4=1): the persisted title shows until the
+  // first real snapshot, which then decides. Provenance: fabricated messages.
+  it('starts with the seeded title and session, and the first snapshot replaces them', () => {
+    const tabs = new ChatTabs();
+    tabs.add(1, 2, { sessionID: 'ses_a', title: 'Fix the build' });
+    expect(tabs.titleOf(1)).toBe('Fix the build');
+    // The session is listed: the title comes from the row.
+    expect(tabs.observe(1, snapshot([summary('ses_a', 'Renamed')], 'ses_a'))).toBe(true);
+    expect(tabs.titleOf(1)).toBe('Renamed');
+  });
+
+  it('keeps the seeded title when the snapshot opens the same session without a row', () => {
+    const tabs = new ChatTabs();
+    tabs.add(1, undefined, { sessionID: 'ses_a', title: 'Fix the build' });
+    tabs.observe(1, snapshot([], 'ses_a'));
+    expect(tabs.titleOf(1)).toBe('Fix the build');
+  });
+
+  it('reads Untitled session when the snapshot has no session, or another one without a row', () => {
+    const none = new ChatTabs();
+    none.add(1, undefined, { sessionID: 'ses_a', title: 'Gone' });
+    expect(none.observe(1, snapshot([]))).toBe(true);
+    expect(none.titleOf(1)).toBe('Untitled session');
+    const other = new ChatTabs();
+    other.add(1, undefined, { sessionID: 'ses_a', title: 'Gone' });
+    other.observe(1, snapshot([], 'ses_b'));
+    expect(other.titleOf(1)).toBe('Untitled session');
+  });
+
+  it('falls back to Untitled session for a blank seed title', () => {
+    const tabs = new ChatTabs();
+    tabs.add(1, undefined, { title: '   ' });
+    expect(tabs.titleOf(1)).toBe('Untitled session');
+  });
+
+  it('leaves the most recent as the last one activated, whatever the restore order', () => {
+    const tabs = new ChatTabs();
+    tabs.add(3, 2, { sessionID: 'c' });
+    tabs.add(1, 2, { sessionID: 'a' });
+    tabs.add(2, 2, { sessionID: 'b' });
+    tabs.setActive(1, true);
+    expect(tabs.recent()).toEqual([1, 2, 3]);
+    expect(tabs.commandTarget()).toBe(1);
+  });
+});
+
 describe('recency and the target of a command', () => {
   it('orders the tabs by activation, most recent first', () => {
     const tabs = new ChatTabs();
