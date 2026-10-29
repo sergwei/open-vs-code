@@ -48,6 +48,12 @@ export type ComposeMessage = Extract<HostToWebview, { type: 'prompt.compose' }>;
 export interface PaneSurface {
   post: Sender<HostToWebview>;
   canDeliver?: () => boolean;
+  /**
+   * True for the surface that gets the remembered session when a server for a NEW folder starts
+   * (the side-bar view); absent for the others (tabs). With no primary surface, the one attached
+   * first gets it.
+   */
+  primary?: boolean;
 }
 
 /** Who a host message is for; see {@link routeOf}. */
@@ -123,7 +129,9 @@ export type PaneHolders = (pane: ChatPane) => { diffs: SessionDiffs; reverts: Se
  * VERIFIED (Windows 11, 25/10/2026, fake surface) by the `chatPane.test.ts` checks "keeps a
  * command once, sends it after ready and says it posted" and "forgets the oldest beyond the cap",
  * and by the `chatController.panes.test.ts` check "binds the new session to its pane only". Not
- * observed with two panes in a real VS Code: phase 1 wires only the side-bar view, as pane 1.
+ * observed with two panes in a real VS Code at the level of this class; the integration case "opens
+ * the diff beside a chat tab, and serves prompts and session.open from tabs" (Windows 11, 29/10/2026)
+ * ran two tab panes end to end.
  */
 export class ChatPane {
   /** The session this surface shows, or `undefined` (nothing open: the next prompt creates one). */
@@ -176,6 +184,11 @@ export class ChatPane {
     const holders = build(this);
     this.diffs = holders.diffs;
     this.reverts = holders.reverts;
+  }
+
+  /** True when the surface asked to receive the remembered session first ({@link PaneSurface.primary}). */
+  get primary(): boolean {
+    return this.surface.primary === true;
   }
 
   /** True while a {@link post} would reach the webview (`surface.canDeliver`, absent meaning always). */

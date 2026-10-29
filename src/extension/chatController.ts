@@ -9,8 +9,8 @@
 // its snapshot generation, its file search and session cursor, and its own "Changed files" and
 // revert state. A webview message arrives as `handle(paneId, message)`; what the host produces is
 // routed by `routeOf`: the content of a session to the panes showing it, the location's news to
-// every pane, and the answer to a request ONLY to the pane that asked. In this phase the only
-// surface is the side-bar view, wired as pane 1: no protocol and no UI change. Wherever the text
+// every pane, and the answer to a request ONLY to the pane that asked. A surface is the side-bar
+// view or an editor tab (`chatLifecycle.ts`); the protocol does not know which. Wherever the text
 // below says "the open session" or "the webview", read it as the one of the pane concerned.
 //
 // Flow: `onServerState(running)` -> client + `runEventStream`; each `server.connected` and each
@@ -237,15 +237,35 @@ export interface SetupCommands {
 
 /** What the controller tells the VS Code side about the chat's keyboard focus (issue #35). */
 export interface ChatUi {
-  /** The webview gained (`true`) or lost (`false`) the keyboard focus; mirrored into a context key. */
-  setChatFocused(focused: boolean): void;
   /**
-   * Hands the keyboard to the chat view's iframe again. Asked after a `ui.command` that had to wait
-   * for a new document. HYPOTHESIS (see `registerChat`): the focus given while the document was
-   * loading went nowhere. Seen once in a `test:visual` step 22 run without this call (the new
-   * document had `hasFocus()` false); not a check, and its necessity was not proven.
+   * Some chat surface has (`focused` true) or has not (false) the keyboard focus; mirrored into a
+   * context key. `focused` is the state of ALL panes together (true while at least one holds the
+   * focus), and `paneId` is the pane whose message or removal caused this call, so a surface-aware
+   * implementation can tell which one changed. An implementation that ignores `paneId` keeps
+   * working.
    */
-  focusView(): void;
+  setChatFocused(focused: boolean, paneId: number): void;
+  /**
+   * Hands the keyboard to the iframe of surface `paneId` again. Asked after a `ui.command` or a
+   * `prompt.compose` that had to wait for a new document. HYPOTHESIS (see `registerChat`): the
+   * focus given while the document was loading went nowhere. Seen once in a `test:visual` step 22
+   * run without this call (the new document had `hasFocus()` false); not a check, and its
+   * necessity was not proven.
+   */
+  focusView(paneId: number): void;
+  /**
+   * Brings the surface of `paneId` to the front without changing what it shows. The controller
+   * calls it when `session.open` asks for a session that ANOTHER pane already shows. Absent means
+   * there is a single surface, so that case cannot arise.
+   */
+  revealPane?(paneId: number): void;
+  /**
+   * Lets the VS Code side serve a request in another surface instead of the asking pane: opens (or
+   * reveals) the surface for `sessionID`, or a lazy one when it is `undefined` (`session.new`).
+   * Returns `true` when it did, and the asking pane is then left untouched. Absent or `false`
+   * means "do it in the asking pane", which is the behavior when the chat lives in one view.
+   */
+  openElsewhere?(fromPaneId: number, sessionID: string | undefined): boolean;
 }
 
 // Where `ui.focus` points and how long a focus request waits live with the pane that keeps them.
@@ -545,9 +565,16 @@ export class ChatController {
   private connection: ConnectionState = { state: 'starting' };
   /**
    * The chat surfaces, by pane id. Each one keeps its own session; only a server for a NEW folder
-   * replaces them (the first pane takes the session remembered for that folder, the others none).
+   * replaces them (the primary pane, i.e. the side-bar view, takes the session remembered for that
+   * folder, else the first pane does; the others none).
    */
   private readonly panes = new Map<number, ChatPane>();
+  /**
+   * The panes whose webview reported `chat.focusChanged` with `focused: true` and not yet false.
+   * A set, not a boolean: with two surfaces a `blur` of A can arrive after the `focus` of B, and
+   * a single flag would read "not focused" while B holds the keyboard.
+   */
+  private readonly focusedPanes = new Set<number>();
   private nextPaneId = 1;
   /**
    * The folder of the last server that ran, so a restart of the SAME folder keeps the session of
@@ -677,8 +704,8 @@ export class ChatController {
    * already in flight; its revert holder (issue #32) is the source of the boundary that bounds
    * that range and borrows its root lookup. Both post to this pane only. A pane starts with no
    * session: when a server for a new folder reaches `running`, {@link onServerState} gives the
-   * first pane the session remembered for that folder; a pane attached while the server already
-   * runs stays empty. Does not send anything: the
+   * primary pane (the side-bar view), else the first pane, the session remembered for that folder;
+   * a pane attached while the server already runs stays empty. Does not send anything: the
    * surface announces itself with `ready`.
    */
   attachPane(surface: PaneSurface): ChatPane {
@@ -714,11 +741,16 @@ export class ChatController {
 
   /**
    * Removes a surface (it was closed): its pending work is cut off and it stops receiving. The
-   * session it showed is no longer tracked by the translator. Unknown ids are ignored.
+   * session it showed is no longer tracked by the translator. If it held the keyboard focus, the
+   * focus state is recomputed from the panes left (false when none), so the context key does not
+   * stay true for a surface that is gone. Unknown ids are ignored.
    */
   detachPane(paneId: number): void {
     const pane = this.panes.get(paneId);
     if (pane === undefined) return;
+    if (this.focusedPanes.delete(paneId)) {
+      this.deps.ui.setChatFocused(this.focusedPanes.size > 0, paneId);
+    }
     pane.fileSearch?.abort();
     pane.fileSearch = undefined;
     pane.generation++;
@@ -727,6 +759,27 @@ export class ChatController {
     pane.releaseDiffs?.();
     this.panes.delete(paneId);
     this.syncTracked();
+  }
+
+  /**
+   * Makes `sessionID` the session of pane `paneId` (or empties it when `undefined`: the next
+   * prompt creates one) without a requester: remembers it for the served folder and publishes a
+   * snapshot to THAT pane only. For a new surface that must show a session, a change of where the
+   * chat lives and "open chat" with no surface; no `request.result` is posted because nobody asked
+   * through the webview. A session deleted meanwhile is cleaned by the resync itself. Unknown pane
+   * ids are ignored, and so is a call before the server runs (there is nothing to read).
+   * VERIFIED by `chatController.panes.test.ts` "binds the session, remembers it and publishes to
+   * that pane only" (fake surfaces, 29/10/2026, Windows 11).
+   */
+  async openInPane(paneId: number, sessionID: string | undefined): Promise<void> {
+    const pane = this.paneById(paneId);
+    if (pane === undefined || this.client === undefined) return;
+    if (sessionID === undefined) {
+      await this.forgetOpen(pane);
+      await this.resync([pane]);
+      return;
+    }
+    await this.openSession(pane, sessionID);
   }
 
   /** The pane with this id, if it is attached. */
@@ -741,6 +794,15 @@ export class ChatController {
       if (pane.sessionID !== undefined) ids.add(pane.sessionID);
     }
     this.translator.setTracked([...ids]);
+  }
+
+  /**
+   * The session pane `paneId` shows, or `undefined` (an empty pane or an unknown id). This is the
+   * source of truth for "which surface shows session X": it changes as soon as a session is bound,
+   * before any snapshot reaches the webview.
+   */
+  sessionOf(paneId: number): string | undefined {
+    return this.panes.get(paneId)?.sessionID;
   }
 
   /** The panes showing `sessionID`. */
@@ -785,10 +847,15 @@ export class ChatController {
    * state stops the stream (so a `stop` never causes reconnection attempts) and is mirrored as
    * a `ConnectionState`. Re-entering `running` with the same URL and password is a no-op.
    *
-   * Phase 3: a server for a NEW folder gives the first pane the session remembered for that folder
-   * (`memory.get(folder)`) and empties the other panes; a server for the SAME folder (a restart)
-   * leaves every pane on its own session, because that memory is last-writer-wins across panes.
-   * HYPOTHESIS for a real window: only unit tests cover two panes (phase 1 wires one pane).
+   * Phase 3: a server for a NEW folder gives one pane the session remembered for that folder
+   * (`memory.get(folder)`) and empties the other panes: the pane whose surface is `primary` (the
+   * side-bar view, even when leftover tabs were attached before it), else the one attached first.
+   * A server for the SAME folder (a restart) leaves every pane on its own session, because that
+   * memory is last-writer-wins across panes. At start in `editor` mode there are no panes yet, so
+   * nothing is given and Open Chat opens the remembered session itself. VERIFIED by
+   * `chatController.panes.test.ts` "gives the remembered session to the primary pane, not the
+   * oldest" (fake surfaces, 29/10/2026). HYPOTHESIS for a real window with several tabs open at a
+   * change of folder (risk R6 of the plan): the tabs keep a stale title until their next snapshot.
    * `restarting` and `connecting` (an external server being checked, issue #11) look like
    * `starting` to the webview; the `message` of an `unavailable` is copied as is to the webview,
    * which is why the external-server messages carry no URL, port or raw cause (the webview never
@@ -818,15 +885,15 @@ export class ChatController {
         this.client = this.deps.createClient(next);
         // Same folder (a restart): every pane keeps its own session. The memory per folder is
         // "last writer wins" across panes, so reading it here would move pane 1 to the session
-        // another pane opened last. New folder: the first pane shows the session remembered for
-        // it and the others start empty (a session lives in its location).
+        // another pane opened last. New folder: the primary pane (else the first) shows the
+        // session remembered for it and the others start empty (a session lives in its location).
         const sameFolder = this.lastFolder === next.folder;
         this.lastFolder = next.folder;
         if (!sameFolder) {
-          let first = true;
-          for (const pane of this.panes.values()) {
-            pane.sessionID = first ? this.deps.memory.get(next.folder) : undefined;
-            first = false;
+          const panes = [...this.panes.values()];
+          const receiver = panes.find((pane) => pane.primary) ?? panes[0];
+          for (const pane of panes) {
+            pane.sessionID = pane === receiver ? this.deps.memory.get(next.folder) : undefined;
           }
         }
         this.translator = createEventTranslator(this.secrets);
@@ -1176,8 +1243,9 @@ export class ChatController {
    * Makes `pane` forget its session: field, translator and the per-folder memory. The returned
    * promise never rejects (a failed write is logged); callers that need the memory written before
    * going on await it, the event path does not. The memory holds ONE session per folder, so with
-   * several panes the last one to open or forget writes it (phase 1 has a single pane; the
-   * per-tab memory is for the phase that adds tabs).
+   * several panes (editor tabs plus, after a change of location, the side-bar view) the last one
+   * to open or forget writes it: the memory is "the session the user touched last in this
+   * folder", which is what Open Chat reopens when no tab is open. A per-tab memory is not kept.
    */
   private async forgetOpen(pane: ChatPane): Promise<void> {
     pane.sessionID = undefined;
@@ -1320,7 +1388,7 @@ export class ChatController {
    * nowhere).
    */
   private flushComposes(pane: ChatPane): void {
-    if (pane.flushComposes()) this.deps.ui.focusView();
+    if (pane.flushComposes()) this.deps.ui.focusView(pane.id);
   }
 
   /**
@@ -1332,7 +1400,7 @@ export class ChatController {
    * `focusView` was not repeated to prove it is needed.
    */
   private flushUiCommands(pane: ChatPane): void {
-    if (pane.flushUiCommands()) this.deps.ui.focusView();
+    if (pane.flushUiCommands()) this.deps.ui.focusView(pane.id);
   }
 
   /**
@@ -3386,7 +3454,9 @@ export class ChatController {
         pending.push(this.editorAction(pane, m.type, () => this.deps.editor.copy(m.text)));
       },
       'chat.focusChanged': (m) => {
-        this.deps.ui.setChatFocused(m.focused);
+        if (m.focused) this.focusedPanes.add(pane.id);
+        else this.focusedPanes.delete(pane.id);
+        this.deps.ui.setChatFocused(this.focusedPanes.size > 0, pane.id);
       },
       'webview.log': (m) => {
         this.log[m.level === 'warn' ? 'warn' : m.level === 'error' ? 'error' : 'info'](
@@ -3406,10 +3476,22 @@ export class ChatController {
    * in the database the TUI shares). The session has no id until that first prompt. Still needs a
    * running server: the snapshot is how the webview learns it, and the button is disabled without
    * one.
+   *
+   * Where the new session lives is not always this pane: `deps.ui.openElsewhere(pane.id,
+   * undefined)` gets the first say, and when it returns `true` (a lazy surface was opened for it)
+   * this pane is left exactly as it was and the request just answers OK. Without that dependency,
+   * or when it returns `false`, the behavior is the one above.
+   * VERIFIED by `chatController.panes.test.ts` "leaves the asking pane alone when the VS Code
+   * side opens the new session elsewhere" and "behaves as before when there is no openElsewhere"
+   * (fake surfaces, 29/10/2026, Windows 11). Not observed with a real second surface.
    */
   private async newSession(pane: ChatPane, requestId: string): Promise<void> {
     if (this.client === undefined) return this.result(pane, requestId, unavailable());
     try {
+      if (this.deps.ui.openElsewhere?.(pane.id, undefined) === true) {
+        this.result(pane, requestId);
+        return;
+      }
       await this.forgetOpen(pane);
       await this.resync([pane]);
       this.result(pane, requestId);
@@ -3422,12 +3504,41 @@ export class ChatController {
    * `session.open`: checks the session exists, then opens it. A `SessionNotFoundError` means the
    * row the user clicked is stale (deleted by another client, or an event was lost), so it is also
    * reported as `session.removed` to heal the list.
+   *
+   * A session is never shown by two panes through this request: when ANOTHER pane already shows
+   * it, that pane is revealed (`deps.ui.revealPane`) and this one keeps its own session. Otherwise
+   * `deps.ui.openElsewhere(pane.id, sessionID)` may serve it in a new surface (decision Q8=1 of
+   * Sergio, 29/10/2026: opening another session from a tab opens or reveals that session's tab);
+   * `true` leaves this pane untouched. Without those optional dependencies, with a single pane,
+   * or when this pane is EMPTY (no session bound) and no other pane shows the session, the
+   * session simply opens in this pane: an empty tab adopts it (decision "empty tab adopts" of
+   * Sergio, 29/10/2026). A pane asking for the session it already shows is not a duplicate: it
+   * falls through and resyncs.
+   * VERIFIED by `chatController.panes.test.ts` "reveals the other pane that shows the session
+   * instead of opening it twice", "an empty pane adopts the session instead of asking
+   * openElsewhere" and the checks around them (fake surfaces, 29/10/2026, Windows 11).
+   * Not observed with a real second surface.
    */
   private async openRequested(pane: ChatPane, requestId: string, sessionID: string): Promise<void> {
     const client = this.client;
     if (client === undefined) return this.result(pane, requestId, unavailable());
     try {
       await client.session.get({ sessionID });
+      const other = this.panesOf(sessionID).find((candidate) => candidate.id !== pane.id);
+      if (other !== undefined && pane.sessionID !== sessionID) {
+        this.deps.ui.revealPane?.(other.id);
+        this.result(pane, requestId);
+        return;
+      }
+      // An EMPTY pane (no session bound) adopts the session instead of leaving itself behind
+      // next to a new surface (decision of Sergio, 29/10/2026); a pane with a session stays bound.
+      if (
+        pane.sessionID !== undefined &&
+        this.deps.ui.openElsewhere?.(pane.id, sessionID) === true
+      ) {
+        this.result(pane, requestId);
+        return;
+      }
       await this.openSession(pane, sessionID);
       this.result(pane, requestId);
     } catch (error) {

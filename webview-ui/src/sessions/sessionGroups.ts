@@ -5,11 +5,8 @@
  */
 import type { SessionSummary } from '../../../src/shared/model';
 
-/**
- * Title shown while a session has none. It must differ from the "New session" button next to it:
- * with the same text the bar read "New session [New session]" (seen in the CDP run of 20/10/2026).
- */
-export const EMPTY_TITLE = 'Untitled session';
+// The label helpers moved to `src/shared` so the host can title editor tabs with the same text.
+export { EMPTY_TITLE, sessionLabel } from '../../../src/shared/sessionLabel';
 
 /** Names of the date groups, newest first. */
 export type GroupLabel = 'Today' | 'Yesterday' | 'Previous 7 days' | 'Older';
@@ -18,12 +15,6 @@ export type GroupLabel = 'Today' | 'Yesterday' | 'Previous 7 days' | 'Older';
 export interface SessionGroup {
   label: GroupLabel;
   rows: SessionSummary[];
-}
-
-/** The title of a row, or {@link EMPTY_TITLE} when it has none or only blanks. */
-export function sessionLabel(row: Pick<SessionSummary, 'title'>): string {
-  const title = row.title?.trim();
-  return title === undefined || title === '' ? EMPTY_TITLE : title;
 }
 
 /** Midnight (local time) of the day that holds `ts`, shifted by `days` calendar days. */
