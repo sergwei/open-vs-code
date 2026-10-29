@@ -9,6 +9,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Editor and Explorer context menus: **Add to OpenCode Chat**, **Explain with OpenCode** and **Fix
+  with OpenCode** (Fix includes the errors and warnings VS Code reports for the selection)
+  in the editor, and **Explain with OpenCode** on one or more files in the Explorer. The prompt is
+  sent at once in the open session, or left in the prompt box with a notice when the chat is busy,
+  not connected, or the buffer has unsaved changes, or when the chat took more than 10 s to open
+  (issue #36).
 - Settings editor: the three settings are listed in a fixed order (executable, server address,
   default model) and link to each other (issue #38).
 - opencode v2 detection: finds `opencode2` or `opencode` (or the `openVsCode.opencodePath`
