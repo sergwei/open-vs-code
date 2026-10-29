@@ -5,7 +5,10 @@
 // of a session reaches only the pane showing it while the location's news reaches all; a server
 // connection reads the location once and publishes one snapshot per pane; a pane that opens or
 // creates a session does not move another pane; a closed pane stops receiving; and the "Changed
-// files" and revert holders are per pane (a path listed for A cannot be opened from B).
+// files" and revert holders are per pane (a path listed for A cannot be opened from B). It also
+// covers `openInPane`, revealing the pane that already shows a session, the optional
+// `openElsewhere` dependency (and that without it the behavior is the single-surface one), and the
+// keyboard focus kept per pane (decisions Q4 and Q8=1 of issue #77, 29/10/2026).
 //
 // Provenance: a small FAKE client (hand-made rows in the shape of the REST answers, cast to
 // `ChatApi` because only the calls these cases reach are implemented) and a fake stream runner
@@ -16,7 +19,7 @@
 import type { FileDiffInfo, SessionInfo, V2Event } from '@opencode/client';
 import { describe, expect, it } from 'vitest';
 import type { HostToWebview, WebviewToHost } from '../shared/protocol';
-import { ChatController, type ChatControllerDeps } from './chatController';
+import { ChatController, type ChatControllerDeps, type ChatUi } from './chatController';
 import type { ChatPane } from './chatPane';
 import type { EventStreamOptions } from './eventStream';
 import type { ChatApi } from './opencodeClient';
@@ -90,7 +93,12 @@ function fakeClient(sessions: string[]) {
 }
 
 /** A controller with `count` panes over fake surfaces, a running server and a hand-fed stream. */
-function setup(count = 2, sessions: string[] = ['ses_a', 'ses_b']) {
+function setup(
+  count = 2,
+  sessions: string[] = ['ses_a', 'ses_b'],
+  ui: Partial<ChatUi> = {},
+  primary?: number,
+) {
   const { api, calls } = fakeClient(sessions);
   const opened: string[] = [];
   const remembered = new Map<string, string | undefined>();
@@ -139,7 +147,7 @@ function setup(count = 2, sessions: string[] = ['ses_a', 'ses_b']) {
     },
     server: { restart: () => undefined, showLogs: () => undefined },
     setup: noSetup,
-    ui: { setChatFocused: () => undefined, focusView: () => undefined },
+    ui: { setChatFocused: () => undefined, focusView: () => undefined, ...ui },
     runStream: ((options: EventStreamOptions<V2Event>) => {
       streams.push(options);
       return new Promise<void>((resolve) => {
@@ -151,7 +159,10 @@ function setup(count = 2, sessions: string[] = ['ses_a', 'ses_b']) {
   const panes: Array<{ pane: ChatPane; posted: HostToWebview[] }> = [];
   for (let index = 0; index < count; index++) {
     const posted: HostToWebview[] = [];
-    panes.push({ pane: controller.attachPane({ post: (m) => posted.push(m) }), posted });
+    panes.push({
+      pane: controller.attachPane({ post: (m) => posted.push(m), primary: index === primary }),
+      posted,
+    });
   }
   controller.onServerState({ kind: 'running', server: SERVER });
   const emit = (type: string, data: object): void => {
@@ -163,7 +174,7 @@ function setup(count = 2, sessions: string[] = ['ses_a', 'ses_b']) {
   const send = (index: number, message: WebviewToHost): Promise<void> =>
     controller.handle(panes[index]?.pane.id ?? -1, message);
   const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
-  return { controller, panes, calls, logs, opened, emit, send, flush };
+  return { controller, panes, calls, logs, opened, remembered, emit, send, flush };
 }
 
 const typesOf = (posted: HostToWebview[]): string[] => posted.map((m) => m.type);
@@ -327,6 +338,28 @@ describe('connecting the server', () => {
     expect(panes[1]?.pane.sessionID).toBeUndefined();
   });
 
+  // Protects W2 of the host review of #77: after editor -> sidebar with leftover tabs the oldest
+  // pane is a tab, and the remembered session of a NEW folder must go to the side-bar pane.
+  // Fake surfaces and memory (synthetic).
+  it('gives the remembered session to the primary pane, not the oldest', () => {
+    const { controller, panes, remembered } = setup(2, ['ses_a', 'ses_b'], {}, 1);
+    remembered.set('C:\\other', 'ses_b');
+    controller.onServerState({
+      kind: 'running',
+      server: { ...SERVER, url: 'http://127.0.0.1:43999', folder: 'C:\\other' },
+    });
+    expect(panes[0]?.pane.sessionID).toBeUndefined();
+    expect(panes[1]?.pane.sessionID).toBe('ses_b');
+  });
+
+  it('reports the session of a pane as soon as it is bound', async () => {
+    const { controller, panes, send } = setup();
+    expect(controller.sessionOf(panes[0]?.pane.id ?? -1)).toBeUndefined();
+    await send(0, { type: 'session.open', requestId: 'o1', sessionID: 'ses_a' });
+    expect(controller.sessionOf(panes[0]?.pane.id ?? -1)).toBe('ses_a');
+    expect(controller.sessionOf(999)).toBeUndefined();
+  });
+
   it('answers the ready of one pane with a snapshot for that pane only', async () => {
     const { panes, controller } = setup();
     for (const { posted } of panes) posted.length = 0;
@@ -376,5 +409,196 @@ describe('closing a pane', () => {
     // A message from the closed pane is dropped with a warning, not answered.
     await controller.handle(panes[0]?.pane.id ?? -1, { type: 'session.new', requestId: 'late' });
     expect(panes[0]?.posted).toEqual([]);
+  });
+});
+
+describe('openInPane', () => {
+  it('binds the session, remembers it and publishes to that pane only', async () => {
+    const { controller, panes, remembered } = setup();
+    for (const { posted } of panes) posted.length = 0;
+    await controller.openInPane(panes[1]?.pane.id ?? -1, 'ses_b');
+    expect(panes[1]?.pane.sessionID).toBe('ses_b');
+    expect(typesOf(panes[1]?.posted ?? [])).toContain('snapshot');
+    expect(panes[0]?.posted).toEqual([]);
+    expect(panes[0]?.pane.sessionID).toBeUndefined();
+    expect(remembered.get(SERVER.folder)).toBe('ses_b');
+  });
+
+  it('empties the pane when given no session, and posts no request.result', async () => {
+    const { controller, panes } = setup();
+    await controller.openInPane(panes[0]?.pane.id ?? -1, undefined);
+    expect(panes[0]?.pane.sessionID).toBeUndefined();
+    expect(typesOf(panes[0]?.posted ?? [])).not.toContain('request.result');
+    expect(typesOf(panes[0]?.posted ?? [])).toContain('snapshot');
+  });
+
+  it('ignores an unknown pane', async () => {
+    const { controller, panes } = setup(1);
+    panes[0]?.posted.splice(0);
+    await controller.openInPane(999, 'ses_a');
+    expect(panes[0]?.posted).toEqual([]);
+  });
+});
+
+describe('opening a session another pane already shows', () => {
+  it('reveals the other pane instead of opening it twice, leaving the asker alone', async () => {
+    const revealed: number[] = [];
+    const { panes, send } = setup(2, ['ses_a', 'ses_b'], {
+      revealPane: (id) => revealed.push(id),
+    });
+    await send(0, { type: 'session.open', requestId: 'o1', sessionID: 'ses_a' });
+    await send(1, { type: 'session.open', requestId: 'o2', sessionID: 'ses_b' });
+    for (const { posted } of panes) posted.length = 0;
+    await send(1, { type: 'session.open', requestId: 'o3', sessionID: 'ses_a' });
+    expect(revealed).toEqual([panes[0]?.pane.id]);
+    expect(panes[1]?.pane.sessionID).toBe('ses_b');
+    expect(panes[0]?.pane.sessionID).toBe('ses_a');
+    expect(panes[1]?.posted).toEqual([{ type: 'request.result', requestId: 'o3' }]);
+    expect(panes[0]?.posted).toEqual([]);
+  });
+
+  it('opens normally when the asking pane already shows that session', async () => {
+    const revealed: number[] = [];
+    const { panes, send } = setup(2, ['ses_a', 'ses_b'], {
+      revealPane: (id) => revealed.push(id),
+    });
+    await send(0, { type: 'session.open', requestId: 'o1', sessionID: 'ses_a' });
+    await send(0, { type: 'session.open', requestId: 'o2', sessionID: 'ses_a' });
+    expect(revealed).toEqual([]);
+    expect(typesOf(panes[0]?.posted ?? []).filter((t) => t === 'snapshot')).toHaveLength(2);
+  });
+
+  it('still answers OK when the surfaces cannot reveal (no revealPane)', async () => {
+    const { panes, send } = setup();
+    await send(0, { type: 'session.open', requestId: 'o1', sessionID: 'ses_a' });
+    await send(1, { type: 'session.open', requestId: 'o2', sessionID: 'ses_b' });
+    await send(1, { type: 'session.open', requestId: 'o3', sessionID: 'ses_a' });
+    expect(panes[1]?.pane.sessionID).toBe('ses_b');
+    expect(panes[1]?.posted).toContainEqual({ type: 'request.result', requestId: 'o3' });
+  });
+});
+
+describe('serving a request in another surface (openElsewhere)', () => {
+  it('leaves the asking pane alone when the VS Code side opens the new session elsewhere', async () => {
+    const calls: Array<[number, string | undefined]> = [];
+    let accept = false;
+    const { panes, send } = setup(2, ['ses_a', 'ses_b'], {
+      openElsewhere: (from, session) => {
+        calls.push([from, session]);
+        return accept;
+      },
+    });
+    await send(0, { type: 'session.open', requestId: 'o1', sessionID: 'ses_a' });
+    calls.length = 0;
+    accept = true;
+    for (const { posted } of panes) posted.length = 0;
+    await send(0, { type: 'session.new', requestId: 'n1' });
+    expect(calls).toEqual([[panes[0]?.pane.id ?? -1, undefined]]);
+    expect(panes[0]?.pane.sessionID).toBe('ses_a');
+    expect(panes[0]?.posted).toEqual([{ type: 'request.result', requestId: 'n1' }]);
+  });
+
+  it('opens an unshown session elsewhere and leaves a bound asking pane on its own', async () => {
+    const calls: Array<[number, string | undefined]> = [];
+    const { panes, send } = setup(2, ['ses_a', 'ses_b'], {
+      openElsewhere: (from, session) => {
+        calls.push([from, session]);
+        return true;
+      },
+    });
+    // The pane is empty, so it adopts ses_a without asking (next test); then it is bound.
+    await send(0, { type: 'session.open', requestId: 'o1', sessionID: 'ses_a' });
+    await send(0, { type: 'session.open', requestId: 'o2', sessionID: 'ses_b' });
+    expect(calls).toEqual([[panes[0]?.pane.id ?? -1, 'ses_b']]);
+    expect(panes[0]?.pane.sessionID).toBe('ses_a');
+  });
+
+  // Protects the decision "an empty tab adopts" (Sergio, 29/10/2026): with a lazy tab the old
+  // behavior left it empty beside a new tab. Fake surfaces (synthetic).
+  it('an empty pane adopts the session instead of asking openElsewhere', async () => {
+    const calls: Array<[number, string | undefined]> = [];
+    const { panes, send } = setup(2, ['ses_a', 'ses_b'], {
+      openElsewhere: (from, session) => {
+        calls.push([from, session]);
+        return true;
+      },
+    });
+    await send(0, { type: 'session.open', requestId: 'o1', sessionID: 'ses_b' });
+    expect(calls).toEqual([]);
+    expect(panes[0]?.pane.sessionID).toBe('ses_b');
+    expect(panes[0]?.posted).toContainEqual({ type: 'request.result', requestId: 'o1' });
+  });
+
+  it('an empty pane still reveals the other pane when that one shows the session', async () => {
+    const revealed: number[] = [];
+    const { panes, send } = setup(2, ['ses_a', 'ses_b'], {
+      revealPane: (id) => revealed.push(id),
+      openElsewhere: () => true,
+    });
+    await send(1, { type: 'session.open', requestId: 'o1', sessionID: 'ses_a' });
+    await send(0, { type: 'session.open', requestId: 'o2', sessionID: 'ses_a' });
+    expect(revealed).toEqual([panes[1]?.pane.id]);
+    expect(panes[0]?.pane.sessionID).toBeUndefined();
+  });
+
+  it('falls through to the asking pane when openElsewhere answers false', async () => {
+    const { panes, send } = setup(1, ['ses_a'], { openElsewhere: () => false });
+    await send(0, { type: 'session.open', requestId: 'o1', sessionID: 'ses_a' });
+    expect(panes[0]?.pane.sessionID).toBe('ses_a');
+    await send(0, { type: 'session.new', requestId: 'n1' });
+    expect(panes[0]?.pane.sessionID).toBeUndefined();
+  });
+
+  it('behaves as before when there is no openElsewhere: New session empties the pane, open binds it', async () => {
+    const { panes, send } = setup(1, ['ses_a']);
+    await send(0, { type: 'session.open', requestId: 'o1', sessionID: 'ses_a' });
+    expect(panes[0]?.pane.sessionID).toBe('ses_a');
+    await send(0, { type: 'session.new', requestId: 'n1' });
+    expect(panes[0]?.pane.sessionID).toBeUndefined();
+    expect(panes[0]?.posted).toContainEqual({ type: 'request.result', requestId: 'n1' });
+  });
+});
+
+describe('keyboard focus with several panes', () => {
+  it('stays true while any pane holds the focus (A focus, B focus, A blur)', async () => {
+    const seen: Array<[boolean, number]> = [];
+    const { panes, send } = setup(2, ['ses_a'], {
+      setChatFocused: (focused, paneId) => seen.push([focused, paneId]),
+    });
+    const [a, b] = [panes[0]?.pane.id ?? -1, panes[1]?.pane.id ?? -1];
+    await send(0, { type: 'chat.focusChanged', focused: true });
+    await send(1, { type: 'chat.focusChanged', focused: true });
+    await send(0, { type: 'chat.focusChanged', focused: false });
+    await send(1, { type: 'chat.focusChanged', focused: false });
+    expect(seen).toEqual([
+      [true, a],
+      [true, b],
+      [true, a],
+      [false, b],
+    ]);
+  });
+
+  it('turns false when the pane that held the focus is closed', async () => {
+    const seen: Array<[boolean, number]> = [];
+    const { controller, panes, send } = setup(2, ['ses_a'], {
+      setChatFocused: (focused, paneId) => seen.push([focused, paneId]),
+    });
+    await send(0, { type: 'chat.focusChanged', focused: true });
+    seen.length = 0;
+    controller.detachPane(panes[1]?.pane.id ?? -1);
+    expect(seen).toEqual([]);
+    controller.detachPane(panes[0]?.pane.id ?? -1);
+    expect(seen).toEqual([[false, panes[0]?.pane.id ?? -1]]);
+  });
+
+  it('hands the keyboard back to the pane whose kept command went out', async () => {
+    const focused: number[] = [];
+    const { controller } = setup(1, ['ses_a'], { focusView: (id) => focused.push(id) });
+    let open = false;
+    const hidden = controller.attachPane({ post: () => undefined, canDeliver: () => open });
+    controller.runUiCommand(hidden.id, 'prompt.focus');
+    open = true;
+    await controller.onPaneReady(hidden.id);
+    expect(focused).toEqual([hidden.id]);
   });
 });
