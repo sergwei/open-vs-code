@@ -30,9 +30,10 @@ affiliated with opencode or with Microsoft.
 
   ![A forked session with a "Forked from" crumb above the first exchange and the Fork from here button on the message](docs/images/fork-session.png)
 
-- **The chat in the side bar or in editor tabs.** With `openVsCode.chatLocation` set to `editor`,
-  every session opens in its own editor tab, beside your code, and the OpenCode view becomes a
-  native **Sessions** tree: the sessions of the folder grouped by Today, Yesterday, Previous 7 days
+- **The chat in editor tabs or in the side bar.** By default (`openVsCode.chatLocation` is
+  `editor`) every session opens in its own editor tab, beside your code, and the OpenCode view is a
+  native **Sessions** tree; set it to `sidebar` to keep one chat in the side bar instead. The tree
+  lists the sessions of the folder grouped by Today, Yesterday, Previous 7 days
   and Older, each row with its state shown by an icon (Running, Needs input, Failed) and, when the
   side bar has room, in words (also Fork, Tab) before the time, with Rename and Delete on the row, a **Search Sessions…** button that searches the titles on the
   server, and a **Show more sessions** row. Clicking a session opens it in a tab, or brings that tab
@@ -73,7 +74,8 @@ affiliated with opencode or with Microsoft.
 - **Drop files and paste images (issue #30):** right-click files in the Explorer and choose
   **Add to OpenCode Chat** (works in every VS Code version), or drag them from the Explorer onto the
   prompt box **while holding Shift** (VS Code only delivers a drop to a side-bar view with Shift
-  held). Only regular files inside the workspace folder are
+  held: that is the side-bar chat, `chatLocation` set to `sidebar`; the editor tabs of the default
+  location are not checked for this). Only regular files inside the workspace folder are
   added, and a dropped file must also be one that opencode lists (what git ignores, `.env`
   included, cannot be dropped: use "Attach file…" in the "+" menu for that); folders and anything else are skipped with
   one notice that counts them. Paste an image (PNG, JPEG, GIF or WebP, up to 10 MiB) with
@@ -119,11 +121,12 @@ The extension is not on the Marketplace yet; issue #43 will publish it there. Un
 
 ## Usage
 
-1. Open a folder in VS Code and click the **OpenCode** icon in the Activity Bar, then open the
-   **Chat** view.
+1. Open a folder in VS Code and click the **OpenCode** icon in the Activity Bar: the **Sessions**
+   view lists the sessions of the folder. Press **New Session** in its title bar to open a chat tab
+   beside your code.
 2. The extension starts `opencode serve` for the workspace folder, on `127.0.0.1` with a random port
    and a random password, and stops it when the window closes.
-3. Type a prompt and press Enter. Press Escape or **Stop** to interrupt a turn. From the editor,
+3. Type a prompt in the tab and press Enter. Press Escape or **Stop** to interrupt a turn. From the editor,
    press Ctrl+Alt+P (Cmd+Alt+P on macOS) to jump to the prompt; press it again to come back to the
    editor (see [Keyboard shortcuts](#keyboard-shortcuts)).
 
@@ -132,14 +135,16 @@ To ask about code without opening the chat first, select it in the editor, right
 Explorer and choose **Explain with OpenCode**. The chat opens by itself and the prompt is sent in
 the open session.
 
-To keep the chat in editor tabs instead, set `openVsCode.chatLocation` to `editor` (Settings: Chat
-Location). The OpenCode view then lists the sessions of the folder: click one (or press Enter on
-it) to open it, `F2` renames the selected one and `Delete` deletes it. **New Session** opens a new
-tab, **Open Chat** brings the most recent tab to the front (or opens the last session of the
-folder when there is none). The chat in a tab has no Sessions button: the tree is the one place to
-browse sessions. Insert at cursor and Add
+The chat lives in editor tabs by default (`openVsCode.chatLocation` is `editor`). The OpenCode view
+lists the sessions of the folder: click one (or press Enter on it) to open it, `F2` renames the
+selected one and `Delete` deletes it. **New Session** opens a new tab, **Open Chat** brings the most
+recent tab to the front (or opens the last session of the folder when there is none). The chat in a
+tab has no Sessions button: the tree is the one place to browse sessions. Insert at cursor and Add
 selection write into the last text editor you used, and file links and diffs open outside the
 chat's group.
+
+To keep one chat in the side bar instead, set `openVsCode.chatLocation` to `sidebar` (Settings:
+Chat Location); the OpenCode view then is the **Chat** view, and the tabs you had open stay open.
 
 In a multi-root workspace, choose the folder opencode works in with **OpenCode: Select Workspace
 Folder**.
@@ -151,7 +156,7 @@ Folder**.
 | `openVsCode.opencodePath` | machine | empty | Absolute path to the opencode **v2** executable. Empty searches `PATH` for `opencode2`, then `opencode`. On Windows an npm `opencode.cmd` shim is accepted. Not used while `openVsCode.serverUrl` is set. |
 | `openVsCode.serverUrl` | machine | empty | Address of an opencode **v2** server that is already running on **this machine**, for example `http://127.0.0.1:4096`. Empty lets the extension launch its own server. The extension then does not use `openVsCode.opencodePath`. See [Using a server you started](#using-a-server-you-started). |
 | `openVsCode.defaultModel` | window | empty | Model every **new** chat session starts with, written `provider/model` (for example `opencode/big-pickle`). It wins over the last model you used. A badly written or unavailable value is ignored with a warning. |
-| `openVsCode.chatLocation` | window | `sidebar` | Where the chat lives: `sidebar` (one chat in the OpenCode view) or `editor` (one editor tab per session). |
+| `openVsCode.chatLocation` | window | `editor` | Where the chat lives: `editor` (one editor tab per session, and the OpenCode view lists the sessions) or `sidebar` (one chat in the OpenCode view). Any other value counts as `editor`. |
 
 ## Commands
 
@@ -162,19 +167,19 @@ Command Palette (they act on the active editor); the two Explorer entries are no
 | Command | What it does |
 | --- | --- |
 | **OpenCode: Show Logs** | Opens the OpenCode output channel. |
-| **OpenCode: Restart Server** | Restarts the server the extension launched, or reconnects to the server in `openVsCode.serverUrl` when that setting is set. Also a button in the chat title bar. |
+| **OpenCode: Restart Server** | Restarts the server the extension launched, or reconnects to the server in `openVsCode.serverUrl` when that setting is set. Also a button in the title bar of the Chat view (`chatLocation` set to `sidebar`) and an entry in the `...` menu of the Sessions view. |
 | **OpenCode: Select Workspace Folder** | Chooses which folder the server runs in (multi-root workspaces only). |
 | **OpenCode: Manage Saved Permissions** | Lists the permissions you chose to always allow and lets you revoke them. |
 | **OpenCode: Set Server Password** | Stores the password of the server in `openVsCode.serverUrl` in VS Code's SecretStorage. |
 | **OpenCode: Forget Server Password** | Deletes that stored password. |
 | **OpenCode: Open Chat** | Shows the chat and puts the caret in the prompt. |
 | **OpenCode: Focus Prompt** | Puts the caret in the prompt; pressed again while the chat has the focus, it returns to the editor. |
-| **OpenCode: New Session** | Same as the **New session** button: the next prompt starts a new session and your draft is kept. With `chatLocation` set to `editor` it opens a new empty tab instead. |
+| **OpenCode: New Session** | Opens a new empty chat tab (the default, `chatLocation` set to `editor`). With `chatLocation` set to `sidebar` it is the same as the **New session** button: the next prompt starts a new session and your draft is kept. |
 | **OpenCode: Open Settings** | Opens Settings filtered to this extension. |
 | **OpenCode: Stop Response** | Same as **Stop**: interrupts the running turn. Run from the editor it also shows the chat; with no turn running it only says "No response is running". |
-| **OpenCode: Rename Session…** | Row of the Sessions list (`chatLocation` set to `editor`): asks for a new title. Also the pencil on the row and `F2`; not in the Command Palette. |
+| **OpenCode: Rename Session…** | Row of the Sessions list (shown when `chatLocation` is not `sidebar`, the default): asks for a new title. Also the pencil on the row and `F2`; not in the Command Palette. |
 | **OpenCode: Delete Session** | Row of the Sessions list: after a confirmation, deletes the session for every opencode client and closes its tab. Also the bin on the row and `Delete`; not in the Command Palette. |
-| **OpenCode: Search Sessions…** | Searches the session titles on the server and opens the one you pick. Only offered while `chatLocation` is `editor`. Also a button in the Sessions title bar. |
+| **OpenCode: Search Sessions…** | Searches the session titles on the server and opens the one you pick. Only offered while `chatLocation` is not `sidebar` (the default is `editor`). Also a button in the Sessions title bar. |
 | **Add to OpenCode Chat** | Explorer right-click menu: attaches the selected files to the prompt. |
 | **Add to OpenCode Chat** | Editor right-click menu: attaches the selection (the whole file when nothing is selected). |
 | **Explain with OpenCode** | Editor right-click menu: sends "Explain what @file#lines does." with the selection (or the file) attached. |

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_CHAT_LOCATION, readChatLocation } from './chatLocation';
 import * as ids from './ids';
 
 interface Manifest {
@@ -354,24 +355,45 @@ describe('chat location (issue #77)', () => {
   const welcome = manifest.contributes.viewsWelcome ?? [];
   const sessionsWelcomes = welcome.filter((w) => w.view === ids.SESSIONS_VIEW_ID);
 
-  it('declares the setting with both values, descriptions, default sidebar and order 4', () => {
+  it('declares the setting with both values, descriptions, default editor and order 4', () => {
     const setting = manifest.contributes.configuration.properties[ids.CHAT_LOCATION_SETTING];
     expect(ids.CHAT_LOCATION_SETTING).toBe(`${ids.CONFIG_SECTION}.${ids.CHAT_LOCATION_KEY}`);
     expect(setting).toMatchObject({
       type: 'string',
       enum: ['sidebar', 'editor'],
-      default: 'sidebar',
+      default: 'editor',
       scope: 'window',
       order: 4,
     });
     expect(setting?.enumDescriptions).toHaveLength(2);
   });
 
-  it('shows the chat view unless the location is editor, and the Sessions view only then', () => {
+  it('shows the chat view only for sidebar, and the Sessions view for anything else', () => {
     const chat = views.find((v) => v.id === ids.CHAT_VIEW_ID);
     const sessions = views.find((v) => v.id === ids.SESSIONS_VIEW_ID);
-    expect(chat?.when).toBe(`config.${ids.CHAT_LOCATION_SETTING} != editor`);
-    expect(sessions?.when).toBe(`config.${ids.CHAT_LOCATION_SETTING} == editor`);
+    expect(chat?.when).toBe(`config.${ids.CHAT_LOCATION_SETTING} == sidebar`);
+    expect(sessions?.when).toBe(`config.${ids.CHAT_LOCATION_SETTING} != sidebar`);
+  });
+
+  // E5 (decision Q1=1 of Sergio, 30/10/2026): one rule, "the side bar only if `sidebar` is written".
+  // Provenance: the REAL manifest and the real host function, fabricated unknown values; what VS
+  // Code does with an unknown value in a `when` is checked by `defaultLocation.test.ts`.
+  it('agrees: the host fallback, the manifest default and the view `when` clauses', () => {
+    const setting = manifest.contributes.configuration.properties[ids.CHAT_LOCATION_SETTING];
+    expect(DEFAULT_CHAT_LOCATION).toBe(setting?.default);
+    for (const raw of [undefined, 'panel', 'Editor', 42]) {
+      expect(readChatLocation(raw), String(raw)).toBe(setting?.default);
+    }
+    expect(readChatLocation('sidebar')).toBe('sidebar');
+    const clauses = [
+      views.find((v) => v.id === ids.CHAT_VIEW_ID)?.when,
+      views.find((v) => v.id === ids.SESSIONS_VIEW_ID)?.when,
+      (manifest.contributes.menus?.['commandPalette'] ?? []).find(
+        (e) => e.command === ids.SEARCH_SESSIONS_COMMAND_ID,
+      )?.when,
+    ];
+    // None of them tests for `editor`: only the literal `sidebar` decides, as in `readChatLocation`.
+    for (const clause of clauses) expect(clause).toMatch(/chatLocation (==|!=) sidebar$/);
   });
 
   // E3 (issue #77, Q9=1 and Q10=1): one welcome per state of `SESSIONS_STATE_CONTEXT_KEY`, with the
@@ -420,7 +442,7 @@ describe('chat location (issue #77)', () => {
     expect(whenOf(ids.RENAME_SESSION_COMMAND_ID)).toBe('false');
     expect(whenOf(ids.DELETE_SESSION_COMMAND_ID)).toBe('false');
     expect(whenOf(ids.SEARCH_SESSIONS_COMMAND_ID)).toBe(
-      `config.${ids.CHAT_LOCATION_SETTING} == editor`,
+      `config.${ids.CHAT_LOCATION_SETTING} != sidebar`,
     );
   });
 

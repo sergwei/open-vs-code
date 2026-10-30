@@ -67,12 +67,12 @@
           "type": "webview",
           "id": "openVsCode.chat",
           "name": "Chat",
-          "when": "config.openVsCode.chatLocation != editor"
+          "when": "config.openVsCode.chatLocation == sidebar"
         },
         {
           "id": "openVsCode.sessions",
           "name": "Sessions",
-          "when": "config.openVsCode.chatLocation == editor"
+          "when": "config.openVsCode.chatLocation != sidebar"
         }
       ]
     },
@@ -129,10 +129,10 @@
             "Side bar: one chat in the OpenCode view.",
             "Editor tabs: one tab per session; the Sessions view lists the sessions of the folder."
           ],
-          "default": "sidebar",
+          "default": "editor",
           "scope": "window",
           "order": 4,
-          "markdownDescription": "Where the chat lives. **sidebar** keeps one chat in the OpenCode view. **editor** opens one editor tab per session and replaces the chat in the OpenCode view with a Sessions view that lists the sessions of the folder; click one to open it in a tab. A change applies at once, without reloading the window. Reload Window restores the open tabs."
+          "markdownDescription": "Where the chat lives. **editor** (the default) opens one editor tab per session and replaces the chat in the OpenCode view with a Sessions view that lists the sessions of the folder; click one to open it in a tab. **sidebar** keeps one chat in the OpenCode view. Any other value counts as **editor**. A change applies at once, without reloading the window. Reload Window restores the open tabs."
         }
       }
     },
@@ -371,7 +371,7 @@
         },
         {
           "command": "openVsCode.searchSessions",
-          "when": "config.openVsCode.chatLocation == editor"
+          "when": "config.openVsCode.chatLocation != sidebar"
         }
       ]
     }

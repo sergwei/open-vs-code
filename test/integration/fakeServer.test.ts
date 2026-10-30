@@ -53,7 +53,12 @@ import {
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
 import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
-import { chatTabs, setChatLocation, waitForChatTabs } from './support/chatLocation';
+import {
+  chatTabs,
+  restoreChatLocation,
+  setChatLocation,
+  waitForChatTabs,
+} from './support/chatLocation';
 import { openLogCursor, openLogFromStart, type LogCursor } from './support/extensionLog';
 import {
   lastReadyPid,
@@ -1293,7 +1298,7 @@ describe('fake server', function () {
       );
     } finally {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-      await setChatLocation(undefined, await openLogCursor());
+      await restoreChatLocation(await openLogCursor());
     }
   });
 
@@ -1354,7 +1359,7 @@ describe('fake server', function () {
 
     afterEach(async () => {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-      await setChatLocation(undefined, await openLogCursor());
+      await restoreChatLocation(await openLogCursor());
     });
 
     it('restores a tab with its session and its title', async function () {
@@ -1500,7 +1505,7 @@ describe('fake server', function () {
 
     afterEach(async () => {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-      await setChatLocation(undefined, await openLogCursor());
+      await restoreChatLocation(await openLogCursor());
     });
 
     it('lists the session another turn created, one more row', async function () {
@@ -1631,7 +1636,7 @@ describe('fake server', function () {
 
     afterEach(async () => {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-      await setChatLocation(undefined, await openLogCursor());
+      await restoreChatLocation(await openLogCursor());
     });
 
     /**

@@ -4,17 +4,27 @@
 /** The two places the chat can live; the values of the `openVsCode.chatLocation` setting. */
 export type ChatLocation = 'sidebar' | 'editor';
 
-/** Used when the setting is absent or holds anything else. */
-export const DEFAULT_CHAT_LOCATION: ChatLocation = 'sidebar';
+/**
+ * Used when the setting is absent or holds anything else, and the `default` of the setting in
+ * `package.json` (E5 of #77, decision Q1=1 of Sergio, 30/10/2026: the default moved from `sidebar`
+ * to `editor`). `manifest.test.ts` ties this constant to the manifest.
+ */
+export const DEFAULT_CHAT_LOCATION: ChatLocation = 'editor';
 
 /**
- * Reads the raw value of the `openVsCode.chatLocation` setting. Anything that is not exactly
- * `'sidebar'` or `'editor'` (absent, another type, a typo, a value of a future version) reads as
- * {@link DEFAULT_CHAT_LOCATION}: a bad setting must not leave the chat without a home.
- * VERIFIED by `chatLocation.test.ts` with fabricated values (no VS Code involved).
+ * Reads the raw value of the `openVsCode.chatLocation` setting. Only an exact `'sidebar'` reads as
+ * `sidebar`; absent, another type, a typo or a value of a future version read as
+ * {@link DEFAULT_CHAT_LOCATION} (`editor`): a bad setting must not leave the chat without a home.
+ * The `when` clauses of the views in `package.json` follow the same rule (`== sidebar` for the
+ * chat view, `!= sidebar` for Sessions), so host and views never disagree about a bad value.
+ * VERIFIED by `chatLocation.test.ts` with fabricated values (no VS Code involved), and the
+ * agreement with the manifest by `manifest.test.ts` "the host fallback, the manifest default and
+ * the view `when` clauses agree". In a real VS Code, the integration case "reads an unknown value
+ * as editor in the host and in the views" (`defaultLocation.test.ts`; Windows 11, VS Code 1.144.0,
+ * 30/10/2026) checks the same agreement with an unknown value. UNVERIFIED on macOS and Linux.
  */
 export function readChatLocation(raw: unknown): ChatLocation {
-  return raw === 'editor' || raw === 'sidebar' ? raw : DEFAULT_CHAT_LOCATION;
+  return raw === 'sidebar' ? 'sidebar' : DEFAULT_CHAT_LOCATION;
 }
 
 /** What {@link planLocationSwitch} knows about an open editor tab. */

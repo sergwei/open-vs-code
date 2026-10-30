@@ -1,5 +1,5 @@
 // Protects the rules of the `openVsCode.chatLocation` setting (issue #77): an invalid value falls
-// back to `sidebar`, and a change of location follows Sergio's decision Q4 of 29/10/2026 (leaving
+// back to `editor`, the default (E5, decision Q1=1 of 30/10/2026), and a change of location follows Sergio's decision Q4 of 29/10/2026 (leaving
 // `editor` does NOT close the tabs; one session is never in two surfaces).
 //
 // Provenance: fabricated values and states, no VS Code and no server. It proves the planning
@@ -20,9 +20,9 @@ describe('readChatLocation', () => {
     expect(readChatLocation('editor')).toBe('editor');
   });
 
-  it('falls back to sidebar for an absent, mistyped or foreign value', () => {
-    for (const raw of [undefined, null, 1, true, {}, 'panel', 'Editor', '']) {
-      expect(readChatLocation(raw)).toBe('sidebar');
+  it('falls back to editor for an absent, mistyped or foreign value', () => {
+    for (const raw of [undefined, null, 1, true, {}, 'panel', 'Editor', 'Sidebar', '']) {
+      expect(readChatLocation(raw)).toBe('editor');
     }
   });
 });
