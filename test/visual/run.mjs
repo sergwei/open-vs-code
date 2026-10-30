@@ -1011,6 +1011,11 @@ async function waitEmptyView(ms = 5_000) {
  * the same late move then showed up in steps 16 and 17 ("@sample" typed into an editor, a prompt
  * typed into `src/sample.ts`), whenever an editor was the active part. A bare `clickIn('textarea')`
  * stays only where the click itself is what a check judges, or where no key follows it.
+ *
+ * Returns whether the focus stayed (false after the 8 s cap). {@link send} and
+ * {@link clearPromptBox} throw on false: they press Ctrl+A and Backspace, which on an editor that
+ * has the focus empty it and leave it dirty
+ * (the "src/sample.ts EMPTY and dirty" of 30/10/2026, then a save dialog and a cascade of FAIL).
  */
 async function focusPromptBox() {
   let steadyReads = 0;
@@ -1026,6 +1031,25 @@ async function focusPromptBox() {
     8_000,
     300,
   );
+  return steadyReads >= 3;
+}
+
+/**
+ * Empties the prompt box with the keyboard, for the `clearBox` helpers of steps 16, 24, 26 and 27,
+ * then pauses `pauseMs` (the first typed character is lost without it, see {@link send}).
+ *
+ * Throws, sending no key, when {@link focusPromptBox} says the focus did not stay: Ctrl+A and
+ * Backspace on an editor empty it and leave it dirty (review 2, C1 of the tests half; the same
+ * guard as {@link send}). The Ctrl+A of the suite that only SELECTS (quick inputs, the settings
+ * search box, the editor of step 26) deletes nothing and is not covered. NOT observed: the throw.
+ */
+async function clearPromptBox(pauseMs) {
+  if (!(await focusPromptBox())) {
+    throw new Error('the prompt box did not keep the focus: it was not cleared');
+  }
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.press('Backspace');
+  await sleep(pauseMs);
 }
 
 /** Waits until the workbench has no editor tab open (after "View: Close All Editors"), up to 3 s. */
@@ -1044,13 +1068,22 @@ function waitForNoTabs() {
  * typed into `src/sample.ts` by a lost focus (step 17, Engram #1337) would have done the same, and
  * "Save" would have kept it on disk. The warning names the editor, because a dialog here means some
  * earlier key went to an editor. The button is found by text: VS Code 1.143.1 keeps it as
- * "Do&&n't Save" in `nls.messages.json`, the mnemonic is not drawn. HYPOTHESIS: the dialog is the
- * in-DOM `.monaco-dialog-box` (custom dialog style, `vscodeProcess.mjs`), as Sergio's screenshot
- * shows; the path that presses the button was not run on purpose yet.
+ * "Do&&n't Save" in `nls.messages.json`, the mnemonic is not drawn. The dialog is the in-DOM
+ * `.monaco-dialog-box` (custom dialog style, `vscodeProcess.mjs`), as Sergio's screenshot shows.
+ *
+ * The button is looked up as `.monaco-button`, not as a `<button>`: VS Code draws it as
+ * `<a class="monaco-button" role="button">` (HYPOTHESIS, read in `workbench.desktop.main.js` of
+ * VS Code 1.144.0, Windows 11, 30/10/2026: the Button class creates an `a` element; reading is not
+ * running, and no run has shown the dialog). The first
+ * version looked for `.monaco-dialog-box button`, which matches nothing, so the path never pressed
+ * "Don't Save": a stray dirty editor left the dialog open and every later step failed in cascade
+ * (57 FAIL on 30/10/2026, Engram #1510 holds the debug round of that cascade). UNVERIFIED:
+ * the press itself was not run against a real dialog; check that a run that leaves a dirty editor
+ * prints "Close All Editors asked to save a changed editor" and goes on.
  */
 async function closeAllEditors() {
   await command('View: Close All Editors');
-  const dontSave = page.locator('.monaco-dialog-box button', { hasText: /Don.t Save/ });
+  const dontSave = page.locator('.monaco-dialog-box .monaco-button', { hasText: /Don.t Save/ });
   const asked = await waitFor(
     async () => (await dontSave.count()) > 0 || (await page.locator('.tab').count()) === 0,
     3_000,
@@ -1276,9 +1309,21 @@ async function clickButton(text) {
  * an empty box and no turn after `send` in 4 runs of 6. The steady focus costs about 0.6-0.9 s
  * per call. HYPOTHESIS: the steady focus is enough; to check, run `--steps 16,17` repeatedly and
  * expect "the context line appears once a step has reported its tokens" every time.
+ *
+ * Throws, sending no key, when the prompt box did not keep the focus: Ctrl+A and Backspace are
+ * destructive on an editor, and the old code pressed them anyway after the 8 s cap of
+ * `focusPromptBox`. Root cause of the dirty editors of 30/10/2026 (an emptied `src/sample.ts`, an
+ * empty Untitled editor and "@sample" typed into a diff editor in a run of the #92 branch, before the
+ * sessions tree existed; Engram #1510): the effect, VERIFIED by those screenshots; that
+ * `send` was the one that pressed the keys, HYPOTHESIS (the runs did not trace the focus; the
+ * `clearBox` helpers of steps 16, 24, 26 and 27 pressed the same keys after the same unchecked
+ * focus until round 2 of the review made them share {@link clearPromptBox}, which throws the same
+ * way). Why the focus is lost is still not known. NOT observed: the throw.
  */
 async function send(text) {
-  await focusPromptBox();
+  if (!(await focusPromptBox())) {
+    throw new Error(`the prompt box did not keep the focus: "${text.slice(0, 40)}" was not sent`);
+  }
   await page.keyboard.press('ControlOrMeta+A');
   await page.keyboard.press('Backspace');
   // Without this pause the first typed character was lost (screenshot 11h showed "all the
@@ -4745,12 +4790,7 @@ try {
       ['hc-light', 'Default High Contrast Light'],
     ];
     /** Empties the prompt box with the keyboard (focus goes into it first). */
-    const clearBox = async () => {
-      await focusPromptBox();
-      await page.keyboard.press('ControlOrMeta+A');
-      await page.keyboard.press('Backspace');
-      await sleep(200); // same pause as in `send`: the emptied textarea re-renders
-    };
+    const clearBox = () => clearPromptBox(200); // same pause as in `send`: the emptied textarea re-renders
     /** Types `text` into an empty prompt box, as a user would. */
     const typeInBox = async (text) => {
       await clearBox();
@@ -7067,12 +7107,7 @@ try {
       await sleep(200); // the key reaches the webview asynchronously and negative checks follow
     };
     // Empties the box with the real keyboard; a popup open on the old text closes with it.
-    const clearBox = async () => {
-      await focusPromptBox();
-      await page.keyboard.press('ControlOrMeta+A');
-      await page.keyboard.press('Backspace');
-      await sleep(150); // the first typed character is lost without it (see `send`)
-    };
+    const clearBox = () => clearPromptBox(150);
     // The text the host logged, from every OpenCode.log of the isolated profile of this run.
     const hostLog = () => {
       const files = [];
@@ -7614,12 +7649,7 @@ try {
       await page.keyboard.press('Shift+ArrowDown');
       await waitFor(async () => /\(\d+ selected\)/.test(await editorSelection()), 2_000, 100);
     };
-    const clearBox = async () => {
-      await focusPromptBox();
-      await page.keyboard.press('ControlOrMeta+A');
-      await page.keyboard.press('Backspace');
-      await sleep(150); // the first typed character is lost without it (see `send`)
-    };
+    const clearBox = () => clearPromptBox(150);
     const removeChips = async () => {
       for (let guard = 0; guard < 6 && (await ctx()).chips.length > 0; guard += 1) {
         await clickIn('.chips .chip-remove');
@@ -7971,11 +8001,11 @@ try {
 
   // Step 27 (issue #77, plan E9-chat-location sections 8 and 9): the chat in editor tabs
   // (`openVsCode.chatLocation: editor`), judged in the DOM of the workbench (tabs, groups, the
-  // launcher, toasts, badge) and of each tab's webview. Cells: C1 the launcher; C2 the chat inside
+  // Sessions view, toasts, badge) and of each tab's webview. Cells: C1 the Sessions view; C2 the chat inside
   // a tab in the four themes at a medium width (the tab beside the code) and in one theme at the
   // full width; C3 the tab's title and icon in the four themes; C4 a LONG turn that ends while its
-  // tab is hidden shows complete and once when the tab returns; C5 opening A's session from B's
-  // picker reveals A; C6 New Session from the palette, from the launcher's title button and with
+  // tab is hidden shows complete and once when the tab returns; C5 clicking A's row in the Sessions
+  // view reveals A; C6 New Session from the palette, from the Sessions view's title button and with
   // Ctrl+Alt+N opens a new tab with the caret in its prompt; C7 Insert at cursor and Add selection
   // from a tab reach the last text editor; C8 a file link and a diff of "Changed files" open
   // outside the chat's group; C9 Explain with every tab hidden goes to the most recent tab; C10
@@ -7983,16 +8013,21 @@ try {
   // a badge, and "Open chat" reveals the tab of its session. What Reload Window does to the tabs
   // is step 28 (it was C12 here, a record taken before the serializer existed: "kept 0 of 5
   // tabs"). The widths are measured and printed, not assumed.
-  // VERIFIED on Windows 11, VS Code 1.144.0 (29/10/2026), the FULL `npm run test:visual` run of
-  // the E1 task (every step, after the last change of `src` and of this file) ended "all visual
-  // checks passed" and printed: "ok C10 sidebar -> editor opens ONE tab with the side
-  // bar session beside the code, and the side bar has no chat", "ok C4 coming back to A shows the
-  // whole reply once: 400 numbers, from 1 to 400, in order, no repeats", "ok C9 Explain with every
-  // tab hidden reveals the most recent tab and sends there" and "ok C11 "Open chat" of the
+  // VERIFIED by a full `npm run test:visual` on the final tree (Windows 11, VS Code 1.144.0,
+  // 30/10/2026, 0 FAIL, "all visual checks passed"), which printed: "ok   C10 sidebar -> editor
+  // opens ONE tab with the side bar session beside the code, and the side bar has no chat",
+  // "ok   C1 the Sessions view lists the session of the tab with no welcome text, shows the New
+  // Session, Search Sessions and Open Settings title buttons, and holds no chat", "ok   C4 coming
+  // back to A shows the whole reply once: 400 numbers, from 1 to 400, in order, no repeats (1
+  // assistant block with the 400)", "ok   C5 clicking A's row in the Sessions view reveals A and
+  // adds no tab (2 -> 2 tabs; the tab has no Sessions button: true)", "ok   C9 Explain with every
+  // tab hidden reveals the most recent tab and sends there" and "ok   C11 "Open chat" of the
   // notification reveals the tab of the session and its permission card is there (tab true, card
-  // true)". Found by it and not by any unit test: the same file open in two groups makes Explain
+  // true)"; the badge line reads "ok   C11 with every chat tab hidden a request raises a native
+  // notification (…) and the badge of the Sessions view shows on the OpenCode icon ("1")".
+  // Found by it and not by any unit test: the same file open in two groups makes Explain
   // lose its range (`editorForMenu`, hence `other27.ts`), and a toast that covers the prompt box.
-  // NOT measured: macOS, Linux, the launcher's badge in `sidebar` mode, two windows.
+  // NOT measured: macOS, Linux, the badge of the Sessions view while it is hidden, two windows.
   await step('27 chat in editor tabs (issue #77)', async () => {
     const DARK = 'Default Dark Modern';
     const EXPLAIN = 'Explain with OpenCode';
@@ -8148,6 +8183,10 @@ try {
           text: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
             .replace(/\s+/g, ' ')
             .trim(),
+          // The rows of the native Sessions tree (group headers and sessions), as VS Code draws them.
+          rows: [...(side?.querySelectorAll('.monaco-list-row') ?? [])].map((row) =>
+            (row.innerText ?? '').replace(/\s+/g, ' ').trim(),
+          ),
           buttons: [...(side?.querySelectorAll('.welcome-view-content .monaco-button') ?? [])].map(
             (b) => (b.textContent ?? '').trim(),
           ),
@@ -8193,12 +8232,7 @@ try {
           );
         })?.name;
       }, CHAT_FRAME);
-    const clearBox = async () => {
-      await focusPromptBox();
-      await page.keyboard.press('ControlOrMeta+A');
-      await page.keyboard.press('Backspace');
-      await sleep(150); // the first typed character is lost without it (see `send`)
-    };
+    const clearBox = () => clearPromptBox(150);
     const removeChips = async () => {
       for (let guard = 0; guard < 6 && (await view()).chips.length > 0; guard += 1) {
         await clickIn('.chips .chip-remove');
@@ -8310,18 +8344,24 @@ try {
         `C10 sidebar -> editor opens ONE tab with the side bar session beside the code, and the side bar has no chat (title ${JSON.stringify(inTab.title)}, ${String(inTab.messages)} of ${String(inSidebar.messages)} blocks, groups ${String(sampleTab?.group)}/${String(tabA?.group)})`,
       );
 
-      // --- C1: the launcher in the side bar ------------------------------------------------------
-      await waitFor(async () => (await launcher()).text !== '', 8_000, 200);
+      // --- C1: the Sessions view in the side bar (issue #77 E3: a native tree, not a launcher) ---
+      // With sessions in the folder the view lists them and shows NO welcome text; the welcome of
+      // each empty state (no sessions, offline) is judged in step 29, cells V4 and V5.
+      await waitFor(
+        async () => (await launcher()).rows.some((row) => row.includes(TITLE_A)),
+        8_000,
+        200,
+      );
       await shot('27a-launcher');
       const bar = await launcher();
       check(
-        bar.text.includes('The chat opens in editor tabs, one per session.') &&
-          bar.buttons.includes('New Session') &&
-          bar.buttons.includes('Open Chat') &&
+        bar.text === '' &&
+          bar.rows.some((row) => row.includes(TITLE_A)) &&
           bar.actions.some((label) => label.startsWith('New Session')) &&
+          bar.actions.some((label) => label.startsWith('Search Sessions')) &&
           bar.actions.includes('Open Settings') &&
           bar.chatFrames === 0,
-        `C1 the launcher shows its welcome text, its New Session and Open Chat buttons and the New Session and Open Settings title buttons, no chat (${JSON.stringify(bar)})`,
+        `C1 the Sessions view lists the session of the tab with no welcome text, shows the New Session, Search Sessions and Open Settings title buttons, and holds no chat (${JSON.stringify(bar)})`,
       );
 
       // --- C2 + C3: the tab beside the code, in the four themes ---------------------------------
@@ -8418,31 +8458,21 @@ try {
       assertNoWebviewErrors('C4 tab return');
       await shot('27c-tab-return');
 
-      // --- C5: B opens A's session from its picker; A is revealed, no tab is added -----------------
+      // --- C5: the tree opens A's session while B is on screen; A is revealed, no tab is added ----
+      // (the picker of a tab is gone since issue #77 E3: the Sessions view is the one place)
       await switchTo('Untitled session');
       const countBeforeOpen = (await chatTabs()).length;
-      check(await clickButton('Sessions'), 'C5 the Sessions button of B is pressed');
-      await waitFor(
-        () => web.inDoc((doc) => doc.querySelectorAll('.session-row').length > 0),
-        10_000,
-        200,
+      const pickerInTab = await web.inDoc(
+        (doc) => doc.querySelector('[data-session-trigger]') !== null,
       );
-      await web.inDoc((doc, title) => {
-        for (const row of doc.querySelectorAll('.session-row')) {
-          if ((row.querySelector('.session-title')?.textContent ?? '').trim() === title) {
-            row.querySelector('.session-main')?.setAttribute('data-visual-pick', 'true');
-          }
-        }
-      }, TITLE_A);
-      check(
-        await clickRowMain('[data-visual-pick="true"]'),
-        "C5 the row of A's session is pressed in the picker of B",
-      );
+      await showOpenCodeBar();
+      const rowOfA = page.locator('.part.sidebar .monaco-list-row', { hasText: TITLE_A }).first();
+      await rowOfA.click({ timeout: 10_000 });
       const revealed = await waitFor(async () => (await visibleChatId()) === idA, 8_000, 150);
       await openChat(30_000);
       check(
-        revealed === true && (await chatTabs()).length === countBeforeOpen,
-        `C5 opening A's session from B's picker reveals A and adds no tab (${String(countBeforeOpen)} -> ${String((await chatTabs()).length)} tabs)`,
+        revealed === true && (await chatTabs()).length === countBeforeOpen && !pickerInTab,
+        `C5 clicking A's row in the Sessions view reveals A and adds no tab (${String(countBeforeOpen)} -> ${String((await chatTabs()).length)} tabs; the tab has no Sessions button: ${String(!pickerInTab)})`,
       );
 
       // --- C6 (launcher title button, Ctrl+Alt+N) ---------------------------------------------------
@@ -8607,7 +8637,7 @@ try {
           toast !== null &&
           /Permission requested/.test(toast) &&
           badgeText !== '',
-        `C11 with every chat tab hidden a request raises a native notification ("${String(toast).slice(0, 80)}") and a badge on the OpenCode icon ("${badgeText}")`,
+        `C11 with every chat tab hidden a request raises a native notification ("${String(toast).slice(0, 80)}") and the badge of the Sessions view shows on the OpenCode icon ("${badgeText}")`,
       );
       await shot('27e-request-hidden');
       const open = page
@@ -8677,7 +8707,7 @@ try {
       setLocation('sidebar');
       // The launcher goes and the chat view takes its place in the same container; if the side bar
       // is not showing it (hidden, another container), the activity bar item brings it back.
-      await waitFor(async () => !(await launcher()).text.includes('The chat opens'), 8_000, 200);
+      await waitFor(async () => (await launcher()).rows.length === 0, 8_000, 200);
       let sidebarId = await waitFor(() => sidebarChatId(), 8_000, 200);
       if (sidebarId === undefined) {
         await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
@@ -8749,20 +8779,20 @@ try {
   // the step ended "all visual checks passed". So R1 does not tell `detachAll` from closing the
   // panels in `deactivate`: in this Reload Window harness both keep the tabs. HYPOTHESIS that
   // closing would lose them on a plain window close; this step does not exercise that.
-  // VERIFIED on Windows 11, VS Code 1.144.0 (29/10/2026), in the final FULL run of
-  // `npm run test:visual` (every step, after the last change to src and to this file), which
-  // ended "all visual checks passed" and printed: "ok R1 right after Reload Window the 4 chat tabs
-  // read as before", "ok R2 A comes back active: title "Tab28A: Reply with exactly: alpha28. Do",
-  // 2 blocks, draft "draft28-A", kind vscode-dark", "ok R5 D says ["This session no longer exists.
-  // Your next prompt starts a new one."] with title "Untitled session", 0 blocks and draft
-  // "draft28-D"", "ok the
-  // serializer restored 4 tabs (log lines "chat tab restored (pane N)"), none skipped", "ok R9 the
-  // notice of D has contrast 7.56 >= 4.5 in dark (tab 541 px)" (9.14 light, 21.00 hc-dark, 14.55
-  // hc-light), "ok R7 the restored B answers" (now also one more assistant block than before the
-  // prompt), "ok a revived panel keeps its document while hidden
-  // (the mark set in A before it was hidden: true, same webview true)", "ok R10 after the second
-  // Reload Window the workbench has 5 chat tabs (5 before it)" and "ok R8 the side bar view
-  // resolved to another session, not A's". The data line "R3 chat iframes in the workbench before
+  // VERIFIED by a full `npm run test:visual` on the final tree (Windows 11, VS Code 1.144.0,
+  // 30/10/2026, 0 FAIL, "all visual checks passed"), which printed: "ok   R1 right after Reload
+  // Window the 4 chat tabs read as before", "ok   R2 A comes back active: title "Tab28A: Reply with
+  // exactly: alpha28. Do", 4 blocks, draft "draft28-A", kind vscode-dark" (the `DELETE_TITLED` turn
+  // adds blocks to A; D is deleted by that fixture trigger, not by a picker), "ok   R5 D says
+  // ["This session no longer exists. Your next prompt starts a new one."] with title "Untitled
+  // session", 0 blocks and draft "draft28-D"", "ok   the serializer restored 4 tabs (log lines
+  // "chat tab restored (pane N)"), none skipped", "ok   R9 the notice of D has contrast 7.56 >= 4.5
+  // in dark (tab 541 px)" (9.14 light, 21.00 hc-dark, 14.55 hc-light), "ok   R7 the restored B
+  // answers", "ok   a revived panel keeps its document while hidden (the mark set in A before it
+  // was hidden: true, same webview true)", "ok   R10 after the second Reload Window the workbench
+  // has 5 chat tabs (5 before it)" and "ok   R8 the side bar view resolved to another session, not
+  // A's".
+  // The data line "R3 chat iframes in the workbench before
   // any background tab is opened: 1" shows the lazy deserialization. Found by it and not by any
   // unit test: the toast "All installed extensions are temporarily disabled" shows up seconds
   // after a Reload and covers the prompt box (hence `clearToasts`). NOT measured: macOS, Linux,
@@ -8777,9 +8807,7 @@ try {
     const PROMPT_B = 'Tab28B: Reply with exactly: beta28. Do not use any tools.';
     const PROMPT_D = 'Tab28D: Reply with exactly: delta28. Do not use any tools.';
     const PROMPT_L = 'Tab28L: Reply with exactly: lateral28. Do not use any tools.';
-    const [TITLE_A, TITLE_B, TITLE_D, TITLE_L] = [PROMPT_A, PROMPT_B, PROMPT_D, PROMPT_L].map(
-      titleOf,
-    );
+    const [TITLE_A, TITLE_B, , TITLE_L] = [PROMPT_A, PROMPT_B, PROMPT_D, PROMPT_L].map(titleOf);
     const sampleFile = path.join(workspace, 'src', 'sample.ts');
     const sampleBefore = fs.readFileSync(sampleFile, 'utf8');
     const setLocation = (value) => {
@@ -8999,60 +9027,12 @@ try {
       await newSessionTab(); // A
       await send(PROMPT_A);
       check(await waitIdle(30_000), 'the turn of A ends');
-      // D's session is deleted from A's picker while D is hidden: D's document keeps believing it.
-      check(await clickButton('Sessions'), 'the Sessions button of A is pressed');
-      await waitFor(
-        () => web.inDoc((doc) => doc.querySelectorAll('.session-row').length > 0),
-        10_000,
-        200,
-      );
-      await web.inDoc((doc, title) => {
-        for (const row of doc.querySelectorAll('.session-row')) {
-          if ((row.querySelector('.session-title')?.textContent ?? '').trim() === title) {
-            row.setAttribute('data-visual-pick', 'true');
-          }
-        }
-      }, TITLE_D);
-      check(
-        await clickIn(
-          '.session-row[data-visual-pick="true"] .session-action[aria-label^="Delete"]',
-        ),
-        "Delete is pressed on D's row in A's picker",
-      );
-      const dialog = page.locator('.monaco-dialog-box');
-      const modal = await waitFor(
-        async () => ((await dialog.count()) ? await dialog.first().innerText() : null),
-        10_000,
-        300,
-      );
-      check(
-        typeof modal === 'string' && modal.includes(TITLE_D),
-        `the modal names D's session (${String(modal).replace(/\s+/g, ' ').slice(0, 120)})`,
-      );
-      await dialog
-        .first()
-        .getByRole('button', { name: /^Delete$/ })
-        .click();
-      const deleted = await waitFor(
-        () =>
-          web.inDoc(
-            (doc, title) =>
-              ![...doc.querySelectorAll('.session-row')].some(
-                (row) => (row.querySelector('.session-title')?.textContent ?? '').trim() === title,
-              ),
-            TITLE_D,
-          ),
-        20_000,
-        300,
-      );
-      check(deleted === true, "D's session leaves the picker of A");
-      await clickIn('input[type="search"]'); // the native dialog took the keyboard focus
-      await page.keyboard.press('Escape');
-      await waitFor(
-        () => web.inDoc((doc) => doc.querySelectorAll('.session-row').length === 0),
-        3_000,
-        100,
-      );
+      // D's session is deleted by "another client" while D is hidden: D's document keeps believing
+      // it. A's picker used to do it (the real modal); a tab has no picker since issue #77 E3, and
+      // deleting from the Sessions view would close D's tab (P8) instead. The fixture trigger
+      // `DELETE_TITLED:<needle>` deletes the sessions whose title has the needle.
+      await send(`DELETE_TITLED:Tab28D Reply with exactly: gone28. Do not use any tools.`);
+      check(await waitIdle(30_000), "the turn that deletes D's session from outside ends");
       await typeDraft('draft28-A');
       await sleep(1_000); // the workbench gets the webview's state through a message; no signal
       const before = await chatTabs();
@@ -9328,6 +9308,843 @@ try {
       await closeAllEditors().catch(() => undefined);
       await setTheme(DARK).catch(() => undefined); // R9 leaves another theme if it fails midway
       fs.writeFileSync(sampleFile, sampleBefore);
+    }
+  });
+
+  // Step 29 (issue #77, delivery E3, plan E9-sessions-sidebar section 9): the native Sessions tree of
+  // the `editor` mode, judged in the DOM of the workbench (VS Code draws the rows, so this reads
+  // `.part.sidebar .monaco-list-row`) and in the webview of each tab. Cells: V1 the rows (date
+  // group, label, description words, icon) in the four themes and at 170 px, with the contrast of
+  // the two coloured icons (3:1); V2 the inline Rename and Delete on hover and on keyboard focus,
+  // dark and high contrast dark; V3 the context menu; V4 the welcome of an empty folder; V5 the
+  // welcome with no server and Open Chat; B1 click opens a tab, a second click reveals it; B2
+  // Rename from the row; B3 Delete from the row closes the tab; B4 Search Sessions…; B5 Show more
+  // sessions and the date groups; B6 Running, then Needs input, and the badge; B7 the tab has no
+  // Sessions button and the side bar chat does; B8 the selection follows the active tab and a hidden
+  // side bar is not opened. The data comes from the fixture (SYNTHETIC): the triggers SEED_SESSIONS,
+  // DELETE_TITLED and WIPE_SESSIONS exist only for this step. Cells that stay with Vitest: "Loading
+  // sessions…" and the move across midnight.
+  // VERIFIED by a full `npm run test:visual` on the final tree (Windows 11, VS Code 1.144.0,
+  // 30/10/2026, 0 FAIL, "all visual checks passed"), which printed: "ok   B6 during the turn the
+  // row of N reads "Running · Tab · 11:15 AM" and then "Needs input · Running · Tab · 11:15 AM",
+  // and the badge of the Sessions view is "1"", "ok   V3 the context menu of a session row lists
+  // Rename Session… and then Delete Session (rows: ["Rename Session…","Delete Session"])", "ok   V4
+  // with no sessions the view says "No sessions in this folder yet."", "ok   V5 with the server down
+  // the view says "OpenCode is not running for this folder."", "ok   B7 the chat in a tab has no
+  // Sessions button and keeps New session (surface "tab", Sessions button false, New session
+  // true)", "ok   B7 the chat in the side bar view keeps its Sessions button (surface "view",
+  // Sessions button true)", "ok   B5 Show more sessions loads the next page (54 -> 81 rows, Seed29
+  // 55 loaded true) and the groups read ["Today","Yesterday","Previous 7 days","Older"]" and "ok
+  // B1 a second click on the row of B reveals its tab and adds none (4 -> 4 tabs)". The V1 line of
+  // the dark theme read: N "Needs input · Running · Tab · 11:15 AM" cut, selected false, bell-dot
+  // 7.69:1, F "Failed · Tab · 11:15 AM" full, selected false, error 7.03:1, drawn descriptions >=
+  // 6.00:1; the same rows in the 170 px side bar show A and N with the description hidden. So the
+  // state words show only when there is room (decision of Sergio, review 1 C1): the icon, the
+  // tooltip and the aria label carry the state. That B1 line does NOT prove `RevealOrder`: the late
+  // reveal came before the second click in that run (Engram #1511), so it passes with or without
+  // it.
+  // The row classes were found by probing that DOM, not read from its source. Found by it: the
+  // first click on a tab sometimes does not take (a hover of the command center is drawn over the
+  // tab strip, hence `clickTabAndChat` removes the `.workbench-hover-container` nodes, clicks the
+  // chat first and prints how many clicks it needed), and the revealed tab is revealed a second time
+  // when its document is ready (the post-ready focus; the host drops that late reveal only when another chat surface was
+  // revealed meanwhile, see `RevealOrder`). NOT measured: macOS, Linux.
+  await step('29 native Sessions tree (issue #77, E3)', async () => {
+    const DARK = 'Default Dark Modern';
+    const HC_DARK = 'Default High Contrast';
+    const PROMPT_A = 'Tab29A: SEED_SESSIONS reply with exactly: alpha29. Do not use any tools.';
+    const PROMPT_B = 'Tab29B: Reply with exactly: beta29. Do not use any tools.';
+    const PROMPT_F = 'Fail29: Reply with exactly: x. FAIL';
+    const PROMPT_N = 'Tab29N: Reply with exactly: nu29. Do not use any tools.';
+    const PROMPT_N2 = 'Tab29N again: ASK_PERMISSION SLOW';
+    const setLocation = (value) => {
+      writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
+    };
+    const tabsNow = () =>
+      page.evaluate(() =>
+        [...globalThis.document.querySelectorAll('.tab')].map((tab) => ({
+          label: tab.getAttribute('aria-label') ?? '',
+          text: (tab.innerText ?? '').trim(),
+          active: tab.classList.contains('active'),
+        })),
+      );
+    // A chat tab is any tab that is not a TypeScript file (no title of this step has ".ts").
+    const chatTabs = async () =>
+      (await tabsNow()).filter((tab) => !/\.ts\b/.test(`${tab.label} ${tab.text}`));
+    const view = () =>
+      web.inDoc((doc) => ({
+        title: doc.querySelector('.chat-title')?.textContent ?? '',
+        surface:
+          doc.querySelector('meta[name="open-vs-code-surface"]')?.getAttribute('content') ?? '',
+        sessionsButton: doc.querySelector('[data-session-trigger]') !== null,
+        newSession: [...doc.querySelectorAll('button')].some(
+          (button) => (button.textContent ?? '').trim() === 'New session',
+        ),
+        kind: doc.body.getAttribute('data-vscode-theme-kind') ?? '',
+      }));
+    const connectToNew = async (previous) => {
+      await waitFor(
+        async () => {
+          const id = await visibleChatId();
+          return id !== undefined && id !== previous ? id : undefined;
+        },
+        10_000,
+        100,
+      );
+      await openChat(30_000);
+    };
+    const newSessionTab = async () => {
+      const previous = drivenChatId;
+      const before = (await chatTabs()).length;
+      await command('OpenCode: New Session');
+      await waitFor(async () => (await chatTabs()).length === before + 1, 10_000, 200);
+      await connectToNew(previous);
+    };
+    const titled = (needle) =>
+      waitFor(async () => (await view()).title.includes(needle), 15_000, 200);
+    const channel = (value) => {
+      const s = value / 255;
+      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    };
+    const luminanceOf = ([r, g, b]) =>
+      0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+    const ratioOf = (a, b) => {
+      const [high, low] = [luminanceOf(a), luminanceOf(b)].sort((x, y) => y - x);
+      return (high + 0.05) / (low + 0.05);
+    };
+    // The rows the native tree draws in the side bar, with the colours VS Code resolved for them.
+    // The in-page `parse` reads `rgb()`/`rgba()`; a row whose icon has another colour format gives
+    // null and the check that needs it fails with the value in its message.
+    const treeRows = () =>
+      page.evaluate(() => {
+        const side = globalThis.document.querySelector('.part.sidebar');
+        const parse = (css) => {
+          const m = css.match(/[\d.]+/g);
+          return m && m.length >= 3
+            ? [Number(m[0]), Number(m[1]), Number(m[2]), m[3] === undefined ? 1 : Number(m[3])]
+            : null;
+        };
+        const opaque = (element) => {
+          for (let node = element; node; node = node.parentElement) {
+            const color = parse(globalThis.getComputedStyle(node).backgroundColor);
+            if (color && color[3] >= 0.99) return color.slice(0, 3);
+          }
+          return null;
+        };
+        const sideBox = side?.getBoundingClientRect();
+        return [...(side?.querySelectorAll('.monaco-list-row') ?? [])].map((row) => {
+          const icon = row.querySelector('.custom-view-tree-node-item-icon');
+          const description = row.querySelector('.label-description');
+          const box = row.getBoundingClientRect();
+          const color = (element) => {
+            const rgb = element ? parse(globalThis.getComputedStyle(element).color) : null;
+            return rgb ? rgb.slice(0, 3) : null;
+          };
+          // Whether the description is really SEEN (C1 of review 1): VS Code truncates the label and
+          // the description from the right, and a long title eats the description whole, while
+          // `textContent` still holds all of it. `full` = drawn inside the label container and not
+          // ellipsised; `cut` = some of it is drawn; `hidden` = none.
+          const container =
+            row.querySelector('.monaco-icon-label-container') ??
+            row.querySelector('.monaco-icon-label');
+          const containerBox = container?.getBoundingClientRect();
+          const descriptionBox = description?.getBoundingClientRect();
+          const drawnWidth =
+            descriptionBox && containerBox
+              ? Math.max(
+                  0,
+                  Math.min(descriptionBox.right, containerBox.right) -
+                    Math.max(descriptionBox.left, containerBox.left),
+                )
+              : 0;
+          const descriptionShown =
+            description === null || drawnWidth < 1
+              ? 'hidden'
+              : description.scrollWidth <= description.clientWidth + 1 &&
+                  descriptionBox !== undefined &&
+                  containerBox !== undefined &&
+                  descriptionBox.right <= containerBox.right + 1
+                ? 'full'
+                : 'cut';
+          // The opacity VS Code puts on the description (and on any ancestor up to the row).
+          let descriptionOpacity = 1;
+          for (
+            let node = description;
+            node && node !== row.parentElement;
+            node = node.parentElement
+          ) {
+            descriptionOpacity *= Number(globalThis.getComputedStyle(node).opacity);
+          }
+          return {
+            name: (row.querySelector('.label-name')?.textContent ?? '').trim(),
+            description: (description?.textContent ?? '').trim(),
+            descriptionShown,
+            descriptionOpacity,
+            hovered: row.matches(':hover'),
+            aria: row.getAttribute('aria-label') ?? '',
+            selected: row.getAttribute('aria-selected') === 'true',
+            focused: row.classList.contains('focused'),
+            iconClass: icon ? (icon.getAttribute('class') ?? '') : '',
+            iconColor: color(icon),
+            descriptionColor: color(description),
+            background: opaque(row),
+            top: box.top,
+            insideSideBar: sideBox !== undefined && box.right <= sideBox.right + 1,
+          };
+        });
+      });
+    const rowNamed = async (needle) => (await treeRows()).find((row) => row.name.includes(needle));
+    const rowLocator = (needle) =>
+      page.locator('.part.sidebar .monaco-list-row', { hasText: needle }).first();
+    const sideState = () =>
+      page.evaluate((selector) => {
+        const side = globalThis.document.querySelector('.part.sidebar');
+        return {
+          text: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
+            .replace(/\s+/g, ' ')
+            .trim(),
+          buttons: [...(side?.querySelectorAll('.welcome-view-content .monaco-button') ?? [])].map(
+            (b) => (b.textContent ?? '').trim(),
+          ),
+          actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
+            (a) => a.getAttribute('aria-label') ?? '',
+          ),
+          rows: [...(side?.querySelectorAll('.monaco-list-row') ?? [])].length,
+          chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+            const sideBox = side?.getBoundingClientRect();
+            const box = frame.getBoundingClientRect();
+            const x = box.left + box.width / 2;
+            return (
+              sideBox !== undefined &&
+              frame.checkVisibility({ checkVisibilityCSS: true }) &&
+              box.width > 0 &&
+              x >= sideBox.left &&
+              x <= sideBox.right
+            );
+          }).length,
+        };
+      }, CHAT_FRAME);
+    const showSessions = async () => {
+      const shows = async () =>
+        (await sideState()).actions.some((label) => label.startsWith('New Session'));
+      if (!(await shows())) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        await waitFor(shows, 5_000, 100);
+      }
+    };
+    const menuRows = async () =>
+      (await page.locator('.monaco-menu .action-label').allInnerTexts())
+        .map((text) => text.trim())
+        .filter((text) => text !== '');
+    // Scrolls the tree with the wheel until a row with `needle` is drawn (the list is virtual).
+    const scrollTo = async (needle, direction = 1) => {
+      const side = await sideBarBox();
+      if (side === null) return false;
+      await page.mouse.move(side.left + 60, side.top + side.height / 2);
+      for (let round = 0; round < 40; round += 1) {
+        if ((await rowNamed(needle)) !== undefined) return true;
+        await page.mouse.wheel(0, 500 * direction);
+        await sleep(120); // the list draws its rows after the wheel; no signal to wait on
+      }
+      return (await rowNamed(needle)) !== undefined;
+    };
+    // The names of every row from the top to the bottom of the tree, in order, without repeats.
+    const allRowNames = async () => {
+      await scrollTo('~never~', -1);
+      const seen = [];
+      for (let round = 0; round < 60; round += 1) {
+        const before = seen.length;
+        for (const row of await treeRows()) if (!seen.includes(row.name)) seen.push(row.name);
+        if (round > 0 && seen.length === before) break;
+        await page.mouse.wheel(0, 400);
+        await sleep(120); // as in scrollTo
+      }
+      return seen;
+    };
+    const badgeText = async () =>
+      (
+        await page
+          .locator('.activitybar .action-item:has([aria-label^="OpenCode"]) .badge-content')
+          .allInnerTexts()
+          .catch(() => [])
+      ).join(',');
+    const inlineLabels = (row) =>
+      row
+        .locator('.actions .action-label')
+        .evaluateAll((items) =>
+          items
+            .filter((item) =>
+              item.checkVisibility({ checkVisibilityCSS: true, opacityProperty: true }),
+            )
+            .map((item) => item.getAttribute('aria-label') ?? ''),
+        );
+    const clickInline = async (needle, label) => {
+      const row = rowLocator(needle);
+      await row.hover();
+      await row.locator(`.actions .action-label[aria-label^="${label}"]`).first().click({
+        timeout: 5_000,
+      });
+    };
+    const closeTabNamed = async (needle) => {
+      const tab = page.locator('.tab', { hasText: needle }).first();
+      await tab.hover();
+      await tab.locator('.tab-actions .action-label').first().click({ timeout: 3_000 });
+    };
+    // Clicks the tab until it is the active one, and then the page of its chat, like a user who
+    // starts to read or type. Returns whether it became active (the caller must ask: a click that
+    // never took makes whatever is judged afterwards vacuous) and how many clicks it needed. In 4 of
+    // 5 runs of 29/10/2026 the FIRST click on a tab did not activate it; the screenshot of that
+    // moment shows the tooltip of the command center drawn over the tab strip. Moving the mouse away
+    // did NOT remove it (29/10/2026, `--steps 27,28,29`: the click on the tab timed out with "hover-contents
+    // of the command center intercepts pointer events"): HYPOTHESIS that the hover came from the
+    // keyboard focus returning to the command center after the palette closed, so it stays until
+    // the focus moves. The chat page is clicked first (focus leaves the command center), then the
+    // tab. This is the harness, not the extension (S1 of review 1).
+    // On 30/10/2026 (`--steps 26,27,28,29`, VS Code 1.144.0) that was not enough: the tooltip stayed
+    // over the middle of the tab strip for 3 clicks in a row (it covered the tabs
+    // between A, at the left, and N; Engram #1510) and the tab of B never became active, while A, outside the
+    // tooltip, needed one click. Each attempt now removes the `.workbench-hover-container` nodes
+    // before the click, so nothing is left to intercept it. VERIFIED on Windows 11, VS Code 1.144.0
+    // (30/10/2026), in the full run on the final tree (0 FAIL): "ok   V1 setup: the tab of B is the
+    // active one and the selection of the tree follows it (active true, row selected true)" and
+    // "B8 the tab of A needed 1 click(s)", where the run before the change had both FAIL. One full
+    // run only: the tooltip's origin is still HYPOTHESIS and a pass does not rule out a flaky click.
+    const clickTabAndChat = async (needle) => {
+      let attempts = 0;
+      let active = false;
+      for (; attempts < 3 && !active; attempts += 1) {
+        await page
+          .evaluate(() => {
+            for (const hover of globalThis.document.querySelectorAll(
+              '.workbench-hover-container',
+            )) {
+              hover.remove();
+            }
+          })
+          .catch(() => undefined);
+        const current = page.locator(`${CHAT_FRAME}:visible`).first();
+        const currentBox = await current.boundingBox({ timeout: 2_000 }).catch(() => null);
+        if (currentBox !== null) {
+          await page.mouse.click(currentBox.x + currentBox.width / 2, currentBox.y + 20);
+        } else {
+          await page.mouse.click(900, 500);
+        }
+        await sleep(250); // the hover widget closes on the focus change; no signal to wait on
+        await page
+          .locator('.tab', { hasText: needle })
+          .first()
+          .click({ timeout: 5_000 })
+          .catch(() => undefined); // not active afterwards: the caller's check says so
+        active =
+          (await waitFor(
+            async () => (await chatTabs()).some((tab) => tab.active && tab.text.includes(needle)),
+            2_000,
+            100,
+          )) === true;
+      }
+      const frame = page.locator(`${CHAT_FRAME}:visible`).first();
+      const box = await frame.boundingBox({ timeout: 3_000 }).catch(() => null);
+      if (box !== null) await page.mouse.click(box.x + box.width / 2, box.y + 20);
+      return { active, clicks: attempts };
+    };
+
+    // Step 27 leaves `web` on a tab it closed: connect to the side bar chat before the first read
+    // (a second press on the activity bar item would hide a side bar already showing it, so it is
+    // pressed only when no chat shows up within 8 s), as step 28 does.
+    setLocation('sidebar');
+    if (
+      (await waitFor(async () => (await visibleChatId()) !== undefined, 8_000, 200)) === undefined
+    ) {
+      await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+      await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+    }
+    await openChat(30_000);
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    await closeAllEditors();
+    const originalWidth = await sideBarPx();
+    try {
+      // --- Montage: A (answered, seeds 55 sessions), B, F (failed), N, in editor mode -------------
+      await setTheme(DARK);
+      await command('Notifications: Clear All Notifications');
+      await waitConnected();
+      check(await clickButton('New session'), 'the New session button is pressed in the side bar');
+      await waitEmptyView();
+      await send(PROMPT_A);
+      check(await waitIdle(30_000), 'the turn of A (it seeds 55 sessions in the fixture) ends');
+      setLocation('editor');
+      await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
+      await connectToNew(drivenChatId);
+      await titled('Tab29A');
+      // The sessions the fixture just made arrive as events; a full read (a restart) is what gives
+      // the tree its first page of 50 and the "Show more sessions" row.
+      await command('OpenCode: Restart Server');
+      await waitConnected(60_000);
+      await newSessionTab(); // B
+      await send(PROMPT_B);
+      check(await waitIdle(30_000), 'the turn of B ends');
+      await titled('Tab29B');
+      await newSessionTab(); // F
+      await send(PROMPT_F);
+      await waitIdle(30_000);
+      await newSessionTab(); // N
+      await send(PROMPT_N);
+      check(await waitIdle(30_000), 'the turn of N ends');
+      await titled('Tab29N');
+      await showSessions();
+
+      // --- B6: Running, then Needs input, and the badge --------------------------------------------
+      await send(PROMPT_N2);
+      const running = await waitFor(
+        async () => {
+          const row = await rowNamed('Tab29N');
+          return row !== undefined &&
+            /\bRunning\b/.test(row.description) &&
+            !/Needs input/.test(row.description)
+            ? row.description
+            : undefined;
+        },
+        10_000,
+        100,
+      );
+      const needs = await waitFor(
+        async () => {
+          const row = await rowNamed('Tab29N');
+          return row !== undefined && /^Needs input · Running · Tab · /.test(row.description)
+            ? row.description
+            : undefined;
+        },
+        20_000,
+        100,
+      );
+      const badge =
+        (await waitFor(async () => (await badgeText()) === '1', 5_000, 100)) === true
+          ? '1'
+          : await badgeText();
+      check(
+        running !== undefined && needs !== undefined && badge === '1',
+        `B6 during the turn the row of N reads ${JSON.stringify(running)} and then ${JSON.stringify(needs)}, and the badge of the Sessions view is ${JSON.stringify(badge)}`,
+      );
+      await shot('29a-tree-needs-input');
+
+      // --- V1: the rows in the four themes, and at 170 px ------------------------------------------
+      // The icon contrast is read on rows that are NOT selected and NOT hovered (C2 of review 1: on
+      // a selected row VS Code paints the codicon with the list's own foreground, so a measure there
+      // never reached `list.warningForeground` / `list.errorForeground`): the tab of B is made the
+      // active one, so the selection (which follows the active tab) sits on B's row, and the mouse
+      // is moved out of the side bar. The check asserts `selected === false` for the rows it judges.
+      // The words of the description are judged for what is DRAWN (C1, decided by Sergio: the state
+      // lives in the icon, the tooltip and the aria label, and the words show when there is room):
+      // `textContent` must hold them (the host's contract), and the check prints whether each one is
+      // fully drawn, cut or hidden. The description contrast composes the opacity VS Code gives it
+      // (W7) and is only taken from descriptions that are drawn.
+      const activeB = await clickTabAndChat('Tab29B');
+      const selectedB =
+        (await waitFor(async () => (await rowNamed('Tab29B'))?.selected === true, 5_000, 150)) ===
+        true;
+      check(
+        activeB.active && selectedB,
+        `V1 setup: the tab of B is the active one and the selection of the tree follows it (active ${String(activeB.active)}, row selected ${String(selectedB)})`,
+      );
+      const blend = (fg, bg, alpha) => fg.map((c, i) => c * alpha + bg[i] * (1 - alpha));
+      const look = async (label) => {
+        await page.mouse.move(900, 500);
+        await sleep(150); // the hover state of the row under the old mouse position clears
+        const rows = await waitFor(
+          async () => {
+            const all = await treeRows();
+            return all.some((row) => row.name.includes('Tab29N')) ? all : undefined;
+          },
+          8_000,
+          150,
+        );
+        const all = rows ?? (await treeRows());
+        const header = all.at(0);
+        const rowA = all.find((row) => row.name.includes('Tab29A'));
+        const rowN = all.find((row) => row.name.includes('Tab29N'));
+        const rowF = all.find((row) => /^Failed\b/.test(row.description));
+        const contrast = (row, key) =>
+          row?.[key] && row.background ? ratioOf(row[key], row.background) : 0;
+        const iconN = contrast(rowN, 'iconColor');
+        const iconF = contrast(rowF, 'iconColor');
+        // Opacity composed over the row background; only descriptions that are drawn count.
+        const drawn = [rowN, rowF, rowA].filter(
+          (row) => row !== undefined && row.descriptionShown !== 'hidden' && row.background,
+        );
+        const descriptions = Math.min(
+          99,
+          ...drawn.map((row) =>
+            row.descriptionColor
+              ? ratioOf(
+                  blend(row.descriptionColor, row.background, row.descriptionOpacity),
+                  row.background,
+                )
+              : 99,
+          ),
+        );
+        if (descriptions < 4.5) {
+          warn(
+            `V1 ${label}: a description reads at ${descriptions.toFixed(2)}:1 (VS Code paints it)`,
+          );
+        }
+        const unselected = [rowN, rowF].every((row) => row?.selected === false && !row.hovered);
+        const shown = (row) => `${JSON.stringify(row?.description)} ${row?.descriptionShown}`;
+        return {
+          ok:
+            header?.name === 'Today' &&
+            /^Tab · \S+/.test(rowA?.description ?? '') &&
+            /^Needs input · Running · Tab · \S+/.test(rowN?.description ?? '') &&
+            /^Failed · Tab · \S+/.test(rowF?.description ?? '') &&
+            /Needs input/.test(rowN?.aria ?? '') &&
+            /Failed/.test(rowF?.aria ?? '') &&
+            /bell-dot/.test(rowN?.iconClass ?? '') &&
+            /codicon-error/.test(rowF?.iconClass ?? '') &&
+            unselected &&
+            iconN >= 3 &&
+            iconF >= 3,
+          text: `first row ${JSON.stringify(header?.name)}, A ${shown(rowA)}, N ${shown(rowN)} selected ${String(rowN?.selected)} icon ${JSON.stringify(rowN?.iconClass)} ${iconN.toFixed(2)}:1, F ${shown(rowF)} selected ${String(rowF?.selected)} icon ${JSON.stringify(rowF?.iconClass)} ${iconF.toFixed(2)}:1, drawn descriptions >= ${descriptions.toFixed(2)}:1`,
+          insideSideBar: all.every((row) => row.insideSideBar),
+        };
+      };
+      for (const [name, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        await showSessions();
+        const result = await look(name);
+        check(
+          result.ok,
+          `V1 ${name}: the tree reads Today first; the rows hold the words of each state and the time (shown as the data says), the aria label of N and F names the state, and the needs-input and failed icons have contrast >= 3 on rows that are not selected (${result.text})`,
+        );
+        await shot(`29b-tree-${name}`);
+      }
+      await setTheme(DARK);
+      const narrow = await setSideBarWidth(170);
+      const small = await look('narrow');
+      check(
+        small.ok && small.insideSideBar,
+        `V1 dark at ${String(narrow)} px: the rows keep their order, the icons and the state in the aria label, the description holds the words (shown as the data says) and none sticks out of the side bar (${small.text})`,
+      );
+      await shot('29c-tree-narrow');
+      await setSideBarWidth(Math.round(originalWidth));
+
+      // --- V2: the inline buttons, on hover and on keyboard focus -----------------------------------
+      for (const theme of [DARK, HC_DARK]) {
+        await setTheme(theme);
+        await showSessions();
+        const row = rowLocator('Tab29A');
+        await row.hover();
+        const hovered = await inlineLabels(row);
+        await page.mouse.move(700, 120);
+        await page.locator('.part.sidebar .monaco-list').first().focus();
+        await page.keyboard.press('Home'); // the focus may already be past the row from the last theme
+        let focusedRow;
+        for (let key = 0; key < 25 && focusedRow === undefined; key += 1) {
+          await page.keyboard.press('ArrowDown');
+          const rows = await treeRows();
+          const hit = rows.find((candidate) => candidate.focused);
+          if (hit?.name.includes('Tab29A')) focusedRow = hit;
+        }
+        const focused = await inlineLabels(row);
+        check(
+          // The label carries the shortcut: "Rename Session… (F2)", "Delete Session (Del)".
+          hovered.some((label) => label.startsWith('Rename Session…')) &&
+            hovered.some((label) => label.startsWith('Delete Session')) &&
+            focusedRow !== undefined &&
+            focused.some((label) => label.startsWith('Rename Session…')) &&
+            focused.some((label) => label.startsWith('Delete Session')),
+          `V2 ${theme}: the row shows ${JSON.stringify(hovered)} on hover and ${JSON.stringify(focused)} with the keyboard focus on it`,
+        );
+        await shot(`29d-inline-${theme === DARK ? 'dark' : 'hc-dark'}`);
+      }
+      await setTheme(DARK);
+
+      // --- V3: the context menu ---------------------------------------------------------------------
+      await rowLocator('Tab29A').click({ button: 'right' });
+      await waitFor(async () => (await menuRows()).length > 0, 3_000, 100);
+      const menu = await menuRows();
+      await shot('29e-context-menu');
+      await page.keyboard.press('Escape');
+      check(
+        menu.includes('Rename Session…') &&
+          menu.includes('Delete Session') &&
+          menu.indexOf('Rename Session…') < menu.indexOf('Delete Session'),
+        `V3 the context menu of a session row lists Rename Session… and then Delete Session (rows: ${JSON.stringify(menu)})`,
+      );
+
+      // --- B1 + B7 (tab): click opens a tab, a second click reveals it; the tab has no picker --------
+      await closeTabNamed('Tab29B');
+      await waitFor(
+        async () => !(await chatTabs()).some((tab) => tab.text.includes('Tab29B')),
+        5_000,
+        150,
+      );
+      const tabsWithoutB = (await chatTabs()).length;
+      const previous = drivenChatId;
+      await rowLocator('Tab29B').click();
+      await waitFor(async () => (await chatTabs()).length === tabsWithoutB + 1, 8_000, 150);
+      await connectToNew(previous);
+      await titled('Tab29B');
+      const inTab = await view();
+      const tabsWithB = (await chatTabs()).length;
+      check(
+        tabsWithB === tabsWithoutB + 1 &&
+          inTab.title.includes('Tab29B') &&
+          (await chatTabs()).some((tab) => tab.active && tab.text.includes('Tab29B')),
+        `B1 a click on the row of B, which had no tab, opens one with its session (${String(tabsWithoutB)} -> ${String(tabsWithB)} tabs, title ${JSON.stringify(inTab.title)})`,
+      );
+      await rowLocator('Tab29A').click();
+      await waitFor(
+        async () => (await chatTabs()).some((tab) => tab.active && tab.text.includes('Tab29A')),
+        8_000,
+        150,
+      );
+      // No pause between the two clicks (W3 of review 1): the revealed tab reloads its document and,
+      // when it is ready, the host used to reveal it AGAIN ("chat tab revealed" twice per click in
+      // the host log of 29/10/2026), which could pull A in front of B's row clicked meanwhile (seen:
+      // "4 -> 4 tabs" with A active). The host now drops that late reveal when another chat surface
+      // was revealed after it was queued, so a quick click on B's row must win.
+      await rowLocator('Tab29B').click();
+      // The active tab says which one is on screen; the first visible iframe can still be the one
+      // that is being hidden (run of 29/10/2026: `visibleChatId` never read B's id again).
+      const back = await waitFor(
+        async () => (await chatTabs()).some((tab) => tab.active && tab.text.includes('Tab29B')),
+        8_000,
+        150,
+      );
+      check(
+        back === true && (await chatTabs()).length === tabsWithB,
+        `B1 a second click on the row of B reveals its tab and adds none (${String(tabsWithB)} -> ${String((await chatTabs()).length)} tabs)`,
+      );
+      await openChat(30_000);
+      const tabView = await view();
+      check(
+        tabView.surface === 'tab' && !tabView.sessionsButton && tabView.newSession,
+        `B7 the chat in a tab has no Sessions button and keeps New session (surface ${JSON.stringify(tabView.surface)}, Sessions button ${String(tabView.sessionsButton)}, New session ${String(tabView.newSession)})`,
+      );
+
+      // --- B8: the selection follows the active tab; a hidden side bar is not opened ----------------
+      // The tab is clicked with `clickTabAndChat` (above), which says whether it became active; the
+      // check below requires it, so the "hidden side bar is not opened" half cannot pass vacuously
+      // with a tab that never activated (W1 of review 1).
+      const tabA = await clickTabAndChat('Tab29A');
+      console.log(`  B8 the tab of A needed ${String(tabA.clicks)} click(s) to become active`);
+      let selectedNow = [];
+      const followed = await waitFor(
+        async () => {
+          const rows = await treeRows();
+          selectedNow = rows.filter((row) => row.selected).map((row) => row.name);
+          const rowA = rows.find((row) => row.name.includes('Tab29A'));
+          const rowB = rows.find((row) => row.name.includes('Tab29B'));
+          return rowA?.selected === true && rowB?.selected !== true;
+        },
+        8_000,
+        150,
+      );
+      await command('View: Toggle Primary Side Bar Visibility');
+      await waitFor(async () => (await sideBarPx()) === 0, 3_000, 100);
+      const hiddenBefore = (await sideBarPx()) === 0;
+      const tabB = await clickTabAndChat('Tab29B');
+      await sleep(1_500); // a reveal that wrongly opened the view would do it within this time
+      const stillHidden = (await sideBarPx()) === 0;
+      await command('View: Toggle Primary Side Bar Visibility');
+      await waitFor(async () => (await sideBarPx()) > 0, 3_000, 100);
+      await showSessions();
+      check(
+        tabA.active && tabB.active && followed === true && hiddenBefore && stillHidden,
+        `B8 activating the tab of A selects its row (and not B's), and with the side bar hidden activating the tab of B does not open it (A active ${String(tabA.active)}, B active ${String(tabB.active)}, selected rows ${JSON.stringify(selectedNow)}, hidden ${String(hiddenBefore)}, still hidden ${String(stillHidden)})`,
+      );
+
+      // --- B2: Rename from the row ------------------------------------------------------------------
+      await clickInline('Tab29A', 'Rename');
+      const asked = await waitFor(async () => !(await quickInputHidden()), 5_000, 100);
+      const prompt = await page.locator('.quick-input-widget').first().innerText();
+      const current = await page.locator('.quick-input-widget input').first().inputValue();
+      await shot('29f-rename-input');
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.type('Renamed29');
+      await page.keyboard.press('Enter');
+      const renamedRow = await waitFor(
+        async () => (await rowNamed('Renamed29')) !== undefined,
+        8_000,
+        150,
+      );
+      const renamedTab = await waitFor(
+        async () => (await chatTabs()).some((tab) => tab.text.includes('Renamed29')),
+        8_000,
+        150,
+      );
+      check(
+        asked === true &&
+          /New title for the session/.test(prompt) &&
+          current.includes('Tab29A') &&
+          renamedRow === true &&
+          renamedTab === true,
+        `B2 Rename on the row asks "New title for the session" with the current title (${JSON.stringify(current)}), and the row and the tab then read Renamed29 (row ${String(renamedRow)}, tab ${String(renamedTab)})`,
+      );
+
+      // --- B3: Delete from the row closes the tab ------------------------------------------------------
+      const tabsBeforeDelete = (await chatTabs()).length;
+      await clickInline('Tab29B', 'Delete');
+      const dialog = page.locator('.monaco-dialog-box');
+      const modal = await waitFor(
+        async () => ((await dialog.count()) ? await dialog.first().innerText() : null),
+        10_000,
+        300,
+      );
+      await dialog
+        .first()
+        .getByRole('button', { name: /^Delete$/ })
+        .click();
+      const gone = await waitFor(async () => (await rowNamed('Tab29B')) === undefined, 15_000, 200);
+      const closed = await waitFor(
+        async () => !(await chatTabs()).some((tab) => tab.text.includes('Tab29B')),
+        8_000,
+        200,
+      );
+      check(
+        typeof modal === 'string' &&
+          modal.includes('Tab29B') &&
+          gone === true &&
+          closed === true &&
+          (await chatTabs()).length === tabsBeforeDelete - 1,
+        `B3 Delete on the row of B asks in the modal (${String(modal).replace(/\s+/g, ' ').slice(0, 80)}), then its row leaves the tree and its tab closes (${String(tabsBeforeDelete)} -> ${String((await chatTabs()).length)} tabs)`,
+      );
+
+      // --- B4: Search Sessions… ----------------------------------------------------------------------
+      await showSessions();
+      await page
+        .locator('.part.sidebar .action-label[aria-label^="Search Sessions"]')
+        .first()
+        .click();
+      await waitFor(async () => !(await quickInputHidden()), 5_000, 100);
+      await page.keyboard.type('Seed29 07');
+      const item = await waitFor(
+        async () =>
+          (await page.locator('.quick-input-list .monaco-list-row').allInnerTexts()).find((text) =>
+            text.includes('Seed29 07'),
+          ),
+        8_000,
+        150,
+      );
+      await shot('29g-search');
+      const tabsBeforeSearch = (await chatTabs()).length;
+      const beforeSearch = drivenChatId;
+      await page.keyboard.press('Enter');
+      await waitFor(async () => (await chatTabs()).length === tabsBeforeSearch + 1, 8_000, 150);
+      await connectToNew(beforeSearch);
+      const searched = await titled('Seed29 07');
+      check(
+        item !== undefined && searched === true,
+        `B4 Search Sessions… lists ${JSON.stringify(String(item).replace(/\s+/g, ' '))} for "Seed29 07" and opens it in a tab (${String(tabsBeforeSearch)} -> ${String((await chatTabs()).length)} tabs)`,
+      );
+
+      // --- B5: Show more sessions, and the date groups it brings ------------------------------------------
+      await showSessions();
+      const more = await scrollTo('Show more sessions');
+      const before = (await allRowNames()).length;
+      await scrollTo('Show more sessions');
+      await rowLocator('Show more sessions').click();
+      const loaded = await waitFor(
+        async () => (await allRowNames()).includes('Seed29 55'),
+        10_000,
+        300,
+      );
+      const names = await allRowNames();
+      const groups = names.filter((name) =>
+        ['Today', 'Yesterday', 'Previous 7 days', 'Older'].includes(name),
+      );
+      await shot('29h-show-more');
+      check(
+        more === true &&
+          loaded === true &&
+          JSON.stringify(groups) ===
+            JSON.stringify(['Today', 'Yesterday', 'Previous 7 days', 'Older']) &&
+          names.length > before,
+        `B5 Show more sessions loads the next page (${String(before)} -> ${String(names.length)} rows, Seed29 55 loaded ${String(loaded)}) and the groups read ${JSON.stringify(groups)}`,
+      );
+
+      // --- V4: an empty folder --------------------------------------------------------------------------
+      await send('WIPE_SESSIONS now');
+      const empty = await waitFor(
+        async () => (await sideState()).text.includes('No sessions in this folder yet.'),
+        15_000,
+        250,
+      );
+      const emptyState = await sideState();
+      await shot('29i-empty');
+      check(
+        empty === true &&
+          emptyState.rows === 0 &&
+          emptyState.buttons.includes('New Session') &&
+          emptyState.buttons.includes('Open Settings') &&
+          emptyState.chatFrames === 0,
+        `V4 with no sessions the view says "No sessions in this folder yet." and offers New Session and Open Settings (${JSON.stringify(emptyState)})`,
+      );
+
+      // --- V5: no server ----------------------------------------------------------------------------------
+      await send('CRASH the server now');
+      const offline = await waitFor(
+        async () => (await sideState()).text.includes('OpenCode is not running for this folder.'),
+        60_000,
+        500,
+      );
+      const offlineState = await sideState();
+      await shot('29j-offline');
+      await closeAllEditors();
+      await showSessions();
+      const tabsBeforeOpen = (await chatTabs()).length;
+      await page
+        .locator('.part.sidebar .welcome-view-content .monaco-button', { hasText: 'Open Chat' })
+        .first()
+        .click({ timeout: 5_000 });
+      const opened = await waitFor(async () => (await visibleChatId()) !== undefined, 15_000, 200);
+      await openChat(30_000);
+      const guide = await waitFor(
+        () =>
+          web.inDoc(
+            (doc) =>
+              doc.querySelector('.connection-card') !== null ||
+              doc.querySelector('.setup-guide') !== null,
+          ),
+        15_000,
+        250,
+      );
+      check(
+        offline === true &&
+          offlineState.buttons.includes('Open Chat') &&
+          offlineState.buttons.includes('Show Logs') &&
+          offlineState.rows === 0 &&
+          opened !== undefined &&
+          (await chatTabs()).length === tabsBeforeOpen + 1 &&
+          guide === true,
+        `V5 with the server down the view says "OpenCode is not running for this folder." with Open Chat and Show Logs (${JSON.stringify(offlineState)}), and Open Chat opens a tab (${String(tabsBeforeOpen)} -> ${String((await chatTabs()).length)}) that shows the guide or the error card (${String(guide)})`,
+      );
+      fs.rmSync(vscode.downMarker, { force: true });
+      await command('OpenCode: Restart Server');
+      await waitConnected(60_000);
+
+      // --- B7 (view): the side bar chat keeps its Sessions button --------------------------------------------
+      await closeAllEditors();
+      setLocation('sidebar');
+      if (
+        (await waitFor(async () => (await visibleChatId()) !== undefined, 8_000, 200)) === undefined
+      ) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+      }
+      await openChat(30_000);
+      const sideView = await view();
+      check(
+        sideView.surface === 'view' && sideView.sessionsButton,
+        `B7 the chat in the side bar view keeps its Sessions button (surface ${JSON.stringify(sideView.surface)}, Sessions button ${String(sideView.sessionsButton)})`,
+      );
+      assertNoWebviewErrors('step 29');
+    } finally {
+      // Leave the workspace as the step found it: the server up, no editor open, `sidebar`, the dark
+      // theme and the side bar at its width. The sessions of the fixture were wiped by V4.
+      fs.rmSync(vscode.downMarker, { force: true });
+      setLocation('sidebar');
+      await closeAllEditors().catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+      await setSideBarWidth(Math.round(originalWidth)).catch(() => undefined);
     }
   });
 } catch (error) {
