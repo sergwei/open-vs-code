@@ -10147,6 +10147,415 @@ try {
       await setSideBarWidth(Math.round(originalWidth)).catch(() => undefined);
     }
   });
+
+  // Step 30 (issue #77, E4): a request goes to the chat tab of its session, and the native
+  // notification is raised when no chat TAB that shows it is the ACTIVE editor (Q1 = 2 of the plan).
+  // Cells: D1 tab B asks while tab A is in front: toast titled with B's session, badge, "Needs
+  // input" on B's row of the Sessions tree, no card in A; D2 "Open chat" brings B forward with its
+  // card focused and the toast gone; D3 control, the tab in front asks: card in it, no toast; D4 two
+  // groups side by side, the request of the visible tab that is NOT the active editor: toast; D5
+  // `sidebar` mode with the side bar chat visible and tabs left over: card in the side bar chat, no
+  // toast. Step 5 and C11 of step 27 are the regression of the toast's new title.
+  // VERIFIED by a full `npm run test:visual` on the final tree (Windows 11, VS Code 1.144.0,
+  // 30/10/2026), which printed lines starting "ok   D1 tab B asks while tab A is in front: the
+  // editor in front is "Tab30A: Reply with exactly: alpha30. Do", a native notification reads", "ok
+  // D2 "Open chat" brings the tab of the request forward with its card focused and the notification
+  // gone (tab in front true, card true, card focused true, toast gone true)", "ok   D3 the tab in
+  // front asks: its card is there (true) and no notification follows after 3 s (null;", "ok   D4
+  // two groups side by side, the request of the visible tab that is not the active editor: 2 chats
+  // on screen in groups [0,1]" and "ok   D5 sidebar mode with the side bar chat visible and 2
+  // tab(s) left over: the card is in the side bar chat (true) and no notification follows after 3 s
+  // (null;" (the full texts carry the toast and the counts of that run).
+  // Found by D4 (decision of Sergio, 30/10/2026): the request dock used to focus the new card in a
+  // tab that did not have the focus, which made VS Code activate that tab and closed the
+  // notification within 1 s after raising it ("1 s later the editor in front is "Tab30B: …"" and
+  // "attention: closed (visible)" logged once). The dock now skips the focus when its document has
+  // none (`RequestDock.tsx`), and D4 reads: "3 s later the editor in front is still "Tab30A: …", the
+  // notification is still there and "attention: closed (visible)" was logged 0 time(s)", the
+  // evidence that the focus was the cause.
+  // NOT measured: macOS, Linux, a subagent that asks (the fixture has none), the request of a tab
+  // that is visible in a window without the system focus.
+  await step('30 requests of the chat tabs (issue #77, E4)', async () => {
+    const DARK = 'Default Dark Modern';
+    const titleOf = (prompt) => prompt.slice(0, 40).trim(); // the fixture titles a session so
+    const PROMPT_A = 'Tab30A: Reply with exactly: alpha30. Do not use any tools.';
+    const PROMPT_B = 'Tab30B: Reply with exactly: beta30. Do not use any tools.';
+    const setLocation = (value) => {
+      writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
+    };
+    const tabsNow = () =>
+      page.evaluate(() => {
+        const groups = [...globalThis.document.querySelectorAll('.editor-group-container')];
+        return [...globalThis.document.querySelectorAll('.tab')].map((tab) => ({
+          label: tab.getAttribute('aria-label') ?? '',
+          text: (tab.innerText ?? '').trim(),
+          active: tab.classList.contains('active'),
+          group: groups.indexOf(tab.closest('.editor-group-container')),
+        }));
+      });
+    const chatTabs = async () =>
+      (await tabsNow()).filter((tab) => !/\.ts\b/.test(`${tab.label} ${tab.text}`));
+    const groupCount = () => page.locator('.editor-group-container').count();
+    // The text of the tab that is the active editor: the active tab of the active group.
+    const activeEditor = () =>
+      page.evaluate(() =>
+        (
+          globalThis.document.querySelector('.editor-group-container.active .tab.active')
+            ?.innerText ?? ''
+        ).trim(),
+      );
+    const hostLog = () => {
+      const files = [];
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'OpenCode.log') files.push(full);
+        }
+      };
+      try {
+        walk(path.join(vscode.userDataDir, 'logs'));
+      } catch {
+        return '';
+      }
+      return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+    };
+    const notifiedCount = () => (hostLog().match(/attention: notified/g) ?? []).length;
+    const closedVisibleCount = () =>
+      (hostLog().match(/attention: closed \S+ \(visible\)/g) ?? []).length;
+    const view = () =>
+      web.inDoc((doc) => ({
+        title: doc.querySelector('.chat-title')?.textContent ?? '',
+        card: doc.querySelector('.permission-card') !== null,
+        cardFocused: doc.hasFocus() && doc.activeElement?.closest('.permission-card') != null,
+      }));
+    const visibleChatIds = () =>
+      page.evaluate(
+        (selector) =>
+          [...globalThis.document.querySelectorAll(selector)]
+            .filter(
+              (frame) =>
+                frame.checkVisibility({ checkVisibilityCSS: true }) &&
+                frame.getBoundingClientRect().width > 0,
+            )
+            .map((frame) => frame.name),
+        CHAT_FRAME,
+      );
+    // Connects to the visible chat whose title has `needle` (two chats can be on screen at once).
+    const connectByTitle = async (needle) => {
+      for (const id of await visibleChatIds()) {
+        await openChat(30_000, id);
+        if ((await view()).title.includes(needle)) return id;
+      }
+      return undefined;
+    };
+    const connectToNew = async (previous) => {
+      await waitFor(
+        async () => {
+          const id = await visibleChatId();
+          return id !== undefined && id !== previous ? id : undefined;
+        },
+        10_000,
+        100,
+      );
+      await openChat(30_000);
+    };
+    const newSessionTab = async () => {
+      const previous = drivenChatId;
+      const before = (await chatTabs()).length;
+      await command('OpenCode: New Session');
+      await waitFor(async () => (await chatTabs()).length === before + 1, 10_000, 200);
+      await connectToNew(previous);
+    };
+    const switchTo = async (needle) => {
+      const previous = drivenChatId;
+      await page.locator('.tab', { hasText: needle }).first().click();
+      await waitFor(
+        async () => {
+          const id = await visibleChatId();
+          return id !== undefined && id !== previous ? id : undefined;
+        },
+        8_000,
+        100,
+      );
+      await openChat(30_000);
+    };
+    const toastText = async () => {
+      const toasts = page.locator('.notifications-toasts .notification-toast');
+      return (await toasts.count())
+        ? (await toasts.first().innerText()).replace(/\n/g, ' | ')
+        : null;
+    };
+    const badgeText = async () =>
+      (
+        await page
+          .locator('.activitybar .action-item:has([aria-label^="OpenCode"]) .badge-content')
+          .allInnerTexts()
+          .catch(() => [])
+      ).join(',');
+    const rowsText = () =>
+      page.evaluate(() =>
+        [...globalThis.document.querySelectorAll('.part.sidebar .monaco-list-row')].map((row) =>
+          (row.innerText ?? '').replace(/\s+/g, ' ').trim(),
+        ),
+      );
+    const showSessionsBar = async () => {
+      const shows = () =>
+        page
+          .locator('.part.sidebar .action-label[aria-label^="New Session"]')
+          .count()
+          .then((n) => n > 0);
+      if (!(await shows())) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        await waitFor(shows, 5_000, 100);
+      }
+    };
+    const sidebarChatId = () =>
+      page.evaluate((selector) => {
+        const sideBox = globalThis.document.querySelector('.part.sidebar')?.getBoundingClientRect();
+        return [...globalThis.document.querySelectorAll(selector)].find((frame) => {
+          const box = frame.getBoundingClientRect();
+          const x = box.left + box.width / 2;
+          return (
+            sideBox !== undefined &&
+            frame.checkVisibility({ checkVisibilityCSS: true }) &&
+            box.width > 0 &&
+            x >= sideBox.left &&
+            x <= sideBox.right
+          );
+        })?.name;
+      }, CHAT_FRAME);
+    // Clicks the tab with `needle` after moving the mouse off the command center: its hover card
+    // ("Search open-vs-code-visual…") covered the tabs and intercepted the click in the first run.
+    const clickTab = async (needle) => {
+      // Over the status bar, not over a webview: a webview swallows the mouse and the card stays.
+      const bar = await page
+        .locator('.statusbar')
+        .boundingBox({ timeout: 2_000 })
+        .catch(() => null);
+      if (bar !== null) await page.mouse.move(bar.x + bar.width / 2, bar.y + bar.height / 2);
+      await sleep(200); // the hover card needs a moment to go
+      await page.locator('.tab', { hasText: needle }).first().click({ timeout: 5_000 });
+    };
+    const clickOpenChat = async () => {
+      const open = page
+        .locator('.notifications-toasts .notification-toast a', { hasText: /open/i })
+        .first();
+      if (await open.count()) await open.click();
+    };
+
+    // Step 29 leaves the side bar mode with its chat: connect to it before the first read.
+    setLocation('sidebar');
+    if (
+      (await waitFor(async () => (await visibleChatId()) !== undefined, 8_000, 200)) === undefined
+    ) {
+      await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+      await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+    }
+    await openChat(30_000);
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    await closeAllEditors();
+    try {
+      await setTheme(DARK);
+      await command('Notifications: Clear All Notifications');
+      await waitConnected();
+      // --- Montage: A and B in editor mode, B in front, the Sessions view on screen ----------------
+      check(await clickButton('New session'), 'the New session button is pressed in the side bar');
+      await waitEmptyView();
+      await send(PROMPT_A);
+      check(await waitIdle(30_000), 'the turn of A ends');
+      setLocation('editor');
+      await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
+      await connectToNew(drivenChatId);
+      await newSessionTab(); // B
+      await send(PROMPT_B);
+      check(await waitIdle(30_000), 'the turn of B ends');
+      await showSessionsBar();
+      const idB = drivenChatId;
+      await command('Notifications: Clear All Notifications');
+
+      // --- D1: B asks while A is in front ----------------------------------------------------------
+      const notifiedBefore = notifiedCount();
+      await send(`${titleOf(PROMPT_B)} Read .env. ASK_PERMISSION SLOW`);
+      // The fixture takes about 1.5 s to the ask (SLOW): the click on A must land before it, or the
+      // tab in front is B and the request is seen (a preparation failure, not a product failure).
+      await page.locator('.tab', { hasText: 'Tab30A' }).first().click();
+      const inFront = await activeEditor();
+      const toast1 = await waitFor(toastText, 30_000);
+      const badge1 =
+        (await waitFor(async () => (await badgeText()) === '1', 5_000, 100)) === true
+          ? '1'
+          : await badgeText();
+      const row1 = await waitFor(
+        async () =>
+          (await rowsText()).find((row) => row.includes('Tab30B') && /Needs input/.test(row)),
+        8_000,
+        150,
+      );
+      await sleep(1_000); // margin: a card sent to A would have arrived with the toast
+      await waitFor(async () => (await visibleChatId()) !== idB, 8_000, 100);
+      await openChat(30_000);
+      const inA = await view();
+      check(
+        /Tab30A/.test(inFront) &&
+          typeof toast1 === 'string' &&
+          /Permission requested/.test(toast1) &&
+          /Tab30B/.test(toast1) &&
+          !/Tab30A/.test(toast1) &&
+          badge1 === '1' &&
+          row1 !== undefined &&
+          inA.title.includes('Tab30A') &&
+          inA.card === false &&
+          notifiedCount() === notifiedBefore + 1,
+        `D1 tab B asks while tab A is in front: the editor in front is "${inFront}", a native notification reads ${JSON.stringify(String(toast1).slice(0, 90))}, the badge is ${JSON.stringify(badge1)}, B's row in the Sessions view reads ${JSON.stringify(row1)}, and A has no permission card (${String(inA.card)}); "attention: notified" ${String(notifiedBefore)} -> ${String(notifiedCount())}`,
+      );
+      await shot('30a-request-of-hidden-tab');
+
+      // --- D2: "Open chat" brings B forward with its card focused ----------------------------------
+      await clickOpenChat();
+      const frontAfter = await waitFor(
+        async () => ((await activeEditor()).includes('Tab30B') ? true : undefined),
+        10_000,
+        200,
+      );
+      await connectByTitle('Tab30B');
+      const card2 = await waitFor(
+        async () => ((await view()).card ? true : undefined),
+        15_000,
+        200,
+      );
+      const focused2 = await waitFor(
+        async () => ((await view()).cardFocused ? true : undefined),
+        5_000,
+        100,
+      );
+      const goneToast = await waitFor(
+        async () => ((await toastText()) === null ? true : undefined),
+        8_000,
+        200,
+      );
+      check(
+        frontAfter === true && card2 === true && focused2 === true && goneToast === true,
+        `D2 "Open chat" brings the tab of the request forward with its card focused and the notification gone (tab in front ${String(frontAfter)}, card ${String(card2)}, card focused ${String(focused2)}, toast gone ${String(goneToast)})`,
+      );
+      await shot('30b-open-chat');
+      check(await clickButton('Allow once'), 'D2 Allow once is pressed (never Always)');
+      check(await waitIdle(30_000), 'D2 the turn ends after Allow once');
+      void idB;
+
+      // --- D3: control, the tab in front asks --------------------------------------------------------
+      await command('Notifications: Clear All Notifications');
+      await switchTo('Tab30A');
+      const notified3 = notifiedCount();
+      await send(`${titleOf(PROMPT_A)} Read .env. ASK_PERMISSION`);
+      const card3 = await waitFor(
+        async () => ((await view()).card ? true : undefined),
+        20_000,
+        200,
+      );
+      await sleep(3_000); // margin: a notification would have come with the card
+      const toast3 = await toastText();
+      check(
+        card3 === true && toast3 === null && notifiedCount() === notified3,
+        `D3 the tab in front asks: its card is there (${String(card3)}) and no notification follows after 3 s (${JSON.stringify(toast3)}; "attention: notified" ${String(notified3)} -> ${String(notifiedCount())})`,
+      );
+      await shot('30c-request-of-front-tab');
+      check(await clickButton('Allow once'), 'D3 Allow once is pressed (never Always)');
+      check(await waitIdle(30_000), 'D3 the turn ends after Allow once');
+
+      // --- D4: two groups side by side, the request of the visible tab that is not active ------------
+      await switchTo('Tab30B');
+      await command('View: Move Editor into Right Group');
+      const split = await waitFor(
+        async () =>
+          (await groupCount()) === 2 && (await visibleChatIds()).length === 2 ? true : undefined,
+        10_000,
+        200,
+      );
+      const idB4 = await connectByTitle('Tab30B');
+      await clickTab('Tab30B'); // B's group is the active one
+      await command('Notifications: Clear All Notifications');
+      const notified4 = notifiedCount();
+      const closed4Before = closedVisibleCount();
+      await send(`${titleOf(PROMPT_B)} Read .env. ASK_PERMISSION SLOW`);
+      await clickTab('Tab30A'); // A's group takes the active editor
+      const tabs4 = await chatTabs();
+      const front4 = await activeEditor();
+      const toast4 = await waitFor(toastText, 30_000, 25);
+      await sleep(3_000); // margin: before the dock stopped stealing the focus it closed within 1 s
+      const frontAfter4 = await activeEditor();
+      const closed4 = closedVisibleCount() - closed4Before;
+      const toastAfter4 = await toastText();
+      const stillTwo = (await visibleChatIds()).length;
+      await connectByTitle('Tab30A');
+      const cardInA4 = (await view()).card;
+      check(
+        split === true &&
+          idB4 !== undefined &&
+          new Set(tabs4.map((tab) => tab.group)).size === 2 &&
+          stillTwo === 2 &&
+          /Tab30A/.test(front4) &&
+          typeof toast4 === 'string' &&
+          /Permission requested/.test(toast4) &&
+          /Tab30B/.test(toast4) &&
+          cardInA4 === false &&
+          notifiedCount() === notified4 + 1 &&
+          /Tab30A/.test(frontAfter4) &&
+          closed4 === 0 &&
+          typeof toastAfter4 === 'string' &&
+          /Permission requested/.test(toastAfter4),
+        `D4 two groups side by side, the request of the visible tab that is not the active editor: ${String(stillTwo)} chats on screen in groups ${JSON.stringify(tabs4.map((tab) => tab.group))}, the editor in front is "${front4}", a native notification reads ${JSON.stringify(String(toast4).slice(0, 90))}, A has no card (${String(cardInA4)}); "attention: notified" ${String(notified4)} -> ${String(notifiedCount())}; 3 s later the editor in front is still "${frontAfter4}", the notification is ${toastAfter4 === null ? 'GONE' : 'still there'} and "attention: closed (visible)" was logged ${String(closed4)} time(s)`,
+      );
+      await shot('30d-two-groups');
+      await clickOpenChat();
+      await waitFor(
+        async () => ((await activeEditor()).includes('Tab30B') ? true : undefined),
+        10_000,
+        200,
+      );
+      await connectByTitle('Tab30B');
+      await waitFor(async () => ((await view()).card ? true : undefined), 15_000, 200);
+      check(await clickButton('Allow once'), 'D4 Allow once is pressed (never Always)');
+      check(await waitIdle(30_000), 'D4 the turn ends after Allow once');
+
+      // --- D5: sidebar mode, the side bar chat visible and tabs left over ----------------------------
+      await command('Notifications: Clear All Notifications');
+      setLocation('sidebar');
+      let lateral = await waitFor(() => sidebarChatId(), 8_000, 200);
+      if (lateral === undefined) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        lateral = await waitFor(() => sidebarChatId(), 15_000, 200);
+      }
+      await openChat(30_000, lateral);
+      await waitConnected();
+      const leftOver = (await chatTabs()).length;
+      check(await clickButton('New session'), 'D5 New session is pressed in the side bar chat');
+      await waitEmptyView();
+      const notified5 = notifiedCount();
+      await send('Tab30S: Read .env. ASK_PERMISSION');
+      const card5 = await waitFor(
+        async () => ((await view()).card ? true : undefined),
+        20_000,
+        200,
+      );
+      await sleep(3_000); // margin: a notification would have come with the card
+      const toast5 = await toastText();
+      check(
+        leftOver >= 1 && card5 === true && toast5 === null && notifiedCount() === notified5,
+        `D5 sidebar mode with the side bar chat visible and ${String(leftOver)} tab(s) left over: the card is in the side bar chat (${String(card5)}) and no notification follows after 3 s (${JSON.stringify(toast5)}; "attention: notified" ${String(notified5)} -> ${String(notifiedCount())})`,
+      );
+      await shot('30e-sidebar-mode');
+      check(await clickButton('Allow once'), 'D5 Allow once is pressed (never Always)');
+      check(await waitIdle(30_000), 'D5 the turn ends after Allow once');
+      assertNoWebviewErrors('step 30');
+    } finally {
+      // Leave the workspace as the step found it: `sidebar`, no editor open, the dark theme.
+      setLocation('sidebar');
+      await command('Notifications: Clear All Notifications').catch(() => undefined);
+      await closeAllEditors().catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+    }
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
