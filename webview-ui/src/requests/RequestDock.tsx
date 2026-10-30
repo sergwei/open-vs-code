@@ -16,8 +16,10 @@ type Ask = { kind: 'permission'; ask: PermissionAsk } | { kind: 'form'; ask: For
 /**
  * The dock of pending requests (issues #18/#44), fixed between the conversation and the prompt box.
  *
- * Shows EVERY pending request of the location (not only the open session's: a subagent asks from
- * its own session), permissions first because they block a tool, then forms, each group in order
+ * Shows every pending request the host sent this surface (it does not filter: since issue #77 E4
+ * the HOST decides, so the side-bar view gets every request of the location and a chat tab only
+ * those of its session and its subagent lineage; not only the open session's, a subagent asks
+ * from its own session), permissions first because they block a tool, then forms, each group in order
  * of arrival; a request of another session says which session it comes from, with an "Open
  * session" button when that is a top-level session. Under the cards, the one-line results of the
  * requests of OTHER sessions (or unknown to the host) answered since the last prompt ("Allowed
@@ -37,12 +39,25 @@ type Ask = { kind: 'permission'; ask: PermissionAsk } | { kind: 'form'; ask: For
  * version focused "Allow once", and with an empty prompt a Space or Enter meant for a sentence
  * would have approved a permission. The plan said "unless the focus is in the textarea", but the
  * prompt box takes the focus right after every send, so that rule would almost never move it;
- * "has text" keeps the intent (do not steal focus while typing). `ui.focus` always focuses the card (and scrolls it into view),
+ * "has text" keeps the intent (do not steal focus while typing). Nor does it focus a card while its
+ * webview document does not have the focus (`document.hasFocus()` false: a chat tab visible in a
+ * group the user is not in, the side bar chat visible but not focused, or a VS Code window that
+ * lost the focus), because that focus made VS Code activate the tab (decision of Sergio,
+ * 30/10/2026, from `test:visual` step 30 D4); the announcement and the host's notification cover it.
+ * VERIFIED in a real VS Code 1.144.0 (Windows 11, `test:visual` step 30 D4, 30/10/2026): without the
+ * `hasFocus` guard the message was "1 s later the editor in front is "Tab30B: …" and "attention:
+ * closed (visible)" was logged 1 time(s)", and with it "3 s later the editor in front is still
+ * "Tab30A: …", the notification is still there and "attention: closed (visible)" was logged 0
+ * time(s)"; the `ui.focus` branch below is seen by D2, "card focused true".
+ * Accepted consequence (Sergio): with the side bar chat visible but not focused, a new request
+ * shows its card and the badge, and neither moves the focus nor raises a notification.
+ * `ui.focus` always focuses the card (and scrolls it into view),
  * waiting for the card to exist if the snapshot has not brought it yet. When the card that had the
  * focus is resolved, the focus returns to the prompt (`focusInput`). Escape inside a card also
  * returns it there, and never rejects.
- * VERIFIED by `RequestDock.test.tsx` in jsdom (order, focus rules, announcement, origin label); how
- * focus feels with a real screen reader and in VS Code is UNVERIFIED (F5 points 1, 5).
+ * VERIFIED by `RequestDock.test.tsx` in jsdom (order, focus rules, announcement, origin label).
+ * UNVERIFIED: how the focus and the announcements feel with a real screen reader, a VS Code window
+ * that lost the system focus, and macOS/Linux.
  */
 export function RequestDock(props: {
   store: ChatStore;
@@ -124,7 +139,11 @@ export function RequestDock(props: {
       const active = document.activeElement;
       const inPrompt = active instanceof HTMLElement && active.closest('.prompt') !== null;
       const inDock = active instanceof HTMLElement && dock?.contains(active) === true;
-      if ((inPrompt && props.typing) || inDock) return;
+      // A document that does not have the focus is a chat tab in a group the user is not in, the
+      // side bar chat visible but not focused, or a window without focus:
+      // `focus()` inside it would make VS Code activate that tab and pull the user out of the one
+      // they are using (and close the notification of the request, `test:visual` step 30 D4).
+      if ((inPrompt && props.typing) || inDock || !document.hasFocus()) return;
       // The card itself, never a button: with the prompt empty the user may be about to type, and
       // a focused button would take the letters and be pressed by Space or Enter (B1 of the
       // review: that approved a permission nobody decided).

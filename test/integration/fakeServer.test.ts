@@ -47,6 +47,7 @@ import {
   RESTART_SERVER_COMMAND_ID,
   RESTORE_CHAT_TAB_TEST_COMMAND_ID,
   SESSION_DIFF_SCHEME,
+  SHOW_REQUEST_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
   TEST_SESSION_ANSWERS_COMMAND_ID,
   VIEW_CONTAINER_ID,
@@ -1586,6 +1587,186 @@ describe('fake server', function () {
       await log.waitFor('chat tab closed (pane', 8_000);
       await waitForChatTabs(0);
       await log.waitFor(`sessions view: ${String(rowsBefore - 1)} rows`, 8_000);
+    });
+  });
+
+  /**
+   * Requests of chat tabs (issue #77, delivery E4, decision Q1=2 of Sergio: a tab "sees" a request
+   * only while it is the ACTIVE editor). Two lazy tabs in `editor` mode, each with its own session;
+   * the one asked for permission is put behind the other (`OPEN_SESSION_COMMAND_ID` on the first
+   * session reveals its tab, which makes it the active editor of the group and hides the second).
+   *
+   * Provenance: SYNTHETIC server (the fake asks permission in the very session of the prompt; its
+   * `SLOW` switch plays the steps 300 ms apart, so the ask arrives about 1.5 s after the prompt,
+   * enough to bring the first tab forward before it). What the toast says and how the dock looks
+   * are inside the workbench and the iframe: `test:visual` step 30 reads them, not here. No subagent asks in
+   * the fake, so lineages of several levels are only covered by Vitest.
+   */
+  describe('requests of chat tabs', function () {
+    /** The label of the chat tab that is the active editor of its group, if any. */
+    function activeChatLabel(): string | undefined {
+      return chatTabs().find((tab) => tab.isActive && tab.group.isActive)?.label;
+    }
+
+    /** Puts the host in `editor` mode with no tab open. */
+    async function toEditorWithoutTabs(log: LogCursor): Promise<void> {
+      await setChatLocation('editor', log);
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await waitForChatTabs(0);
+      await sleep(SETTLE_MS);
+    }
+
+    /** A NEW tab with the prompt `text` answered to the end; returns the session it created. */
+    async function tabWithAnsweredSession(text: string, count: number): Promise<string> {
+      await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
+      await waitForChatTabs(count);
+      await sleep(SETTLE_MS);
+      const log = await openLogCursor();
+      await sendPrompt(log, text);
+      const id = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+      assert.ok(id, `no session id in the log:\n${log.added()}`);
+      await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+      return id;
+    }
+
+    afterEach(async () => {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await setChatLocation(undefined, await openLogCursor());
+    });
+
+    /**
+     * Protects: the per-request `seen` of the attention feature (a request of tab B is NOT seen
+     * while tab A is the active editor, although B's dock lists it), the refresh when the active
+     * tab changes (Open chat reveals B, B becomes active, the toast closes as `visible`), and the
+     * owner choice of `SHOW_REQUEST_COMMAND_ID` (the tab that lists the request, not the active one).
+     */
+    it('notifies a permission asked by a tab behind the active one, and closes the toast when Open chat shows it', async function () {
+      const cursor = await openLogCursor();
+      await toEditorWithoutTabs(cursor);
+      const sessionA = await tabWithAnsweredSession('E4 tab A first', 1);
+      await tabWithAnsweredSession('E4 tab B first', 2);
+      const labelA = chatTabs().find((tab) => tab.label.includes('E4 tab A'))?.label;
+      assert.ok(labelA, `tab A has no title: ${JSON.stringify(chatTabs().map((t) => t.label))}`);
+
+      const log = await openLogCursor();
+      // B is the active tab (the newest): its second prompt asks for permission after ~1.5 s.
+      await sendPrompt(log, 'ASK_PERMISSION SLOW E4 tab B');
+      const sessionB = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+      assert.ok(sessionB && sessionB !== sessionA, `wrong session for tab B:\n${log.added()}`);
+      // Now A comes forward; B is hidden behind it before the ask arrives.
+      await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, sessionA);
+      const asked = await matchInLog(
+        log,
+        /permission asked (per_\S+) for (ses_\S+) \(read\)/,
+        TURN_WAIT_MS,
+        'permission asked',
+      );
+      const permissionID = asked[1];
+      assert.ok(permissionID && asked[2] === sessionB, `the ask is not B's:\n${log.added()}`);
+      await log.waitFor(`attention: notified ${permissionID}`, 5_000);
+      await sleep(SETTLE_MS);
+      log.assertAbsent(`attention: closed ${permissionID}`);
+      assert.strictEqual(activeChatLabel(), labelA, 'tab A must still be the active one');
+
+      log.mark();
+      await vscode.commands.executeCommand(SHOW_REQUEST_COMMAND_ID, {
+        sessionID: sessionB,
+        id: permissionID,
+        kind: 'permission',
+      });
+      await log.waitFor('chat tab revealed (pane', 8_000);
+      await log.waitFor(`attention: closed ${permissionID} (visible)`, 8_000);
+      assert.notStrictEqual(activeChatLabel(), labelA, 'Open chat left tab A in front');
+      assert.strictEqual(chatTabs().length, 2, 'Open chat opened another tab');
+
+      await vscode.commands.executeCommand(REPLY_PERMISSION_COMMAND_ID, {
+        sessionID: sessionB,
+        permissionID,
+        decision: 'reject',
+      });
+      await log.waitFor('turn finished:', TURN_WAIT_MS);
+    });
+
+    /**
+     * Protects the `SHOW_REQUEST_COMMAND_ID` branch with NO owner tab in `editor` mode: the tab of
+     * the asking session was closed before the ask, so "Open chat" has to put that session (the
+     * root of its lineage; here the session itself, the fake has no subagent) in a NEW tab, make it
+     * the active editor and let the toast close as `visible`. Provenance: SYNTHETIC server, same
+     * SLOW ask as above. The focus of the card in that tab is inside the iframe: not read here.
+     */
+    it('opens the tab of the session when Open chat finds no tab that lists the request', async function () {
+      const cursor = await openLogCursor();
+      await toEditorWithoutTabs(cursor);
+      const sessionA = await tabWithAnsweredSession('E4 owner A first', 1);
+      await tabWithAnsweredSession('E4 owner B first', 2);
+      const labelA = chatTabs().find((tab) => tab.label.includes('E4 owner A'))?.label;
+      assert.ok(labelA, `tab A has no title: ${JSON.stringify(chatTabs().map((t) => t.label))}`);
+
+      const log = await openLogCursor();
+      await sendPrompt(log, 'ASK_PERMISSION SLOW E4 owner B');
+      const sessionB = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+      assert.ok(sessionB && sessionB !== sessionA, `wrong session for tab B:\n${log.added()}`);
+      // B is the active tab: closing it leaves A in front and no tab that shows B's session.
+      await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+      await waitForChatTabs(1);
+      assert.strictEqual(activeChatLabel(), labelA, 'tab A must be the one left');
+      const asked = await matchInLog(
+        log,
+        /permission asked (per_\S+) for (ses_\S+) \(read\)/,
+        TURN_WAIT_MS,
+        'permission asked',
+      );
+      const permissionID = asked[1];
+      assert.ok(permissionID && asked[2] === sessionB, `the ask is not B's:\n${log.added()}`);
+      await log.waitFor(`attention: notified ${permissionID}`, 5_000);
+
+      log.mark();
+      await vscode.commands.executeCommand(SHOW_REQUEST_COMMAND_ID, {
+        sessionID: sessionB,
+        id: permissionID,
+        kind: 'permission',
+      });
+      await waitForChatTabs(2);
+      await log.waitFor(`attention: closed ${permissionID} (visible)`, 8_000);
+      assert.notStrictEqual(activeChatLabel(), labelA, 'Open chat left tab A in front');
+
+      await vscode.commands.executeCommand(REPLY_PERMISSION_COMMAND_ID, {
+        sessionID: sessionB,
+        permissionID,
+        decision: 'reject',
+      });
+      await log.waitFor('turn finished:', TURN_WAIT_MS);
+    });
+
+    /**
+     * Control of the case above (the opposite transition must NOT happen): the same permission,
+     * asked by the tab that IS the active editor, raises the badge and no toast. After the margin
+     * the absence is asserted (`vscode-extension` §11: an absence cannot be proven instantly).
+     */
+    it('does not notify a permission asked by the active tab', async function () {
+      const cursor = await openLogCursor();
+      await toEditorWithoutTabs(cursor);
+      await tabWithAnsweredSession('E4 control first', 1);
+      const log = await openLogCursor();
+      await sendPrompt(log, 'ASK_PERMISSION SLOW E4 control');
+      const asked = await matchInLog(
+        log,
+        /permission asked (per_\S+) for (ses_\S+) \(read\)/,
+        TURN_WAIT_MS,
+        'permission asked',
+      );
+      const [, permissionID, sessionID] = asked;
+      assert.ok(permissionID && sessionID, 'ids missing from the log line');
+      await log.waitFor('attention: badge 1', 5_000);
+      await sleep(2_000);
+      log.assertAbsent('attention: notified');
+
+      await vscode.commands.executeCommand(REPLY_PERMISSION_COMMAND_ID, {
+        sessionID,
+        permissionID,
+        decision: 'reject',
+      });
+      await log.waitFor('turn finished:', TURN_WAIT_MS);
     });
   });
 

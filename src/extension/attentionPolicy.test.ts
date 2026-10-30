@@ -1,12 +1,15 @@
-// Protects the rules of the attention feature (issue #19): one notification per request, never
-// while the view is visible, at most three open, closed when the request is resolved by anyone,
-// and a badge that counts everything. A wrong rule here is a toast that never closes, a flood of
-// toasts, or a pending permission nobody is told about while the agent waits.
+// Protects the rules of the attention feature (issue #19, per request since E4 of #77): one
+// notification per request, never for a request a visible surface shows, at most three open,
+// closed when the request is resolved by anyone or its own card comes into view, a badge that
+// counts everything, and a title that names the chat. A wrong rule here is a toast that never
+// closes, a flood of toasts, or a pending permission of a hidden tab nobody is told about while
+// the agent waits.
 //
 // Provenance of the data: FABRICATED summaries. They confirm the policy's logic; that VS Code
 // renders and runs the `command:` links of a progress notification is UNVERIFIED (F5 point 4).
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_LABEL_LENGTH,
   MAX_OPEN_NOTIFICATIONS,
   notificationMessage,
   notificationTitle,
@@ -24,9 +27,13 @@ const request = (
 
 const none = { notified: new Set<string>(), open: new Set<string>() };
 
+/** Every request seen / none seen: the two global answers the old boolean could give. */
+const seenAll = (): boolean => true;
+const seenNone = (): boolean => false;
+
 describe('planAttention', () => {
-  it('notifies each request once while the view is hidden, and the badge counts them', () => {
-    const plan = planAttention(none, [request('a'), request('b')], false);
+  it('notifies each request once while it is not seen, and the badge counts them', () => {
+    const plan = planAttention(none, [request('a'), request('b')], seenNone);
     expect(plan.notify.map((r) => r.id)).toEqual(['a', 'b']);
     expect(plan.close).toEqual([]);
     expect(plan.badge).toBe(2);
@@ -36,23 +43,23 @@ describe('planAttention', () => {
     const plan = planAttention(
       { notified: new Set(['a']), open: new Set() },
       [request('a')],
-      false,
+      seenNone,
     );
     expect(plan.notify).toEqual([]);
     expect(plan.badge).toBe(1);
   });
 
-  it('never notifies while the view is visible, but still counts them in the badge', () => {
-    const plan = planAttention(none, [request('a')], true);
+  it('never notifies a request that is seen, but still counts it in the badge', () => {
+    const plan = planAttention(none, [request('a')], seenAll);
     expect(plan.notify).toEqual([]);
     expect(plan.badge).toBe(1);
   });
 
-  it('closes every open notification when the view becomes visible', () => {
+  it('closes every open notification whose request becomes seen', () => {
     const plan = planAttention(
       { notified: new Set(['a', 'b']), open: new Set(['a', 'b']) },
       [request('a'), request('b')],
-      true,
+      seenAll,
     );
     expect(plan.close).toEqual([
       { id: 'a', why: 'visible' },
@@ -60,24 +67,40 @@ describe('planAttention', () => {
     ]);
   });
 
+  it('decides per request: only the toast whose card is seen closes, the others stay open', () => {
+    const plan = planAttention(
+      { notified: new Set(['a', 'b']), open: new Set(['a', 'b']) },
+      [request('a'), request('b')],
+      (r) => r.id === 'b',
+    );
+    expect(plan.close).toEqual([{ id: 'b', why: 'visible' }]);
+    expect(plan.notify).toEqual([]);
+  });
+
+  it('notifies the request of a hidden chat while another request is seen', () => {
+    const plan = planAttention(none, [request('a'), request('b')], (r) => r.id === 'a');
+    expect(plan.notify.map((r) => r.id)).toEqual(['b']);
+    expect(plan.badge).toBe(2);
+  });
+
   it('closes a notification whose request is resolved, and says so', () => {
     const plan = planAttention(
       { notified: new Set(['a', 'b']), open: new Set(['a', 'b']) },
       [request('b')],
-      false,
+      seenNone,
     );
     expect(plan.close).toEqual([{ id: 'a', why: 'resolved' }]);
     expect(plan.badge).toBe(1);
   });
 
   it('prefers resolved over visible when both apply', () => {
-    const plan = planAttention({ notified: new Set(['a']), open: new Set(['a']) }, [], true);
+    const plan = planAttention({ notified: new Set(['a']), open: new Set(['a']) }, [], seenAll);
     expect(plan.close).toEqual([{ id: 'a', why: 'resolved' }]);
   });
 
   it('caps the open notifications at three and leaves the rest for the badge', () => {
     const many = ['a', 'b', 'c', 'd', 'e'].map((id) => request(id));
-    const plan = planAttention(none, many, false);
+    const plan = planAttention(none, many, seenNone);
     expect(MAX_OPEN_NOTIFICATIONS).toBe(3);
     expect(plan.notify.map((r) => r.id)).toEqual(['a', 'b', 'c']);
     expect(plan.badge).toBe(5);
@@ -88,20 +111,31 @@ describe('planAttention', () => {
     const plan = planAttention(
       state,
       [request('b'), request('c'), request('d'), request('e')],
-      false,
+      seenNone,
     );
     expect(plan.close).toEqual([{ id: 'a', why: 'resolved' }]);
     expect(plan.notify.map((r) => r.id)).toEqual(['d']);
   });
 
+  it('counts the slots after the closes of requests that became seen', () => {
+    const state = { notified: new Set(['a', 'b', 'c']), open: new Set(['a', 'b', 'c']) };
+    const plan = planAttention(
+      state,
+      [request('a'), request('b'), request('c'), request('d')],
+      (r) => r.id === 'a',
+    );
+    expect(plan.close).toEqual([{ id: 'a', why: 'visible' }]);
+    expect(plan.notify.map((r) => r.id)).toEqual(['d']);
+  });
+
   it('honours a custom maximum', () => {
-    const plan = planAttention(none, [request('a'), request('b')], false, 1);
+    const plan = planAttention(none, [request('a'), request('b')], seenNone, 1);
     expect(plan.notify.map((r) => r.id)).toEqual(['a']);
   });
 
   it('does not mutate the state it is given', () => {
     const state = { notified: new Set(['a']), open: new Set(['a']) };
-    planAttention(state, [], true);
+    planAttention(state, [], seenAll);
     expect([...state.notified]).toEqual(['a']);
     expect([...state.open]).toEqual(['a']);
   });
@@ -174,6 +208,25 @@ describe('notificationMessage', () => {
 describe('notificationTitle and sanitizeLinkText', () => {
   it('prefixes the product name', () => {
     expect(notificationTitle(request('a'))).toBe('OpenCode: Title a');
+  });
+
+  it('names the chat the request belongs to when given a label (decision Q2=1)', () => {
+    expect(notificationTitle(request('a'), 'Fix the build')).toBe(
+      'OpenCode · Fix the build: Title a',
+    );
+  });
+
+  it('reads "Untitled session" for an empty label', () => {
+    expect(notificationTitle(request('a'), '')).toBe('OpenCode · Untitled session: Title a');
+    expect(notificationTitle(request('a'), '  \n ')).toBe('OpenCode · Untitled session: Title a');
+  });
+
+  it('strips link characters from the label, collapses whitespace and cuts it', () => {
+    expect(notificationTitle(request('a'), '[x](command:evil)\nnext')).toBe(
+      'OpenCode · xcommand:evil next: Title a',
+    );
+    const long = notificationTitle(request('a'), 'w'.repeat(100));
+    expect(long).toBe(`OpenCode · ${'w'.repeat(MAX_LABEL_LENGTH - 1)}…: Title a`);
   });
 
   it('removes only the characters that build a link, keeping the rest as it is', () => {

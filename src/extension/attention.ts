@@ -8,10 +8,17 @@ import {
 import type { ServerLog } from './opencodeServer';
 import type { PendingSummary } from './pendingRequests';
 
-/** What the attention feature needs from the chat view provider. */
+/** What the attention feature needs from the chat surfaces. */
 export interface AttentionTarget {
   setBadge(count: number): void;
-  readonly visible: boolean;
+  /**
+   * Whether some surface that is being looked at shows the card of `request` right now (decision
+   * Q1=2 of Sergio, 30/10/2026: a chat tab sees only while it is the ACTIVE editor, the side-bar
+   * view while it is visible). Asked per request, every time the plan is computed.
+   */
+  seen(request: PendingSummary): boolean;
+  /** The chat the request belongs to, for the title of its notification (`ChatController.labelOf`). */
+  label(sessionID: string): string;
 }
 
 /** Why a notification closed; `cancelled` is the user pressing its Cancel button. */
@@ -21,16 +28,21 @@ type ClosedBy = 'resolved' | 'visible' | 'cancelled' | 'disposed';
 export interface Attention {
   /** The set of pending requests changed (also called with `[]` when the server goes away). */
   update(requests: readonly PendingSummary[]): void;
-  /** The chat view was shown or hidden. */
-  onVisibility(visible: boolean): void;
+  /**
+   * What a surface shows changed (a tab became active or hidden, the view was shown, a tab opened
+   * another session): asks `seen` again for every request and applies the new plan.
+   */
+  refresh(): void;
   /** Closes every notification and clears the badge; call it on deactivation. */
   dispose(): void;
 }
 
 /**
- * VS Code side of issue #19: the Activity Bar badge and one auto-closing notification per request
- * that arrives while the chat view is hidden. WHAT to show comes from `planAttention`
- * (`attentionPolicy.ts`); this module only executes the plan.
+ * VS Code side of issue #19 and of E4 of #77: the Activity Bar badge and one auto-closing
+ * notification per request that no looked-at surface shows. "Shows" is `target.seen(request)`,
+ * asked per request, so with several chat tabs a request of a hidden tab is notified even while
+ * another tab is in front. WHAT to show comes from `planAttention` (`attentionPolicy.ts`); this
+ * module only executes the plan.
  *
  * Why `withProgress` and not `showWarningMessage`: a message box cannot be closed from code, so a
  * permission answered from the chat would leave a stale toast whose button then says "already
@@ -50,7 +62,10 @@ export interface Attention {
  * `attention: notified <id>`, `attention: closed <id> (<resolved|visible|cancelled|disposed>)`.
  * Requests' resources and titles are never logged. Not unit-tested (it needs a window): the
  * decisions are, in `attentionPolicy.test.ts`; this is covered by the opt-in `realOpencode.test.ts`
- * for the badge and the open/close log lines, not for how the toast looks.
+ * for the badge and the open/close log lines, not for how the toast looks. The per-tab behaviour
+ * (a request of a tab behind the active one is notified, one of the active tab is not, and "Open
+ * chat" closes it as `visible`) is covered by `fakeServer.test.ts`, whose cases are named in the
+ * header of `registerChat`.
  */
 export function createAttention(deps: {
   target: AttentionTarget;
@@ -89,14 +104,14 @@ export function createAttention(deps: {
       vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: notificationTitle(summary),
+          title: notificationTitle(summary, target.label(summary.sessionID)),
           cancellable: true,
         },
         (progress, token) => {
           progress.report({ message: notificationMessage(summary) });
           token.onCancellationRequested(() => {
             close(summary.id, 'cancelled');
-            replan(target.visible); // a slot freed: a queued request may take it
+            replan(); // a slot freed: a queued request may take it
           });
           return done;
         },
@@ -106,10 +121,15 @@ export function createAttention(deps: {
     });
   };
 
-  /** Applies the plan for the current requests and visibility. */
-  const replan = (visible: boolean): void => {
+  /** Applies the plan for the current requests, asking `target.seen` for each one. */
+  const replan = (): void => {
     if (disposed) return;
-    const plan = planAttention({ notified, open: new Set(open.keys()) }, latest, visible, maxOpen);
+    const plan = planAttention(
+      { notified, open: new Set(open.keys()) },
+      latest,
+      (request) => target.seen(request),
+      maxOpen,
+    );
     if (plan.badge !== lastBadge) {
       lastBadge = plan.badge;
       log.info(`attention: badge ${String(plan.badge)}`);
@@ -127,10 +147,10 @@ export function createAttention(deps: {
   return {
     update(requests) {
       latest = requests;
-      replan(target.visible);
+      replan();
     },
-    onVisibility(visible) {
-      replan(visible);
+    refresh() {
+      replan();
     },
     dispose() {
       if (disposed) return;

@@ -104,11 +104,6 @@ export class ChatPanels {
     return [...this.entries.keys()];
   }
 
-  /** True while at least one tab is on screen. */
-  anyVisible(): boolean {
-    return [...this.entries.values()].some((entry) => !entry.disposed && entry.panel.visible);
-  }
-
   /** True while at least one tab would deliver a post now (document ready and visible). */
   anyCanDeliver(): boolean {
     return [...this.entries.values()].some((entry) => this.canDeliver(entry));
@@ -123,6 +118,26 @@ export class ChatPanels {
   isVisible(paneId: number): boolean {
     const entry = this.entries.get(paneId);
     return entry !== undefined && !entry.disposed && entry.panel.visible;
+  }
+
+  /**
+   * True while tab `paneId` is open and is the ACTIVE editor of the workbench (`WebviewPanel.active`,
+   * which implies it is visible), the only state in which a tab counts as "seeing" a request
+   * (decision Q1=2 of Sergio, 30/10/2026): a tab that is visible in another group but not the
+   * active editor does not. `onDidChangeViewState` carries `active`, and it already ends in
+   * `onSurfaceChange`, so the attention feature is refreshed when the active tab changes.
+   * VERIFIED in VS Code 1.144.0 on Windows 11 (30/10/2026) for the same-group case, by the
+   * integration case "notifies a permission asked by a tab behind the active one, and closes the toast when Open chat shows it": the hidden tab must not be active and the revealed one must turn active.
+   * Two groups, VERIFIED by `test:visual` step 30 (Windows 11, VS Code 1.144.0, 30/10/2026): "ok
+   * D4 two groups side by side, the request of the visible tab that is not the active editor: 2
+   * chats on screen in groups [0,1]" shows `active` was false for the visible tab of the other
+   * group (the toast was raised), and the same line reads "3 s later the editor in front is still"
+   * the other tab and "attention: closed (visible)" 0 times: the request does not activate the tab
+   * (the dock does not focus a card in a document without focus).
+   */
+  isActive(paneId: number): boolean {
+    const entry = this.entries.get(paneId);
+    return entry !== undefined && !entry.disposed && entry.panel.active;
   }
 
   /**
@@ -197,7 +212,8 @@ export class ChatPanels {
    * The wiring shared by a new tab and a restored one: attaches the pane, registers the tab,
    * subscribes to the panel, renders the webview and logs `chat tab created (pane N)` or `chat tab
    * restored (pane N)`. Returns the pane id. For a restored panel the session is bound to the pane
-   * before the document exists, so its `ready` is answered with that session.
+   * before the document exists, so its `ready` is answered with that session. The pane is attached
+   * with `ownRequestsOnly`, so its dock lists only the requests of its session lineage.
    */
   private adopt(panel: vscode.WebviewPanel, origin: PanelOrigin): number {
     panel.iconPath = {
@@ -217,6 +233,9 @@ export class ChatPanels {
         this.post(paneId, entry, message);
       },
       canDeliver: () => this.canDeliver(entry),
+      // A tab shows the requests of its session and its subagents only (E4 of #77, decision
+      // T1=1); the side-bar view does not set this and keeps every request (decision Q3=1).
+      ownRequestsOnly: true,
     });
     paneId = pane.id;
     this.entries.set(paneId, entry);

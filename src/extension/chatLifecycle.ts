@@ -62,6 +62,7 @@ import { pickSavedPermissionsToRevoke } from './savedPermissionsUi';
 import { restartServerWithFeedback } from './serverLifecycle';
 import type { ServerManager } from './serverManager';
 import { registerSessionDiffProvider } from './sessionDiffEditor';
+import type { PendingSummary } from './pendingRequests';
 import { showSessionsSearch } from './sessionsSearch';
 import { RevealOrder } from './revealOrder';
 import { registerSessionsView, type SessionsState } from './sessionsView';
@@ -337,9 +338,11 @@ function warnSessionFailure(action: string, error: unknown): void {
  *   `ChatPanels.restore`, which binds the session the tab's webview saved. Deactivation releases
  *   the tabs (`detachAll`) instead of closing them. In `ExtensionMode.Test` the internal command
  *   `RESTORE_CHAT_TAB_TEST_COMMAND_ID` feeds a panel it creates through that same `restore`.
- * - `anySurfaceVisible` (not the view alone) drives the attention feature, and the badge goes to
- *   the view in `sidebar` and to the Sessions view in `editor`. `chatFocused` is true while ANY
- *   surface has the focus; a surface that hides gets a synthetic blur.
+ * - The attention feature asks `seenBySurface` PER REQUEST (E4 of #77, decision Q1=2): a chat tab
+ *   sees the requests its dock lists (`ChatController.displays`) only while it is the ACTIVE
+ *   editor, the side-bar view while it is visible. The badge goes to the view in `sidebar` and to
+ *   the Sessions view in `editor`. `chatFocused` is true while ANY surface has the focus; a
+ *   surface that hides gets a synthetic blur.
  * VERIFIED in a real VS Code 1.144.0 (Windows 11, `npm run test:integration`, 29/10/2026), with
  * a synthetic server for the session cases: "opens one tab per New Session, each with a ready
  * document", "reveals the existing tab on Open Chat instead of opening another", "opens a tab on
@@ -385,6 +388,37 @@ function warnSessionFailure(action: string, error: unknown): void {
  * KNOWN LIMITATION (W2 of review 2): only reveals made by our code are tracked, so a manual click
  * on a tab of the tab strip after a row click can be stolen by the late reveal. UNVERIFIED on
  * macOS/Linux.
+ *
+ * E4 (issue #77, decisions Q1=2, Q2=1, Q3=1, Q4=1, T1=1, T2=1 of Sergio, 30/10/2026): in `editor`
+ * mode a request is shown in the dock of the tab of its session or of an ancestor, never in the
+ * others (`ChatController.displays`), and the toast title names the chat (`labelOf`). A request
+ * whose tab is behind the active one is notified; "Open chat" (`SHOW_REQUEST_COMMAND_ID`) reveals
+ * the tab that lists it, else puts the ROOT of its lineage in a tab (`placeSession`) and focuses
+ * the card. The Sessions tree marks "Needs input" on the root row at any depth (Vitest only).
+ * VERIFIED in a real VS Code 1.144.0 (Windows 11, `npm run test:integration`, main and
+ * `--label fake-server`, 30/10/2026): "✔ notifies a permission asked by a tab behind the active
+ * one, and closes the toast when Open chat shows it" (waits for `attention: notified <id>`, then
+ * after Open chat for `attention: closed <id> (visible)` and a different active chat tab) and "✔
+ * does not notify a permission asked by the active tab" (badge 1, no `attention: notified` after
+ * 2 s). VERIFIED by `test:visual` step 30 (Windows 11, VS Code 1.144.0, 30/10/2026): "ok   D1 tab
+ * B asks while tab A is in front: …" (toast, badge 1, "Needs input" row, no card in A), "ok   D2
+ * "Open chat" brings the tab of the request forward with its card focused and the notification
+ * gone (tab in front true, card true, card focused true, toast gone true)", "ok   D3 the tab in
+ * front asks: its card is there (true) and no notification follows after 3 s (null;" and "ok   D5
+ * sidebar mode with the side bar chat visible and 2 tab(s) left over: the card is in the side bar
+ * chat (true) and no notification follows after 3 s (null;". Two groups: "ok   D4 two groups side
+ * by side, the request of the visible tab that is not the active editor: 2 chats on screen in
+ * groups [0,1]" raised the toast and kept it (D4 message: "3 s later the editor in front is still
+ * "Tab30A: …", the notification is still there and "attention: closed (visible)" was logged 0
+ * time(s)"); before `RequestDock` stopped focusing a card in a document without focus, the same
+ * cell logged `closed (visible)` once, within 1 s after the toast, with B in front. The branch with NO
+ * owner tab in `editor` mode (the tab of the asking session closed before the ask) is VERIFIED by
+ * "✔ opens the tab of the session when Open chat finds no tab that lists the request" (same run:
+ * the second chat tab appears after the command, `attention: closed <id> (visible)` follows and
+ * the active chat tab is not the one that was in front; the fake has no subagent, so the session
+ * itself, not a distinct root, is what the tab opens). NOT observed: the card of that new tab
+ * taking the focus (it lives in the iframe), the adoption of an EMPTY tab by that branch, a
+ * subagent that asks (the fake has none), and macOS and Linux locally.
  *
  * The two internal commands (`SHOW_REQUEST_COMMAND_ID`, `REPLY_PERMISSION_COMMAND_ID`) are always
  * registered and not contributed: they are the targets of the links of an attention
@@ -434,12 +468,26 @@ export function registerChat(
   // the callbacks only use them later, from events and from VS Code callbacks, never during this
   // function.
   /**
-   * True while the side-bar view (only if its pane exists) or any chat tab is on screen: what the
-   * attention feature asks instead of "is the view visible". HYPOTHESIS for the pane-less case
-   * (`editor` mode with the view still visible): a check that reads the badge there would settle it.
+   * Whether somebody is looking at the card of `request` right now: the side-bar view (only if its
+   * pane exists) while it is VISIBLE and its dock lists the request, or a chat tab that is the
+   * ACTIVE editor and whose dock lists it (`controller.displays`, the same rule that routes the
+   * request, so a card with no dock and no toast cannot happen). Decision Q1=2 of Sergio
+   * (30/10/2026): a tab visible in another group but not active does not count; the side bar
+   * needs no focus, so `sidebar` mode, step 5 and C11 of `test:visual` keep their behaviour.
+   * Replaces the old global "any surface visible" flag, which could not tell tabs apart.
    */
-  const anySurfaceVisible = (): boolean =>
-    (sidebarPane !== undefined && view.provider.visible) || panels.anyVisible();
+  const seenBySurface = (request: PendingSummary): boolean => {
+    if (
+      sidebarPane !== undefined &&
+      view.provider.visible &&
+      controller.displays(sidebarPane.id, request.sessionID)
+    ) {
+      return true;
+    }
+    return panels
+      .ids()
+      .some((paneId) => panels.isActive(paneId) && controller.displays(paneId, request.sessionID));
+  };
   /**
    * Writes the pending-request count to the surface that carries the badge: the view in `sidebar`
    * mode, the Sessions view in `editor` mode, and 0 to the other so it never keeps a stale number.
@@ -457,18 +505,22 @@ export function registerChat(
         badgeCount = count;
         applyBadge();
       },
-      get visible() {
-        return anySurfaceVisible();
-      },
+      seen: seenBySurface,
+      label: (sessionID) => controller.labelOf(sessionID),
     },
     log,
   });
   // What the controller is given instead of `attention`: the same updates, plus the pending
-  // summaries reaching the model of the tree, so a row says "Needs input" (decision Q6=1).
+  // summaries reaching the model of the tree, so a row says "Needs input" (decision Q6=1). A
+  // request of a subagent marks the ROOT row, at any depth (E4 of #77): the tree lists roots only.
+  // An unknown chain (`rootOf` undefined) falls back to the session itself, as before.
   const attentionAndTree: AttentionSink = {
     update: (requests) => {
       attention.update(requests);
-      if (sessionTree.setPending(requests)) sessionsView.refresh();
+      const marked = requests.map((request) => ({
+        sessionID: controller.rootOf(request.sessionID) ?? request.sessionID,
+      }));
+      if (sessionTree.setPending(marked)) sessionsView.refresh();
     },
   };
   const controller = new ChatController({
@@ -717,9 +769,13 @@ export function registerChat(
     const target = tabs.commandTarget();
     sessionsView.reveal(target === undefined ? undefined : controller.sessionOf(target));
   };
-  /** A surface appeared, hid, was activated or closed: refresh what depends on "any surface visible". */
+  /**
+   * A surface appeared, hid, was activated or closed: asks the attention feature again which
+   * requests are seen (a tab becoming the active editor closes the toast of the request it shows),
+   * and refreshes what depends on the surfaces.
+   */
   const onSurfaceChange = (): void => {
-    attention.onVisibility(anySurfaceVisible());
+    attention.refresh();
     blurHiddenSurfaces();
     syncSessionsTree();
   };
@@ -769,6 +825,8 @@ export function registerChat(
     onSurfaceChange,
     onTabSessionChanged: () => {
       syncSessionsTree();
+      // A tab that now opens the session of a pending request sees it (and one that left it stops).
+      attention.refresh();
     },
     restoreSession: (paneId, sessionID) => {
       controller.restorePane(paneId, sessionID);
@@ -870,30 +928,48 @@ export function registerChat(
   };
 
   /**
-   * Opens a session from the Sessions tree (decision Q3=1/1), an `editor`-mode action: a tab that
-   * already shows it is revealed WITH the focus; else the active or most recent tab is adopted when
-   * it is EMPTY; else a new tab opens in the chat group with the focus in its prompt. Nothing in
-   * `sidebar` mode, where the tree is hidden. Never leaves two tabs on one session, because the
-   * first question is the controller's own state (`paneShowing`).
+   * Puts `sessionID` in a tab (an `editor`-mode action, shared by the Sessions tree and by "Open
+   * chat" of a notification): a tab that already shows it is revealed; else the active or most
+   * recent tab is adopted when it is EMPTY; else a new tab opens in the chat group. Returns the
+   * pane and a promise that settles when the pane has loaded the session (immediately when the tab
+   * already showed it or is a NEW tab, whose document is not ready yet and keeps its own requests).
+   * `focusPrompt` also puts the keyboard in the prompt box (the tree does; the notification does
+   * not, because it focuses the request card afterwards). Never leaves two tabs on one session,
+   * because the first question is the controller's own state (`paneShowing`).
+   * VERIFIED only for the "a new tab opens" branch, through "Open chat" with no owner tab
+   * (`fakeServer.test.ts` "opens the tab of the session when Open chat finds no tab that lists the
+   * request", Windows 11, VS Code 1.144.0, 30/10/2026). NOT observed in a real window: adopting an
+   * EMPTY tab and awaiting `loaded` (only Vitest fabricates it).
    */
-  const openSession = (sessionID: string): void => {
-    if (mode !== 'editor') return;
+  const placeSession = (
+    sessionID: string,
+    focusPrompt: boolean,
+  ): { paneId: number; loaded: Promise<void> } => {
     const shown = paneShowing(sessionID);
     if (shown !== undefined) {
       revealSurface(shown, false);
-      queuePromptFocus(shown);
-      return;
+      if (focusPrompt) queuePromptFocus(shown);
+      return { paneId: shown, loaded: Promise.resolve() };
     }
     const candidate = tabs.commandTarget();
     if (candidate !== undefined && controller.sessionOf(candidate) === undefined) {
-      void controller.openInPane(candidate, sessionID).catch((error: unknown) => {
+      const loaded = controller.openInPane(candidate, sessionID).catch((error: unknown) => {
         log.error(`opening a session in an empty tab failed: ${String(error)}`);
       });
       revealSurface(candidate, false);
-      queuePromptFocus(candidate);
-      return;
+      if (focusPrompt) queuePromptFocus(candidate);
+      return { paneId: candidate, loaded };
     }
-    openTab(sessionID, true);
+    return { paneId: openTab(sessionID, focusPrompt), loaded: Promise.resolve() };
+  };
+  /**
+   * Opens a session from the Sessions tree (decision Q3=1/1), an `editor`-mode action: see
+   * {@link placeSession}, with the focus in the prompt. Nothing in `sidebar` mode, where the tree
+   * is hidden.
+   */
+  const openSession = (sessionID: string): void => {
+    if (mode !== 'editor') return;
+    placeSession(sessionID, true);
   };
   /** The session a command acts on: its argument (a row), else the row selected in the tree. */
   const targetSession = (raw: unknown): string | undefined =>
@@ -1085,15 +1161,27 @@ export function registerChat(
         log.warn(`${SHOW_REQUEST_COMMAND_ID} rejected: invalid arguments`);
         return;
       }
-      // The tab (or the view) that already shows the request's session, else the surface of the
-      // current mode; with no tab at all, one is opened on that session (decision Q10=1).
-      const shown = paneShowing(target.sessionID);
-      const paneId =
-        shown ??
-        (mode === 'sidebar'
-          ? ensureSidebar().id
-          : (tabs.commandTarget() ?? openTab(target.sessionID, false)));
+      // E4 of #77: the owner is the surface whose dock LISTS the request (`controller.displays`: a
+      // tab of the session or of an ancestor, most recent first, then the side-bar view), not the
+      // active tab. With no owner, `sidebar` mode shows it in the view; `editor` mode puts the ROOT
+      // of its lineage in a tab (decision Q4=1; the session itself while the chain is unknown), with
+      // the prompt left alone, because the request card takes the focus next.
+      const owner = [...tabs.recent(), ...(sidebarPane === undefined ? [] : [sidebarPane.id])].find(
+        (candidate) => controller.displays(candidate, target.sessionID),
+      );
+      let paneId: number;
+      let loaded: Promise<void> = Promise.resolve();
+      if (owner !== undefined) {
+        paneId = owner;
+      } else if (mode === 'sidebar') {
+        paneId = ensureSidebar().id;
+      } else {
+        const placed = placeSession(controller.rootOf(target.sessionID) ?? target.sessionID, false);
+        paneId = placed.paneId;
+        loaded = placed.loaded;
+      }
       await revealChat(paneId);
+      await loaded;
       controller.focusRequest(paneId, target);
     }),
     vscode.commands.registerCommand(REPLY_PERMISSION_COMMAND_ID, async (raw: unknown) => {

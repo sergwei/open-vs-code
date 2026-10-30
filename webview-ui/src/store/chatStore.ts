@@ -18,8 +18,9 @@
  *  - Phase 2 (issues #13/#16) adds the attachments chosen with Attach (`draftFiles`, no two with
  *    the same `uri`, filled by `attachments.picked`) and dismissible notices; a notice born from a
  *    failed request carries its `requestId`, so the UI can restore the unsent prompt.
- *  - Phase 3 (issues #18/#44) adds the pending requests of the WHOLE location (`requests`, not
- *    tied to the open session: a subagent asks from its own session), the one-line results that
+ *  - Phase 3 (issues #18/#44) adds the pending requests the host sends this surface (`requests`: the
+ *    whole location in the side bar, the lineage of the tab's session in a tab; not tied to the open
+ *    session: a subagent asks from its own session), the one-line results that
  *    stay after a request is answered (`resolved`, at most {@link MAX_RESOLVED}, cleared on the next
  *    prompt), the cards waiting for the server's answer (`replying`, by ask id) with the error of
  *    the last failed answer (`requestErrors`), and the pending `ui.focus` target. A request leaves
@@ -737,7 +738,8 @@ export function createChatStore(): ChatStore {
       );
     },
 
-    // Requests are NOT filtered by session: a subagent asks from its own child session.
+    // Not filtered by session here: a subagent asks from its own child session. The HOST already
+    // sent only the requests this surface displays (issue #77 E4: a tab gets its own lineage's).
     'permission.asked': (m) => {
       if (state.requests.permissions.some((ask) => ask.id === m.permission.id)) return;
       setState('requests', 'permissions', state.requests.permissions.length, m.permission);

@@ -9,7 +9,7 @@
 // to a stand-in prompt form. jsdom implements focus and `activeElement`, but not layout, scrolling
 // or a screen reader: those are UNVERIFIED (F5 points 1, 5).
 import { createRoot, createSignal } from 'solid-js';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FormAsk, PermissionAsk, RequestResolution } from '../../../src/shared/model';
 import { createChatStore, type ChatStore } from '../store/chatStore';
 import { must, mount, splitRequestId, type Mounted } from '../testing';
@@ -266,6 +266,44 @@ describe('announcements', () => {
 });
 
 describe('focus', () => {
+  // jsdom answers `document.hasFocus()` from its own state, which is false with nothing focused;
+  // the tests below model a document that has the focus unless one says otherwise.
+  let documentHasFocus = true;
+  beforeEach(() => {
+    documentHasFocus = true;
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => documentHasFocus);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Protects the phase 3b decision (D4 of `test:visual` step 30): a card that arrives in a document
+   * without the focus (a tab visible in another group) is not focused, because focusing it made VS
+   * Code activate that tab; with the focus the card is focused as before. SYNTHETIC: `hasFocus` is
+   * a spy, the real behaviour is read in `test:visual` step 30.
+   */
+  it('does not focus a new card when its document has no focus, and does when it has', () => {
+    const { store, card, active } = setup();
+    documentHasFocus = false;
+    store.apply({ type: 'permission.asked', permission: permission('per_1') });
+    expect(active()).not.toBe(card('per_1'));
+    documentHasFocus = true;
+    store.apply({ type: 'permission.asked', permission: permission('per_2') });
+    expect(active()).toBe(card('per_2'));
+  });
+
+  it('ui.focus focuses the card even when the document has no focus ("Open chat")', () => {
+    const { store, card, active } = setup();
+    documentHasFocus = false;
+    store.apply({ type: 'permission.asked', permission: permission('per_1') });
+    store.apply({
+      type: 'ui.focus',
+      target: { kind: 'permission', sessionID: 'ses_1', id: 'per_1' },
+    });
+    expect(active()).toBe(card('per_1'));
+  });
+
   it('moves the focus to the CARD (never a button) of a new request when nothing has it', () => {
     const { store, card, active } = setup();
     store.apply({ type: 'permission.asked', permission: permission('per_1') });

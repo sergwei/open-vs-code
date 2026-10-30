@@ -54,10 +54,17 @@ export interface PaneSurface {
    * first gets it.
    */
   primary?: boolean;
+  /**
+   * True for a chat TAB (issue #77 E4): its dock shows only the requests of its own session and of
+   * that session's subagent lineage, and the rest are notified natively. Absent means every
+   * request of the location, which is what the side-bar view shows (decision Q3=1) and what every
+   * test with a fabricated surface keeps getting.
+   */
+  ownRequestsOnly?: boolean;
 }
 
 /** Who a host message is for; see {@link routeOf}. */
-export type MessageRoute = 'session' | 'all' | 'origin';
+export type MessageRoute = 'session' | 'all' | 'origin' | 'request';
 
 /**
  * Says where a host-to-webview message must go when there is more than one pane.
@@ -68,10 +75,15 @@ export type MessageRoute = 'session' | 'all' | 'origin';
  * `prompt.compose` (issue #36: the prompt of one menu action goes to the one pane it was aimed
  * at, or two panes would send it twice), `snapshot`,
  * `setup.binary` of issue #86: the answer of the file dialog one pane opened), only for that pane; broadcasting a `request.result` would close a request with the same id in another
- * pane (ids are a per-document counter). Everything else (`connection.state`, `catalog`,
- * `session.upserted|removed|status`, `permission.*`, `form.*`, `notice`) belongs to the location and
- * goes to all of them. A `notice` caused by one pane's request is posted to that pane directly and
- * never goes through here.
+ * pane (ids are a per-document counter). `request` (issue #77 E4): a NEW `permission.asked` or
+ * `form.asked`, for the panes that display it (`ChatController.displays`: a tab shows its own
+ * session's requests and its subagents', the side-bar view shows every one). Their `*.resolved`
+ * stay `all`: the store ignores a resolution it does not know, so sending it to a pane that never
+ * got the ask is harmless and a pane that changed session meanwhile still clears the card.
+ * Everything else (`connection.state`, `catalog`, `session.upserted|removed|status`,
+ * `permission.resolved`, `form.resolved`, `notice`) belongs to the location and goes to all of
+ * them. A `notice` caused by one pane's request is posted to that pane directly and never goes
+ * through here.
  */
 export function routeOf(message: HostToWebview): MessageRoute {
   switch (message.type) {
@@ -97,12 +109,13 @@ export function routeOf(message: HostToWebview): MessageRoute {
     case 'session.upserted':
     case 'session.removed':
     case 'session.status':
-    case 'permission.asked':
     case 'permission.resolved':
-    case 'form.asked':
     case 'form.resolved':
     case 'notice':
       return 'all';
+    case 'permission.asked':
+    case 'form.asked':
+      return 'request';
     default:
       // A new HostToWebview variant makes this line a type error until it is classified above,
       // instead of being broadcast to every pane by default.
@@ -189,6 +202,11 @@ export class ChatPane {
   /** True when the surface asked to receive the remembered session first ({@link PaneSurface.primary}). */
   get primary(): boolean {
     return this.surface.primary === true;
+  }
+
+  /** True when the surface shows only its own session's requests ({@link PaneSurface.ownRequestsOnly}). */
+  get ownRequestsOnly(): boolean {
+    return this.surface.ownRequestsOnly === true;
   }
 
   /** True while a {@link post} would reach the webview (`surface.canDeliver`, absent meaning always). */
