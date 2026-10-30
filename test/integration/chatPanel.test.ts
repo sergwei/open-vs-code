@@ -38,7 +38,12 @@ import {
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
 import { openLogCursor, type LogCursor } from './support/extensionLog';
-import { chatTabs, setChatLocation, waitForChatTabs } from './support/chatLocation';
+import {
+  chatTabs,
+  restoreChatLocation,
+  setChatLocation,
+  waitForChatTabs,
+} from './support/chatLocation';
 
 const EXTENSION_ID = 'sergwei.open-vs-code';
 // Our own margins: a document needs well under a second to say `ready`; absence is asserted after
@@ -104,7 +109,7 @@ describe('chat in editor tabs', function () {
 
   afterEach(async () => {
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-    await setChatLocation(undefined, await openLogCursor());
+    await restoreChatLocation(await openLogCursor());
     for (const dir of tempDirs.splice(0)) {
       await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }

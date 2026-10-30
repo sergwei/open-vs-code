@@ -323,8 +323,13 @@ function warnSessionFailure(action: string, error: unknown): void {
  *
  * Issue #77 (decisions Q1-Q10 and T1-T4 of Sergio, 29/10/2026): the setting
  * `openVsCode.chatLocation` picks where the chat lives, read at start and on every change.
- * - `sidebar` (the default): ONE pane, the view, attached at start as before.
- * - `editor`: no side-bar pane. Every chat is an editor tab (`ChatPanels`), one pane each; New
+ * - `sidebar`: ONE pane, the view, attached at start as before. Opt-in since E5 (30/10/2026,
+ *   decision Q1=1): the default is `editor`, and `chat location at start: <mode>` is logged on
+ *   activation. VERIFIED for the `editor` line: `chat location at start: editor` on the first
+ *   activation of a profile with no key, read by the integration case "starts in editor on the
+ *   first activation" and by D0 of step 25 of `test:visual` (Windows 11, VS Code 1.144.0,
+ *   30/10/2026). UNVERIFIED on macOS and Linux; the `sidebar` line is read by no test.
+ * - `editor` (the default): no side-bar pane. Every chat is an editor tab (`ChatPanels`), one pane each; New
  *   Session always opens a NEW lazy tab; a command goes to the active tab, else the most recent
  *   (`ChatTabs.commandTarget`), else it opens one with the last session of the folder.
  * - A change runs `planLocationSwitch`: to `editor` the view's pane is dropped and its session
@@ -439,12 +444,20 @@ export function registerChat(
     chatFocused = focused;
     void vscode.commands.executeCommand('setContext', CHAT_FOCUSED_CONTEXT_KEY, focused);
   };
-  /** Where the chat lives now (issue #77): the setting, read at start and again on each change. */
+  /**
+   * Where the chat lives now (issue #77): the setting, read at start and again on each change.
+   * Since E5 (30/10/2026) an absent or unknown value reads as `editor`, the default; only an
+   * exact `sidebar` gives the side bar (`readChatLocation`).
+   */
   const readLocation = (): ChatLocation =>
     readChatLocation(
       vscode.workspace.getConfiguration(CONFIG_SECTION).get<unknown>(CHAT_LOCATION_KEY),
     );
   let mode = readLocation();
+  // The mode of the FIRST activation, in the log: support can tell where a user's chat lives.
+  // VERIFIED (Windows 11, VS Code 1.144.0, 30/10/2026): the integration case "starts in editor on
+  // the first activation" reads this line in a profile without the setting.
+  log.info(`chat location at start: ${mode}`);
   const tabs = new ChatTabs();
   // Which chat surface was revealed last, so a post-ready focus can tell it was overtaken (W3).
   const revealOrder = new RevealOrder();

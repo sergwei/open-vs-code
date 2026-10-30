@@ -19,7 +19,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { INJECT_WEBVIEW_MESSAGE_COMMAND_ID, NEW_SESSION_COMMAND_ID } from '../../src/extension/ids';
-import { setChatLocation, waitForChatTabs } from './support/chatLocation';
+import { restoreChatLocation, setChatLocation, waitForChatTabs } from './support/chatLocation';
 import { openLogCursor } from './support/extensionLog';
 
 const EXTENSION_ID = 'sergwei.open-vs-code';
@@ -152,7 +152,7 @@ describe('editor actions', () => {
       assert.strictEqual(document.getText(), 'hello world');
     } finally {
       await vscode.window.showTextDocument(document, vscode.ViewColumn.One);
-      await setChatLocation(undefined, log);
+      await restoreChatLocation(log);
     }
   });
 

@@ -176,6 +176,27 @@ describe('README.md', () => {
     );
   });
 
+  // E5 of #77: the names test above ignores the Default column, so a README that kept saying
+  // `sidebar` after the default moved to `editor` passed. `empty` stands for the empty string.
+  // Provenance: the REAL README and manifest. Mutation (Windows 11, `npx vitest run`, 30/10/2026):
+  // with `sidebar` in the Default cell of the `openVsCode.chatLocation` row this test is red.
+  it('has a Settings table whose Default column is the default of each contributed setting', () => {
+    const properties = manifest.contributes.configuration.properties as Record<
+      string,
+      { default?: unknown }
+    >;
+    const rows = new Map<string, string>();
+    for (const line of readme.split(/\r?\n/)) {
+      const cells = /^\| `(openVsCode\.[\w.]+)` \| [^|]+ \| ([^|]+) \|/.exec(line);
+      if (cells?.[1] !== undefined && cells[2] !== undefined) rows.set(cells[1], cells[2].trim());
+    }
+    expect(rows.size).toBe(Object.keys(properties).length);
+    for (const [key, property] of Object.entries(properties)) {
+      const wanted = property.default === '' ? 'empty' : `\`${String(property.default)}\``;
+      expect(rows.get(key), key).toBe(wanted);
+    }
+  });
+
   it('has a Commands table whose rows are exactly the contributed commands', () => {
     const labels = manifest.contributes.commands.map(({ title, category }) =>
       category ? `${category}: ${title}` : title,

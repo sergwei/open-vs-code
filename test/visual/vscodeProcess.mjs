@@ -191,6 +191,13 @@ function installExtension(repoRoot, extensionsDir) {
  * (`opencode-xdg`, see {@link cleanEnv}) are wiped at start so every run begins from the same
  * state.
  *
+ * `chatLocation` is the value written to `openVsCode.chatLocation` in the profile: `'sidebar'` when
+ * the option is absent, because since E9 (#77 E5) the extension's own default is `editor` and the
+ * steps 0-26 judge the chat in the side bar (Q2 = 1 of `E9-default-editor`); `null` writes NO key,
+ * which is the profile of someone who just installed the extension (step 25's control window and
+ * D0); any other string is written as is. The profile is wiped above, so `null` cannot inherit a
+ * key from a previous run.
+ *
  * `openVsCode.opencodePath` is the fixture (see {@link fakeEnv}) unless `opencodePath` overrides it
  * (E2 step 0 passes a path that does not exist); `startDown` starts with the fixture's `.down`
  * marker in place; the fixture's state file lives in
@@ -206,6 +213,7 @@ export async function startVSCode({
   startDown,
   restricted,
   installed,
+  chatLocation,
 }) {
   const executable = await downloadAndUnzipVSCode('stable');
   const userDataDir = path.join(workDir, 'user-data');
@@ -226,6 +234,7 @@ export async function startVSCode({
   writeSettings(userDataDir, {
     'openVsCode.opencodePath':
       opencodePath ?? path.join(repoRoot, 'src', 'extension', 'test-fixtures', 'fake-opencode.mjs'),
+    ...(chatLocation === null ? {} : { 'openVsCode.chatLocation': chatLocation ?? 'sidebar' }),
     'workbench.startupEditor': 'none',
     'workbench.colorTheme': 'Default Dark Modern',
     'security.workspace.trust.enabled': restricted === true,

@@ -25,7 +25,7 @@ running.
 - Linux needs a display: `xvfb-run -a npm run test:integration`. Windows and macOS: as is.
 - Needs network on the first run (VS Code download). Cache `.vscode-test/vscode-*` if wanted.
 - `npm run test:integration` runs every configuration that is not opt-in: `main`,
-  `external-server` and `fake-server`.
+  `external-server`, `fake-server` and `default-location`.
 - Run it before `npm run vsix` (that one rebuilds `dist/` in production mode).
 
 ## How the tests observe the extension
@@ -42,6 +42,22 @@ The opt-in `real-opencode` suite creates and removes sessions in a real opencode
 extension host and by `opencode serve`). It does not add sessions to your
 `~/.local/share/opencode`. Checked on Windows 11 with opencode 2.0.32 (a new `opencode.db`
 appears there, the real one keeps its modification time); POSIX is unchecked.
+
+## Where the chat lives in the test profiles (E5 of #77)
+
+The default of `openVsCode.chatLocation` is `editor`, but the existing suites verify the `sidebar`
+mode (a view that resolves, a snapshot sent to it). So `.vscode-test.mjs` writes
+`"openVsCode.chatLocation": "sidebar"` (`TEST_CHAT_LOCATION`) into the `settings.json` of the four
+profiles (`main` and `real-opencode` share one) every time it loads, and the cases that switch
+modes restore with `restoreChatLocation` (`support/chatLocation.ts`), never with
+`setChatLocation(undefined, …)`, which would now mean `editor`.
+
+The default itself is checked by the `default-location` configuration (`defaultLocation.test.ts`):
+its own profile `.vscode-test/user-data-default`, whose `settings.json` is rewritten to `{}`, no
+folder and no server. It proves what VS Code registers as default, that the first activation logs
+`chat location at start: editor`, that the Chat view does not resolve until `sidebar` is written,
+that New Session opens a tab, and that an unknown value reads as `editor` in the host and in the
+views. Run only it: `npm run test:integration -- --label default-location`.
 
 ## The opt-in `real-opencode` suite: a contract, never a turn
 

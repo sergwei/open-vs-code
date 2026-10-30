@@ -25,6 +25,21 @@ import path from 'node:path';
 const userDataDir = path.join(import.meta.dirname, '.vscode-test', 'user-data');
 
 /**
+ * Baseline of `openVsCode.chatLocation` in the isolated profiles of the existing suites (E5 of
+ * #77, decision Q2=1 of Sergio, 30/10/2026).
+ *
+ * Why: the default of the setting is now `editor`, and ~95 cases of `main`, `external-server`,
+ * `fake-server` and `real-opencode` verify the `sidebar` mode (a view that resolves, a snapshot
+ * sent to it, injected messages that only reach a side-bar pane). Rewriting them for `editor`
+ * would cover no more of the default than a case that runs WITHOUT the key, and that is what the
+ * `default-location` configuration below is for: its profile never carries this key. Written
+ * into every profile's `settings.json` when this file loads, so a dead run cannot leave another
+ * value behind. Keep it equal to `TEST_BASELINE_CHAT_LOCATION` in
+ * `test/integration/support/chatLocation.ts`, which restores to it between cases.
+ */
+const TEST_CHAT_LOCATION = 'sidebar';
+
+/**
  * Environment of the VS Code under test.
  *
  * Why the `undefined` entries: when the runner is launched from a process that descends from VS
@@ -81,17 +96,28 @@ const common = {
  * Main configuration: every suite except the opt-in one, with NO folder open (the binary
  * detection suite depends on that: without a workspace folder the server manager never starts a
  * process). The extglob `!(realOpencode)` keeps the opt-in suite out; the recursive part is
- * meant to also pick up suites in subfolders (HYPOTHESIS: there is none yet).
+ * meant to also pick up suites in subfolders (HYPOTHESIS: there is none yet). `defaultLocation`
+ * has its own configuration (a profile WITHOUT the `chatLocation` key) and is excluded here.
  * VERIFIED with the `glob` package that test-cli uses, against the real
  * `out/test/integration` (Windows 11, Node 24, 2026-10-20): it matches `activation`,
  * `binaryDetection` and `chatView`, and skips `realOpencode`.
+ *
+ * Its profile (shared with `real-opencode`) gets `settings.json` rewritten here with the
+ * `sidebar` baseline of {@link TEST_CHAT_LOCATION} and nothing else: no suite of `main` writes
+ * other settings that must survive a start (they restore their own).
  */
 const main = {
   ...common,
   label: 'main',
   // Relative to this file. Compiled by `npm run compile:integration`, not by Vitest.
-  files: 'out/test/integration/**/!(realOpencode|externalServer|fakeServer).test.js',
+  files:
+    'out/test/integration/**/!(realOpencode|externalServer|fakeServer|defaultLocation).test.js',
 };
+fs.mkdirSync(path.join(userDataDir, 'User'), { recursive: true });
+fs.writeFileSync(
+  path.join(userDataDir, 'User', 'settings.json'),
+  JSON.stringify({ 'openVsCode.chatLocation': TEST_CHAT_LOCATION }, null, 2),
+);
 
 /**
  * Opt-in configuration for `realOpencode.test.ts`: runs only when `OPEN_VS_CODE_REAL_OPENCODE`
@@ -185,6 +211,7 @@ fs.writeFileSync(
     {
       'openVsCode.serverUrl': 'http://127.0.0.1:9',
       'openVsCode.opencodePath': path.join(os.tmpdir(), 'open-vs-code-no-such-opencode'),
+      'openVsCode.chatLocation': TEST_CHAT_LOCATION,
     },
     null,
     2,
@@ -272,11 +299,43 @@ fs.writeFileSync(
 fs.mkdirSync(path.join(fakeUserDataDir, 'User'), { recursive: true });
 fs.writeFileSync(
   path.join(fakeUserDataDir, 'User', 'settings.json'),
-  JSON.stringify({ 'openVsCode.opencodePath': fakeOpencode }, null, 2),
+  JSON.stringify(
+    { 'openVsCode.opencodePath': fakeOpencode, 'openVsCode.chatLocation': TEST_CHAT_LOCATION },
+    null,
+    2,
+  ),
 );
+
+/**
+ * Configuration of `defaultLocation.test.ts` (E5 of #77): the default of `openVsCode.chatLocation`
+ * as a user with a NEW profile sees it.
+ *
+ * Why its own profile: every other profile carries the `sidebar` baseline of
+ * {@link TEST_CHAT_LOCATION}, so none of them can tell what happens with no key. This one has its
+ * own user data dir whose `settings.json` is rewritten to `{}` on every load (a dead run cannot
+ * leave the key behind), no folder (like `main`: no server, every tab lazy) and no extensions
+ * but ours. The suite reads the log of the FIRST activation of this window, so it must be the
+ * only suite of the configuration. Not opt-in: it needs no server and no model.
+ * `--password-store=basic`, as in the other private profiles, for SecretStorage under `xvfb-run`.
+ * UNVERIFIED on macOS and Linux until the CI runs it.
+ */
+const defaultUserDataDir = path.join(import.meta.dirname, '.vscode-test', 'user-data-default');
+const defaultLocation = {
+  ...common,
+  label: 'default-location',
+  env: { ...env, OPEN_VS_CODE_TEST_USER_DATA_DIR: defaultUserDataDir },
+  files: 'out/test/integration/defaultLocation.test.js',
+  launchArgs: [
+    '--disable-extensions',
+    `--user-data-dir=${defaultUserDataDir}`,
+    '--password-store=basic',
+  ],
+};
+fs.mkdirSync(path.join(defaultUserDataDir, 'User'), { recursive: true });
+fs.writeFileSync(path.join(defaultUserDataDir, 'User', 'settings.json'), '{}\n');
 
 export default defineConfig(
   process.env.OPEN_VS_CODE_REAL_OPENCODE
-    ? [main, realOpencode, externalServer, fakeServer]
-    : [main, externalServer, fakeServer],
+    ? [main, realOpencode, externalServer, fakeServer, defaultLocation]
+    : [main, externalServer, fakeServer, defaultLocation],
 );
