@@ -20,7 +20,8 @@ affiliated with opencode or with Microsoft.
   ![The chat view showing a reply with TypeScript and bash code blocks, a table and a list, each code block with Copy, Insert and New file buttons](docs/images/chat-markdown.png)
 
 - **Permission and question cards.** When opencode asks, you answer with a click. With the chat
-  hidden you get a notification and a badge on the Activity Bar icon.
+  hidden, or (with chat tabs) when the request belongs to a tab that is not in front, you get a
+  notification and a badge on the Activity Bar icon.
 
   ![A permission card for the read tool with the buttons Allow once, Always allow, Reject and Reject with feedback](docs/images/permission-card.png)
 
@@ -236,7 +237,7 @@ always `opencode`.
   next to the view, as extra tabs.
 - The Sessions tree lists the root sessions of the folder (50 at a time); subagent sessions are not
   rows, you reach them from the tab of their parent. **Needs input** marks a row for a request of
-  its own session or of a subagent whose parent the extension already knows. The rows are emptied
+  its own session or of a subagent at any depth below it. The rows are emptied
   while the server is not running and come back on the next reconnection. The order only changes
   with the events that move a session's update time, so it can be stale until the next
   reconnection.
@@ -245,9 +246,16 @@ always `opencode`.
   it yourself from the Sessions tree.
 - While chat tabs are open, the extension starts when the window opens (VS Code needs it to restore
   them), so the opencode server starts even if you do not touch the chat.
-- In `editor` mode a pending permission or question shows in **every** open tab, not only in the
-  tab of its session; the native notification and the badge appear when no chat is on screen.
-  Showing it only in the tab it belongs to is planned.
+- In `editor` mode a pending permission or question shows only in the tab of its session (and, for
+  a subagent, in the tab of an ancestor session); the side bar chat still shows every one. You get
+  the native notification, titled with the chat it comes from, when no chat tab that shows the
+  request is the active editor, and **Open chat** reveals that tab (the tab of the root session for
+  a subagent with no tab of its own). With two tabs side by side, a request from the one you are
+  not in raises the notification and leaves your focus where it was; its card is not focused
+  until you go to that tab (or press **Open chat**). With the side bar chat visible, a new request
+  shows its card and the badge, but it neither moves the focus nor raises a notification. The chat
+  tabs left over from `editor` mode keep showing only the requests of their own session and lineage
+  in `sidebar` mode too, and **Open chat** looks in those tabs before the side bar chat.
 - In `editor` mode, switching to another served folder (for example with **Select Workspace
   Folder**) while tabs are open leaves them empty, with the old title, until they are reloaded; only
   the first chat gets the session remembered for the new folder.
