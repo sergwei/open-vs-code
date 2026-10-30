@@ -9,12 +9,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Native **Sessions** tree in `editor` mode: the OpenCode view lists the root sessions of the
+  folder, grouped by Today, Yesterday, Previous 7 days and Older. Each row shows its state with an
+  icon (Running, Needs input, Failed) and, when the side bar is wide enough, in words (also Fork
+  and Tab) before its time; a long title can hide the words, and the tooltip and the screen
+  reader label always carry them. The chat in a tab has no **Sessions** button: the tree is the
+  place to browse, search, rename and delete sessions (the side bar chat keeps its button). It
+  follows the server without refreshing
+  (created, renamed, deleted, running, waiting for input), opens a session in a tab or reveals the
+  one it has, renames and deletes from the row (inline buttons, context menu, `F2` and `Delete`),
+  searches the titles on the server with **Search Sessions…**, loads 50 more with **Show more
+  sessions**, follows the active tab, and shows a welcome with buttons when the folder has no
+  sessions, when opencode is not running or when no folder is open. The badge is the number of
+  pending requests. Known limits: deleting a session also deletes its subagent sessions, and a tab
+  that showed one of them gets the "deleted outside this view" notice (issue #77).
 - Setting `openVsCode.chatLocation` (`sidebar` by default, or `editor`): with `editor` every session
-  opens in its own editor tab beside the code and the OpenCode view becomes a launcher (New
-  Session, Open Chat, Open Settings). Opening a session that already has a tab reveals it, New
-  Session opens a new tab, and Insert at cursor and Add selection write into the last text editor,
-  while file links and diffs open outside the chat's group. A tab with no session opens the
-  session you pick in it, instead of leaving an empty tab behind. Changing the setting applies at
+  opens in its own editor tab beside the code and the OpenCode view becomes the Sessions tree
+  (above). Opening a session that already has a tab reveals it, New Session opens a new tab, and
+  Insert at cursor and Add selection write into the last text editor, while file links and diffs
+  open outside the chat's group. Opening a row of the tree adopts an empty tab instead of leaving
+  one behind. Changing the setting applies at
   once: the side bar session opens in a tab, and going back to `sidebar` leaves the tabs open.
   The tabs are restored after Reload Window, each with its session, draft and title (the ones in
   the background when you open them); a restored tab whose session is already open elsewhere
