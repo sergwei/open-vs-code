@@ -218,12 +218,31 @@ describe('palette commands and keybindings', () => {
     for (const binding of contributed()) {
       const key = normalizeKey(process.platform === 'darwin' ? (binding.mac ?? '') : binding.key);
       assert.notStrictEqual(key, '', `${binding.command} has no key for ${process.platform}`);
+      // E3 (issue #77): F2 and Delete of the Sessions tree are scoped by `focusedView == …`, and
+      // F2 / Delete are bound by VS Code in the editor, the Explorer, the terminal tabs, the debug
+      // views... each under its own focus condition. For such a binding a default rule WITH a
+      // `when` is taken as scoped to another widget (HYPOTHESIS: the focus of a tree of ours cannot
+      // also be the Explorer's; the Windows defaults read in the run of 29/10/2026 showed
+      // `renameFile` under `filesExplorerFocus` and `editor.action.rename` under `editorTextFocus`,
+      // not re-read on macOS), UNLESS the `when` states a condition that CAN hold inside our tree:
+      // `listFocus` or `treeFindOpen` asked positively (not as `!key`, which is what the Explorer's
+      // own rules carry). Those still count as clashes. A rule that REQUIRES `inputFocus` or
+      // `textInputFocus` (VS Code's `deleteRight` and, on macOS, `deleteAllLeft` carry
+      // `textInputFocus`) cannot match our `!inputFocus` `when`, because `textInputFocus` implies
+      // `inputFocus`, so it is not a clash (HYPOTHESIS: read in the 1.144.0 bundle, 30/10/2026;
+      // the implication is not executed).
+      // Not observed: any other rule with a `when` that can be true while our view has the focus.
+      const scoped = binding.when?.includes('focusedView ==') === true;
+      const holdsInOurTree = (when: string): boolean =>
+        /(?<!!)\b(listFocus|treeFindOpen)\b/u.test(when) &&
+        !/(?<!!)\b(inputFocus|textInputFocus)\b/u.test(when);
       const clashes = rules.filter(
         (rule) =>
           rule.key !== undefined &&
           normalizeKey(rule.key) === key &&
           rule.command !== undefined &&
           !ours.has(rule.command.replace(/^-/, '')) &&
+          !(scoped && rule.when !== undefined && !holdsInOurTree(rule.when)) &&
           !isAcceptedClash(key, rule),
       );
       assert.deepStrictEqual(

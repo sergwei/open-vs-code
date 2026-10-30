@@ -130,6 +130,7 @@ import { safeLog, type ServerLog } from './opencodeServer';
 import { createPendingRequests, type PendingSummary } from './pendingRequests';
 import { createRequestResolutions } from './requestResolutions';
 import type { RunningServerInfo, ServerState } from './serverManager';
+import { createSessionBrowser, type SessionPage } from './sessionBrowser';
 import { codedError, createSessionDiffs, type DiffTarget } from './sessionDiff';
 import { createSessionReverts } from './sessionRevert';
 import {
@@ -196,6 +197,49 @@ export interface SavedPermission {
  */
 export interface AttentionSink {
   update(requests: readonly PendingSummary[]): void;
+}
+
+/**
+ * One page of ROOT sessions for the native Sessions tree (issue #77, delivery E3). `statuses` is
+ * only the `busy` ones REST knows, completed with what the stream said since the read started;
+ * `folder` is the one the server serves.
+ */
+export interface SessionListPage {
+  folder: string;
+  rows: readonly SessionSummary[];
+  statuses: { [sessionID: string]: SessionStatus };
+  hasMore: boolean;
+}
+
+/** The session events the tree follows (a subset of what {@link ChatController.publish} sends). */
+export type SessionListEvent = Extract<
+  HostToWebview,
+  { type: 'session.upserted' | 'session.removed' | 'session.status' }
+>;
+
+/** What {@link ChatController.searchSessions} found: root rows, newest activity first. */
+export interface SessionSearchResult {
+  rows: SessionSummary[];
+  hasMore: boolean;
+}
+
+/**
+ * Where the controller reports the root sessions of the served folder for the native Sessions tree
+ * (issue #77, E3; the model is `sessionTree.ts`, wired by `chatLifecycle.ts`). Optional: without it
+ * the controller does exactly what it did before the tree existed (four reads per full resync, no
+ * extra REST call, nothing forwarded). Every method must be cheap and must not throw.
+ */
+export interface SessionListSink {
+  /** The first page of a FULL resync: replaces the window it covers (see `sessionTree.ts`). */
+  reset(page: SessionListPage): void;
+  /** The read of that first page failed: the tree shows an error and no rows until the next one. */
+  failed(): void;
+  /** The page a "Show more" read: added to the rows held, nothing is pruned. */
+  append(rows: readonly SessionSummary[], hasMore: boolean): void;
+  /** A session event, also when no pane is open. */
+  event(message: SessionListEvent): void;
+  /** The connection state changed (every state the panes are told about). */
+  connection(connection: ConnectionState): void;
 }
 
 /** What the controller needs from the VS Code side to manage the server (issue #10). */
@@ -373,6 +417,11 @@ export interface ChatControllerDeps {
   memory: SessionMemory;
   editor: EditorActions;
   attention: AttentionSink;
+  /**
+   * The native Sessions tree (issue #77, E3). Absent in the unit tests written before it and in
+   * any host that has no tree; see {@link SessionListSink}.
+   */
+  sessionList?: SessionListSink;
   /** The QuickPick that picks which saved permissions to revoke; resolves with their ids. */
   savedPermissions: { pickToRevoke(items: SavedPermission[]): Promise<string[]> };
   /**
@@ -677,6 +726,28 @@ export class ChatController {
    */
   private readonly deleting = new Set<string>();
   private disposed = false;
+  /**
+   * Pagination of the native Sessions tree (issue #77, E3), apart from every pane's browser: the
+   * tree reads the first page in the FULL resync and the next ones on "Show more". Used only when
+   * `deps.sessionList` exists.
+   */
+  private readonly treeBrowser = createSessionBrowser();
+  /** Pagination of the tree's "Search Sessions…" QuickPick; its own cursor, never the tree's. */
+  private readonly searchBrowser = createSessionBrowser();
+  /** Bumped by every {@link searchSessions}: only the newest answer is returned. */
+  private searchTicket = 0;
+  /**
+   * Bumped when the tree's first page is read (and when the server goes away): a "Show more" that
+   * started before it must not append rows older than a list that has just been replaced.
+   */
+  private treeEpoch = 0;
+  /**
+   * True once rows of the tree were mirrored in the translator. While it is, the seed of a snapshot
+   * adds to the mirror instead of replacing it (R2 of the E9 plan): otherwise one pane's resync
+   * would forget the rows loaded with "Show more", and a `session.renamed` of one of them would be
+   * dropped as an unknown row.
+   */
+  private treeMirrored = false;
   /** Models, providers and agents of the CURRENT server; `undefined` until the first load succeeds. */
   private catalog: Catalog | undefined;
   /**
@@ -872,10 +943,15 @@ export class ChatController {
     }
   }
 
-  /** Changes the connection state and tells every pane. */
+  /**
+   * Changes the connection state and tells every pane and, when there is one, the native Sessions
+   * tree (`deps.sessionList`, issue #77 E3), which empties its rows unless the state is
+   * `connected`. VERIFIED by `chatController.test.ts` "tells the sink every connection state".
+   */
   private setConnection(connection: ConnectionState): void {
     this.connection = connection;
     this.broadcast({ type: 'connection.state', connection });
+    this.deps.sessionList?.connection(connection);
   }
 
   /**
@@ -955,6 +1031,7 @@ export class ChatController {
           }
         }
         this.translator = createEventTranslator(this.secrets);
+        this.treeMirrored = false; // the new translator mirrors nothing of the tree yet
         this.syncTracked();
         this.setConnection({ state: 'starting' });
         this.startStream(this.client);
@@ -1003,6 +1080,7 @@ export class ChatController {
    * stays, like `pickedUris`, so a chip pending in the webview survives Restart Server.
    * The "Changed files" list and its originals go too (issue #31): the paths belong to the old
    * server, and a load in flight is cut off; the next snapshot brings the list back.
+   * The Sessions tree's cursors and in-flight pages and searches go as well (issue #77, E3).
    */
   private stopStream(): void {
     this.streamAbort?.abort();
@@ -1018,6 +1096,12 @@ export class ChatController {
     this.client = undefined;
     this.server = undefined;
     this.locationGeneration++;
+    // The tree's cursors embed the old server's query, and an answer in flight belongs to it.
+    this.treeBrowser.reset();
+    this.searchBrowser.reset();
+    this.treeEpoch++;
+    this.searchTicket++;
+    this.treeMirrored = false;
     // The catalog belongs to the server that served it: another server may offer other models.
     this.catalog = undefined;
     this.catalogEpoch++;
@@ -1252,13 +1336,26 @@ export class ChatController {
    * pending requests (and `live`), the open-session check of {@link onSessionRemoved} and the memory
    * of answered requests; the attention feature is told once if the pending set changed. Used for
    * the events of the stream and for the `session.removed` the controller itself synthesises when
-   * a call finds the session gone (self-healing of a stale row).
+   * a call finds the session gone (self-healing of a stale row). `session.upserted`, `.removed` and
+   * `.status` also go to `deps.sessionList` (issue #77, E3), with or without panes: `route` only
+   * reaches panes, and the tree must stay current while every chat tab is closed. VERIFIED by
+   * `chatController.test.ts` "forwards the session events to the sink with no pane open".
    */
   private publish(messages: readonly HostToWebview[]): void {
     let changed = false;
+    const sink = this.deps.sessionList;
     for (const message of messages) {
       if (this.trackRequest(message)) changed = true;
       this.route(this.withResolution(message));
+      // The tree follows the session events even with no pane open (`route` reaches only panes).
+      if (
+        sink !== undefined &&
+        (message.type === 'session.upserted' ||
+          message.type === 'session.removed' ||
+          message.type === 'session.status')
+      ) {
+        sink.event(message);
+      }
       // After the post: the webview empties its view on `session.removed`, and the notice that may
       // follow explains why.
       if (message.type === 'session.removed') this.onSessionRemoved(message.sessionID);
@@ -1503,6 +1600,19 @@ export class ChatController {
    * statuses and totals (R2 of the E9 plan; VERIFIED only by the translator unit test "keeps the
    * idle that arrived after the first resync began although a second one began later").
    *
+   * Issue #77, E3: with `deps.sessionList` and no `only`, the FULL resync adds a fifth read in the
+   * same `Promise.all`: the first page of ROOT sessions (`parentID: null`, 50) through the tree's
+   * own browser, reconciled in {@link publishTree}. A resync of one pane never reads it (it would
+   * fold the "Show more" the user opened), and without a sink there are exactly the four reads
+   * below. A failure of the fifth read is a `warn` line and never fails the snapshot of the panes;
+   * the tree gets `sink.failed()` (empty rows and a message, the next full resync retries).
+   * The tree's half has its own stamp (`treeEpoch`), independent of the panes' `dropped()`: a
+   * one-pane resync that overtakes this one drops the panes' snapshot but not the tree's page.
+   * VERIFIED by `chatController.test.ts` (fake client, Windows 11, 29/10/2026): "still makes the
+   * four reads and no extra call without a sink", "reads the roots of the tree in the full resync
+   * and reports them, statuses merged", "a pane resync during the full resync does not leave the
+   * tree loading" and "reports a failed read of the tree and keeps the panes' snapshot".
+   *
    * Asks for the session list (the 50 newest; the open session's row is added by `session.get`
    * when it is older than those), the active sessions, the pending permissions and forms of the
    * whole LOCATION (`permission.request.list()` and `form.list()`, whose `{location, data}` answer
@@ -1547,6 +1657,16 @@ export class ChatController {
    * Issue #31: once the snapshot is out and a session is open, the "Changed files" list the host
    * holds for it is sent again (the webview state was just replaced) and a reload is requested,
    * fire and forget; it never delays or fails the snapshot.
+   * The tree's half (full resync with a sink): published on success, and a non-transport failure of
+   * any read (the fifth one or a pane's) tells the sink `failed()` when the host is not disposed,
+   * the client is unchanged and this resync still owns the tree's stamp, EVEN IF the panes' half
+   * was overtaken by a newer resync of its own (the check runs before the panes' `dropped()`
+   * return). VERIFIED by `chatController.test.ts` "reports a failed tree when a read of the panes
+   * fails with a server error", "reports a failed tree when a pane-only resync overtakes the full
+   * one and a pane read fails" and "does not report a failed tree for a transport error or for a
+   * stale tree stamp" (fake client with synthetic errors, Windows 11, 30/10/2026). HYPOTHESIS,
+   * read in the code and not run by any test: the "not disposed" and "client unchanged" conditions
+   * of the gate. A Transport failure is left to the connection state.
    */
   async resync(only?: readonly ChatPane[]): Promise<void> {
     const client = this.client;
@@ -1576,12 +1696,31 @@ export class ChatController {
       (targets.length === 0
         ? locationStamp !== this.locationGeneration
         : stillCurrent().length === 0);
+    // Only a FULL resync reads the tree's first page, and only with a sink: a resync of one pane
+    // (a tab becoming ready) must not fold a "Show more" the user opened, and without a sink the
+    // four reads below are exactly what they always were.
+    const sink = only === undefined ? this.deps.sessionList : undefined;
+    const treeQuery =
+      sink === undefined ? undefined : this.treeBrowser.query('', false, server.folder);
+    // The tree's own stamp (B1 of review 1): only a NEWER full resync (or a server change, which
+    // also bumps `treeEpoch`) may drop the tree's half; the panes' `dropped()` must not, because a
+    // one-pane resync racing this one would leave the tree in "Loading sessions…" for good.
+    const treeStamp = treeQuery === undefined ? 0 : ++this.treeEpoch;
     try {
-      const [list, active, permissionList, formList] = await Promise.all([
+      const [list, active, permissionList, formList, treeAnswer] = await Promise.all([
         client.session.list({ directory: server.folder, order: 'desc', limit: SESSION_LIMIT }),
         client.session.active(),
         client.permission.request.list(),
         client.form.list(),
+        treeQuery === undefined
+          ? Promise.resolve(undefined)
+          : // Cosmetic for the chat: a failure here must not fail the snapshot of the panes.
+            client.session.list(treeQuery.input).catch((error: unknown) => {
+              this.log.warn(
+                `sessions tree read failed: ${toErrorInfo(error, this.secrets).message}`,
+              );
+              return undefined;
+            }),
       ]);
       const restRequests: PendingAsks = {
         permissions: permissionList.data.map(toPermissionAsk),
@@ -1599,7 +1738,17 @@ export class ChatController {
           ),
         ),
       );
-      if (dropped()) return;
+      /** The tree's half: the page, or the failure of its read, unless a newer full resync owns it. */
+      const publishTreeHalf = (): void => {
+        if (sink === undefined || treeQuery === undefined) return;
+        if (this.disposed || client !== this.client || treeStamp !== this.treeEpoch) return;
+        if (treeAnswer === undefined) sink.failed();
+        else this.publishTree(sink, server.folder, treeQuery.accept(treeAnswer), active, token);
+      };
+      if (dropped()) {
+        publishTreeHalf();
+        return;
+      }
       const current = stillCurrent();
       const requests = this.completeWithLive(restRequests);
       if (this.pending.replaceAll(requests.permissions, requests.forms)) {
@@ -1614,9 +1763,26 @@ export class ChatController {
           this.publishSnapshot(pane, read, token, requests);
         }
       });
+      publishTreeHalf();
     } catch (error) {
-      if (dropped()) return;
       const info = toErrorInfo(error, this.secrets);
+      // W1 of review 2 and W1 of its delta review: a failing read of the PANES (session.list,
+      // session.active, the requests or a pane's messages) must not leave the tree in "Loading
+      // sessions…" for good, so this runs BEFORE the panes' `dropped()` return (a racing one-pane
+      // resync makes `dropped()` true without the tree's half having been published). It keeps the
+      // gate of `publishTreeHalf`: not disposed, same client, and only the resync that still owns
+      // the tree's stamp may say it failed. A Transport failure is left to the connection state.
+      if (
+        info.code !== 'Transport' &&
+        sink !== undefined &&
+        treeQuery !== undefined &&
+        !this.disposed &&
+        client === this.client &&
+        treeStamp === this.treeEpoch
+      ) {
+        sink.failed();
+      }
+      if (dropped()) return;
       if (info.code === 'Transport') {
         // The server is unreachable (it died or is restarting): the connection banner already
         // says so, and a notice on top would only be noise (W4 of the review; seen in the log
@@ -1629,6 +1795,41 @@ export class ChatController {
     } finally {
       this.resyncing -= 1;
     }
+  }
+
+  /**
+   * The tree's half of a FULL resync (issue #77, E3): reconciles the first page of root sessions
+   * with the stream exactly as the panes' snapshot does and hands it to the sink. Everything here
+   * runs without an `await`. The rows and statuses of sessions deleted during the reads
+   * (`live.removed`) are left out, so a stale read cannot bring a deleted row back; the usage and
+   * the statuses the stream reported after `token` win over the older REST ones. The rows are
+   * mirrored in the translator AFTER every pane's seed, so a `session.renamed` of a row only the
+   * tree shows still reaches the sink. Not logged at `info`: the host logs what the tree shows.
+   * VERIFIED by `chatController.test.ts` "reads the roots of the tree in the full resync and
+   * reports them, statuses merged" and "leaves out of the tree a session deleted during the read"
+   * (fake client, Windows 11, 29/10/2026).
+   */
+  private publishTree(
+    sink: SessionListSink,
+    folder: string,
+    page: SessionPage,
+    active: Awaited<ReturnType<ChatApi['session']['active']>>,
+    token: ResyncToken,
+  ): void {
+    const rows = this.translator.mergeUsage(
+      page.rows.filter((row) => !this.live.removed.has(row.id)),
+      token,
+    );
+    const rest: { [sessionID: string]: SessionStatus } = {};
+    for (const id of Object.keys(active)) rest[id] = { type: 'busy' };
+    const statuses = { ...this.translator.mergeStatuses(rest, token) };
+    for (const id of this.live.removed) delete statuses[id];
+    this.translator.mirror(rows);
+    this.treeMirrored = rows.length > 0;
+    sink.reset({ folder, rows, statuses, hasMore: page.hasMore });
+    this.log.debug(
+      `sessions tree read (${String(rows.length)} roots, more: ${String(page.hasMore)})`,
+    );
   }
 
   /**
@@ -1753,6 +1954,10 @@ export class ChatController {
    * surface by "keeps the notice of a restored session that is gone until the tab can receive it,
    * then sends it once" (`chatController.panes.test.ts`, Windows 11, 29/10/2026). UNVERIFIED: a
    * real tab that is hidden when the server comes up (R5 of `test:visual` step 28 opens D after it).
+   * Issue #77, E3: the seed ADDS to the translator's mirror (`merge`) not only with several panes
+   * but also while the Sessions tree has rows mirrored (`treeMirrored`), or a single pane's resync
+   * would forget the rows loaded with "Show more". VERIFIED by `chatController.test.ts` "keeps the
+   * rows of the tree in the mirror when one pane resyncs".
    */
   private publishSnapshot(
     pane: ChatPane,
@@ -1783,7 +1988,7 @@ export class ChatController {
       sessions: rows,
       messages: rawMessages,
       sessionID: moved ? '' : (pane.sessionID ?? ''),
-      merge: this.panes.size > 1,
+      merge: this.panes.size > 1 || this.treeMirrored,
     });
     const complete = open === undefined ? undefined : this.translator.mergeLive(open);
     pane.post({
@@ -3700,29 +3905,54 @@ export class ChatController {
    * clearing it: VERIFIED by the planner spike). The visible result is the `session.renamed` event
    * the server publishes (translated to `session.upserted`, also when another client renames);
    * this only answers with a `request.result`. A session that no longer exists is reported as
-   * `session.removed`. Logs the id, never the title.
+   * `session.removed`. Logs the id, never the title. The work is {@link renameSessionById}, which
+   * the native Sessions tree calls too (issue #77, E3); this handler only turns its outcome into
+   * the `request.result`, as it always did.
    */
   private async renameSession(
     pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'session.rename' }>,
   ): Promise<void> {
     const { requestId, sessionID } = message;
+    try {
+      await this.renameSessionById(sessionID, message.title);
+      this.result(pane, requestId);
+    } catch (error) {
+      this.result(pane, requestId, error);
+    }
+  }
+
+  /**
+   * Renames `sessionID` with no pane involved (issue #77, E3: the tree's Rename and the webview's
+   * `session.rename` share it). Trims the title and re-checks it, because the caller is not
+   * trusted and a BLANK title would make the server run the LLM title generator instead of
+   * clearing it (planner spike). Rejects with `ServerUnavailable` when no server runs, with
+   * `InvalidTitle` (an Error whose `name` is the code, as `toErrorInfo` reads it) for a title that is blank or
+   * longer than {@link MAX_SESSION_TITLE_LENGTH}, and with whatever the server answers; a
+   * `SessionNotFoundError` is also published as `session.removed` first (self-healing of a stale
+   * row). The visible result is the `session.renamed` event of the server. Logs the id only.
+   * VERIFIED by `chatController.test.ts` "renames a session without a pane, trimming the title",
+   * "refuses a blank or overlong title and a missing server without calling the server" and
+   * "heals a session that no longer exists as removed and rejects with the server error", and, for
+   * the webview path, by the unchanged `session.rename` cases of the same file (fake client,
+   * Windows 11, 29/10/2026).
+   */
+  async renameSessionById(sessionID: string, rawTitle: string): Promise<void> {
     const client = this.client;
-    if (client === undefined) return this.result(pane, requestId, unavailable());
-    const title = message.title.trim();
+    if (client === undefined) throw unavailableError();
+    const title = rawTitle.trim();
     if (title === '' || title.length > MAX_SESSION_TITLE_LENGTH) {
-      return this.result(pane, requestId, {
-        _tag: 'InvalidTitle',
-        message: `A session title needs 1 to ${String(MAX_SESSION_TITLE_LENGTH)} characters`,
-      });
+      throw codedError(
+        'InvalidTitle',
+        `A session title needs 1 to ${String(MAX_SESSION_TITLE_LENGTH)} characters`,
+      );
     }
     try {
       await client.session.update({ sessionID, title });
       this.log.info(`session renamed ${sessionID}`);
-      this.result(pane, requestId);
     } catch (error) {
       this.healMissing(error, sessionID);
-      this.result(pane, requestId, error);
+      throw error;
     }
   }
 
@@ -3738,15 +3968,41 @@ export class ChatController {
    * interrupts a busy one first; the events do the rest (`onSessionRemoved`, pending requests,
    * resolutions). If the stream is down no event comes, so after a successful call the controller
    * reports the removal itself (idempotent: the real event, if it arrives, finds nothing left to
-   * do). Logs ids only.
+   * do). Logs ids only. The work is {@link deleteSessionById}, which the native Sessions tree
+   * calls too (issue #77, E3); a declined dialog and a delete both answer without error here.
    */
   private async deleteSession(
     pane: ChatPane,
     message: Extract<WebviewToHost, { type: 'session.delete' }>,
   ): Promise<void> {
-    const { requestId, sessionID } = message;
+    try {
+      await this.deleteSessionById(message.sessionID);
+      this.result(pane, message.requestId);
+    } catch (error) {
+      this.result(pane, message.requestId, error);
+    }
+  }
+
+  /**
+   * Deletes `sessionID` after the native confirmation, with no pane involved (issue #77, E3).
+   * Resolves `{ deleted: true }` once the server accepted the DELETE and `{ deleted: false }` when
+   * the user declined the modal (no DELETE is sent). Rejects with `ServerUnavailable` when no
+   * server runs, and with whatever the server answers; a `SessionNotFoundError` is also published
+   * as `session.removed` first (self-healing of a stale row). The rest is as documented on
+   * {@link deleteSession}: the dialog's title and running flag are read from the server, the id
+   * enters `deleting` before the call so the `session.removed` that follows is not announced as
+   * "deleted elsewhere", and after a successful call the controller publishes the removal itself
+   * in case the stream is down. A caller that wants to close the tab of the session must read
+   * {@link sessionOf} BEFORE calling, because the removal makes every pane forget it.
+   * VERIFIED by `chatController.test.ts` "deletes a session without a pane and closes it for the
+   * pane that showed it, without the "outside this view" notice", "resolves deleted false when
+   * the user declines, and sends no DELETE" and "heals a session that is already gone as removed
+   * and rejects, asking nobody", and, for the webview path, by the unchanged `session.delete`
+   * cases of the same file (fake client, Windows 11, 29/10/2026).
+   */
+  async deleteSessionById(sessionID: string): Promise<{ deleted: boolean }> {
     const client = this.client;
-    if (client === undefined) return this.result(pane, requestId, unavailable());
+    if (client === undefined) throw unavailableError();
     try {
       const [info, active] = await Promise.all([
         client.session.get({ sessionID }),
@@ -3758,7 +4014,7 @@ export class ChatController {
       });
       if (!confirmed) {
         this.log.info(`session delete cancelled ${sessionID}`);
-        return this.result(pane, requestId);
+        return { deleted: false };
       }
       this.deleting.add(sessionID);
       try {
@@ -3769,11 +4025,75 @@ export class ChatController {
       }
       this.log.info(`session deleted ${sessionID}`);
       this.publish([{ type: 'session.removed', sessionID }]);
-      this.result(pane, requestId);
+      return { deleted: true };
     } catch (error) {
       this.healMissing(error, sessionID);
-      this.result(pane, requestId, error);
+      throw error;
     }
+  }
+
+  /**
+   * "Show more sessions" of the native tree (issue #77, E3): reads the next page of root sessions
+   * with the tree's own cursor and appends it through the sink. Does nothing without a sink or a
+   * server. The page is mirrored in the translator (a later `session.renamed` of one of its rows
+   * must reach the sink, R2 of the plan). The page is dropped when the server changed, or when a
+   * full resync replaced the first page while this one was in flight (`treeEpoch`): its rows are
+   * older than a list that no longer is the one it was cut from, and could bring back a deleted
+   * session. Rejects with the server's error for the caller to show as a native warning; an
+   * `InvalidCursorError` also resets the cursor, so the next call starts again from the first page
+   * (harmless: the sink replaces rows by id).
+   * VERIFIED by `chatController.test.ts` "loads the next page of the tree with the cursor and
+   * mirrors it" and, against a real client and cursor, `chatController.e2e.test.ts` "pages the
+   * tree through the cursor of the synthetic server" (Windows 11, 29/10/2026). UNVERIFIED against
+   * a real opencode: only the planner spike of #20 saw its cursors.
+   */
+  async loadMoreSessions(): Promise<void> {
+    const sink = this.deps.sessionList;
+    const client = this.client;
+    const server = this.server;
+    if (sink === undefined || client === undefined || server === undefined) return;
+    const epoch = this.treeEpoch;
+    const query = this.treeBrowser.query('', true, server.folder);
+    try {
+      const answer = await client.session.list(query.input);
+      if (client !== this.client || epoch !== this.treeEpoch) return;
+      const page = query.accept(answer);
+      this.translator.mirror(page.rows);
+      if (page.rows.length > 0) this.treeMirrored = true;
+      sink.append(page.rows, page.hasMore);
+      this.log.debug(
+        `sessions tree page (${String(page.rows.length)}, more: ${String(page.hasMore)})`,
+      );
+    } catch (error) {
+      if (tagOf(error) === 'InvalidCursorError') this.treeBrowser.reset();
+      throw error;
+    }
+  }
+
+  /**
+   * "Search Sessions…" of the native tree (issue #77, E3): the root sessions of the served folder
+   * whose title contains `text`, searched ON THE SERVER (so it finds sessions older than any
+   * loaded page), newest activity first, first page only. It uses its own browser, never the
+   * tree's cursor. Two searches may overlap while the user types: only the newest one answers,
+   * and an older answer that arrives later resolves `undefined` instead of overwriting it. The
+   * rows are mirrored in the translator so a rename of one of them still reaches the sink. Rejects
+   * with `ServerUnavailable` when no server runs and with the server's error otherwise. Logs the
+   * row count, never the text.
+   * VERIFIED by `chatController.test.ts` "keeps a late answer of an older search from replacing
+   * the newer one" (fake client with answers released out of order, Windows 11, 29/10/2026).
+   */
+  async searchSessions(text: string): Promise<SessionSearchResult | undefined> {
+    const client = this.client;
+    const server = this.server;
+    if (client === undefined || server === undefined) throw unavailableError();
+    const ticket = ++this.searchTicket;
+    const query = this.searchBrowser.query(text, false, server.folder);
+    const answer = await client.session.list(query.input);
+    if (ticket !== this.searchTicket || client !== this.client) return undefined;
+    const page = query.accept(answer);
+    this.translator.mirror(page.rows);
+    this.log.debug(`sessions search (${String(page.rows.length)} found)`);
+    return { rows: page.rows, hasMore: page.hasMore };
   }
 
   /**
@@ -4073,4 +4393,13 @@ function sameMention(mention: PromptMention | undefined, text: string): PromptMe
 /** Error body for a request that arrives while there is no running server. */
 function unavailable(): { _tag: string; message: string } {
   return { _tag: 'ServerUnavailable', message: 'The opencode server is not running' };
+}
+
+/**
+ * The same refusal as {@link unavailable} as a real `Error`, for the pane-less cores that throw
+ * (`toErrorInfo` reads the same `ServerUnavailable` code and text from both).
+ */
+function unavailableError(): Error {
+  const body = unavailable();
+  return codedError(body._tag, body.message);
 }

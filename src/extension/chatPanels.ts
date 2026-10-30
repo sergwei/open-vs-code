@@ -36,6 +36,11 @@ export interface ChatPanelsHost {
   paneShowing(sessionID: string): number | undefined;
   /** Brings the surface of `paneId` forward (a tab or the side-bar view). */
   revealSurface(paneId: number): void;
+  /**
+   * The session or the title of tab `paneId` changed, as seen in a message posted to it (the
+   * native Sessions tree repaints its "Tab" mark and follows the active tab). Optional.
+   */
+  onTabSessionChanged?(paneId: number): void;
 }
 
 /** How a panel reaches {@link ChatPanels.adopt}: created by us, or handed back by VS Code. */
@@ -255,7 +260,7 @@ export class ChatPanels {
         for (const subscription of entry.subscriptions) subscription.dispose();
       }),
     );
-    renderChatWebview(panel.webview, this.extensionUri, this.channel);
+    renderChatWebview(panel.webview, this.extensionUri, this.channel, 'tab');
     this.log.info(
       `chat tab ${origin.kind === 'restored' ? 'restored' : 'created'} (pane ${String(paneId)})`,
     );
@@ -309,12 +314,14 @@ export class ChatPanels {
    * The `post` of a tab's pane. First the registry looks at the message (title), whether or not it
    * can be delivered: the controller publishes to hidden panes too, which is how a hidden tab
    * keeps its title current. Then the message goes out only if the tab can take it; what is dropped
-   * is repaired by the resync when the tab is visible again.
+   * is repaired by the resync when the tab is visible again. When the registry says the session or
+   * title changed, `onTabSessionChanged` is told too (the Sessions tree marks the tabs).
    */
   private post(paneId: number, entry: PanelEntry, message: HostToWebview): void {
     if (entry.disposed) return;
     if (this.tabs.observe(paneId, message)) {
       entry.panel.title = this.tabs.titleOf(paneId) ?? EMPTY_TITLE;
+      this.host.onTabSessionChanged?.(paneId);
     }
     if (!this.canDeliver(entry)) return;
     void entry.panel.webview.postMessage(message).then(undefined, (error: unknown) => {

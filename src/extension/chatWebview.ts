@@ -5,7 +5,7 @@
 
 import * as vscode from 'vscode';
 import { isWebviewToHost, type WebviewToHost } from '../shared/protocol';
-import { buildWebviewHtml, createNonce } from './webviewHtml';
+import { buildWebviewHtml, createNonce, type ChatSurface } from './webviewHtml';
 
 // Contract with webview-ui/vite.config.mts: the output directory and the fixed
 // file names below must match `build.outDir`, `entryFileNames` and the CSS name.
@@ -34,11 +34,14 @@ export function chatWebviewOptions(extensionUri: vscode.Uri): vscode.WebviewOpti
  * and for a tab "opens one tab per New Session, each with a ready document" (two `webview ready`
  * lines, no "Webview bundle file missing" nor "rejected a message from the webview"). Not
  * observed: a missing bundle, macOS and Linux.
+ * `surface` ends up in a `<meta name="open-vs-code-surface">`: `tab` makes the webview hide its
+ * session picker, because the Sessions tree view is the one place to browse sessions (issue #77).
  */
 export function renderChatWebview(
   webview: vscode.Webview,
   extensionUri: vscode.Uri,
   channel: vscode.LogOutputChannel,
+  surface: ChatSurface,
 ): void {
   const distWebview = vscode.Uri.joinPath(extensionUri, ...WEBVIEW_DIST_SEGMENTS);
   const scriptUri = vscode.Uri.joinPath(distWebview, ...SCRIPT_SEGMENTS);
@@ -49,6 +52,7 @@ export function renderChatWebview(
     scriptUri: webview.asWebviewUri(scriptUri).toString(),
     styleUri: webview.asWebviewUri(styleUri).toString(),
     nonce: createNonce(),
+    surface,
   });
   void warnIfBundleMissing(channel, [scriptUri, styleUri]);
 }

@@ -1,5 +1,33 @@
 import * as vscode from 'vscode';
+import { MAX_SESSION_TITLE_LENGTH } from '../shared/protocol';
 import { sanitizeLinkText } from './attentionPolicy';
+
+/**
+ * Asks for the new title of a session (issue #77, E3: Rename of the native Sessions tree) with an
+ * input box that starts with `current` selected, so typing replaces it. Resolves the typed text, or
+ * `undefined` when the user cancels (Escape).
+ *
+ * The validation mirrors what `ChatController.renameSessionById` enforces (trimmed, 1 to
+ * {@link MAX_SESSION_TITLE_LENGTH} characters), so the box refuses what the host would reject; the
+ * host re-checks anyway because it does not trust its callers. The text is the user's own, not the
+ * server's, so nothing is sanitised. VERIFIED by a full `test:visual` (Windows 11, VS Code 1.144.0,
+ * 30/10/2026, 0 FAIL): "ok   B2 Rename on the row asks "New title for the session" with the
+ * current title ("Tab29A: SEED_SESSIONS reply with exactly"), and the row and the tab then read
+ * Renamed29 (row true, tab true)". Not observed: the validation messages on screen.
+ */
+export async function askSessionTitle(current: string): Promise<string | undefined> {
+  return vscode.window.showInputBox({
+    prompt: 'New title for the session',
+    value: current,
+    valueSelection: [0, current.length],
+    validateInput: (text) => {
+      const length = text.trim().length;
+      return length >= 1 && length <= MAX_SESSION_TITLE_LENGTH
+        ? undefined
+        : `A session title needs 1 to ${String(MAX_SESSION_TITLE_LENGTH)} characters`;
+    },
+  });
+}
 
 /**
  * Asks the user to confirm deleting a session (issue #20), with a MODAL native dialog; resolves

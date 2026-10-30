@@ -33,6 +33,7 @@ import {
   MANAGE_PERMISSIONS_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
   OPEN_CHAT_COMMAND_ID,
+  OPEN_SESSION_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
@@ -163,6 +164,40 @@ describe('chat in editor tabs', function () {
     await vscode.commands.executeCommand(OPEN_CHAT_COMMAND_ID);
     await waitForChatTabs(1);
     await log.waitFor('chat tab created (pane', READY_WAIT_MS);
+  });
+
+  /**
+   * The internal open command of the Sessions tree (issue #77, E3) in the `main` configuration (no
+   * folder, so no server and no session can be bound; the cases with real sessions are in
+   * `fakeServer.test.ts`).
+   *
+   * Protects: the command doing NOTHING in `sidebar` mode (the tree is hidden there), opening a tab
+   * in `editor` mode, and a second call adopting the EMPTY tab it just opened instead of opening
+   * another (`chat tab revealed`, no second `created`), which is the adoption rule of decision
+   * Q3=1; an unusable argument is refused. A margin of 1.5 s precedes each absence.
+   */
+  it('opens a tab for a session only in editor mode, and adopts the empty tab the second time', async () => {
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, 'ses_none');
+    await pause(SETTLE_MS);
+    log.assertAbsent('chat tab created (pane');
+    assert.strictEqual(chatTabs().length, 0);
+
+    await setChatLocation('editor', log);
+    await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, 'ses_none');
+    await waitForChatTabs(1);
+    await log.waitFor('chat tab created (pane', READY_WAIT_MS);
+    await pause(SETTLE_MS);
+
+    log.mark();
+    await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, 'ses_none');
+    await log.waitFor('chat tab revealed (pane', READY_WAIT_MS);
+    await pause(SETTLE_MS);
+    log.assertAbsent('chat tab created (pane');
+    assert.strictEqual(chatTabs().length, 1);
+
+    await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, { not: 'a session' });
+    await log.waitFor(`${OPEN_SESSION_COMMAND_ID} rejected: invalid arguments`, READY_WAIT_MS);
   });
 
   /**

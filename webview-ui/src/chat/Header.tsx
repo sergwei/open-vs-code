@@ -44,6 +44,17 @@ const PICKER_ID = 'session-picker';
  * click reports the path through `onOpenChangedFile` and the host opens the diff. When the host
  * could not refresh the list, one line under the summary says so (`state.diff.error`) and the
  * rows are the last list it had.
+ * In an editor tab (`<meta name="open-vs-code-surface" content="tab">`, written by the host;
+ * issue #77, E3) there is NO "Sessions" button and no picker: the native Sessions tree view is the
+ * one place to browse sessions. Title, New session and "Subagent sessions (N)" stay. The surface
+ * is read once, since a document never moves between the view and a tab (HYPOTHESIS: the host
+ * writes the meta per surface and a panel never becomes the view; no check moves one); a missing
+ * meta counts as the side-bar view.
+ * VERIFIED for the surface rule in a real window by a full `test:visual` (Windows 11, VS Code
+ * 1.144.0, 30/10/2026, 0 FAIL): "ok   B7 the chat in a tab has no Sessions button and keeps New
+ * session (surface "tab", Sessions button false, New session true)" and "ok   B7 the chat in the
+ * side bar view keeps its Sessions button (surface "view", Sessions button true)"; in jsdom `App.test.tsx` "in an editor tab (surface
+ * meta "tab") has no "Sessions" button…". The rest:
  * VERIFIED in jsdom (`App.test.tsx`, `SessionPicker.test.tsx`) and by `npm run test:visual`
  * (steps 1-9, Windows 11, real VS Code; step 10 for the lineage); macOS/Linux UNVERIFIED.
  */
@@ -56,6 +67,8 @@ export function Header(props: {
   onOpenChangedFile: (path: string) => void;
 }) {
   const state = props.store.state;
+  const inTab =
+    document.querySelector('meta[name="open-vs-code-surface"]')?.getAttribute('content') === 'tab';
   const [pickerOpen, setPickerOpen] = createSignal(false);
   createEffect(
     on(
@@ -173,23 +186,25 @@ export function Header(props: {
         <h1 class="chat-title" title={title()}>
           {title()}
         </h1>
-        <button
-          type="button"
-          class="secondary"
-          data-session-trigger
-          aria-haspopup="dialog"
-          aria-expanded={pickerOpen()}
-          aria-controls={PICKER_ID}
-          disabled={!connected()}
-          ref={(element) => {
-            trigger = element;
-          }}
-          onClick={() => {
-            setPickerOpen(!pickerOpen());
-          }}
-        >
-          Sessions
-        </button>
+        <Show when={!inTab}>
+          <button
+            type="button"
+            class="secondary"
+            data-session-trigger
+            aria-haspopup="dialog"
+            aria-expanded={pickerOpen()}
+            aria-controls={PICKER_ID}
+            disabled={!connected()}
+            ref={(element) => {
+              trigger = element;
+            }}
+            onClick={() => {
+              setPickerOpen(!pickerOpen());
+            }}
+          >
+            Sessions
+          </button>
+        </Show>
         <button
           type="button"
           class="secondary"

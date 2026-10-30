@@ -79,7 +79,18 @@
     "viewsWelcome": [
       {
         "view": "openVsCode.sessions",
-        "contents": "The chat opens in editor tabs, one per session.\n[New Session](command:openVsCode.newSession)\n[Open Chat](command:openVsCode.openChat)\nTo keep the chat here, change Chat Location in [Open Settings](command:openVsCode.openSettings)."
+        "contents": "No sessions in this folder yet.\n[New Session](command:openVsCode.newSession)\n[Open Settings](command:openVsCode.openSettings)",
+        "when": "openVsCode.sessionsState == ready"
+      },
+      {
+        "view": "openVsCode.sessions",
+        "contents": "OpenCode is not running for this folder.\n[Open Chat](command:openVsCode.openChat)\n[Show Logs](command:openVsCode.showLogs)",
+        "when": "openVsCode.sessionsState == offline"
+      },
+      {
+        "view": "openVsCode.sessions",
+        "contents": "Open a folder to see its OpenCode sessions.\n[Open Folder](command:workbench.action.files.openFolder)",
+        "when": "openVsCode.sessionsState == noFolder"
       }
     ],
     "configuration": {
@@ -116,12 +127,12 @@
           ],
           "enumDescriptions": [
             "Side bar: one chat in the OpenCode view.",
-            "Editor tabs: one tab per session; the OpenCode view becomes a launcher."
+            "Editor tabs: one tab per session; the Sessions view lists the sessions of the folder."
           ],
           "default": "sidebar",
           "scope": "window",
           "order": 4,
-          "markdownDescription": "Where the chat lives. **sidebar** keeps one chat in the OpenCode view. **editor** opens one editor tab per session and turns the OpenCode view into a launcher. A change applies at once, without reloading the window. Editor tabs are not restored by Reload Window yet; Open Chat reopens the last session of the folder."
+          "markdownDescription": "Where the chat lives. **sidebar** keeps one chat in the OpenCode view. **editor** opens one editor tab per session and replaces the chat in the OpenCode view with a Sessions view that lists the sessions of the folder; click one to open it in a tab. A change applies at once, without reloading the window. Reload Window restores the open tabs."
         }
       }
     },
@@ -204,6 +215,24 @@
         "command": "openVsCode.stopResponse",
         "title": "Stop Response",
         "category": "OpenCode"
+      },
+      {
+        "command": "openVsCode.renameSession",
+        "title": "Rename Session…",
+        "category": "OpenCode",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "openVsCode.deleteSession",
+        "title": "Delete Session",
+        "category": "OpenCode",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "openVsCode.searchSessions",
+        "title": "Search Sessions…",
+        "category": "OpenCode",
+        "icon": "$(search)"
       }
     ],
     "keybindings": [
@@ -230,6 +259,18 @@
         "key": "ctrl+alt+n",
         "mac": "cmd+alt+n",
         "when": "openVsCode.chatFocused"
+      },
+      {
+        "command": "openVsCode.renameSession",
+        "key": "f2",
+        "mac": "f2",
+        "when": "focusedView == openVsCode.sessions && !inputFocus"
+      },
+      {
+        "command": "openVsCode.deleteSession",
+        "key": "delete",
+        "mac": "cmd+backspace",
+        "when": "focusedView == openVsCode.sessions && !inputFocus"
       }
     ],
     "menus": {
@@ -245,14 +286,41 @@
           "when": "view == openVsCode.sessions"
         },
         {
-          "command": "openVsCode.openSettings",
+          "command": "openVsCode.searchSessions",
           "group": "navigation@2",
+          "when": "view == openVsCode.sessions"
+        },
+        {
+          "command": "openVsCode.openSettings",
+          "group": "navigation@3",
           "when": "view == openVsCode.sessions"
         },
         {
           "command": "openVsCode.restartServer",
           "group": "9_server",
           "when": "view == openVsCode.sessions"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "openVsCode.renameSession",
+          "group": "inline@1",
+          "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/"
+        },
+        {
+          "command": "openVsCode.deleteSession",
+          "group": "inline@2",
+          "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/"
+        },
+        {
+          "command": "openVsCode.renameSession",
+          "group": "1_modification@1",
+          "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/"
+        },
+        {
+          "command": "openVsCode.deleteSession",
+          "group": "1_modification@2",
+          "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/"
         }
       ],
       "explorer/context": [
@@ -292,6 +360,18 @@
         {
           "command": "openVsCode.explainFiles",
           "when": "false"
+        },
+        {
+          "command": "openVsCode.renameSession",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.deleteSession",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.searchSessions",
+          "when": "config.openVsCode.chatLocation == editor"
         }
       ]
     }

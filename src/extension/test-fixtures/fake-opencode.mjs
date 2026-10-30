@@ -912,8 +912,71 @@ function compactionSteps(sessionID) {
  * answered turn of a session without a title ends with a `session.renamed` (the row gets the start
  * of the prompt as its title); a stopped or failed turn never reaches it. A prompt containing
  * EDIT_FILES makes the step end with the `files` and `snapshot` of {@link applyEdits} (issue #31).
+ * Two triggers are served BEFORE the turn: WIPE_SESSIONS deletes every session and plays NO turn at
+ * all; DELETE_TITLED:<needle> deletes the other sessions whose title contains the needle and the
+ * turn then plays as usual (both INVENTED, for `test:visual` steps 28 and 29).
  */
 function playTurn(sessionID, inboxID, text, files = []) {
+  // WIPE_SESSIONS (E9-sessions-sidebar, issue #77 E3; INVENTED trigger, `test:visual` step 29 cell
+  // V4): deletes EVERY session of the folder, the running one too, publishing `session.deleted`
+  // for each, and plays no turn, so the Sessions tree gets its "empty folder" state.
+  if (text.includes('WIPE_SESSIONS')) {
+    for (const id of [...sessions.keys()]) {
+      if (sessions.has(id)) removeSession(id);
+    }
+    running.delete(sessionID);
+    return;
+  }
+  // DELETE_TITLED:<needle> (same task; INVENTED trigger, `test:visual` step 28 R5): another client
+  // deletes every OTHER session whose title contains `<needle>`, publishing `session.deleted`, and
+  // the turn then plays as usual. It stands in for the picker of a tab, which no longer exists.
+  const doomed = /DELETE_TITLED:(\S+)/.exec(text)?.[1];
+  if (doomed !== undefined) {
+    for (const [id, row] of [...sessions]) {
+      if (id !== sessionID && (row.title ?? '').includes(doomed)) removeSession(id);
+    }
+  }
+  // SEED_SESSIONS (same task; INVENTED trigger, cell B5): adds 55 root sessions titled
+  // "Seed29 NN" beside the one that sent the prompt, the first 50 updated one second apart and all
+  // OLDER than it, the last five days old, so the tree (page size 50) has a "Show more sessions"
+  // row and the second page brings the older date groups. They have no history. The turn then
+  // plays as usual.
+  if (text.includes('SEED_SESSIONS')) {
+    const location = sessions.get(sessionID)?.location ?? { directory: '' };
+    const base = Date.now() - 60_000;
+    const DAY = 86_400_000;
+    // The last five are old on purpose, one per date group beyond "Today": noon of yesterday, three
+    // days, nine days, twenty days and sixty days back ("Yesterday", "Previous 7 days", "Older").
+    // The first is counted from the local midnight, not from now: "a day and a half ago" falls on
+    // the day before yesterday in a run started before noon, and the tree then has no "Yesterday"
+    // group (seen 30/10/2026 at 10:00: check B5 of `test:visual` step 29 read ["Today", "Previous 7
+    // days", "Older"]; the same step passed at 22:19 the day before).
+    const midnight = new Date().setHours(0, 0, 0, 0);
+    const old = [midnight - DAY / 2, ...[3, 9, 20, 60].map((days) => Date.now() - days * DAY)];
+    for (let index = 0; index < 55; index += 1) {
+      const id = nextId('ses');
+      const stamp = index >= 50 ? old[index - 50] : base - index * 1_000;
+      const title = `Seed29 ${String(index + 1).padStart(2, '0')}`;
+      sessions.set(id, {
+        id,
+        projectID: 'prj_fake',
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: stamp, updated: stamp },
+        location,
+        title,
+      });
+      history.set(id, []);
+      broadcast('session.created', {
+        sessionID: id,
+        projectID: 'prj_fake',
+        slug: id,
+        version: '2.0.32',
+        location,
+        title,
+      });
+    }
+  }
   // CRASH (E2, issue #85): the server dies in the middle of a turn and cannot come back until the
   // marker `<FAKE_OPENCODE_STATE_FILE>.down` is deleted. Only with a state file, because the
   // marker lives next to it and the conversation must survive the exit (the `exit` handler of

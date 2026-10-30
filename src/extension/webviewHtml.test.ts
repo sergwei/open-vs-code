@@ -20,6 +20,7 @@ function options(overrides: Partial<Parameters<typeof buildWebviewHtml>[0]> = {}
     scriptUri: 'https://file+.vscode-resource.vscode-cdn.net/dist/webview/assets/index.js',
     styleUri: 'https://file+.vscode-resource.vscode-cdn.net/dist/webview/assets/style.css',
     nonce,
+    surface: 'view' as const,
     ...overrides,
   };
 }
@@ -68,6 +69,17 @@ describe('buildWebviewHtml', () => {
 
     expect(html).toContain(`src="${o.scriptUri}"`);
     expect(html).toContain(`href="${o.styleUri}"`);
+  });
+
+  it('writes the surface meta for a view and for a tab, and the CSP does not change with it', () => {
+    // Protects issue #77 (E3): the tab webview hides its session picker by reading this meta.
+    // Fabricated input; a real VS Code is covered by test:visual step 29 cell B7.
+    const view = buildWebviewHtml(options({ surface: 'view' }));
+    const tab = buildWebviewHtml(options({ surface: 'tab' }));
+
+    expect(view).toContain('<meta name="open-vs-code-surface" content="view">');
+    expect(tab).toContain('<meta name="open-vs-code-surface" content="tab">');
+    expect(cspOf(tab)).toBe(cspOf(view));
   });
 
   it('escapes attribute values so a URI cannot break out of the attribute', () => {

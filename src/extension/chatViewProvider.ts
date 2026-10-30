@@ -139,7 +139,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }),
     ];
 
-    renderChatWebview(webview, this.extensionUri, this.channel);
+    renderChatWebview(webview, this.extensionUri, this.channel, 'view');
     this.channel.info('Chat view resolved');
     this.applyBadge();
     this.hooks.onVisibilityChange?.(true);
