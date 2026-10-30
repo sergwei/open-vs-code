@@ -10,7 +10,7 @@ interface Manifest {
   contributes: {
     viewsContainers: { activitybar: { id: string }[] };
     views: Record<string, { id: string; name?: string; when?: string }[]>;
-    viewsWelcome?: { view: string; contents: string }[];
+    viewsWelcome?: { view: string; contents: string; when?: string }[];
     commands: { command: string; title?: string; category?: string; icon?: string }[];
     menus?: Record<string, { command: string; group?: string; when?: string }[]>;
     configuration: {
@@ -176,10 +176,24 @@ describe('keybindings in package.json', () => {
     'cmd+i',
   ];
 
-  it('declares the shortcuts of Focus Prompt (two, one per direction) and New Session', () => {
+  // E3 (issue #77, Q4=1): F2 and Delete only while the Sessions tree has the focus, and not while a
+  // text box of the tree (its type-to-find widget) has it: Delete there must erase a character, not
+  // open the delete modal (W3 of review 1; the built-in Explorer rules carry the same `!inputFocus`).
+  it('declares the shortcuts of Focus Prompt (two, one per direction), New Session, Rename and Delete', () => {
     expect(list.map((b) => b.command).sort()).toEqual(
-      [ids.FOCUS_PROMPT_COMMAND_ID, ids.FOCUS_PROMPT_COMMAND_ID, ids.NEW_SESSION_COMMAND_ID].sort(),
+      [
+        ids.FOCUS_PROMPT_COMMAND_ID,
+        ids.FOCUS_PROMPT_COMMAND_ID,
+        ids.NEW_SESSION_COMMAND_ID,
+        ids.RENAME_SESSION_COMMAND_ID,
+        ids.DELETE_SESSION_COMMAND_ID,
+      ].sort(),
     );
+    for (const id of [ids.RENAME_SESSION_COMMAND_ID, ids.DELETE_SESSION_COMMAND_ID]) {
+      expect(list.find((b) => b.command === id)?.when, id).toBe(
+        `focusedView == ${ids.SESSIONS_VIEW_ID} && !inputFocus`,
+      );
+    }
   });
 
   // Issue #92: the key from editor text must not depend on `openVsCode.chatFocused`, which lags
@@ -286,8 +300,14 @@ describe('context menus (issue #36)', () => {
     const hidden = entries('commandPalette')
       .filter((e) => e.when === 'false')
       .map((e) => e.command);
+    // Rename and Delete (E3) also need a tree row and are hidden the same way.
     expect(hidden.sort()).toEqual(
-      [ids.ADD_TO_CHAT_COMMAND_ID, ids.EXPLAIN_FILES_COMMAND_ID].sort(),
+      [
+        ids.ADD_TO_CHAT_COMMAND_ID,
+        ids.EXPLAIN_FILES_COMMAND_ID,
+        ids.RENAME_SESSION_COMMAND_ID,
+        ids.DELETE_SESSION_COMMAND_ID,
+      ].sort(),
     );
     const palette = entries('commandPalette').map((e) => e.command);
     for (const id of [
@@ -319,19 +339,20 @@ describe('activation by a restored chat tab (issue #77)', () => {
 /**
  * Protects the manifest side of the chat location (issue #77, decisions Q2=1, Q3=1, Q9=1 and T1=1
  * of Sergio, 29/10/2026): the setting with its values and default, the two views excluded from each
- * other by `when` on `config.openVsCode.chatLocation`, the welcome of the launcher with the texts
- * of the approved sketch and commands that exist, and the title buttons. The data is the REAL
- * package.json. What VS Code DOES with those `when` clauses is not checked here. VERIFIED only for
+ * other by `when` on `config.openVsCode.chatLocation`, one welcome of the Sessions view per state
+ * with the texts of the approved sketch and commands that exist, the row menu of E3 (Rename,
+ * Delete), the palette entries and the title buttons. The data is the REAL package.json. What VS
+ * Code DOES with those `when` clauses is not checked here. VERIFIED only for
  * the chat view, by `chatPanel.test.ts` "keeps the tabs open and the side-bar view working when
  * going back to sidebar" (Windows 11, VS Code 1.144.0, 29/10/2026): `Chat view resolved` appears
- * after the setting goes back to `sidebar`. HYPOTHESIS for the launcher view (that it shows with
+ * after the setting goes back to `sidebar`. HYPOTHESIS for the Sessions view (that it shows with
  * its welcome in `editor` mode) from this file alone: `test:visual` step 27 looks at it on screen.
  */
 describe('chat location (issue #77)', () => {
   const views = manifest.contributes.views[ids.VIEW_CONTAINER_ID] ?? [];
   const commandIds = manifest.contributes.commands.map((c) => c.command);
   const welcome = manifest.contributes.viewsWelcome ?? [];
-  const sessionsWelcome = welcome.find((w) => w.view === ids.SESSIONS_VIEW_ID);
+  const sessionsWelcomes = welcome.filter((w) => w.view === ids.SESSIONS_VIEW_ID);
 
   it('declares the setting with both values, descriptions, default sidebar and order 4', () => {
     const setting = manifest.contributes.configuration.properties[ids.CHAT_LOCATION_SETTING];
@@ -346,22 +367,75 @@ describe('chat location (issue #77)', () => {
     expect(setting?.enumDescriptions).toHaveLength(2);
   });
 
-  it('shows the chat view unless the location is editor, and the launcher only then', () => {
+  it('shows the chat view unless the location is editor, and the Sessions view only then', () => {
     const chat = views.find((v) => v.id === ids.CHAT_VIEW_ID);
     const sessions = views.find((v) => v.id === ids.SESSIONS_VIEW_ID);
     expect(chat?.when).toBe(`config.${ids.CHAT_LOCATION_SETTING} != editor`);
     expect(sessions?.when).toBe(`config.${ids.CHAT_LOCATION_SETTING} == editor`);
   });
 
-  it('gives the launcher the welcome of the approved sketch, with buttons that exist', () => {
-    const contents = sessionsWelcome?.contents ?? '';
-    expect(contents).toContain('The chat opens in editor tabs, one per session.');
-    expect(contents).toContain('[New Session](command:openVsCode.newSession)');
-    expect(contents).toContain('[Open Chat](command:openVsCode.openChat)');
-    expect(contents).toContain('To keep the chat here, change Chat Location in [Open Settings]');
-    for (const [, command] of contents.matchAll(/\(command:([\w.]+)\)/g)) {
-      expect(commandIds, command).toContain(command);
+  // E3 (issue #77, Q9=1 and Q10=1): one welcome per state of `SESSIONS_STATE_CONTEXT_KEY`, with the
+  // exact texts of the approved sketch; the line of E1 "To keep the chat here…" is gone. Buttons
+  // may point at a built-in command (Open Folder), so only our own ids must be contributed.
+  it('gives the Sessions view one welcome per state, with the approved texts and live buttons', () => {
+    const byState = (state: string): string =>
+      sessionsWelcomes.find((w) => w.when === `${ids.SESSIONS_STATE_CONTEXT_KEY} == ${state}`)
+        ?.contents ?? '';
+    expect(sessionsWelcomes).toHaveLength(3);
+    expect(byState('ready')).toBe(
+      'No sessions in this folder yet.\n[New Session](command:openVsCode.newSession)\n[Open Settings](command:openVsCode.openSettings)',
+    );
+    expect(byState('offline')).toBe(
+      'OpenCode is not running for this folder.\n[Open Chat](command:openVsCode.openChat)\n[Show Logs](command:openVsCode.showLogs)',
+    );
+    expect(byState('noFolder')).toBe(
+      'Open a folder to see its OpenCode sessions.\n[Open Folder](command:workbench.action.files.openFolder)',
+    );
+    for (const entry of sessionsWelcomes) {
+      expect(entry.contents).not.toContain('To keep the chat here');
+      for (const [, command] of entry.contents.matchAll(/\(command:([\w.]+)\)/g)) {
+        if (command?.startsWith('openVsCode.')) expect(commandIds, command).toContain(command);
+      }
     }
+  });
+
+  // E3: every command of the row menu exists, has a constant, and is offered only on session rows
+  // (`viewItem` comes from `contextValue` of `sessionTree.ts`); the palette hides Rename and Delete
+  // and shows Search only in `editor` mode, so `sidebar` mode gains no visible command.
+  it('offers Rename and Delete on session rows only, and Search only in editor mode', () => {
+    const rowMenu = manifest.contributes.menus?.['view/item/context'] ?? [];
+    expect(rowMenu.length).toBeGreaterThan(0);
+    for (const entry of rowMenu) {
+      expect(commandIds, entry.command).toContain(entry.command);
+      expect(idValues, entry.command).toContain(entry.command);
+      expect(entry.when, entry.command).toContain(`view == ${ids.SESSIONS_VIEW_ID}`);
+      expect(entry.when, entry.command).toContain('viewItem =~ /\\bsession\\b/');
+    }
+    expect(rowMenu.filter((e) => e.group?.startsWith('inline')).map((e) => e.command)).toEqual([
+      ids.RENAME_SESSION_COMMAND_ID,
+      ids.DELETE_SESSION_COMMAND_ID,
+    ]);
+    const palette = manifest.contributes.menus?.['commandPalette'] ?? [];
+    const whenOf = (id: string): string | undefined => palette.find((e) => e.command === id)?.when;
+    expect(whenOf(ids.RENAME_SESSION_COMMAND_ID)).toBe('false');
+    expect(whenOf(ids.DELETE_SESSION_COMMAND_ID)).toBe('false');
+    expect(whenOf(ids.SEARCH_SESSIONS_COMMAND_ID)).toBe(
+      `config.${ids.CHAT_LOCATION_SETTING} == editor`,
+    );
+  });
+
+  it('keeps the open and show-more commands internal and puts Search after New Session', () => {
+    expect(commandIds).not.toContain(ids.OPEN_SESSION_COMMAND_ID);
+    expect(commandIds).not.toContain(ids.SHOW_MORE_SESSIONS_COMMAND_ID);
+    expect(commandIds).not.toContain(ids.TEST_SESSION_ANSWERS_COMMAND_ID);
+    const title = (manifest.contributes.menus?.['view/title'] ?? []).filter(
+      (e) => e.when === `view == ${ids.SESSIONS_VIEW_ID}`,
+    );
+    const order = (id: string): string | undefined => title.find((e) => e.command === id)?.group;
+    expect(order(ids.NEW_SESSION_COMMAND_ID)).toBe('navigation@1');
+    expect(order(ids.SEARCH_SESSIONS_COMMAND_ID)).toBe('navigation@2');
+    expect(order(ids.OPEN_SETTINGS_COMMAND_ID)).toBe('navigation@3');
+    expect(order(ids.RESTART_SERVER_COMMAND_ID)).toBe('9_server');
   });
 
   it('points every welcome at a contributed view', () => {
@@ -371,7 +445,7 @@ describe('chat location (issue #77)', () => {
     for (const entry of welcome) expect(viewIds).toContain(entry.view);
   });
 
-  it('puts New Session and Open Settings on the launcher title, Restart Server in the overflow', () => {
+  it('puts New Session and Open Settings on the Sessions view title, Restart Server in the overflow', () => {
     const title = (manifest.contributes.menus?.['view/title'] ?? []).filter(
       (e) => e.when === `view == ${ids.SESSIONS_VIEW_ID}`,
     );

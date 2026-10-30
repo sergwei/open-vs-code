@@ -213,6 +213,39 @@ describe('empty state and header', () => {
     expect(h.container.querySelector('[role="dialog"][aria-label="Sessions"]')).not.toBeNull();
   });
 
+  // Issue #77 (E3, Q7=1): in an editor tab the host writes the surface meta and the Sessions tree
+  // view is the one place to browse. Fabricated DOM: the meta is added by hand; the real document
+  // is covered by test:visual step 29 cell B7.
+  it('in an editor tab (surface meta "tab") has no "Sessions" button, but keeps New session and the subagent list', () => {
+    const meta = document.createElement('meta');
+    meta.name = 'open-vs-code-surface';
+    meta.content = 'tab';
+    document.head.append(meta);
+    try {
+      const h = start();
+      h.apply(
+        ...openWith(
+          [
+            { id: SES, title: 'Fix the build' },
+            { id: 'ses_k1', title: 'Child', parentID: SES, agent: 'general', createdAt: 10 },
+          ],
+          [user('m1', 'hi')],
+        ),
+      );
+      const labels = [...must(h.container, 'header').querySelectorAll('button')].map(
+        (button) => button.textContent,
+      );
+      expect(labels).toEqual(['New session']);
+      expect(h.container.querySelector('[data-session-trigger]')).toBeNull();
+      expect(must(h.container, '.chat-title').textContent).toBe('Fix the build');
+      expect(must(h.container, 'details.subagent-sessions summary').textContent).toBe(
+        'Subagent sessions (1)',
+      );
+    } finally {
+      meta.remove();
+    }
+  });
+
   it('opening a session from the list sends session.open, closes the list and focuses the prompt', () => {
     const h = start();
     h.apply(...openSession([user('m1', 'hi')]));

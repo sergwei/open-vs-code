@@ -18,8 +18,9 @@ export const VIEW_CONTAINER_ID = 'openVsCode';
 export const CHAT_VIEW_ID = 'openVsCode.chat';
 
 /**
- * Launcher view shown in place of the chat while `openVsCode.chatLocation` is `editor` (issue #77,
- * `contributes.views.openVsCode[].id`). A tree view with a welcome message; it holds no chat.
+ * Native Sessions tree view, shown in place of the chat while `openVsCode.chatLocation` is `editor`
+ * (issue #77, `contributes.views.openVsCode[].id`). It lists the sessions of the folder and holds
+ * no chat.
  */
 export const SESSIONS_VIEW_ID = 'openVsCode.sessions';
 
@@ -117,6 +118,50 @@ export const FIX_SELECTION_COMMAND_ID = 'openVsCode.fixSelection';
  * the palette because it needs the Explorer's arguments; issue #36, decision P2b=1 of Sergio).
  */
 export const EXPLAIN_FILES_COMMAND_ID = 'openVsCode.explainFiles';
+
+/**
+ * Internal command behind the `command` of every row of the native Sessions tree (issue #77, E3):
+ * opens (or reveals) the chat tab of a session. Argument: the session id. Registered always and
+ * deliberately NOT contributed (it takes an argument and is no palette command), like
+ * {@link SHOW_REQUEST_COMMAND_ID}; it does nothing in `sidebar` mode, where the tree is not shown.
+ */
+export const OPEN_SESSION_COMMAND_ID = 'openVsCode.openSession';
+
+/**
+ * Command id of "OpenCode: Rename Session…" (contributed in `view/item/context`, hidden from the
+ * palette; issue #77, E3). Argument: the row clicked; without one (F2) the selected row.
+ */
+export const RENAME_SESSION_COMMAND_ID = 'openVsCode.renameSession';
+
+/** Command id of "OpenCode: Delete Session" (contributed like {@link RENAME_SESSION_COMMAND_ID}). */
+export const DELETE_SESSION_COMMAND_ID = 'openVsCode.deleteSession';
+
+/**
+ * Command id of "OpenCode: Search Sessions…" (contributed; issue #77, E3): the QuickPick that
+ * searches session titles on the server. In the palette only in `editor` mode.
+ */
+export const SEARCH_SESSIONS_COMMAND_ID = 'openVsCode.searchSessions';
+
+/**
+ * Internal command of the "Show more sessions" row of the tree (issue #77, E3). Registered and NOT
+ * contributed, like {@link OPEN_SESSION_COMMAND_ID}.
+ */
+export const SHOW_MORE_SESSIONS_COMMAND_ID = 'openVsCode.showMoreSessions';
+
+/**
+ * Context key `offline | ready | noFolder` (issue #77, E3) that picks which `viewsWelcome` entry of
+ * the Sessions view shows. Set with `setContext`, read by the `when` clauses in package.json.
+ */
+export const SESSIONS_STATE_CONTEXT_KEY = 'openVsCode.sessionsState';
+
+/**
+ * Internal command that answers the NEXT Rename box and Delete modal of the Sessions tree without
+ * showing them (issue #77, E3), because the integration tests cannot type into a `showInputBox` or
+ * click a modal. Argument: `{ title?: string | null, confirmDelete?: boolean }` (`null` cancels the
+ * box). Registered ONLY in `ExtensionMode.Test`, NOT contributed, like
+ * {@link TEST_SET_SERVER_PASSWORD_COMMAND_ID}.
+ */
+export const TEST_SESSION_ANSWERS_COMMAND_ID = 'openVsCode.test.sessionAnswers';
 
 /** Configuration section (the prefix of every setting id). */
 export const CONFIG_SECTION = 'openVsCode';

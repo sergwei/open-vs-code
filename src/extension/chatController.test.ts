@@ -51,8 +51,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ModelRef } from '../shared/model';
-import type { HostToWebview, Snapshot, WebviewToHost } from '../shared/protocol';
+import type { ConnectionState, HostToWebview, Snapshot, WebviewToHost } from '../shared/protocol';
 import type { AttachmentRef, PromptFileRef } from '../shared/protocol';
+import { MAX_SESSION_TITLE_LENGTH } from '../shared/protocol';
 import {
   ChatController,
   FILE_SEARCH_LIMIT,
@@ -62,6 +63,9 @@ import {
   type EditorActions,
   type EditorContext,
   type SavedPermission,
+  type SessionListEvent,
+  type SessionListPage,
+  type SessionListSink,
 } from './chatController';
 import type { DroppedFiles } from './chatController';
 import type { EventStreamOptions } from './eventStream';
@@ -140,6 +144,8 @@ type FakeOptions = Partial<{
   commands: CommandInfo[];
   /** Rejects `command.list` with this body; the rest of the catalog still loads (issue #33). */
   commandListError: object;
+  /** Makes `form.list` reject with this body (a pane read of the snapshot failing). */
+  formListError: object;
   /** Rejects `session.command` with this server error body (issue #33). */
   commandError: object;
   /** `agent` / `model` fields `session.get` adds to every row (issues #23/#24). */
@@ -524,6 +530,7 @@ function fakeApi(options: FakeOptions = {}) {
     form: {
       list: () => {
         calls.push('form.list');
+        if (options.formListError !== undefined) return failWith(options.formListError);
         return Promise.resolve({ location: LOCATION, data: options.forms ?? [] });
       },
     },
@@ -649,6 +656,7 @@ function setup(
   confirmDelete: (info: { title: string; running: boolean }) => Promise<boolean> = () =>
     Promise.resolve(true),
   confirmRevertDiscard: () => Promise<boolean> = () => Promise.resolve(true),
+  sessionList?: SessionListSink,
 ) {
   const confirmations: Array<{ title: string; running: boolean }> = [];
   let discardAsked = 0;
@@ -706,6 +714,7 @@ function setup(
     },
     createClient: () => api,
     editor,
+    ...(sessionList === undefined ? {} : { sessionList }),
     log: {
       info: (m) => logs.push(`info: ${m}`),
       warn: (m) => logs.push(`warn: ${m}`),
@@ -3462,7 +3471,7 @@ describe('session.rename (issue #20)', () => {
     const { api, updates } = fakeApi();
     const { controller, posted } = setup(api);
     controller.onServerState(RUNNING);
-    for (const title of ['   ', 'x'.repeat(201)]) {
+    for (const title of ['   ', 'x'.repeat(MAX_SESSION_TITLE_LENGTH + 1)]) {
       await controller.handle({
         type: 'session.rename',
         requestId: 'r1',
@@ -5577,4 +5586,523 @@ describe('slash commands (issue #33)', () => {
       });
     },
   );
+});
+
+// Issue #77, delivery E3 (`E9-sessions-sidebar`, phase 1): what the controller does for the native
+// Sessions tree through the optional `deps.sessionList` sink, and the pane-less cores the tree
+// shares with the webview's messages. Provenance: the same FAKE client as the rest of the file
+// (hand-made rows; the tree's read is told apart from the panes' by `parentID: null`), so it
+// proves the controller's logic, not the contract with a real server; the wiring against a real
+// client and cursor is `chatController.e2e.test.ts` ("pages the tree through the cursor of the
+// synthetic server").
+describe('the Sessions tree sink (issue #77)', () => {
+  /** A sink that records what the controller tells it. */
+  function recordingSink() {
+    const resets: SessionListPage[] = [];
+    const appends: Array<{ ids: string[]; hasMore: boolean }> = [];
+    const events: SessionListEvent[] = [];
+    const connections: ConnectionState[] = [];
+    const failures: string[] = [];
+    const sink: SessionListSink = {
+      reset: (page) => {
+        resets.push(page);
+      },
+      failed: () => {
+        failures.push('failed');
+      },
+      append: (rows, hasMore) => {
+        appends.push({ ids: rows.map((row) => row.id), hasMore });
+      },
+      event: (message) => {
+        events.push(message);
+      },
+      connection: (connection) => {
+        connections.push(connection);
+      },
+    };
+    return { sink, resets, appends, events, connections, failures };
+  }
+
+  /** A controller with `sink` wired as `deps.sessionList` (the seventh argument of `setup`). */
+  const withSink = (api: ChatApi, sink: SessionListSink) =>
+    setup(api, undefined, undefined, undefined, undefined, undefined, sink);
+
+  /** A promise the test settles by hand, to hold a read while the stream speaks. */
+  function deferred<T>() {
+    let resolve: (value: T) => void = () => undefined;
+    const promise = new Promise<T>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  const isTreeRead = (input?: SessionListInput): boolean => input?.parentID === null;
+  const empty: SessionsResponse = { data: [], cursor: {} };
+  /** Rejects with a server error BODY (not an Error), like the real client. */
+  const failWithServerError = (): Promise<never> =>
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+    Promise.reject({ _tag: 'ServerError', message: 'boom' });
+
+  it('still makes the four reads and no extra call without a sink', async () => {
+    const { api, calls, listInputs } = fakeApi({ sessions: ['ses_a'] });
+    const { controller } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    await controller.loadMoreSessions();
+    expect(calls.filter((call) => call.startsWith('session.list'))).toEqual(['session.list']);
+    expect(calls.filter((call) => call === 'session.active')).toHaveLength(1);
+    expect(calls.filter((call) => call === 'permission.request.list')).toHaveLength(1);
+    expect(calls.filter((call) => call === 'form.list')).toHaveLength(1);
+    expect(listInputs).toEqual([{ directory: SERVER.folder, order: 'desc', limit: 50 }]);
+  });
+
+  it('reads the roots of the tree in the full resync and reports them, statuses merged', async () => {
+    const gate = deferred<void>();
+    const { api, listInputs } = fakeApi({
+      active: { ses_r1: { type: 'running' } },
+      listImpl: async (input) => {
+        if (!isTreeRead(input)) return empty;
+        await gate.promise;
+        return { data: pageOf(2, 'ses_r'), cursor: { next: 'CUR1' } };
+      },
+    });
+    const { sink, resets, events } = recordingSink();
+    const { controller, streams } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    const done = controller.resync();
+    await flush();
+    // The stream says ses_r0 started AFTER the read began: it must show as busy in the reset.
+    emit(streams, 'session.execution.started', { sessionID: 'ses_r0' });
+    gate.resolve();
+    await done;
+    expect(listInputs.filter(isTreeRead)).toEqual([
+      { directory: SERVER.folder, order: 'desc', limit: 50, parentID: null },
+    ]);
+    expect(resets).toHaveLength(1);
+    expect(resets[0]).toMatchObject({
+      folder: SERVER.folder,
+      hasMore: false,
+      statuses: { ses_r0: { type: 'busy' }, ses_r1: { type: 'busy' } },
+    });
+    expect(resets[0]?.rows.map((row) => row.id)).toEqual(['ses_r0', 'ses_r1']);
+    expect(events).toMatchObject([
+      { type: 'session.status', sessionID: 'ses_r0', status: { type: 'busy' } },
+    ]);
+  });
+
+  it('leaves out of the tree a session deleted during the read', async () => {
+    const gate = deferred<void>();
+    const { api } = fakeApi({
+      active: { ses_r1: { type: 'running' } },
+      listImpl: async (input) => {
+        if (!isTreeRead(input)) return empty;
+        await gate.promise;
+        return { data: pageOf(2, 'ses_r'), cursor: {} };
+      },
+    });
+    const { sink, resets, events } = recordingSink();
+    const { controller, streams } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    const done = controller.resync();
+    await flush();
+    emit(streams, 'session.deleted', { sessionID: 'ses_r1' });
+    gate.resolve();
+    await done;
+    expect(resets[0]?.rows.map((row) => row.id)).toEqual(['ses_r0']);
+    expect(resets[0]?.statuses).toEqual({});
+    expect(events).toEqual([{ type: 'session.removed', sessionID: 'ses_r1' }]);
+  });
+
+  // Protects B1 of review 1: the tree's reset was gated by the panes' staleness guard, so a tab
+  // becoming ready (a one-pane resync) while a full resync was reading left the tree in "Loading
+  // sessions…" until the next full resync. Fake client with a gate on the tree's read.
+  it('a pane resync during the full resync does not leave the tree loading', async () => {
+    const gate = deferred<void>();
+    const { api } = fakeApi({
+      listImpl: async (input) => {
+        if (!isTreeRead(input)) return empty;
+        await gate.promise;
+        return { data: pageOf(2, 'ses_r'), cursor: {} };
+      },
+    });
+    const { sink, resets } = recordingSink();
+    const { controller } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    const full = controller.resync();
+    await flush();
+    await controller.resync([controller.pane]); // the tab became ready meanwhile
+    gate.resolve();
+    await full;
+    expect(resets).toHaveLength(1);
+    expect(resets[0]?.rows.map((row) => row.id)).toEqual(['ses_r0', 'ses_r1']);
+  });
+
+  // The other side of B1: a NEWER full resync is the only thing that may drop the tree's half.
+  it('drops the tree page of a full resync that a newer full resync overtook', async () => {
+    const gates = [deferred<void>(), deferred<void>()];
+    let reads = 0;
+    const { api } = fakeApi({
+      listImpl: async (input) => {
+        if (!isTreeRead(input)) return empty;
+        const mine = gates[reads];
+        reads += 1;
+        await mine?.promise;
+        return { data: pageOf(reads, 'ses_r'), cursor: {} };
+      },
+    });
+    const { sink, resets } = recordingSink();
+    const { controller } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    const first = controller.resync();
+    await flush();
+    const second = controller.resync();
+    await flush();
+    gates[1]?.resolve();
+    await second;
+    gates[0]?.resolve();
+    await first;
+    expect(resets).toHaveLength(1);
+    expect(resets[0]?.rows).toHaveLength(2);
+  });
+
+  // Protects W1 of review 1 (decided by Sergio): a failed fifth read must not leave the tree
+  // "loading" for good. Fake client whose tree read rejects; the panes' snapshot must still go out.
+  it('reports a failed read of the tree and keeps the panes snapshot', async () => {
+    const { api } = fakeApi({
+      listImpl: (input) =>
+        isTreeRead(input) ? Promise.reject(new Error('boom')) : Promise.resolve(empty),
+    });
+    const { sink, resets, failures } = recordingSink();
+    const { controller, posted } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(failures).toEqual(['failed']);
+    expect(resets).toEqual([]);
+    expect(posted.some((message) => message.type === 'snapshot')).toBe(true);
+  });
+
+  // Protects W1 of review 2: the tree's half was only published from the try, so a failing PANE read
+  // (here `form.list` answering a server error, not a transport one) left the tree in "Loading
+  // sessions…" until the next full resync. Fake client; the sink must hear `failed` exactly once.
+  it('reports a failed tree when a read of the panes fails with a server error', async () => {
+    const { api } = fakeApi({ formListError: { _tag: 'ServerError', message: 'boom' } });
+    const { sink, resets, failures } = recordingSink();
+    const { controller } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(failures).toEqual(['failed']);
+    expect(resets).toEqual([]);
+  });
+
+  // Protects W1 of the delta review of round 2: the failure gate sat AFTER the panes' `dropped()`
+  // return, so a full resync overtaken by a pane-only one (a tab becoming ready) whose pane read
+  // then failed with a server error left the tree "Loading sessions…". Fake client, synthetic
+  // (the first pane-level `session.list` is held, then rejected by hand while the pane-only
+  // resync runs); not observed against a real server.
+  it('reports a failed tree when a pane-only resync overtakes the full one and a pane read fails', async () => {
+    const gate = deferred<void>();
+    let held = false;
+    const { api } = fakeApi({
+      listImpl: async (input) => {
+        if (isTreeRead(input)) return empty;
+        if (held) return empty;
+        held = true;
+        await gate.promise;
+        return failWithServerError();
+      },
+    });
+    const { sink, resets, failures } = recordingSink();
+    const { controller } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    await flush();
+    held = false;
+    const full = controller.resync();
+    await flush();
+    await controller.resync([controller.pane]);
+    gate.resolve();
+    await full;
+    expect(failures).toEqual(['failed']);
+    expect(resets).toEqual([]);
+  });
+
+  // Protects the negative branches of the same gate: a Transport failure is left to the connection
+  // state, and a failure of a resync a NEWER full one overtook must not erase that one's tree.
+  // Fake client, synthetic errors.
+  it('does not report a failed tree for a transport error or for a stale tree stamp', async () => {
+    const transport = fakeApi({ formListError: { _tag: 'Transport', message: 'down' } });
+    const first = recordingSink();
+    const withTransport = withSink(transport.api, first.sink);
+    withTransport.controller.onServerState(RUNNING);
+    await withTransport.controller.resync();
+    expect(first.failures).toEqual([]);
+
+    const gate = deferred<void>();
+    let held = false;
+    const { api } = fakeApi({
+      listImpl: async (input) => {
+        if (isTreeRead(input)) return empty;
+        if (held) return empty;
+        held = true;
+        await gate.promise;
+        return failWithServerError();
+      },
+    });
+    const { sink, resets, failures } = recordingSink();
+    const { controller } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    await flush();
+    held = false;
+    const older = controller.resync();
+    await flush();
+    await controller.resync();
+    gate.resolve();
+    await older;
+    expect(failures).toEqual([]);
+    expect(resets.length).toBeGreaterThan(0);
+  });
+
+  it('does not read the tree again for the resync of one pane', async () => {
+    const { api, listInputs } = fakeApi({ sessions: ['ses_a'] });
+    const { sink, resets } = recordingSink();
+    const { controller } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(resets).toHaveLength(1);
+    await controller.resync([controller.pane]);
+    await controller.onWebviewReady();
+    expect(resets).toHaveLength(1);
+    expect(listInputs.filter(isTreeRead)).toHaveLength(1);
+  });
+
+  it('forwards the session events to the sink with no pane open', () => {
+    const { api } = fakeApi();
+    const { sink, events } = recordingSink();
+    const { controller, streams } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    controller.detachPane(controller.pane.id);
+    emit(streams, 'session.created', { sessionID: 'ses_x', title: 'New one' });
+    emit(streams, 'session.execution.failed', {
+      sessionID: 'ses_x',
+      error: { type: 'unknown', message: 'boom' },
+    });
+    emit(streams, 'session.deleted', { sessionID: 'ses_x' });
+    expect(events.map((event) => event.type)).toEqual([
+      'session.upserted',
+      'session.status',
+      'session.removed',
+    ]);
+    expect(events[0]).toMatchObject({ session: { id: 'ses_x', title: 'New one' } });
+  });
+
+  it('tells the sink every connection state', () => {
+    const { api } = fakeApi();
+    const { sink, connections } = recordingSink();
+    const { controller, streams } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    streams[0]?.options.onState({ kind: 'connected' });
+    controller.onServerState({ kind: 'stopped' });
+    expect(connections.map((connection) => connection.state)).toEqual([
+      'starting',
+      'connected',
+      'stopped',
+    ]);
+  });
+
+  it('keeps the rows of the tree in the mirror when one pane resyncs', async () => {
+    const { api } = fakeApi({
+      listImpl: (input) =>
+        Promise.resolve(isTreeRead(input) ? { data: pageOf(2, 'ses_t'), cursor: {} } : empty),
+    });
+    const { sink, events } = recordingSink();
+    const { controller, streams } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    // The snapshot of the single pane seeds the mirror with ITS rows (none here); without the
+    // merge rule the rows of the tree would be gone and this rename dropped as an unknown row.
+    await controller.resync([controller.pane]);
+    emit(streams, 'session.renamed', { sessionID: 'ses_t1', title: 'Renamed' });
+    expect(events).toMatchObject([
+      { type: 'session.upserted', session: { id: 'ses_t1', title: 'Renamed' } },
+    ]);
+  });
+
+  it('loads the next page of the tree with the cursor and mirrors it', async () => {
+    const { api, listInputs } = fakeApi({
+      listImpl: (input) => {
+        if (input?.cursor !== undefined) {
+          return Promise.resolve({ data: pageOf(1, 'ses_old'), cursor: { next: 'CUR2' } });
+        }
+        return Promise.resolve(
+          isTreeRead(input) ? { data: pageOf(50, 'ses_a'), cursor: { next: 'CUR1' } } : empty,
+        );
+      },
+    });
+    const { sink, resets, appends, events } = recordingSink();
+    const { controller, streams } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(resets[0]?.hasMore).toBe(true);
+    await controller.loadMoreSessions();
+    expect(listInputs.at(-1)).toEqual({ cursor: 'CUR1' });
+    expect(appends).toEqual([{ ids: ['ses_old0'], hasMore: false }]);
+    emit(streams, 'session.renamed', { sessionID: 'ses_old0', title: 'Renamed' });
+    expect(events).toMatchObject([
+      { type: 'session.upserted', session: { id: 'ses_old0', title: 'Renamed' } },
+    ]);
+  });
+
+  it('drops a page that was in flight when the first page was read again', async () => {
+    const gate = deferred<void>();
+    let treeReads = 0;
+    const { api } = fakeApi({
+      listImpl: async (input) => {
+        if (input?.cursor !== undefined) {
+          await gate.promise;
+          return { data: pageOf(1, 'ses_old'), cursor: {} };
+        }
+        if (!isTreeRead(input)) return empty;
+        treeReads += 1;
+        return { data: pageOf(50, 'ses_a'), cursor: { next: 'CUR1' } };
+      },
+    });
+    const { sink, appends } = recordingSink();
+    const { controller } = withSink(api, sink);
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    const more = controller.loadMoreSessions();
+    await flush();
+    await controller.resync();
+    gate.resolve();
+    await more;
+    expect(treeReads).toBe(2);
+    expect(appends).toEqual([]);
+  });
+
+  it('keeps a late answer of an older search from replacing the newer one', async () => {
+    const gate = deferred<void>();
+    const { api } = fakeApi({
+      listImpl: async (input) => {
+        if (input?.search === 'old') {
+          await gate.promise;
+          return { data: pageOf(1, 'ses_old'), cursor: {} };
+        }
+        return { data: pageOf(1, 'ses_new'), cursor: {} };
+      },
+    });
+    const { controller } = setup(api);
+    controller.onServerState(RUNNING);
+    const older = controller.searchSessions('old');
+    const newer = await controller.searchSessions('new');
+    gate.resolve();
+    expect(newer?.rows.map((row) => row.id)).toEqual(['ses_new0']);
+    expect(await older).toBeUndefined();
+  });
+
+  it('searches the root sessions of the folder, trimmed, on the server', async () => {
+    const { api, listInputs } = fakeApi({ sessions: ['ses_a'] });
+    const { controller, logs } = setup(api);
+    controller.onServerState(RUNNING);
+    const found = await controller.searchSessions('  taskkill ');
+    expect(listInputs.at(-1)).toEqual({
+      directory: SERVER.folder,
+      order: 'desc',
+      limit: 50,
+      parentID: null,
+      search: 'taskkill',
+    });
+    expect(found).toMatchObject({ hasMore: false });
+    expect(logs.join('\n')).not.toContain('taskkill');
+  });
+
+  it('rejects a search with ServerUnavailable when no server runs', async () => {
+    const { controller } = setup(fakeApi().api);
+    await expect(controller.searchSessions('x')).rejects.toMatchObject({
+      name: 'ServerUnavailable',
+    });
+  });
+});
+
+describe('renameSessionById and deleteSessionById (issue #77)', () => {
+  it('renames a session without a pane, trimming the title', async () => {
+    const { api, updates } = fakeApi();
+    const { controller, logs, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.renameSessionById('ses_a', '  Secret plan ');
+    expect(updates).toEqual([{ sessionID: 'ses_a', title: 'Secret plan' }]);
+    expect(logs).toContain('info: session renamed ses_a');
+    expect(logs.join('\n')).not.toContain('Secret plan');
+    expect(posted.some((message) => message.type === 'request.result')).toBe(false);
+  });
+
+  it('refuses a blank or overlong title and a missing server without calling the server', async () => {
+    const { api, updates } = fakeApi();
+    const { controller } = setup(api);
+    await expect(controller.renameSessionById('ses_a', 'x')).rejects.toMatchObject({
+      name: 'ServerUnavailable',
+    });
+    controller.onServerState(RUNNING);
+    for (const title of ['   ', 'x'.repeat(MAX_SESSION_TITLE_LENGTH + 1)]) {
+      await expect(controller.renameSessionById('ses_a', title)).rejects.toMatchObject({
+        name: 'InvalidTitle',
+      });
+    }
+    expect(updates).toEqual([]);
+  });
+
+  it('heals a session that no longer exists as removed and rejects with the server error', async () => {
+    const { api } = fakeApi({
+      updateError: { _tag: 'SessionNotFoundError', message: 'Session not found' },
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await expect(controller.renameSessionById('ses_gone', 'New')).rejects.toMatchObject({
+      _tag: 'SessionNotFoundError',
+    });
+    expect(posted).toContainEqual({ type: 'session.removed', sessionID: 'ses_gone' });
+  });
+
+  it('deletes a session without a pane and closes it for the pane that showed it, without the "outside this view" notice', async () => {
+    const { api, sessionRemoves } = fakeApi({ sessions: ['ses_open'], titles: { ses_open: 'T' } });
+    const { controller, confirmations, posted, memoryWrites } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(controller.sessionOf(controller.pane.id)).toBe('ses_open');
+    await expect(controller.deleteSessionById('ses_open')).resolves.toEqual({ deleted: true });
+    expect(confirmations).toEqual([{ title: 'T', running: false }]);
+    expect(sessionRemoves).toEqual([{ sessionID: 'ses_open' }]);
+    expect(controller.sessionOf(controller.pane.id)).toBeUndefined();
+    expect(memoryWrites.at(-1)).toEqual({ folder: SERVER.folder, id: undefined });
+    expect(posted.some((message) => message.type === 'notice')).toBe(false);
+    expect(posted.some((message) => message.type === 'request.result')).toBe(false);
+  });
+
+  it('resolves deleted false when the user declines, and sends no DELETE', async () => {
+    const { api, sessionRemoves } = fakeApi();
+    const { controller } = setup(api, undefined, undefined, undefined, () =>
+      Promise.resolve(false),
+    );
+    controller.onServerState(RUNNING);
+    await expect(controller.deleteSessionById('ses_a')).resolves.toEqual({ deleted: false });
+    expect(sessionRemoves).toEqual([]);
+  });
+
+  it('heals a session that is already gone as removed and rejects, asking nobody', async () => {
+    const { api } = fakeApi({
+      getError: { _tag: 'SessionNotFoundError', message: 'Session not found' },
+    });
+    const { controller, posted, confirmations } = setup(api);
+    controller.onServerState(RUNNING);
+    await expect(controller.deleteSessionById('ses_gone')).rejects.toMatchObject({
+      _tag: 'SessionNotFoundError',
+    });
+    expect(confirmations).toEqual([]);
+    expect(posted).toContainEqual({ type: 'session.removed', sessionID: 'ses_gone' });
+  });
+
+  it('rejects with ServerUnavailable when no server runs', async () => {
+    const { controller } = setup(fakeApi().api);
+    await expect(controller.deleteSessionById('ses_a')).rejects.toMatchObject({
+      name: 'ServerUnavailable',
+    });
+  });
 });

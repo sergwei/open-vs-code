@@ -30,9 +30,12 @@ affiliated with opencode or with Microsoft.
   ![A forked session with a "Forked from" crumb above the first exchange and the Fork from here button on the message](docs/images/fork-session.png)
 
 - **The chat in the side bar or in editor tabs.** With `openVsCode.chatLocation` set to `editor`,
-  every session opens in its own editor tab, beside your code, and the OpenCode view becomes a small
-  launcher with New Session and Open Chat. Opening a session that already has a tab brings that tab
-  to the front instead of opening another. Changing the setting takes effect at once: the session
+  every session opens in its own editor tab, beside your code, and the OpenCode view becomes a
+  native **Sessions** tree: the sessions of the folder grouped by Today, Yesterday, Previous 7 days
+  and Older, each row with its state shown by an icon (Running, Needs input, Failed) and, when the
+  side bar has room, in words (also Fork, Tab) before the time, with Rename and Delete on the row, a **Search Sessions…** button that searches the titles on the
+  server, and a **Show more sessions** row. Clicking a session opens it in a tab, or brings that tab
+  to the front if it already has one, instead of opening another. Changing the setting takes effect at once: the session
   of the side bar opens in a tab, and going back leaves the tabs open. After **Developer: Reload
   Window** the tabs come back, each with its session, its draft and its
   title.
@@ -129,8 +132,11 @@ Explorer and choose **Explain with OpenCode**. The chat opens by itself and the 
 the open session.
 
 To keep the chat in editor tabs instead, set `openVsCode.chatLocation` to `editor` (Settings: Chat
-Location). **New Session** then opens a new tab, **Open Chat** brings the most recent tab to the
-front (or opens the last session of the folder when there is none). Insert at cursor and Add
+Location). The OpenCode view then lists the sessions of the folder: click one (or press Enter on
+it) to open it, `F2` renames the selected one and `Delete` deletes it. **New Session** opens a new
+tab, **Open Chat** brings the most recent tab to the front (or opens the last session of the
+folder when there is none). The chat in a tab has no Sessions button: the tree is the one place to
+browse sessions. Insert at cursor and Add
 selection write into the last text editor you used, and file links and diffs open outside the
 chat's group.
 
@@ -165,6 +171,9 @@ Command Palette (they act on the active editor); the two Explorer entries are no
 | **OpenCode: New Session** | Same as the **New session** button: the next prompt starts a new session and your draft is kept. With `chatLocation` set to `editor` it opens a new empty tab instead. |
 | **OpenCode: Open Settings** | Opens Settings filtered to this extension. |
 | **OpenCode: Stop Response** | Same as **Stop**: interrupts the running turn. Run from the editor it also shows the chat; with no turn running it only says "No response is running". |
+| **OpenCode: Rename Session…** | Row of the Sessions list (`chatLocation` set to `editor`): asks for a new title. Also the pencil on the row and `F2`; not in the Command Palette. |
+| **OpenCode: Delete Session** | Row of the Sessions list: after a confirmation, deletes the session for every opencode client and closes its tab. Also the bin on the row and `Delete`; not in the Command Palette. |
+| **OpenCode: Search Sessions…** | Searches the session titles on the server and opens the one you pick. Only offered while `chatLocation` is `editor`. Also a button in the Sessions title bar. |
 | **Add to OpenCode Chat** | Explorer right-click menu: attaches the selected files to the prompt. |
 | **Add to OpenCode Chat** | Editor right-click menu: attaches the selection (the whole file when nothing is selected). |
 | **Explain with OpenCode** | Editor right-click menu: sends "Explain what @file#lines does." with the selection (or the file) attached. |
@@ -173,13 +182,15 @@ Command Palette (they act on the active editor); the two Explorer entries are no
 
 ## Keyboard shortcuts
 
-Two commands have a default shortcut. Change them in **File > Preferences > Keyboard Shortcuts**
+Four commands have a default shortcut. Change them in **File > Preferences > Keyboard Shortcuts**
 (search for "OpenCode"); the other commands have none by default and you can bind them there too.
 
 | Windows / Linux | macOS | Command | Works when |
 | --- | --- | --- | --- |
 | `Ctrl+Alt+P` | `Cmd+Alt+P` | OpenCode: Focus Prompt | the editor or the chat has the focus |
 | `Ctrl+Alt+N` | `Cmd+Alt+N` | OpenCode: New Session | the chat has the focus |
+| `F2` | `F2` | OpenCode: Rename Session… | the Sessions list has the focus |
+| `Delete` | `Cmd+Backspace` | OpenCode: Delete Session | the Sessions list has the focus |
 
 On Windows, Ctrl+Alt is the same as AltGr: if your keyboard layout types a character with AltGr+P
 or AltGr+N, rebind the shortcut in Keyboard Shortcuts or it will run the command instead of typing.
@@ -223,6 +234,15 @@ always `opencode`.
   and reveals the one that has it. One whose session was deleted comes back empty, with the notice
   "This session no longer exists", and keeps its draft. With `sidebar` the restored tabs stay open
   next to the view, as extra tabs.
+- The Sessions tree lists the root sessions of the folder (50 at a time); subagent sessions are not
+  rows, you reach them from the tab of their parent. **Needs input** marks a row for a request of
+  its own session or of a subagent whose parent the extension already knows. The rows are emptied
+  while the server is not running and come back on the next reconnection. The order only changes
+  with the events that move a session's update time, so it can be stale until the next
+  reconnection.
+- Deleting a session deletes its subagent sessions too (opencode does it). A tab that was showing
+  one of those subagent sessions gets the notice "deleted outside this view", although you deleted
+  it yourself from the Sessions tree.
 - While chat tabs are open, the extension starts when the window opens (VS Code needs it to restore
   them), so the opencode server starts even if you do not touch the chat.
 - In `editor` mode a pending permission or question shows in **every** open tab, not only in the

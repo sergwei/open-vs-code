@@ -19,7 +19,12 @@
 import type { FileDiffInfo, SessionInfo, V2Event } from '@opencode/client';
 import { describe, expect, it } from 'vitest';
 import type { HostToWebview, WebviewToHost } from '../shared/protocol';
-import { ChatController, type ChatControllerDeps, type ChatUi } from './chatController';
+import {
+  ChatController,
+  type ChatControllerDeps,
+  type ChatUi,
+  type SessionListSink,
+} from './chatController';
 import type { ChatPane } from './chatPane';
 import type { EventStreamOptions } from './eventStream';
 import type { ChatApi } from './opencodeClient';
@@ -105,7 +110,7 @@ function setup(
   sessions: string[] = ['ses_a', 'ses_b'],
   ui: Partial<ChatUi> = {},
   primary?: number,
-  options: { start?: boolean; missing?: string[] } = {},
+  options: { start?: boolean; missing?: string[]; sessionList?: SessionListSink } = {},
 ) {
   const { api, calls } = fakeClient(sessions, new Set(options.missing ?? []));
   const opened: string[] = [];
@@ -114,6 +119,7 @@ function setup(
   const streams: Array<EventStreamOptions<V2Event>> = [];
   const deps: ChatControllerDeps = {
     createClient: () => api,
+    ...(options.sessionList === undefined ? {} : { sessionList: options.sessionList }),
     editor: {
       open: () => Promise.resolve(),
       editorContext: () => Promise.resolve({ refs: [], ranged: 0, unsaved: false }),
@@ -318,6 +324,38 @@ describe('connecting the server', () => {
     };
     expect(open(0)).toBe('ses_a');
     expect(open(1)).toBe('ses_b');
+  });
+
+  // Protects the rule of the Sessions tree (issue #77, E3) that its data does not depend on how
+  // many chat surfaces exist: one tree read and one `reset` per full resync, not one per pane, and
+  // a session event reaches the sink once, not once per pane. Fake client and fake sink.
+  it('tells the Sessions sink once, whatever the number of panes', async () => {
+    const resets: string[][] = [];
+    const events: string[] = [];
+    const sessionList: SessionListSink = {
+      reset: (page) => {
+        resets.push(page.rows.map((r) => r.id));
+      },
+      failed: () => undefined,
+      append: () => undefined,
+      event: (message) => {
+        events.push(message.type);
+      },
+      connection: () => undefined,
+    };
+    const { controller, calls, emit, flush } = setup(3, ['ses_a', 'ses_b'], {}, undefined, {
+      start: false,
+      sessionList,
+    });
+    controller.onServerState({ kind: 'running', server: SERVER });
+    calls.length = 0;
+    emit('server.connected', {});
+    await flush();
+    await flush();
+    expect(calls.filter((call) => call === 'session.list')).toHaveLength(2); // panes + tree
+    expect(resets).toEqual([['ses_a', 'ses_b']]);
+    emit('session.execution.started', { sessionID: 'ses_a' });
+    expect(events).toEqual(['session.status']);
   });
 
   // Protects W1 of review-1 (fix round 1): the memory per folder is last-writer-wins, so a restart

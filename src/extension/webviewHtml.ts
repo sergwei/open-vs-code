@@ -10,7 +10,16 @@ export interface WebviewHtmlOptions {
   styleUri: string;
   /** Per-resolution nonce from {@link createNonce}. */
   nonce: string;
+  /**
+   * Where this document lives: the side-bar `view` or an editor `tab`. Written as
+   * `<meta name="open-vs-code-surface">` so the webview can drop the session picker in a tab
+   * (issue #77, E3) without a new protocol message.
+   */
+  surface: ChatSurface;
 }
+
+/** The two places a chat webview can live. */
+export type ChatSurface = 'view' | 'tab';
 
 /**
  * Creates a fresh CSP nonce: 16 random bytes, base64 (24 characters).
@@ -55,6 +64,11 @@ function escapeAttribute(value: string): string {
  * webview developer tools (no "Refused to ..." in the console).
  * `webviewHtml.test.ts` guards the shape of the output with fabricated input; it
  * does not prove that VS Code enforces the policy.
+ * The surface meta carries a closed two-value union, not free text, and the CSP string is untouched
+ * by it (the unit test compares the exact policy). VERIFIED by a full `test:visual` (Windows 11, VS
+ * Code 1.144.0, 30/10/2026, 0 FAIL): "ok   B7 the chat in a tab has no Sessions button and keeps
+ * New session (surface "tab", Sessions button false, New session true)" and "ok   B7 the chat in
+ * the side bar view keeps its Sessions button (surface "view", Sessions button true)".
  */
 export function buildWebviewHtml(options: WebviewHtmlOptions): string {
   const { cspSource, nonce } = options;
@@ -74,6 +88,7 @@ export function buildWebviewHtml(options: WebviewHtmlOptions): string {
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="${escapeAttribute(csp)}">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="open-vs-code-surface" content="${escapeAttribute(options.surface)}">
   <link rel="stylesheet" href="${escapeAttribute(options.styleUri)}">
 </head>
 <body>

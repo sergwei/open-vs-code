@@ -27,7 +27,12 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ModelRef, Part } from '../shared/model';
 import type { HostToWebview, WebviewToHost } from '../shared/protocol';
-import { ChatController } from './chatController';
+import {
+  ChatController,
+  type SessionListEvent,
+  type SessionListPage,
+  type SessionListSink,
+} from './chatController';
 import { createOpencodeClient } from './opencodeClient';
 import { startServer, stopServer, type RunningServer, type ServerLog } from './opencodeServer';
 import type { PendingSummary } from './pendingRequests';
@@ -71,6 +76,7 @@ async function boot(
   confirmDelete: (info: { title: string; running: boolean }) => Promise<boolean> = () =>
     Promise.resolve(true),
   extraEnv: Record<string, string> = {},
+  sessionList?: SessionListSink,
 ) {
   const folder = await mkdtemp(path.join(os.tmpdir(), 'ovsc-chat-'));
   folders.push(folder);
@@ -89,6 +95,7 @@ async function boot(
   let lastModel: ModelRef | undefined;
   const core = new ChatController({
     createClient: createOpencodeClient,
+    ...(sessionList === undefined ? {} : { sessionList }),
     editor: {
       open: () => Promise.resolve(),
       editorContext: () => Promise.resolve({ refs: [], ranged: 0, unsaved: false }),
@@ -1759,6 +1766,89 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
 // SSE loop. The server is the synthetic fixture (a second pane is the only new thing), so this
 // proves our routing against the client's own stream code, NOT that a real opencode interleaves
 // two sessions' events this way.
+// Issue #77, delivery E3 (`E9-sessions-sidebar`, phase 1): the Sessions tree's reads and the
+// pane-less rename/delete over HTTP, with the real client and the real reconnecting loop. The
+// server is the SYNTHETIC fixture (its cursor format is invented, its `parentID=null` and `limit`
+// copy the planner spike of 21/10/2026), so a pass proves our wiring, not the real server.
+describe('the Sessions tree over HTTP and SSE against the synthetic server', () => {
+  /** A booted controller with a recording sink and a second, independent client. */
+  async function bootTree(confirm?: Parameters<typeof boot>[1]) {
+    const resets: SessionListPage[] = [];
+    const appends: Array<{ ids: string[]; hasMore: boolean }> = [];
+    const events: SessionListEvent[] = [];
+    const sink: SessionListSink = {
+      reset: (page) => {
+        resets.push(page);
+      },
+      // The read cannot fail against the fixture; the failure path is a Vitest case of
+      // `chatController.test.ts` ("reports a failed read of the tree…").
+      failed: () => undefined,
+      append: (rows, hasMore) => {
+        appends.push({ ids: rows.map((row) => row.id), hasMore });
+      },
+      event: (message) => {
+        events.push(message);
+      },
+      connection: () => undefined,
+    };
+    const booted = await boot('ok', confirm, {}, sink);
+    if (booted.state.kind !== 'running') throw new Error('the server is not running');
+    return { ...booted, resets, appends, events, other: createOpencodeClient(booted.state.server) };
+  }
+
+  it('pages the tree through the cursor of the synthetic server', async () => {
+    const { core, state, resets, appends, other } = await bootTree();
+    for (let index = 0; index < 52; index++)
+      await other.session.create({ title: `s${String(index)}` });
+    const parent = await other.session.create({ title: 'parent' });
+    await other.session.create({ title: 'a child', parentID: parent.id });
+
+    core.onServerState(state);
+    await waitUntil(() => resets.length > 0, 'the first page of the tree');
+    const first = resets[0];
+    // 53 roots exist; the child is not one of them, and the page holds the 50 newest.
+    expect(first?.rows).toHaveLength(50);
+    expect(first?.hasMore).toBe(true);
+    expect(first?.rows.some((row) => row.title === 'a child')).toBe(false);
+    expect(first?.rows.every((row) => row.parentID === undefined)).toBe(true);
+
+    await core.loadMoreSessions();
+    expect(appends).toHaveLength(1);
+    expect(appends[0]?.ids).toHaveLength(3);
+    expect(appends[0]?.hasMore).toBe(false);
+    const all = [...(first?.rows.map((row) => row.id) ?? []), ...(appends[0]?.ids ?? [])];
+    expect(new Set(all).size).toBe(53);
+  }, 30_000);
+
+  it('follows another client over the stream, and renames and deletes without a pane', async () => {
+    const { controller, core, state, resets, events, other } = await bootTree();
+    core.onServerState(state);
+    await waitUntil(() => resets.length > 0, 'the first page of the tree');
+    core.detachPane(controller.pane.id); // no chat tab open: only the tree listens
+
+    const created = await other.session.create({ title: 'from the TUI' });
+    await waitUntil(
+      () => events.some((e) => e.type === 'session.upserted' && e.session.id === created.id),
+      'the session created by another client',
+    );
+
+    await core.renameSessionById(created.id, '  Renamed from the tree ');
+    await waitUntil(
+      () =>
+        events.some(
+          (e) =>
+            e.type === 'session.upserted' &&
+            e.session.id === created.id &&
+            e.session.title === 'Renamed from the tree',
+        ),
+      'the rename to reach the sink',
+    );
+
+    await expect(core.deleteSessionById(created.id)).resolves.toEqual({ deleted: true });
+    expect(events).toContainEqual({ type: 'session.removed', sessionID: created.id });
+  }, 30_000);
+});
+
 describe('two panes over HTTP and SSE against the synthetic server', () => {
   it('streams two prompts at once, each pane receiving only the content of its own session', async () => {
     const { controller, core, posted, state } = await boot('ok');

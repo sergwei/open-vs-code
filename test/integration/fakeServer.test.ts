@@ -37,14 +37,18 @@ import {
   ADD_TO_CHAT_COMMAND_ID,
   EXPLAIN_FILES_COMMAND_ID,
   EXPLAIN_SELECTION_COMMAND_ID,
+  DELETE_SESSION_COMMAND_ID,
   FIX_SELECTION_COMMAND_ID,
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
+  OPEN_SESSION_COMMAND_ID,
+  RENAME_SESSION_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
   RESTART_SERVER_COMMAND_ID,
   RESTORE_CHAT_TAB_TEST_COMMAND_ID,
   SESSION_DIFF_SCHEME,
   STOP_RESPONSE_COMMAND_ID,
+  TEST_SESSION_ANSWERS_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
 import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
@@ -1449,6 +1453,139 @@ describe('fake server', function () {
       assert.strictEqual(chatTabs().length, 1, 'the restore opened more than one tab');
       log.assertAbsent('chat tab restore skipped');
       log.assertAbsent('chat tab restore failed');
+    });
+  });
+
+  /**
+   * The native Sessions tree (issue #77, delivery E3) against the synthetic server: what the model
+   * lists (read from the stable log line `sessions view: N rows (more: …)`, the tree itself is not
+   * readable by the test API), and the commands behind its rows: open, repeat, rename, delete.
+   *
+   * Protects: the 5th read of the full resync and the session events reaching the model; the open
+   * rule (a session with a tab is revealed, never duplicated); Rename and Delete going through the
+   * controller cores; and P8 (the tab of a deleted session closes). The Rename box and the Delete
+   * modal are replaced by `TEST_SESSION_ANSWERS_COMMAND_ID`, so this does NOT show that the real box
+   * and modal work (`test:visual` step 29 does). "Another client" is the host's own prompt in a
+   * second session, not a second process: the test cannot reach the fixture's port and password.
+   * Provenance: SYNTHETIC server; row counts are the fixture's.
+   */
+  describe('the native Sessions tree', function () {
+    /** The rows of the newest `sessions view: N rows` line of `text`, or `undefined` when none. */
+    function lastRows(text: string): number | undefined {
+      const all = [...text.matchAll(/sessions view: (\d+) rows \(more: (true|false)\)/g)];
+      const last = all[all.length - 1]?.[1];
+      return last === undefined ? undefined : Number(last);
+    }
+
+    /** Starts a NEW session in the side bar, answers `text` to the end and returns its id. */
+    async function newAnsweredSession(text: string): Promise<string> {
+      await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
+      await sleep(SETTLE_MS);
+      const log = await openLogCursor();
+      await sendPrompt(log, text);
+      const id = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+      assert.ok(id, `no session id in the log:\n${log.added()}`);
+      await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+      return id;
+    }
+
+    /** Puts the host in `editor` mode with no tab open. */
+    async function toEditorWithoutTabs(log: LogCursor): Promise<void> {
+      await setChatLocation('editor', log);
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await waitForChatTabs(0);
+      await sleep(SETTLE_MS);
+    }
+
+    afterEach(async () => {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await setChatLocation(undefined, await openLogCursor());
+    });
+
+    it('lists the session another turn created, one more row', async function () {
+      const before = lastRows((await openLogFromStart()).added());
+      assert.ok(before !== undefined, 'the tree never logged a `sessions view` line');
+      const log = await openLogCursor();
+      await newAnsweredSession('Tree77 appears');
+      await log.waitFor(`sessions view: ${String(before + 1)} rows`, 10_000);
+    });
+
+    it('opens a session in a tab once, and reveals it the second time', async function () {
+      const sessionID = await newAnsweredSession('Tree77 open');
+      const log = await openLogCursor();
+      await toEditorWithoutTabs(log);
+      log.mark();
+      await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, sessionID);
+      await waitForChatTabs(1);
+      await log.waitFor('chat tab created (pane', 8_000);
+      await log.waitFor('webview ready', 8_000);
+      await sleep(SETTLE_MS);
+
+      log.mark();
+      await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, sessionID);
+      await log.waitFor('chat tab revealed (pane', 8_000);
+      await sleep(SETTLE_MS);
+      log.assertAbsent('chat tab created (pane');
+      assert.strictEqual(chatTabs().length, 1, 'opening the same session twice made two tabs');
+    });
+
+    it('renames a session and retitles its tab', async function () {
+      const sessionID = await newAnsweredSession('Tree77 rename');
+      const log = await openLogCursor();
+      await toEditorWithoutTabs(log);
+      await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, sessionID);
+      await waitForChatTabs(1);
+      await sleep(SETTLE_MS);
+
+      await vscode.commands.executeCommand(TEST_SESSION_ANSWERS_COMMAND_ID, {
+        title: 'Tree77 renamed',
+      });
+      await vscode.commands.executeCommand(RENAME_SESSION_COMMAND_ID, sessionID);
+      await log.waitFor(`session renamed ${sessionID}`, 8_000);
+      const deadline = Date.now() + 8_000;
+      while (!chatTabs().some((tab) => tab.label === 'Tree77 renamed')) {
+        assert.ok(
+          Date.now() < deadline,
+          `the tab was not retitled: ${JSON.stringify(chatTabs().map((t) => t.label))}`,
+        );
+        await sleep(100);
+      }
+    });
+
+    it('keeps the tab when the delete is declined, and closes it when it is confirmed', async function () {
+      const sessionID = await newAnsweredSession('Tree77 delete');
+      const log = await openLogCursor();
+      await toEditorWithoutTabs(log);
+      await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, sessionID);
+      await waitForChatTabs(1);
+      await sleep(SETTLE_MS);
+      // Read from the start of the log, not from the cursor opened after the session was created:
+      // the line this case compares against must exist, or the final wait would be skipped.
+      const rowsBefore = lastRows((await openLogFromStart()).added());
+      assert.ok(
+        rowsBefore !== undefined,
+        'the Sessions view logged no `sessions view: N rows` line',
+      );
+
+      log.mark();
+      await vscode.commands.executeCommand(TEST_SESSION_ANSWERS_COMMAND_ID, {
+        confirmDelete: false,
+      });
+      await vscode.commands.executeCommand(DELETE_SESSION_COMMAND_ID, sessionID);
+      await log.waitFor(`session delete cancelled ${sessionID}`, 8_000);
+      await sleep(SETTLE_MS);
+      log.assertAbsent('chat tab closed (pane');
+      log.assertAbsent(`session deleted ${sessionID}`);
+      assert.strictEqual(chatTabs().length, 1);
+
+      await vscode.commands.executeCommand(TEST_SESSION_ANSWERS_COMMAND_ID, {
+        confirmDelete: true,
+      });
+      await vscode.commands.executeCommand(DELETE_SESSION_COMMAND_ID, sessionID);
+      await log.waitFor(`session deleted ${sessionID}`, 8_000);
+      await log.waitFor('chat tab closed (pane', 8_000);
+      await waitForChatTabs(0);
+      await log.waitFor(`sessions view: ${String(rowsBefore - 1)} rows`, 8_000);
     });
   });
 

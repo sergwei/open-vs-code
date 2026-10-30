@@ -1,8 +1,14 @@
+import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { isWebviewToHost, type UiCommand } from '../shared/protocol';
+import { isWebviewToHost, type ConnectionState, type UiCommand } from '../shared/protocol';
 import { EMPTY_TITLE } from '../shared/sessionLabel';
 import { createAttention } from './attention';
-import { ChatController, type ComposeOutcome, type FocusTarget } from './chatController';
+import {
+  ChatController,
+  type AttentionSink,
+  type ComposeOutcome,
+  type FocusTarget,
+} from './chatController';
 import {
   planLocationSwitch,
   readChatLocation,
@@ -28,6 +34,7 @@ import {
   CONFIG_SECTION,
   DEFAULT_MODEL_KEY,
   DEFAULT_MODEL_SETTING,
+  DELETE_SESSION_COMMAND_ID,
   EXPLAIN_FILES_COMMAND_ID,
   EXPLAIN_SELECTION_COMMAND_ID,
   FIX_SELECTION_COMMAND_ID,
@@ -36,11 +43,16 @@ import {
   MANAGE_PERMISSIONS_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
   OPEN_CHAT_COMMAND_ID,
+  OPEN_SESSION_COMMAND_ID,
   OPEN_SETTINGS_COMMAND_ID,
+  RENAME_SESSION_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
   RESTORE_CHAT_TAB_TEST_COMMAND_ID,
+  SEARCH_SESSIONS_COMMAND_ID,
+  SHOW_MORE_SESSIONS_COMMAND_ID,
   SHOW_REQUEST_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
+  TEST_SESSION_ANSWERS_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from './ids';
 import { createOpencodeClient } from './opencodeClient';
@@ -50,8 +62,11 @@ import { pickSavedPermissionsToRevoke } from './savedPermissionsUi';
 import { restartServerWithFeedback } from './serverLifecycle';
 import type { ServerManager } from './serverManager';
 import { registerSessionDiffProvider } from './sessionDiffEditor';
-import { registerSessionsLauncher } from './sessionsLauncher';
-import { confirmRevertDiscard, confirmSessionDelete } from './sessionUi';
+import { showSessionsSearch } from './sessionsSearch';
+import { RevealOrder } from './revealOrder';
+import { registerSessionsView, type SessionsState } from './sessionsView';
+import { createSessionTree } from './sessionTree';
+import { askSessionTitle, confirmRevertDiscard, confirmSessionDelete } from './sessionUi';
 
 /**
  * `workspaceState` key of the sessions this extension opened last, one per served folder:
@@ -176,6 +191,25 @@ function parseReply(
   if (!isFilled(sessionID) || !isFilled(permissionID)) return undefined;
   if (decision !== 'once' && decision !== 'reject') return undefined;
   return { sessionID, permissionID, decision };
+}
+
+/**
+ * The session id a Sessions-tree command was run on: the row VS Code passes as the argument (an
+ * object with `kind: 'session'`) or a bare id string (the internal open command). `undefined` for
+ * anything else, so the caller falls back to the selection (F2, Delete) instead of trusting a shape
+ * anyone can send with `executeCommand`.
+ */
+function sessionIDOf(raw: unknown): string | undefined {
+  if (isFilled(raw)) return raw;
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { kind, sessionID } = raw as Record<string, unknown>;
+  return kind === 'session' && isFilled(sessionID) ? sessionID : undefined;
+}
+
+/** Shows a failure of a Sessions-tree action as a native warning, without awaiting its dismissal. */
+function warnSessionFailure(action: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  void vscode.window.showWarningMessage(`OpenCode could not ${action}: ${reason}`);
 }
 
 /**
@@ -304,7 +338,7 @@ function parseReply(
  *   the tabs (`detachAll`) instead of closing them. In `ExtensionMode.Test` the internal command
  *   `RESTORE_CHAT_TAB_TEST_COMMAND_ID` feeds a panel it creates through that same `restore`.
  * - `anySurfaceVisible` (not the view alone) drives the attention feature, and the badge goes to
- *   the view in `sidebar` and to the launcher view in `editor`. `chatFocused` is true while ANY
+ *   the view in `sidebar` and to the Sessions view in `editor`. `chatFocused` is true while ANY
  *   surface has the focus; a surface that hides gets a synthetic blur.
  * VERIFIED in a real VS Code 1.144.0 (Windows 11, `npm run test:integration`, 29/10/2026), with
  * a synthetic server for the session cases: "opens one tab per New Session, each with a ready
@@ -325,8 +359,32 @@ function parseReply(
  * Chat entries and Manage Saved Permissions in `editor` mode are run by the cases of
  * `test/integration/chatPanel.test.ts` (log only). UNVERIFIED: macOS and Linux locally (the CI
  * runs the integration suite there), the chips the Add entries give with a folder served (the
- * suite serves none, so the host refuses them), and the badge with the launcher not in front (it
- * was the view in front in C11).
+ * suite serves none, so the host refuses them), and the badge with the Sessions view not in front
+ * (it was the view in front in C11).
+ *
+ * E3 (issue #77, decisions Q1-Q10 and T1-T9 of Sergio, 29/10/2026): in `editor` mode the OpenCode
+ * view is the native Sessions tree (`sessionsView.ts`, model in `sessionTree.ts`). The controller
+ * reports the root sessions of the folder to it through `deps.sessionList` and the pending
+ * requests reach it through a wrapper of the attention sink; the set of sessions with a tab comes
+ * from `controller.sessionOf` over the tabs, never from the registry of titles. Commands: the
+ * internal open and show-more (not contributed, run by the rows), Rename and Delete (row menu, F2,
+ * Delete) and Search Sessions…. Opening a session reveals its tab with the focus; with no tab it
+ * adopts the active or most recent EMPTY tab, else opens a new one; nothing happens in `sidebar`
+ * mode. Delete reads the tab that shows the session BEFORE deleting and closes it afterwards (P8).
+ * Failures of these commands are native warnings. Under `ExtensionMode.Test` the command
+ * `TEST_SESSION_ANSWERS_COMMAND_ID` pre-answers the Rename box and the Delete modal, which the test
+ * API cannot operate. VERIFIED by a full `test:visual` (Windows 11, VS Code 1.144.0, 30/10/2026,
+ * 0 FAIL, with `RevealOrder`): "ok   B6 during the turn the row of N reads "Running · Tab · 11:15 AM"
+ * and then "Needs input · Running · Tab · 11:15 AM", and the badge of the Sessions view is "1"",
+ * "ok   V3 the context menu of a session row lists Rename Session… and then Delete Session", "ok
+ * B1 a second click on the row of B reveals its tab and adds none (4 -> 4 tabs)" and "ok   B2 Rename
+ * on the row asks "New title for the session"…". The post-ready focus of a tab is dropped when
+ * another chat surface was revealed after it was queued (`RevealOrder`, W3 of review 1): VERIFIED by
+ * `revealOrder.test.ts` only. UNVERIFIED end to end: in that run the late reveal came before the
+ * click on the second row, so no focus was dropped, and the B1 line passes with or without the fix.
+ * KNOWN LIMITATION (W2 of review 2): only reveals made by our code are tracked, so a manual click
+ * on a tab of the tab strip after a row click can be stolen by the late reveal. UNVERIFIED on
+ * macOS/Linux.
  *
  * The two internal commands (`SHOW_REQUEST_COMMAND_ID`, `REPLY_PERMISSION_COMMAND_ID`) are always
  * registered and not contributed: they are the targets of the links of an attention
@@ -354,13 +412,26 @@ export function registerChat(
     );
   let mode = readLocation();
   const tabs = new ChatTabs();
+  // Which chat surface was revealed last, so a post-ready focus can tell it was overtaken (W3).
+  const revealOrder = new RevealOrder();
+  /** Queues the `prompt.focus` of `paneId` and remembers when, for {@link RevealOrder}. */
+  const queuePromptFocus = (paneId: number): void => {
+    revealOrder.queueFocus(paneId);
+    controller.runUiCommand(paneId, 'prompt.focus');
+  };
   const lastEditor = trackLastTextEditor();
   // The side-bar pane exists only in `sidebar` mode (decision T3=1).
   let sidebarPane: ChatPane | undefined;
-  // Pending requests the badge must show; written to the view or to the launcher by `applyBadge`.
+  // Pending requests the badge must show; written to the view or to the Sessions view by `applyBadge`.
   let badgeCount = 0;
-  // `view`, `launcher`, `panels` and `controller` are assigned below; the attention feature and the
-  // callbacks only use them later, from events and from VS Code callbacks, never during this
+  // The model of the native Sessions tree (E3, issue #77) and the last connection state the
+  // controller reported, which picks the welcome of the tree when it has no rows.
+  const sessionTree = createSessionTree({ locale: vscode.env.language });
+  let connection: ConnectionState | undefined;
+  // Answers for the NEXT Rename box and Delete modal, set only by the Test-mode command below.
+  const testAnswers: { title?: string | null; confirmDelete?: boolean } = {};
+  // `view`, `sessionsView`, `panels` and `controller` are assigned below; the attention feature and
+  // the callbacks only use them later, from events and from VS Code callbacks, never during this
   // function.
   /**
    * True while the side-bar view (only if its pane exists) or any chat tab is on screen: what the
@@ -371,13 +442,14 @@ export function registerChat(
     (sidebarPane !== undefined && view.provider.visible) || panels.anyVisible();
   /**
    * Writes the pending-request count to the surface that carries the badge: the view in `sidebar`
-   * mode, the launcher view in `editor` mode, and 0 to the other so it never keeps a stale number.
-   * VERIFIED in a real window for the launcher in front: "C11 … a badge on the OpenCode icon ("1")"
-   * of `test:visual` step 27 (Windows 11, 29/10/2026).
+   * mode, the Sessions view in `editor` mode, and 0 to the other so it never keeps a stale number.
+   * VERIFIED for the view in front by a full `test:visual` (Windows 11, VS Code 1.144.0, 30/10/2026,
+   * 0 FAIL): "ok   C11 with every chat tab hidden a request raises a native notification (…) and the
+   * badge of the Sessions view shows on the OpenCode icon ("1")" (step 27).
    */
   const applyBadge = (): void => {
     view.provider.setBadge(mode === 'sidebar' ? badgeCount : 0);
-    launcher.setBadge(mode === 'editor' ? badgeCount : 0);
+    sessionsView.setBadge(mode === 'editor' ? badgeCount : 0);
   };
   const attention = createAttention({
     target: {
@@ -391,6 +463,14 @@ export function registerChat(
     },
     log,
   });
+  // What the controller is given instead of `attention`: the same updates, plus the pending
+  // summaries reaching the model of the tree, so a row says "Needs input" (decision Q6=1).
+  const attentionAndTree: AttentionSink = {
+    update: (requests) => {
+      attention.update(requests);
+      if (sessionTree.setPending(requests)) sessionsView.refresh();
+    },
+  };
   const controller = new ChatController({
     createClient: createOpencodeClient,
     log,
@@ -407,9 +487,37 @@ export function registerChat(
         await context.workspaceState.update(OPEN_SESSION_BY_FOLDER_KEY, map);
       },
     },
-    attention,
+    attention: attentionAndTree,
     savedPermissions: { pickToRevoke: pickSavedPermissionsToRevoke },
-    sessions: { confirmDelete: confirmSessionDelete, confirmRevertDiscard },
+    sessions: {
+      confirmDelete: (info) => {
+        const answer = testAnswers.confirmDelete;
+        if (answer === undefined) return confirmSessionDelete(info);
+        delete testAnswers.confirmDelete;
+        return Promise.resolve(answer);
+      },
+      confirmRevertDiscard,
+    },
+    sessionList: {
+      reset: (page) => {
+        if (sessionTree.reset(page)) sessionsView.refresh();
+      },
+      failed: () => {
+        if (sessionTree.fail()) sessionsView.refresh();
+      },
+      append: (rows, hasMore) => {
+        if (sessionTree.append(rows, hasMore)) sessionsView.refresh();
+      },
+      event: (message) => {
+        if (sessionTree.event(message)) sessionsView.refresh();
+      },
+      connection: (next) => {
+        connection = next;
+        sessionTree.setOnline(next.state === 'connected');
+        // Always repaint: the context key (welcome) may change even when the rows do not.
+        sessionsView.refresh();
+      },
+    },
     preferences: {
       defaultModel: () =>
         vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>(DEFAULT_MODEL_KEY),
@@ -430,7 +538,16 @@ export function registerChat(
     ui: {
       setChatFocused,
       focusView: (paneId) => {
-        revealSurface(paneId, false);
+        // W3 of review 1: this runs after the document of `paneId` is ready, long after the click
+        // that asked for it. If the user revealed another chat surface meanwhile, pulling this one
+        // in front would undo that choice, so the reveal is dropped.
+        if (!revealOrder.focusStillWanted(paneId)) {
+          log.debug(
+            `post-ready focus of pane ${String(paneId)} dropped: another surface was revealed`,
+          );
+          return;
+        }
+        revealSurface(paneId, false, true);
       },
       revealPane: (paneId) => {
         revealSurface(paneId, false);
@@ -471,7 +588,10 @@ export function registerChat(
    * Brings the surface of `paneId` forward: the tab in its own column, or the view with the
    * keyboard in it. `preserveFocus` only applies to a tab.
    */
-  const revealSurface = (paneId: number, preserveFocus: boolean): void => {
+  const revealSurface = (paneId: number, preserveFocus: boolean, late = false): void => {
+    // The reveal the post-ready focus makes is not "someone chose this tab": it must not overtake
+    // the focus requests of the other tabs still loading (see `RevealOrder`).
+    if (!late) revealOrder.noteReveal(paneId);
     if (tabs.has(paneId)) panels.reveal(paneId, preserveFocus);
     else void vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
   };
@@ -482,8 +602,9 @@ export function registerChat(
    */
   const openTab = (sessionID: string | undefined, focus: boolean): number => {
     const paneId = panels.open(focus);
+    revealOrder.noteReveal(paneId);
     if (sessionID !== undefined) void controller.openInPane(paneId, sessionID);
-    if (focus) controller.runUiCommand(paneId, 'prompt.focus');
+    if (focus) queuePromptFocus(paneId);
     return paneId;
   };
   /**
@@ -581,15 +702,51 @@ export function registerChat(
       void controller.handle(paneId, { type: 'chat.focusChanged', focused: false });
     }
   };
+  /**
+   * Tells the Sessions tree which sessions have a tab (the controller's own state, see
+   * `paneShowing`) and moves its selection to the session of the active tab, or the most recent
+   * one (decision T8=1). Does nothing in `sidebar` mode, where the tree is not shown.
+   */
+  const syncSessionsTree = (): void => {
+    if (mode !== 'editor') return;
+    const shown = tabs.recent().flatMap((paneId) => {
+      const sessionID = controller.sessionOf(paneId);
+      return sessionID === undefined ? [] : [sessionID];
+    });
+    if (sessionTree.setTabs(shown)) sessionsView.refresh();
+    const target = tabs.commandTarget();
+    sessionsView.reveal(target === undefined ? undefined : controller.sessionOf(target));
+  };
   /** A surface appeared, hid, was activated or closed: refresh what depends on "any surface visible". */
   const onSurfaceChange = (): void => {
     attention.onVisibility(anySurfaceVisible());
     blurHiddenSurfaces();
+    syncSessionsTree();
   };
-  const launcher = registerSessionsLauncher();
+  /** Which welcome the tree shows when it has no rows: no folder, no server, or an empty list. */
+  const sessionsState = (): SessionsState => {
+    if (connection?.state === 'unavailable' && connection.reason === 'no-workspace') {
+      return 'noFolder';
+    }
+    return sessionTree.load() === 'offline' ? 'offline' : 'ready';
+  };
+  const sessionsView = registerSessionsView({
+    tree: sessionTree,
+    log,
+    locale: vscode.env.language,
+    state: sessionsState,
+    folderName: () => {
+      const state = manager.state;
+      if ((vscode.workspace.workspaceFolders?.length ?? 0) < 2 || state.kind !== 'running') {
+        return undefined;
+      }
+      return path.basename(state.server.folder);
+    },
+  });
   const panels = new ChatPanels(context.extensionUri, channel, log, tabs, {
     attachPane: (surface) => controller.attachPane(surface),
     detachPane: (paneId) => {
+      revealOrder.forget(paneId);
       controller.detachPane(paneId);
     },
     onReady: (paneId) => {
@@ -610,6 +767,9 @@ export function registerChat(
       });
     },
     onSurfaceChange,
+    onTabSessionChanged: () => {
+      syncSessionsTree();
+    },
     restoreSession: (paneId, sessionID) => {
       controller.restorePane(paneId, sessionID);
     },
@@ -661,6 +821,7 @@ export function registerChat(
   };
   /** Shows the chat of `paneId` without moving the keyboard into it. */
   const revealChat = async (paneId: number): Promise<void> => {
+    revealOrder.noteReveal(paneId);
     if (tabs.has(paneId)) {
       panels.reveal(paneId, false);
       return;
@@ -703,13 +864,44 @@ export function registerChat(
       if (command !== 'session.stop') openTab(rememberedSession(), true);
       return;
     }
+    revealOrder.noteReveal(paneId);
     panels.reveal(paneId, false);
     controller.runUiCommand(paneId, command);
   };
 
+  /**
+   * Opens a session from the Sessions tree (decision Q3=1/1), an `editor`-mode action: a tab that
+   * already shows it is revealed WITH the focus; else the active or most recent tab is adopted when
+   * it is EMPTY; else a new tab opens in the chat group with the focus in its prompt. Nothing in
+   * `sidebar` mode, where the tree is hidden. Never leaves two tabs on one session, because the
+   * first question is the controller's own state (`paneShowing`).
+   */
+  const openSession = (sessionID: string): void => {
+    if (mode !== 'editor') return;
+    const shown = paneShowing(sessionID);
+    if (shown !== undefined) {
+      revealSurface(shown, false);
+      queuePromptFocus(shown);
+      return;
+    }
+    const candidate = tabs.commandTarget();
+    if (candidate !== undefined && controller.sessionOf(candidate) === undefined) {
+      void controller.openInPane(candidate, sessionID).catch((error: unknown) => {
+        log.error(`opening a session in an empty tab failed: ${String(error)}`);
+      });
+      revealSurface(candidate, false);
+      queuePromptFocus(candidate);
+      return;
+    }
+    openTab(sessionID, true);
+  };
+  /** The session a command acts on: its argument (a row), else the row selected in the tree. */
+  const targetSession = (raw: unknown): string | undefined =>
+    sessionIDOf(raw) ?? sessionsView.selectedSessions()[0]?.sessionID;
+
   const disposables: vscode.Disposable[] = [
     view.disposable,
-    launcher.disposable,
+    sessionsView.disposable,
     // Not `dispose`: the tabs stay open so the workbench can save them for the next start.
     { dispose: () => panels.detachAll() },
     // Registered in BOTH modes: VS Code only persists a chat tab if a serializer exists for its
@@ -723,6 +915,62 @@ export function registerChat(
     { dispose: () => lastEditor.dispose() },
     manager.onDidChangeState((state) => {
       controller.onServerState(state);
+      // The served folder (multi-root description of the Sessions view) follows the server state.
+      sessionsView.refresh();
+    }),
+    // E3 (issue #77): the actions of the native Sessions tree. Failures are native warnings.
+    vscode.commands.registerCommand(OPEN_SESSION_COMMAND_ID, (raw: unknown) => {
+      const sessionID = sessionIDOf(raw);
+      if (sessionID === undefined) {
+        log.warn(`${OPEN_SESSION_COMMAND_ID} rejected: invalid arguments`);
+        return;
+      }
+      openSession(sessionID);
+    }),
+    vscode.commands.registerCommand(RENAME_SESSION_COMMAND_ID, async (raw: unknown) => {
+      const sessionID = targetSession(raw);
+      if (sessionID === undefined) return;
+      const current = sessionTree.rowOf(sessionID)?.title ?? '';
+      let title: string | undefined;
+      if (testAnswers.title === undefined) {
+        title = await askSessionTitle(current);
+      } else {
+        title = testAnswers.title ?? undefined;
+        delete testAnswers.title;
+      }
+      if (title === undefined) return;
+      try {
+        await controller.renameSessionById(sessionID, title);
+      } catch (error) {
+        warnSessionFailure('rename the session', error);
+      }
+    }),
+    vscode.commands.registerCommand(DELETE_SESSION_COMMAND_ID, async (raw: unknown) => {
+      const sessionID = targetSession(raw);
+      if (sessionID === undefined) return;
+      // P8: read the tab BEFORE deleting, because the removal makes every pane forget the session.
+      const shown = paneShowing(sessionID);
+      try {
+        const { deleted } = await controller.deleteSessionById(sessionID);
+        if (deleted && shown !== undefined && tabs.has(shown)) panels.close(shown);
+      } catch (error) {
+        warnSessionFailure('delete the session', error);
+      }
+    }),
+    vscode.commands.registerCommand(SHOW_MORE_SESSIONS_COMMAND_ID, async () => {
+      try {
+        await controller.loadMoreSessions();
+      } catch (error) {
+        warnSessionFailure('load more sessions', error);
+      }
+    }),
+    vscode.commands.registerCommand(SEARCH_SESSIONS_COMMAND_ID, async () => {
+      if (mode !== 'editor') return;
+      await showSessionsSearch({
+        search: (text) => controller.searchSessions(text),
+        open: openSession,
+        locale: vscode.env.language,
+      });
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration(DEFAULT_MODEL_SETTING)) controller.onPreferencesChanged();
@@ -870,6 +1118,13 @@ export function registerChat(
 
   if (context.extensionMode === vscode.ExtensionMode.Test) {
     disposables.push(
+      vscode.commands.registerCommand(TEST_SESSION_ANSWERS_COMMAND_ID, (raw: unknown) => {
+        // Answers for the NEXT Rename box (`title`, `null` cancels) and Delete modal.
+        const args =
+          typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+        if (typeof args.title === 'string' || args.title === null) testAnswers.title = args.title;
+        if (typeof args.confirmDelete === 'boolean') testAnswers.confirmDelete = args.confirmDelete;
+      }),
       vscode.commands.registerCommand(RESTORE_CHAT_TAB_TEST_COMMAND_ID, (raw: unknown) => {
         // The persisted state and title of a tab "revived by VS Code"; a panel we create stands in
         // for the revived one and goes through the SAME `restore` as the serializer.
