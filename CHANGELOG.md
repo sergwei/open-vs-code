@@ -9,6 +9,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Requests per chat tab: with `chatLocation: editor`, a permission or question shows only in the
+  tab of its session or of an ancestor of the subagent that asked (the side bar chat still shows
+  all of them). The native notification is titled `OpenCode · <session title>: …` and appears when
+  no chat tab that shows the request is the active editor; **Open chat** reveals that tab, or the
+  tab of the root session for a subagent with none, and focuses the card. **Needs input** marks the
+  root row of the Sessions tree for a request at any depth of its subagents. A new request card no
+  longer takes the focus when its chat does not have it (a tab side by side with the one you are
+  in), so the notification stays and your focus is not moved. With the side bar chat visible, a
+  new request shows its card and the badge, but neither moves the focus nor raises a
+  notification (issue #77).
 - Native **Sessions** tree in `editor` mode: the OpenCode view lists the root sessions of the
   folder, grouped by Today, Yesterday, Previous 7 days and Older. Each row shows its state with an
   icon (Running, Needs input, Failed) and, when the side bar is wide enough, in words (also Fork
