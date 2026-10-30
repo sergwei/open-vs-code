@@ -109,6 +109,49 @@ describe('routeOf', () => {
       expect(routeOf(message)).toBe('all');
     }
   });
+
+  it('routes a new request to the panes that display it, and its resolution to all', () => {
+    // Issue #77 E4: a tab must not get the cards of another chat, but the `*.resolved` of a card
+    // it may already hold has to reach it whatever the lineage says.
+    expect(
+      routeOf({
+        type: 'permission.asked',
+        permission: { id: 'p', sessionID: 's', action: 'read', resources: [], save: [] },
+      }),
+    ).toBe('request');
+    expect(
+      routeOf({
+        type: 'form.asked',
+        form: { id: 'f', sessionID: 's', title: 'Q', kind: 'question', fields: [] },
+      }),
+    ).toBe('request');
+    expect(
+      routeOf({
+        type: 'permission.resolved',
+        sessionID: 's',
+        permissionID: 'p',
+        decision: 'once',
+      }),
+    ).toBe('all');
+    expect(
+      routeOf({ type: 'form.resolved', sessionID: 's', formID: 'f', outcome: 'answered' }),
+    ).toBe('all');
+  });
+});
+
+describe('ownRequestsOnly', () => {
+  it('is false unless the surface says so (the side-bar view and every old test keep all)', () => {
+    const log = {
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+    };
+    const plain = new ChatPane(1, { post: () => undefined }, log, noHolders);
+    const tab = new ChatPane(2, { post: () => undefined, ownRequestsOnly: true }, log, noHolders);
+    expect(plain.ownRequestsOnly).toBe(false);
+    expect(tab.ownRequestsOnly).toBe(true);
+  });
 });
 
 describe('post', () => {

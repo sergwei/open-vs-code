@@ -240,8 +240,12 @@ export type UiCommand = 'prompt.focus' | 'session.new' | 'session.stop';
  * `request.result` without `error` means success. The `error` of `request.result` and of `notice`
  * is an `ErrorInfo`: the host must strip the server URL and port from `message`/`detail` before
  * sending it (architecture rule 1); nothing in this module does it.
- * `permission.*` and `form.*` are forwarded for EVERY session of the location, not only the open
- * one, and `ui.focus` asks the webview to bring a pending request into view (phase 3).
+ * `permission.asked` and `form.asked` are forwarded for the sessions the surface displays, which
+ * is not only the open one (a subagent asks from its own child session): a chat TAB gets those of
+ * its session and its subagent lineage, the side-bar view every one of the location (issue #77 E4;
+ * the host decides, `ChatController.displays`, the webview does not filter). `permission.resolved`
+ * and `form.resolved` go to every surface. `ui.focus` asks the webview to bring a pending request
+ * into view (phase 3).
  * `permission.resolved` and `form.resolved` carry the host's `resolution` record when the host
  * knew the request (it is absent for one it never saw asked, e.g. answered by another client
  * before the first snapshot); the webview files it in the history when the session is the open one.

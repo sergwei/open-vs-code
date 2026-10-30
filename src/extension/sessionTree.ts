@@ -9,7 +9,10 @@
 // a tab; whether the server is reachable (`offline | loading | ready`); and whether the server may
 // have more pages. Sub-agent sessions never become rows (decision Q6=1), but a child announced by
 // an event leaves its `parentID` behind, so a request of that child marks its ROOT as "Needs
-// input" (the full lineage rule is E4, issue #1261).
+// input" (one level here). Since issue #77 E4 the host hands this model the ROOT of each pending
+// request (`ChatController.rootOf`, which walks the whole lineage), so a request of any depth
+// marks its root and the one-level `parentOf` below is only the fallback for a chain the host has
+// not completed yet.
 //
 // Why `reset` only prunes inside the page window (opencode-api §4, "el snapshot es una foto"): a
 // full resync reads the 50 newest roots, but the user may have loaded older ones with "Show more".

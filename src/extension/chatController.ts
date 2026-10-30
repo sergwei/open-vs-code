@@ -132,6 +132,7 @@ import { createRequestResolutions } from './requestResolutions';
 import type { RunningServerInfo, ServerState } from './serverManager';
 import { createSessionBrowser, type SessionPage } from './sessionBrowser';
 import { codedError, createSessionDiffs, type DiffTarget } from './sessionDiff';
+import { createSessionLineage, MAX_LINEAGE_DEPTH } from './sessionLineage';
 import { createSessionReverts } from './sessionRevert';
 import {
   lastCompactionAt,
@@ -193,7 +194,11 @@ export interface SavedPermission {
 /**
  * The attention feature as the controller sees it (issue #19, implemented in `attention.ts`):
  * told the whole set of pending requests every time it changes, and with `[]` when the server
- * goes away. It decides by itself whether the view is visible.
+ * goes away. It decides by itself which requests a visible surface shows, asking
+ * {@link ChatController.displays} (issue #77 E4). The controller calls `update` again, with the
+ * same set, whenever the lineage learns something that can change who shows a pending request
+ * (a `session.get` of {@link ChatController.resolveLineage}, or a snapshot with new rows), so
+ * the answer of `displays` is re-read; `update` must therefore be idempotent.
  */
 export interface AttentionSink {
   update(requests: readonly PendingSummary[]): void;
@@ -691,6 +696,17 @@ export class ChatController {
   private readonly offeredUris = new Set<string>();
   private readonly pending = createPendingRequests();
   /**
+   * Who is whose ancestor among the sessions seen (issue #77 E4): decides which chat tab shows a
+   * request ({@link displays}) and under which root the Sessions tree marks "Needs input"
+   * ({@link rootOf}). Fed by every `session.upserted`, every snapshot and the reads of
+   * {@link resolveLineage}; emptied when the folder changes.
+   */
+  private readonly lineage = createSessionLineage();
+  /** Sessions with a {@link resolveLineage} in flight, so one request does not start two walks. */
+  private readonly lineageReads = new Set<string>();
+  /** Bumped when the server goes away: a walk started under an older value publishes nothing. */
+  private lineageEpoch = 0;
+  /**
    * What the user answered, kept for the history (E3-resolved-history). Created ONCE for the life of
    * the controller and never emptied by `stopStream`/`onServerState`: that is what makes the lines
    * survive Restart Server (the controller is not recreated, only the client).
@@ -917,6 +933,143 @@ export class ChatController {
     return [...this.panes.values()].filter((pane) => pane.sessionID === sessionID);
   }
 
+  /**
+   * True when pane `paneId` puts a request of `sessionID` in its dock: ALWAYS for a surface that
+   * shows every request of the location (the side-bar view, decision Q3=1), and for a tab
+   * ({@link PaneSurface.ownRequestsOnly}) only when the session it shows is `sessionID` itself or
+   * one of its ancestors, i.e. the request comes from the tab's session or from its subagent
+   * lineage. A tab with no session shows none. An unknown pane id is `false`.
+   *
+   * This is the ONE rule behind both halves of issue #77 E4 (decision T1=1): the host uses it to
+   * route a new `permission.asked` / `form.asked` and to filter the snapshot, and the attention
+   * feature uses it (with the visibility of the surface) to decide whether someone is looking at
+   * the card; two implementations could disagree and leave a request with neither dock nor toast.
+   * It says nothing about the surface being on screen: that is the VS Code side's to know, so
+   * `seenBySurface` in `chatLifecycle.ts` combines `displays` with `WebviewPanel.active` (tabs,
+   * decision Q1=2) or visibility (side-bar view). A request whose chain is not complete yet (unknown parent) is not displayed
+   * by any tab until {@link resolveLineage} completes it (decision T2=1).
+   * VERIFIED by `chatController.panes.test.ts` "routes a request only to the tabs that show its
+   * session or a descendant" and the cases around it (fabricated panes and events, 30/10/2026).
+   */
+  displays(paneId: number, sessionID: string): boolean {
+    const pane = this.panes.get(paneId);
+    return pane !== undefined && this.paneDisplays(pane, sessionID);
+  }
+
+  /** The rule of {@link displays} for a pane we already hold. */
+  private paneDisplays(pane: ChatPane, sessionID: string): boolean {
+    if (!pane.ownRequestsOnly) return true;
+    const shown = pane.sessionID;
+    return shown !== undefined && this.lineage.chain(sessionID).includes(shown);
+  }
+
+  /** The panes whose dock shows a request of `sessionID`. */
+  private displayingPanes(sessionID: string): ChatPane[] {
+    return [...this.panes.values()].filter((pane) => this.paneDisplays(pane, sessionID));
+  }
+
+  /**
+   * The root of `sessionID`'s tree, or `undefined` while the chain up to a known root is not
+   * complete. The Sessions tree lists roots only, so "Needs input" of a subagent's request is
+   * marked on this row (decision E3 Q6=1 left the full lineage for E4). Asking never reads the
+   * server.
+   */
+  rootOf(sessionID: string): string | undefined {
+    return this.lineage.rootOf(sessionID);
+  }
+
+  /**
+   * The text that names the chat a request belongs to in the toast title (decision Q2=1): the
+   * title of the ROOT of its tree (the session a tab shows, even when a subagent is the one that
+   * asks), else the session's own, else `''`, which the notification reads as "Untitled session".
+   * Asking never reads the server. Server text: the caller sanitises it (`notificationTitle`).
+   */
+  labelOf(sessionID: string): string {
+    const root = this.lineage.rootOf(sessionID) ?? sessionID;
+    return this.lineage.titleOf(root) ?? this.lineage.titleOf(sessionID) ?? '';
+  }
+
+  /** The asks of `asks` that `pane` shows; all of them for a surface that shows everything. */
+  private requestsOf(pane: ChatPane, asks: PendingAsks): PendingAsks {
+    if (!pane.ownRequestsOnly) return asks;
+    return {
+      permissions: asks.permissions.filter((ask) => this.paneDisplays(pane, ask.sessionID)),
+      forms: asks.forms.filter((ask) => this.paneDisplays(pane, ask.sessionID)),
+    };
+  }
+
+  /**
+   * Starts the completion of `sessionID`'s chain when it is incomplete AND somebody needs it: a
+   * tab that filters by lineage exists, or the Sessions tree wants roots. Without either the
+   * side-bar view shows every request and no extra `session.get` is worth making. In production
+   * `registerChat` always passes `deps.sessionList`, so the reads happen there too (the tree needs
+   * the root); only a host built without the tree, as in some unit tests, skips them.
+   */
+  private ensureLineage(sessionID: string): void {
+    const needed =
+      this.deps.sessionList !== undefined ||
+      [...this.panes.values()].some((pane) => pane.ownRequestsOnly);
+    if (needed && this.lineage.unresolved(sessionID) !== undefined) {
+      void this.resolveLineage(sessionID);
+    }
+  }
+
+  /**
+   * Completes the chain of `sessionID` with `session.get`, one ancestor at a time (decision T2=1,
+   * the "full lineage" that E3 Q6 left for E4), at most {@link MAX_LINEAGE_DEPTH} reads. Never
+   * rejects: a failing read is a `debug` line and the chain stays incomplete (the request then
+   * shows in no tab and is notified, which is the safe side). A walk for the same session runs at
+   * most once at a time, also across a server restart: the `finally` of a stale walk leaves the
+   * entry of the newer one alone.
+   *
+   * While the request is still pending: the tabs that NOW display it but did not before get a
+   * snapshot of their own (the ask was routed while the chain was incomplete, so it never reached
+   * them) and the attention feature is told again, because the answer of {@link displays} may have
+   * changed. This happens even when this walk learned nothing itself, because another path (a
+   * `session.upserted` of the missing parent, a resync) may have completed the chain during the
+   * `await`. A walk whose `session.get` resolves after the server changed (`lineageEpoch`), the
+   * client changed or the host was disposed publishes nothing. HYPOTHESIS, read in the code and not
+   * run: a walk whose `session.get` rejects skips that check and goes on to the resync and
+   * `attention.update` below, which repeat the current state (idempotent). No test covers a stale
+   * walk whose read rejects.
+   * VERIFIED by `chatController.panes.test.ts` (fabricated client and stream, 30/10/2026): "completes
+   * an unknown parent with session.get, then gives the tab a snapshot and tells attention again",
+   * "does not reject when session.get fails, and gives no tab the request", "ignores a lineage walk
+   * that a server restart made stale", "runs one lineage walk per session at a time, also across a
+   * restart" and "resyncs a tab that gained the request through another path during the walk".
+   * UNVERIFIED: the `disposed` flag alone (`dispose` also bumps the epoch, so no case isolates it)
+   * and a real subagent that asks for permission (the fake server has none).
+   */
+  private async resolveLineage(sessionID: string): Promise<void> {
+    const client = this.client;
+    if (client === undefined || this.lineageReads.has(sessionID)) return;
+    this.lineageReads.add(sessionID);
+    const epoch = this.lineageEpoch;
+    const before = new Set(this.displayingPanes(sessionID).map((pane) => pane.id));
+    try {
+      for (let step = 0; step < MAX_LINEAGE_DEPTH; step += 1) {
+        const missing = this.lineage.unresolved(sessionID);
+        if (missing === undefined) break;
+        let found: SessionSummary;
+        try {
+          found = toSessionSummary(await client.session.get({ sessionID: missing }));
+        } catch (error) {
+          this.log.debug(`could not read an ancestor session row: ${String(error)}`);
+          break;
+        }
+        if (this.disposed || epoch !== this.lineageEpoch || client !== this.client) return;
+        this.lineage.learn([found]);
+      }
+    } finally {
+      // A restart cleared `lineageReads` and a newer walk may own the entry now: leave it.
+      if (epoch === this.lineageEpoch) this.lineageReads.delete(sessionID);
+    }
+    if (!this.pending.hasSession(sessionID)) return;
+    const gained = this.displayingPanes(sessionID).filter((pane) => !before.has(pane.id));
+    if (gained.length > 0) void this.resync(gained);
+    this.deps.attention.update(this.pending.list());
+  }
+
   /** Posts to every pane: what belongs to the location. */
   private broadcast(message: HostToWebview): void {
     for (const pane of this.panes.values()) pane.post(message);
@@ -924,14 +1077,29 @@ export class ChatController {
 
   /**
    * Routes a message produced by the host without a requester (`routeOf`): session content to the
-   * panes showing that session, location news to all. An `origin` message has no pane to answer
-   * here, so it is dropped with a debug line; nothing the translator makes is one.
+   * panes showing that session, location news to all, a NEW request (`request`, issue #77 E4) to
+   * the panes whose dock displays it ({@link displays}; every pane when none filters, so a host
+   * with only the side-bar view behaves as before). A request whose chain is incomplete also
+   * starts {@link resolveLineage}. An `origin` message has no pane to answer here, so it is
+   * dropped with a debug line; nothing the translator makes is one.
    */
   private route(message: HostToWebview): void {
     switch (routeOf(message)) {
       case 'all':
         this.broadcast(message);
         return;
+      case 'request': {
+        const sessionID =
+          message.type === 'permission.asked'
+            ? message.permission.sessionID
+            : message.type === 'form.asked'
+              ? message.form.sessionID
+              : undefined;
+        if (sessionID === undefined) return;
+        for (const pane of this.displayingPanes(sessionID)) pane.post(message);
+        this.ensureLineage(sessionID);
+        return;
+      }
       case 'session':
         if ('sessionID' in message) {
           for (const pane of this.panesOf(message.sessionID)) pane.post(message);
@@ -968,7 +1136,9 @@ export class ChatController {
    * empty (a session lives in its location), restored sessions included. A server for the SAME
    * folder (a restart) leaves every pane on its own session, because that memory is
    * last-writer-wins across panes. At start in `editor` mode with no tab to restore there are no
-   * panes yet, so nothing is given and Open Chat opens the remembered session itself. VERIFIED by
+   * panes yet, so nothing is given and Open Chat opens the remembered session itself. A server
+   * for a NEW folder also empties the session lineage (issue #77 E4: ids belong to a location).
+   * VERIFIED by
    * `chatController.panes.test.ts` "gives the remembered session to the primary pane, not the
    * oldest" and the first-server cases next to it (fake surfaces, 29/10/2026). HYPOTHESIS for a
    * real window with several tabs open at a change of folder (risk R6 of the plan): the tabs keep
@@ -1029,6 +1199,7 @@ export class ChatController {
             this.restored.delete(pane.id);
             this.lostSession.delete(pane.id);
           }
+          this.lineage.clear(); // session ids belong to a location
         }
         this.translator = createEventTranslator(this.secrets);
         this.treeMirrored = false; // the new translator mirrors nothing of the tree yet
@@ -1080,7 +1251,8 @@ export class ChatController {
    * stays, like `pickedUris`, so a chip pending in the webview survives Restart Server.
    * The "Changed files" list and its originals go too (issue #31): the paths belong to the old
    * server, and a load in flight is cut off; the next snapshot brings the list back.
-   * The Sessions tree's cursors and in-flight pages and searches go as well (issue #77, E3).
+   * The Sessions tree's cursors and in-flight pages and searches go as well (issue #77, E3), and
+   * so do the lineage walks in flight (E4); the lineage rows already learned stay.
    */
   private stopStream(): void {
     this.streamAbort?.abort();
@@ -1110,6 +1282,10 @@ export class ChatController {
     this.cancelCommandRetry();
     this.clearPending();
     this.resolutions.forgetAsks();
+    // A lineage walk in flight asked the old server; the rows already learned stay (ids survive a
+    // restart of the same folder, and a new folder clears them in `onServerState`).
+    this.lineageEpoch++;
+    this.lineageReads.clear();
   }
 
   /** Empties the registry of pending requests and tells the attention feature, if it held any. */
@@ -1340,12 +1516,18 @@ export class ChatController {
    * `.status` also go to `deps.sessionList` (issue #77, E3), with or without panes: `route` only
    * reaches panes, and the tree must stay current while every chat tab is closed. VERIFIED by
    * `chatController.test.ts` "forwards the session events to the sink with no pane open".
+   * Issue #77, E4: every `session.upserted` feeds the lineage before it is routed and every
+   * `session.removed` takes the id out of it afterwards, so a request that follows its session's
+   * row finds the chain.
    */
   private publish(messages: readonly HostToWebview[]): void {
     let changed = false;
     const sink = this.deps.sessionList;
     for (const message of messages) {
       if (this.trackRequest(message)) changed = true;
+      // Before the route: a `permission.asked` that follows its session's row in the same batch
+      // must already find the chain (issue #77 E4).
+      if (message.type === 'session.upserted') this.lineage.learn([message.session]);
       this.route(this.withResolution(message));
       // The tree follows the session events even with no pane open (`route` reaches only panes).
       if (
@@ -1358,7 +1540,10 @@ export class ChatController {
       }
       // After the post: the webview empties its view on `session.removed`, and the notice that may
       // follow explains why.
-      if (message.type === 'session.removed') this.onSessionRemoved(message.sessionID);
+      if (message.type === 'session.removed') {
+        this.onSessionRemoved(message.sessionID);
+        this.lineage.forget(message.sessionID);
+      }
     }
     if (changed) this.deps.attention.update(this.pending.list());
   }
@@ -1667,6 +1852,11 @@ export class ChatController {
    * stale tree stamp" (fake client with synthetic errors, Windows 11, 30/10/2026). HYPOTHESIS,
    * read in the code and not run by any test: the "not disposed" and "client unchanged" conditions
    * of the gate. A Transport failure is left to the connection state.
+   * Issue #77, E4: the session rows read (the list and each pane's lineage rows) are learned by the
+   * lineage before the registry of requests is replaced; when that taught it something and
+   * requests are pending the attention feature is told again, and a pending request whose chain is
+   * still incomplete starts {@link resolveLineage}. Each pane's snapshot carries only the requests
+   * it shows ({@link publishSnapshot}).
    */
   async resync(only?: readonly ChatPane[]): Promise<void> {
     const client = this.client;
@@ -1738,6 +1928,10 @@ export class ChatController {
           ),
         ),
       );
+      // Issue #77 E4: the lineage learns from every row read, BEFORE the registry of requests is
+      // replaced, so the attention feature and the per-pane filters see the chains of this read.
+      let learned = this.lineage.learn(list.data.map(toSessionSummary));
+      for (const read of reads) if (this.lineage.learn(read.sessions)) learned = true;
       /** The tree's half: the page, or the failure of its read, unless a newer full resync owns it. */
       const publishTreeHalf = (): void => {
         if (sink === undefined || treeQuery === undefined) return;
@@ -1751,9 +1945,13 @@ export class ChatController {
       }
       const current = stillCurrent();
       const requests = this.completeWithLive(restRequests);
-      if (this.pending.replaceAll(requests.permissions, requests.forms)) {
+      const pendingChanged = this.pending.replaceAll(requests.permissions, requests.forms);
+      // A snapshot that taught the lineage something can change who shows a request that was
+      // already pending, so the attention feature reads `displays` again (it must be idempotent).
+      if (pendingChanged || (learned && this.pending.list().length > 0)) {
         this.deps.attention.update(this.pending.list());
       }
+      for (const request of this.pending.list()) this.ensureLineage(request.sessionID);
       // So a request first seen here (asked before this host connected) can still be resolved
       // into a record when its `*.resolved` arrives.
       this.resolutions.rememberAsks(requests.permissions, requests.forms);
@@ -1825,6 +2023,7 @@ export class ChatController {
     const statuses = { ...this.translator.mergeStatuses(rest, token) };
     for (const id of this.live.removed) delete statuses[id];
     this.translator.mirror(rows);
+    this.lineage.learn(rows); // roots: a known root ends a chain without a `session.get`
     this.treeMirrored = rows.length > 0;
     sink.reset({ folder, rows, statuses, hasMore: page.hasMore });
     this.log.debug(
@@ -1958,6 +2157,11 @@ export class ChatController {
    * but also while the Sessions tree has rows mirrored (`treeMirrored`), or a single pane's resync
    * would forget the rows loaded with "Show more". VERIFIED by `chatController.test.ts` "keeps the
    * rows of the tree in the mirror when one pane resyncs".
+   * Issue #77, E4: the snapshot's `requests` are the pane's own ({@link requestsOf}): a tab gets
+   * only the requests of its session and its subagent lineage, the side-bar view all of them, and
+   * the rows of the snapshot are first learned by the lineage so the filter sees them. VERIFIED by
+   * `chatController.panes.test.ts` "sends each tab a snapshot with only the requests it shows"
+   * (fabricated panes, 30/10/2026).
    */
   private publishSnapshot(
     pane: ChatPane,
@@ -1980,6 +2184,9 @@ export class ChatController {
       const compactedAt = lastCompactionAt(rawMessages);
       if (compactedAt !== undefined) open.compactedAt = compactedAt;
     }
+    // The rows of this snapshot (children and parent of the open session included) complete the
+    // lineage that decides which requests this pane shows (issue #77 E4).
+    this.lineage.learn(rows);
     this.syncTracked();
     // The pane moved to another session since the read: seeding with its new id would prune the
     // trackers of that session, which another pane may be showing. An empty id prunes none.
@@ -1997,7 +2204,7 @@ export class ChatController {
         sessions: rows,
         statuses: this.translator.mergeStatuses(statuses, token),
         ...(complete ? { open: complete } : {}),
-        requests,
+        requests: this.requestsOf(pane, requests),
         resolutions:
           pane.sessionID === undefined ? [] : this.resolutions.forSession(pane.sessionID),
       },
