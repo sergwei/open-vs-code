@@ -74,6 +74,7 @@ export const STEPS = [
   { id: '26', needs: ['1'], sendsPrompt: true },
   { id: '27', needs: ['1'], sendsPrompt: true },
   { id: '28', needs: ['1'], sendsPrompt: true },
+  { id: '29', needs: ['1'], sendsPrompt: true },
 ];
 
 /** Every valid id, in canonical order. */
