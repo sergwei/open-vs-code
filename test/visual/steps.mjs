@@ -37,6 +37,11 @@
  * needs the 1 (it drives the chat) and sends prompts.
  * The step 27 (the chat in editor tabs, issue #77) came after it too: it starts from the side bar
  * chat that the 1 opens, sends prompts, and ends with `chatLocation` back at `sidebar`.
+ * The step 31 (the default of `chatLocation` is `editor`, issue #77 E5) came after it too: it
+ * starts from the side bar chat that the 1 opens, sends a prompt, takes the key out of the live
+ * profile and ends with `chatLocation` back at `sidebar`. VERIFIED on 30/10/2026 (Windows 11, VS
+ * Code 1.144.0): `--steps 25,31 --bail` ran the 1 and the 31 and ended "all visual checks passed"
+ * (the 31 alone, without the 1, was not run).
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -76,6 +81,7 @@ export const STEPS = [
   { id: '28', needs: ['1'], sendsPrompt: true },
   { id: '29', needs: ['1'], sendsPrompt: true },
   { id: '30', needs: ['1'], sendsPrompt: true },
+  { id: '31', needs: ['1'], sendsPrompt: true },
 ];
 
 /** Every valid id, in canonical order. */

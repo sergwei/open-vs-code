@@ -7401,6 +7401,21 @@ try {
   // `--extensionDevelopmentPath`, which Workspace Trust does not disable, see `installExtension`):
   // a control whose trust is switched off, where the OpenCode item must show up, and the subject,
   // with trust enabled and the start-up prompt off, on a folder nobody trusted.
+  // Cell D0 (issue #77, E5, plan E9-default-editor section 7): the control window is also the
+  // closest thing to a fresh install that this suite has (the extension INSTALLED, a new profile),
+  // so it starts WITHOUT the `openVsCode.chatLocation` key (`chatLocation: null`, the other windows
+  // of the run carry `sidebar`) and judges the default the user gets: the profile has no key, the
+  // host logged `chat location at start: editor` on its first activation, and the OpenCode icon
+  // opens the Sessions view (its New Session and Search Sessions title buttons) with no chat
+  // iframe inside the side bar. The text of the view's title and of its welcome are printed as
+  // data, not judged (HYPOTHESIS about the DOM of VS Code 1.144.0: a container with one view is
+  // titled "<container>: <view>"; the run printed title "OpenCode: Sessions").
+  // VERIFIED by a full `npm run test:visual` (Windows 11, VS Code 1.144.0, 30/10/2026, "all visual
+  // checks passed"), which printed a line starting "ok   D0 a profile with no chatLocation key
+  // starts in editor mode: the host logged "chat location at start: editor" (true), the OpenCode
+  // icon opens the Sessions view with its New Session and Search Sessions buttons (true) and no
+  // chat is in the side bar (0 iframe(s)); key in the profile: false". Not observed: macOS, Linux,
+  // a Marketplace install.
   await step(
     '25 Restricted Mode keeps the extension off (Workspace Trust, issue #33)',
     async () => {
@@ -7409,6 +7424,50 @@ try {
           .locator(`.activitybar [aria-label^="${label}"]`)
           .count()
           .catch(() => 0);
+      // The text of every OpenCode.log under `<userDataDir>/logs` (the extension host writes there).
+      const readHostLog = (userDataDir) => {
+        const files = [];
+        const walk = (dir) => {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) walk(full);
+            else if (entry.name === 'OpenCode.log') files.push(full);
+          }
+        };
+        try {
+          walk(path.join(userDataDir, 'logs'));
+        } catch {
+          return '';
+        }
+        return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+      };
+      // What the side bar of `p` shows: its title text, the title buttons, the welcome text and how
+      // many chat iframes have their centre inside it (a webview floats over the side bar, it is
+      // not a DOM child of it).
+      const sideBarState = (p) =>
+        p.evaluate((selector) => {
+          const side = globalThis.document.querySelector('.part.sidebar');
+          const sideBox = side?.getBoundingClientRect();
+          const flat = (text) => (text ?? '').replace(/\s+/g, ' ').trim();
+          return {
+            title: flat(side?.querySelector('.title-label')?.textContent),
+            actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
+              (a) => a.getAttribute('aria-label') ?? '',
+            ),
+            welcome: flat(side?.querySelector('.welcome-view-content')?.innerText),
+            chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+              const box = frame.getBoundingClientRect();
+              const x = box.left + box.width / 2;
+              return (
+                sideBox !== undefined &&
+                frame.checkVisibility({ checkVisibilityCSS: true }) &&
+                box.width > 0 &&
+                x >= sideBox.left &&
+                x <= sideBox.right
+              );
+            }).length,
+          };
+        }, CHAT_FRAME);
       // Starts a window with `options`, connects to it, runs `body(window, instance)` and always
       // stops it and deletes its folder.
       const withWindow = async (label, options, body) => {
@@ -7431,7 +7490,7 @@ try {
           fs.rmSync(folder, { recursive: true, force: true });
         }
       };
-      await withWindow('trusted', { restricted: false }, async (other) => {
+      await withWindow('trusted', { restricted: false, chatLocation: null }, async (other, win) => {
         const up = await waitFor(async () => (await itemCount(other, 'Explorer')) > 0, 60_000, 500);
         check(up === true, 'the control window is up (its activity bar shows Explorer)');
         const shown = await waitFor(
@@ -7443,6 +7502,36 @@ try {
           shown === true,
           'control: the OpenCode item is in the activity bar of the installed extension when trust is off',
         );
+        // --- D0: the default of a profile with no `openVsCode.chatLocation` key ----------------------
+        const profile = JSON.parse(
+          fs.readFileSync(path.join(win.userDataDir, 'User', 'settings.json'), 'utf8'),
+        );
+        await other.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        const sessionsUp = await waitFor(
+          async () =>
+            (await sideBarState(other)).actions.some((label) => label.startsWith('New Session')),
+          15_000,
+          300,
+        );
+        const startedInEditor = await waitFor(
+          () => /chat location at start: editor/.test(readHostLog(win.userDataDir)),
+          10_000,
+          300,
+        );
+        await sleep(3_000); // negative check after the positive waits: a chat would resolve by now
+        const bar = await sideBarState(other);
+        console.log(`  D0 side bar of the control window: ${JSON.stringify(bar)}`);
+        check(
+          !('openVsCode.chatLocation' in profile) &&
+            sessionsUp === true &&
+            startedInEditor === true &&
+            bar.actions.some((label) => label.startsWith('Search Sessions')) &&
+            bar.chatFrames === 0,
+          `D0 a profile with no chatLocation key starts in editor mode: the host logged "chat location at start: editor" (${String(startedInEditor)}), the OpenCode icon opens the Sessions view with its New Session and Search Sessions buttons (${String(sessionsUp)}) and no chat is in the side bar (${String(bar.chatFrames)} iframe(s)); key in the profile: ${String('openVsCode.chatLocation' in profile)}`,
+        );
+        await other
+          .screenshot({ path: path.join(shotsDir, '25a-default-editor.png') })
+          .catch(() => undefined);
       });
       await withWindow('restricted', { restricted: true }, async (other) => {
         const up = await waitFor(async () => (await itemCount(other, 'Explorer')) > 0, 60_000, 500);
@@ -10548,6 +10637,318 @@ try {
       check(await clickButton('Allow once'), 'D5 Allow once is pressed (never Always)');
       check(await waitIdle(30_000), 'D5 the turn ends after Allow once');
       assertNoWebviewErrors('step 30');
+    } finally {
+      // Leave the workspace as the step found it: `sidebar`, no editor open, the dark theme.
+      setLocation('sidebar');
+      await command('Notifications: Clear All Notifications').catch(() => undefined);
+      await closeAllEditors().catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+    }
+  });
+
+  // Step 31 (issue #77, E5, plan E9-default-editor sections 4 and 7): the default of
+  // `openVsCode.chatLocation` is `editor`. The profile of this run carries `sidebar` (the baseline
+  // of the steps 0-26, `startVSCode`), so this step takes the key OUT of the live profile, the way a
+  // user who deletes the setting does, and judges what follows. Cells: D1 removing the key opens ONE
+  // tab with the side bar session beside the code (the side bar keeps no chat); D2 the side bar
+  // shows the Sessions view with that session's row and no chat; D3 the Settings editor shows Chat
+  // Location as `editor` and NOT modified, with a control: once `sidebar` is written (D5) the same
+  // row reads `sidebar` and modified, so the detector is not vacuous; D4 New Session from the title
+  // button of the Sessions view opens a new empty tab with the caret in its prompt; D5 writing
+  // `sidebar` brings the Chat view back to the side bar and the tabs stay open (Q4 of E1). The
+  // first-activation default of a fresh install is cell D0 of step 25. The DOM of the Settings
+  // editor (`.setting-item`, `select`, `.is-configured`, `.setting-item-modified-indicator`) is
+  // internal to VS Code: the row is printed as data so a selector that moved shows in the output.
+  // VERIFIED by a full `npm run test:visual` (Windows 11, VS Code 1.144.0, 30/10/2026, "all visual
+  // checks passed"), which printed lines starting "ok   D1 taking chatLocation out of the profile
+  // (key in it: true -> false) opens 1 tab with the side bar session", "ok   D2 the side bar shows
+  // the Sessions view with the row", "ok   D3 with the key out of the profile the Settings editor
+  // shows Chat Location as "editor" and not modified (is-configured false, indicator shown
+  // false)", "ok   D4 New Session from the title button of the Sessions view opens a new empty tab
+  // with the caret in its prompt (1 -> 2 tabs, 0 blocks, focus true)", "ok   D5 writing sidebar
+  // brings the Chat view back to the side bar (chat true) and the tabs stay open (2 -> 2)" and
+  // "ok   D3 control: once sidebar is written the same row reads "sidebar" and modified
+  // (is-configured false, indicator shown true)". What the control showed: in VS Code 1.144.0 the
+  // row never gets `is-configured` here; the modified signal is the visible
+  // `.setting-item-modified-indicator`, so the check reads either. Not observed: other VS Code
+  // versions, macOS, Linux.
+  await step('31 the default of chatLocation is editor (issue #77, E5)', async () => {
+    const DARK = 'Default Dark Modern';
+    const KEY = 'openVsCode.chatLocation';
+    const PROMPT_A = 'Tab31A: Reply with exactly: alpha31. Do not use any tools.';
+    const setLocation = (value) => {
+      writeSettings(vscode.userDataDir, { [KEY]: value });
+    };
+    const keyInProfile = () =>
+      KEY in
+      JSON.parse(fs.readFileSync(path.join(vscode.userDataDir, 'User', 'settings.json'), 'utf8'));
+    const tabsNow = () =>
+      page.evaluate(() => {
+        const groups = [...globalThis.document.querySelectorAll('.editor-group-container')];
+        return [...globalThis.document.querySelectorAll('.tab')].map((tab) => ({
+          label: tab.getAttribute('aria-label') ?? '',
+          text: (tab.innerText ?? '').trim(),
+          group: groups.indexOf(tab.closest('.editor-group-container')),
+        }));
+      });
+    // A chat tab is any tab that is not a TypeScript file (no title here has ".ts"); the Settings
+    // editor is closed before every count, so it is never mistaken for one.
+    const isChatTab = (tab) => !/\.ts\b/.test(`${tab.label} ${tab.text}`);
+    const chatTabs = async () => (await tabsNow()).filter(isChatTab);
+    const view = () =>
+      web.inDoc((doc) => {
+        const field = doc.querySelector('textarea.prompt-text');
+        return {
+          title: doc.querySelector('.chat-title')?.textContent ?? '',
+          messages: doc.querySelectorAll('[role="log"] > *').length,
+          focusOnBox: field !== null && doc.activeElement === field && doc.hasFocus(),
+        };
+      });
+    // The side bar as VS Code draws it: the rows of the Sessions tree, the title buttons, the
+    // welcome text and how many chat iframes have their centre inside it.
+    const sideBar = () =>
+      page.evaluate((selector) => {
+        const side = globalThis.document.querySelector('.part.sidebar');
+        const sideBox = side?.getBoundingClientRect();
+        return {
+          welcome: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
+            .replace(/\s+/g, ' ')
+            .trim(),
+          rows: [...(side?.querySelectorAll('.monaco-list-row') ?? [])].map((row) =>
+            (row.innerText ?? '').replace(/\s+/g, ' ').trim(),
+          ),
+          actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
+            (a) => a.getAttribute('aria-label') ?? '',
+          ),
+          chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+            const box = frame.getBoundingClientRect();
+            const x = box.left + box.width / 2;
+            return (
+              sideBox !== undefined &&
+              frame.checkVisibility({ checkVisibilityCSS: true }) &&
+              box.width > 0 &&
+              x >= sideBox.left &&
+              x <= sideBox.right
+            );
+          }).length,
+        };
+      }, CHAT_FRAME);
+    const sidebarChatId = () =>
+      page.evaluate((selector) => {
+        const sideBox = globalThis.document.querySelector('.part.sidebar')?.getBoundingClientRect();
+        return [...globalThis.document.querySelectorAll(selector)].find((frame) => {
+          const box = frame.getBoundingClientRect();
+          const x = box.left + box.width / 2;
+          return (
+            sideBox !== undefined &&
+            frame.checkVisibility({ checkVisibilityCSS: true }) &&
+            box.width > 0 &&
+            x >= sideBox.left &&
+            x <= sideBox.right
+          );
+        })?.name;
+      }, CHAT_FRAME);
+    const showSessionsBar = async () => {
+      const shows = async () =>
+        (await sideBar()).actions.some((label) => label.startsWith('New Session'));
+      if (!(await shows())) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        await waitFor(shows, 5_000, 100);
+      }
+    };
+    // Waits for a chat other than `previous` to be on screen (a new tab) and connects to it.
+    const connectToNew = async (previous) => {
+      await waitFor(
+        async () => {
+          const id = await visibleChatId();
+          return id !== undefined && id !== previous ? id : undefined;
+        },
+        10_000,
+        100,
+      );
+      await openChat(30_000);
+    };
+    const openSample = async () => {
+      await page.keyboard.press('ControlOrMeta+p');
+      await waitFor(async () => !(await quickInputHidden()), 2_000, 50);
+      await page.keyboard.type('src/sample.ts');
+      await waitFor(
+        () =>
+          page.evaluate(() =>
+            (
+              globalThis.document.querySelector('.quick-input-list .monaco-list-row.focused')
+                ?.textContent ?? ''
+            ).includes('sample.ts'),
+          ),
+        3_000,
+        50,
+      );
+      await page.keyboard.press('Enter');
+      await waitFor(
+        async () => (await page.locator('.tab.active[aria-label*="sample.ts"]').count()) > 0,
+        5_000,
+        100,
+      );
+    };
+    // Opens the Settings editor filtered by this extension, reads the row of Chat Location (the
+    // value its control shows and whether VS Code marks it as modified), prints it and closes the
+    // editor. `modified` is true when the row carries `is-configured` or its modified indicator is
+    // visible. Returns the row, or null when it never showed up.
+    const readChatLocationRow = async (label) => {
+      await command('Preferences: Open Settings (UI)');
+      const searchBox = page
+        .locator('.settings-editor .suggest-input-container .monaco-editor')
+        .first();
+      await searchBox.click({ timeout: 15_000 });
+      await page.keyboard.press('Control+A');
+      await page.keyboard.type('@ext:sergwei.open-vs-code');
+      const read = () =>
+        page.evaluate(() => {
+          const row = [
+            ...globalThis.document.querySelectorAll('.settings-editor .setting-item'),
+          ].find(
+            (candidate) =>
+              candidate.querySelector('.setting-item-label')?.textContent?.trim() ===
+              'Chat Location',
+          );
+          if (!row) return null;
+          const select = row.querySelector('select');
+          const control = row.querySelector('.setting-item-control');
+          const indicator = row.querySelector('.setting-item-modified-indicator');
+          return {
+            value: (select
+              ? select.value || (select.selectedOptions[0]?.textContent ?? '')
+              : (control?.innerText ?? '')
+            ).trim(),
+            hasSelect: select !== null,
+            configured: row.classList.contains('is-configured'),
+            indicatorShown:
+              indicator !== null &&
+              indicator.checkVisibility({ checkVisibilityCSS: true, checkOpacity: true }),
+            classes: row.className,
+          };
+        });
+      const row = (await waitFor(read, 20_000, 250)) ?? null;
+      console.log(`  ${label} Settings row of Chat Location: ${JSON.stringify(row)}`);
+      await shot(label === 'D3' ? '31c-settings-default' : '31e-settings-sidebar');
+      await page.keyboard.press('Control+W');
+      await sleep(500); // closing the settings tab has no signal the next step reads; kept short
+      return row === null ? null : { ...row, modified: row.configured || row.indicatorShown };
+    };
+
+    // Step 30 leaves `sidebar` and its chat in the side bar: connect to it before the first read.
+    setLocation('sidebar');
+    if (
+      (await waitFor(async () => (await visibleChatId()) !== undefined, 8_000, 200)) === undefined
+    ) {
+      await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+      await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+    }
+    await openChat(30_000);
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    await closeAllEditors();
+    try {
+      await setTheme(DARK);
+      await command('Notifications: Clear All Notifications');
+      await waitConnected();
+      check(await clickButton('New session'), 'the New session button is pressed in the side bar');
+      await waitEmptyView();
+      await send(PROMPT_A);
+      check(await waitIdle(30_000), 'the turn of the side bar session ends');
+      await openSample();
+
+      // --- D1: the key is taken out of the profile; ONE tab opens beside the code ------------------
+      const keyBefore = keyInProfile();
+      setLocation(undefined);
+      const opened = await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
+      await connectToNew(drivenChatId);
+      await waitFor(async () => (await view()).title.includes('Tab31A'), 15_000, 200);
+      await sleep(1_000); // negative check after the positive waits: a second tab would be there
+      const tabs1 = await tabsNow();
+      const chat1 = tabs1.filter(isChatTab);
+      const sample1 = tabs1.find((tab) => !isChatTab(tab));
+      const inTab = await view();
+      const bar1 = await sideBar();
+      check(
+        keyBefore === true &&
+          !keyInProfile() &&
+          opened === true &&
+          chat1.length === 1 &&
+          inTab.title.includes('Tab31A') &&
+          sample1 !== undefined &&
+          chat1[0].group !== sample1.group &&
+          bar1.chatFrames === 0,
+        `D1 taking chatLocation out of the profile (key in it: ${String(keyBefore)} -> ${String(keyInProfile())}) opens ${String(chat1.length)} tab with the side bar session ${JSON.stringify(inTab.title)} beside the code (groups ${String(sample1?.group)}/${String(chat1[0]?.group)}) and the side bar holds ${String(bar1.chatFrames)} chat(s)`,
+      );
+      await shot('31a-default-tab');
+
+      // --- D2: the side bar shows the Sessions view with the row of the session and no chat --------
+      await showSessionsBar();
+      const rowA = await waitFor(
+        async () => (await sideBar()).rows.find((row) => row.includes('Tab31A')),
+        8_000,
+        200,
+      );
+      const bar2 = await sideBar();
+      check(
+        rowA !== undefined && bar2.welcome === '' && bar2.chatFrames === 0,
+        `D2 the side bar shows the Sessions view with the row ${JSON.stringify(rowA)}, no welcome text (${JSON.stringify(bar2.welcome)}) and no chat (${String(bar2.chatFrames)} iframe(s))`,
+      );
+      await shot('31b-sessions-view');
+
+      // --- D3: the Settings editor shows `editor`, not modified ------------------------------------
+      const settingsDefault = await readChatLocationRow('D3');
+      check(
+        settingsDefault !== null &&
+          settingsDefault.value === 'editor' &&
+          settingsDefault.modified === false,
+        `D3 with the key out of the profile the Settings editor shows Chat Location as ${JSON.stringify(settingsDefault?.value)} and not modified (is-configured ${String(settingsDefault?.configured)}, indicator shown ${String(settingsDefault?.indicatorShown)})`,
+      );
+      check(
+        (await chatTabs()).length === 1,
+        'D3 the Settings editor is closed again and only the chat tab of the session is open',
+      );
+
+      // --- D4: New Session from the title button of the Sessions view ------------------------------
+      await showSessionsBar();
+      const previous = drivenChatId;
+      const before = (await chatTabs()).length;
+      await page.locator('.part.sidebar .action-label[aria-label^="New Session"]').first().click();
+      await waitFor(async () => (await chatTabs()).length === before + 1, 10_000, 200);
+      await connectToNew(previous);
+      const focused = await waitFor(async () => (await view()).focusOnBox, 6_000, 200);
+      const now = await chatTabs();
+      const fresh = await view();
+      check(
+        now.length === before + 1 && focused === true && fresh.messages === 0,
+        `D4 New Session from the title button of the Sessions view opens a new empty tab with the caret in its prompt (${String(before)} -> ${String(now.length)} tabs, ${String(fresh.messages)} blocks, focus ${String(focused)})`,
+      );
+      await shot('31d-new-session');
+
+      // --- D5: writing `sidebar` brings the Chat view back; the tabs stay open --------------------
+      const tabsBefore = (await chatTabs()).length;
+      setLocation('sidebar');
+      let lateral = await waitFor(() => sidebarChatId(), 8_000, 200);
+      if (lateral === undefined) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        lateral = await waitFor(() => sidebarChatId(), 15_000, 200);
+      }
+      await openChat(30_000, lateral);
+      await waitConnected();
+      const tabsAfter = (await chatTabs()).length;
+      check(
+        lateral !== undefined && keyInProfile() && tabsAfter === tabsBefore,
+        `D5 writing sidebar brings the Chat view back to the side bar (chat ${String(lateral !== undefined)}) and the tabs stay open (${String(tabsBefore)} -> ${String(tabsAfter)})`,
+      );
+      await shot('31f-back-to-sidebar');
+      const settingsSidebar = await readChatLocationRow('D3 control');
+      check(
+        settingsSidebar !== null &&
+          settingsSidebar.value === 'sidebar' &&
+          settingsSidebar.modified === true,
+        `D3 control: once sidebar is written the same row reads ${JSON.stringify(settingsSidebar?.value)} and modified (is-configured ${String(settingsSidebar?.configured)}, indicator shown ${String(settingsSidebar?.indicatorShown)}), so the detector of D3 can tell`,
+      );
+      assertNoWebviewErrors('step 31');
     } finally {
       // Leave the workspace as the step found it: `sidebar`, no editor open, the dark theme.
       setLocation('sidebar');
