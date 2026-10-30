@@ -33,9 +33,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sessions, when opencode is not running or when no folder is open. The badge is the number of
   pending requests. Known limits: deleting a session also deletes its subagent sessions, and a tab
   that showed one of them gets the "deleted outside this view" notice (issue #77).
-- Setting `openVsCode.chatLocation` (`sidebar` by default, or `editor`): with `editor` every session
-  opens in its own editor tab beside the code and the OpenCode view becomes the Sessions tree
-  (above). Opening a session that already has a tab reveals it, New Session opens a new tab, and
+- Setting `openVsCode.chatLocation` (`editor` by default, or `sidebar`; any other value counts as
+  `editor`): with `editor` every session opens in its own editor tab beside the code and the
+  OpenCode view is the Sessions tree (above); `sidebar` keeps one chat in the OpenCode view.
+  Opening a session that already has a tab reveals it, New Session opens a new tab, and
   Insert at cursor and Add selection write into the last text editor, while file links and diffs
   open outside the chat's group. Opening a row of the tree adopts an empty tab instead of leaving
   one behind. Changing the setting applies at
@@ -43,9 +44,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The tabs are restored after Reload Window, each with its session, draft and title (the ones in
   the background when you open them); a restored tab whose session is already open elsewhere
   closes and reveals the other one, and one whose session was deleted comes back empty with a
-  notice. With tabs open the extension now activates when the window opens. Known limits: every
-  tab shows every pending request, the draft in the prompt box does not move when the setting
-  changes, and changing the served folder with tabs open leaves them empty (issue #77).
+  notice. With tabs open the extension now activates when the window opens. Known limits: the draft
+  in the prompt box does not move when the setting changes, and changing the served folder with
+  tabs open leaves them empty (issue #77).
 - Editor and Explorer context menus: **Add to OpenCode Chat**, **Explain with OpenCode** and **Fix
   with OpenCode** (Fix includes the errors and warnings VS Code reports for the selection)
   in the editor, and **Explain with OpenCode** on one or more files in the Explorer. The prompt is
