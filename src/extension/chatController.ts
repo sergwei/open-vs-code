@@ -1028,11 +1028,10 @@ export class ChatController {
    * changed. This happens even when this walk learned nothing itself, because another path (a
    * `session.upserted` of the missing parent, a resync) may have completed the chain during the
    * `await`. A walk whose `session.get` resolves after the server changed (`lineageEpoch`), the
-   * client changed or the host was disposed publishes nothing. HYPOTHESIS, read in the code and not
-   * run: a walk whose `session.get` rejects skips that check and goes on to the resync and
-   * `attention.update` below, which repeat the current state (idempotent). No test covers a stale
-   * walk whose read rejects.
-   * VERIFIED by `chatController.panes.test.ts` (fabricated client and stream, 30/10/2026): "completes
+   * client changed or the host was disposed publishes nothing, whether its read resolved or rejected
+   * (the same check runs again after the `finally`).
+   * VERIFIED by `chatController.panes.test.ts` (fabricated client and stream, 31/10/2026): "ignores
+   * a stale lineage walk whose session.get rejects", and (30/10/2026) "completes
    * an unknown parent with session.get, then gives the tab a snapshot and tells attention again",
    * "does not reject when session.get fails, and gives no tab the request", "ignores a lineage walk
    * that a server restart made stale", "runs one lineage walk per session at a time, also across a
@@ -1064,6 +1063,8 @@ export class ChatController {
       // A restart cleared `lineageReads` and a newer walk may own the entry now: leave it.
       if (epoch === this.lineageEpoch) this.lineageReads.delete(sessionID);
     }
+    // A read that REJECTED skipped the check inside the loop: repeat it for a stale walk.
+    if (this.disposed || epoch !== this.lineageEpoch || client !== this.client) return;
     if (!this.pending.hasSession(sessionID)) return;
     const gained = this.displayingPanes(sessionID).filter((pane) => !before.has(pane.id));
     if (gained.length > 0) void this.resync(gained);

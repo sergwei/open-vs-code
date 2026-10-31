@@ -74,7 +74,8 @@ type RestRequests = { permissions: PermissionRequest[]; forms: FormInfo[] };
 
 /**
  * Lets a case drive `session.get` of ONE id: `fail` rejects it, `hold` keeps it pending until the
- * function pushed to `held` runs (so the case can change the world during the read).
+ * function pushed to `held` runs (so the case can change the world during the read), and both
+ * together keep it pending and then reject it when released (a stale walk whose read fails).
  */
 type GetControl = { id: string; fail?: boolean; hold?: boolean; held: Array<() => void> };
 
@@ -115,12 +116,17 @@ function fakeClient(
       get: ({ sessionID }: { sessionID: string }) => {
         gets.push(sessionID);
         if (control?.id === sessionID) {
-          if (control.fail === true) return Promise.reject(new Error('read failed'));
           if (control.hold === true) {
-            return new Promise<SessionInfo>((resolve) => {
-              control.held.push(() => resolve(rowOf(sessionID)));
+            // Held until the case releases it; with `fail` it then rejects instead of resolving.
+            return new Promise<SessionInfo>((resolve, reject) => {
+              control.held.push(() =>
+                control.fail === true
+                  ? reject(new Error('read failed'))
+                  : resolve(rowOf(sessionID)),
+              );
             });
           }
+          if (control.fail === true) return Promise.reject(new Error('read failed'));
         }
         return Promise.resolve(rowOf(sessionID));
       },
@@ -1073,6 +1079,38 @@ describe('requests reach the chat tabs that display them', () => {
     await flush();
     // Without the guard the old row would be learned and ses_kid would have a root.
     expect(controller.rootOf('ses_kid')).toBeUndefined();
+    expect(typesOf(panes[0]?.posted ?? [])).not.toContain('snapshot');
+  });
+
+  /**
+   * Protects the stale check after the `finally` of `resolveLineage`: a walk whose `session.get`
+   * REJECTS after a server restart must not resync tabs nor tell attention (the stale check inside
+   * the loop is only reached by a read that resolves). Provenance: FABRICATED client whose read is
+   * held and then rejected by the case; no real server.
+   */
+  it('ignores a stale lineage walk whose session.get rejects', async () => {
+    const getControl: GetControl = { id: 'ses_kid', hold: true, fail: true, held: [] };
+    const { controller, panes, rest, attention, emit, emitLatest, flush } = await twoTabs({
+      sessions: [...SESSIONS, 'ses_kid'],
+      unlisted: ['ses_kid'],
+      getControl,
+    });
+    rest.permissions.push(permission('per_kid', 'ses_kid'));
+    emit('permission.asked', asked('per_kid', 'ses_kid'));
+    await flush();
+    expect(getControl.held).toHaveLength(1);
+    controller.onServerState({ kind: 'idle' });
+    controller.onServerState({ kind: 'running', server: SERVER });
+    await flush();
+    // The new server asks again, so the request is pending when the OLD walk's read rejects.
+    emitLatest('permission.asked', asked('per_kid', 'ses_kid'));
+    await flush();
+    expect(getControl.held).toHaveLength(2);
+    const updates = attention.length;
+    getControl.held[0]?.();
+    await flush();
+    await flush();
+    expect(attention.length).toBe(updates);
     expect(typesOf(panes[0]?.posted ?? [])).not.toContain('snapshot');
   });
 
