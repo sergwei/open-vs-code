@@ -30,6 +30,10 @@ affiliated with opencode or with Microsoft.
 
   ![A forked session with a "Forked from" crumb above the first exchange and the Fork from here button on the message](docs/images/fork-session.png)
 
+- **Server status in the status bar.** An `OpenCode` item shows whether the server is starting,
+  running (with the model a new session will use), not started or unavailable; click it to open the
+  chat.
+
 - **The chat in editor tabs or in the side bar.** By default (`openVsCode.chatLocation` is
   `editor`) every session opens in its own editor tab, beside your code, and the OpenCode view is a
   native **Sessions** tree; set it to `sidebar` to keep one chat in the side bar instead. The tree
@@ -60,7 +64,8 @@ affiliated with opencode or with Microsoft.
   once (`Explain what @src/a.ts#2-3 does.`, `Fix the problems in @src/a.ts#2-3.`) with the
   selection attached; Fix also lists the errors and warnings VS Code reports for that range (up to
   20). In the Explorer, **Explain with OpenCode** works on one or several files. If the chat cannot
-  send right then (a turn is running, or the server is not connected yet), the prompt is left in
+  send right then (a turn is running, or the server is not connected yet; with `autoStart` off and
+  the server not started, the prompt is sent and starts it), the prompt is left in
   the prompt box with a notice, and your own draft is never overwritten. The entries only appear
   on files that exist on disk. From the Explorer, folders and files outside the workspace folder
   are counted in a notice inside the chat ("1 selected item was not added…"); from the editor
@@ -156,6 +161,7 @@ Folder**.
 | `openVsCode.opencodePath` | machine | empty | Absolute path to the opencode **v2** executable. Empty searches `PATH` for `opencode2`, then `opencode`. On Windows an npm `opencode.cmd` shim is accepted. Not used while `openVsCode.serverUrl` is set. |
 | `openVsCode.serverUrl` | machine | empty | Address of an opencode **v2** server that is already running on **this machine**, for example `http://127.0.0.1:4096`. Empty lets the extension launch its own server. The extension then does not use `openVsCode.opencodePath`. See [Using a server you started](#using-a-server-you-started). |
 | `openVsCode.defaultModel` | window | empty | Model every **new** chat session starts with, written `provider/model` (for example `opencode/big-pickle`). It wins over the last model you used. A badly written or unavailable value is ignored with a warning. |
+| `openVsCode.autoStart` | window | `true` | Launch the opencode server when the window starts. Turn it off and the chat shows **not started**; **OpenCode: Restart Server**, the Start button or your first prompt starts it. No effect while `openVsCode.serverUrl` is set. |
 | `openVsCode.chatLocation` | window | `editor` | Where the chat lives: `editor` (one editor tab per session, and the OpenCode view lists the sessions) or `sidebar` (one chat in the OpenCode view). Any other value counts as `editor`. |
 
 ## Commands
@@ -167,7 +173,7 @@ Command Palette (they act on the active editor); the two Explorer entries are no
 | Command | What it does |
 | --- | --- |
 | **OpenCode: Show Logs** | Opens the OpenCode output channel. |
-| **OpenCode: Restart Server** | Restarts the server the extension launched, or reconnects to the server in `openVsCode.serverUrl` when that setting is set. Also a button in the title bar of the Chat view (`chatLocation` set to `sidebar`) and an entry in the `...` menu of the Sessions view. |
+| **OpenCode: Restart Server** | Restarts the server the extension launched (it also starts it when `openVsCode.autoStart` is off), or reconnects to the server in `openVsCode.serverUrl` when that setting is set. Also a button in the title bar of the Chat view (`chatLocation` set to `sidebar`) and an entry in the `...` menu of the Sessions view. |
 | **OpenCode: Select Workspace Folder** | Chooses which folder the server runs in (multi-root workspaces only). |
 | **OpenCode: Manage Saved Permissions** | Lists the permissions you chose to always allow and lets you revoke them. |
 | **OpenCode: Set Server Password** | Stores the password of the server in `openVsCode.serverUrl` in VS Code's SecretStorage. |
