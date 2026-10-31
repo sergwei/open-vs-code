@@ -53,8 +53,14 @@ function isAlive(pid: number): boolean {
   }
 }
 
-/** Polls `read` until it returns a value, or fails after `timeoutMs`. */
-async function waitFor<T>(read: () => T | undefined, timeoutMs = 3000): Promise<T> {
+/**
+ * Polls `read` until it returns a value, or fails after `timeoutMs`.
+ *
+ * The 8 s default leaves room for real processes on a loaded machine (the whole suite runs in
+ * parallel): every caller waits for something that does come, so a longer cap costs nothing when
+ * the test passes (#90).
+ */
+async function waitFor<T>(read: () => T | undefined, timeoutMs = 8000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const value = read();
@@ -64,9 +70,16 @@ async function waitFor<T>(read: () => T | undefined, timeoutMs = 3000): Promise<
   }
 }
 
-/** Waits until `pid` is gone (up to 3 s) and returns whether it is. */
+/**
+ * Waits until `pid` is gone (up to 8 s) and returns whether it is.
+ *
+ * 8 s and not 3 s for #90: "a server that ignores stdin is killed with its grandchild" failed 1 run
+ * in 3 with the whole suite in parallel and passed alone (Windows 11, 25/10/2026). HYPOTHESIS that
+ * `taskkill /T` simply takes longer to reap the tree on a loaded machine: not reproduced on
+ * demand. It returns as soon as the process is gone, so a passing test does not wait longer.
+ */
 async function waitDead(pid: number): Promise<boolean> {
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 8000;
   while (isAlive(pid)) {
     if (Date.now() > deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -275,10 +288,25 @@ describe('against the synthetic fixture (real processes)', () => {
   const servers: RunningServer[] = [];
   const folders: string[] = [];
 
+  /**
+   * Stops every server a case started and removes its temp folders.
+   *
+   * The folder is the cwd of the child and its grandchild, and right after they are killed Windows
+   * can still hold it: `rm` failed with `EBUSY: resource busy or locked, rmdir 'C:\…\ovsc-serve-…'`
+   * (#90, seen on 23/10/2026 and 31/10/2026 with the whole suite in parallel). `maxRetries` makes
+   * Node retry on EBUSY with a linear backoff of `retryDelay` (100, 200 … 500 ms, 1.5 s at most,
+   * inside the 10 s hook timeout); the same values most integration tests already use for their
+   * temp folders. HYPOTHESIS that this is the only cause of #90: the retry was not seen firing,
+   * since the failure does not reproduce on demand.
+   */
   afterEach(async () => {
     const quiet = captureLog().log;
     await Promise.all(servers.splice(0).map((s) => stopServer(s.child, quiet, { graceMs: 300 })));
-    await Promise.all(folders.splice(0).map((f) => rm(f, { recursive: true, force: true })));
+    await Promise.all(
+      folders
+        .splice(0)
+        .map((f) => rm(f, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })),
+    );
   });
 
   /** Creates a temp folder (removed afterwards) and starts the fixture in it. */
