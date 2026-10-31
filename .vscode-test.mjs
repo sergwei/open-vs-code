@@ -213,6 +213,9 @@ fs.writeFileSync(
       'openVsCode.serverUrl': 'http://127.0.0.1:9',
       'openVsCode.opencodePath': path.join(os.tmpdir(), 'open-vs-code-no-such-opencode'),
       'openVsCode.chatLocation': TEST_CHAT_LOCATION,
+      // Issue #124: autoStart must have no effect with an external server; the suite connects
+      // anyway and asserts the log has no `server not started`.
+      'openVsCode.autoStart': false,
     },
     null,
     2,

@@ -55,6 +55,10 @@
  * profile and ends with `chatLocation` back at `sidebar`. VERIFIED on 30/10/2026 (Windows 11, VS
  * Code 1.144.0): `--steps 25,31 --bail` ran the 1 and the 31 and ended "all visual checks passed"
  * (the 31 alone, without the 1, was not run).
+ * The step 32 (`openVsCode.autoStart` off, issue #124) came after it too: it needs the 1, reloads
+ * the window twice with the key in the profile and sends one prompt. Its `budgetS` of 25 is the
+ * criterion above applied to its first full run (31/10/2026, Windows 11, VS Code 1.144.0:
+ * 18.1 s; a partial `--steps 21,32 --bail` had taken 10.6 s).
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -101,6 +105,7 @@ export const STEPS = [
   { id: '29', needs: ['1'], sendsPrompt: true, groups: ['sessions', 'tabs'], budgetS: 105 },
   { id: '30', needs: ['1'], sendsPrompt: true, groups: ['requests', 'tabs'], budgetS: 60 },
   { id: '31', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 20 },
+  { id: '32', needs: ['1'], sendsPrompt: true, groups: ['setup'], budgetS: 25 },
 ];
 
 /** Every valid id, in canonical order. */

@@ -15,6 +15,13 @@ describe('selectForFiles', () => {
     expect(result.reasons).toEqual(['webview-ui/src/selectors/ModelPicker.tsx -> selectors']);
   });
 
+  it('maps the status bar text of the server (issue #124) to the setup group', () => {
+    expect(selectForFiles(['src/extension/serverStatus.ts'])).toMatchObject({
+      mode: 'groups',
+      groups: ['setup'],
+    });
+  });
+
   it('unites the groups of several files, without repeating one', () => {
     const result = selectForFiles([
       'src/extension/chatTabs.ts',

@@ -6564,8 +6564,8 @@ try {
   await step('20 drop and paste (issue #30)', withSavedClipboard(dropAndPaste));
 
   /**
-   * Step 21 (issue #38; four settings since E9 #77, `chatLocation` is the fourth): how the Settings
-   * editor of a real VS Code shows the four contributed settings: filtered by `@ext:sergwei.open-vs-code`, in the `order` of the manifest, with the
+   * Step 21 (issue #38; five settings since #124, `autoStart` is the fifth): how the Settings
+   * editor of a real VS Code shows the five contributed settings: filtered by `@ext:sergwei.open-vs-code`, in the `order` of the manifest, with the
    * label the user reads, the first sentence of each description, and the `#id#` link of
    * `opencodePath` painted as a link and followed with a real mouse click.
    *
@@ -6622,22 +6622,24 @@ try {
       }, 20_000)) ?? (await readRows());
     console.log(`  rows: ${JSON.stringify(rows)}`);
     check(
-      rows.length === 4,
-      `the Settings editor lists exactly 4 settings for the extension (${String(rows.length)}; selector .settings-editor .setting-item)`,
+      rows.length === 5,
+      `the Settings editor lists exactly 5 settings for the extension (${String(rows.length)}; selector .settings-editor .setting-item)`,
     );
     const expected = [
       'Absolute path to the opencode v2 executable.',
       'Address of an opencode v2 server that is already running on this machine',
       'Model that every new chat session starts with',
       'Where the chat lives.',
+      'Launch the opencode server when the window starts.',
     ];
     const expectedLabels = [
       'Open Vs Code: Opencode Path',
       'Open Vs Code: Server Url',
       'Open Vs Code: Default Model',
       'Open Vs Code: Chat Location',
+      'Open Vs Code: Auto Start',
     ];
-    rows.slice(0, 4).forEach((row, index) => {
+    rows.slice(0, 5).forEach((row, index) => {
       console.log(
         `  label ${String(index + 1)}: "${row.category}${row.category ? ' ' : ''}${row.label}"`,
       );
@@ -11209,6 +11211,224 @@ try {
       await setTheme(DARK).catch(() => undefined);
     }
   });
+
+  // Step 32 (issue #124): `openVsCode.autoStart: false`. Cells: N1 the new activation logs `server
+  // not started` and no `starting the server for` follows (2 s margin, the state is the final one);
+  // N2 the chat shows the "opencode is not running" card with a Start button and the status bar item
+  // reads `OpenCode: not started`; N3 Start connects, the card goes and the item shows the model;
+  // N4 after a second Reload, a prompt sent from `not-started` starts the server and is answered
+  // (the fake's reply is in the conversation); N5 a click on the status bar item brings the hidden
+  // side bar chat back with the caret in its prompt. The DOM of the status bar (`.statusbar-item`,
+  // its `aria-label`) is internal to VS Code: the items are printed as data. VERIFIED by `npm run
+  // test:visual -- --steps 21,32 --bail` (Windows 11, VS Code 1.144.0, 31/10/2026, "all visual
+  // checks passed"): "ok   N1 the log has "server not started" and no "starting the server for"
+  // follows (noted true, launched false)", "ok   N3 once connected the card is gone and the item
+  // shows the model (OpenCode: Big Pickle. Click to open the chat. | OpenCode: Big Pickle)", "ok
+  // N4 the prompt sent from not-started was delivered and answered (2 blocks)" and, with the OLD N5
+  // check (`hasFocus()` required), "ok   N5 a click on the status bar item brings the chat back
+  // (visible true) with the caret in its prompt (true)". The current N5 (active element plus a
+  // typed letter): the same "ok   N5 … (true)" line in `npm run test:visual -- --steps 31,32`
+  // (Windows 11, VS Code 1.144.0, 31/10/2026). The captures 32a-not-started and 32b-started were inspected by the main thread
+  // (Windows 11, 31/10/2026): the status bar showed "○ OpenCode: not started" and "✓ OpenCode: Big
+  // Pickle" (`circle-outline`, `check`). Not observed: the glyphs of `loading~spin`, `circle-slash`
+  // and `error`, macOS, Linux; a partial run is not commit evidence.
+  await step(
+    '32 autoStart off: not started, Start, the prompt and the status bar (issue #124)',
+    async () => {
+      const KEY = 'openVsCode.autoStart';
+      const DARK = 'Default Dark Modern';
+      const hostLogSizes = () => {
+        const sizes = new Map();
+        const walk = (dir) => {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) walk(full);
+            else if (entry.name === 'OpenCode.log') sizes.set(full, fs.statSync(full).size);
+          }
+        };
+        try {
+          walk(path.join(vscode.userDataDir, 'logs'));
+        } catch {
+          // no logs yet: nothing to subtract
+        }
+        return sizes;
+      };
+      // What the host logged since `before` (a `hostLogSizes()`): the tail of each file, whole new files.
+      const logSince = (before) => {
+        let text = '';
+        for (const file of hostLogSizes().keys()) {
+          text += fs.readFileSync(file, 'utf8').slice(before.get(file) ?? 0) + '\n';
+        }
+        return text;
+      };
+      const statusItems = () =>
+        page.evaluate(() =>
+          [...globalThis.document.querySelectorAll('.part.statusbar .statusbar-item')]
+            .map(
+              (item) =>
+                `${item.getAttribute('aria-label') ?? ''} | ${(item.textContent ?? '').trim()}`,
+            )
+            .filter((text) => /opencode/i.test(text)),
+        );
+      const reload = async (mark) => {
+        await page.evaluate((key) => {
+          globalThis[key] = true;
+        }, mark);
+        await command('Developer: Reload Window');
+        web?.close();
+        await browser.close().catch(() => undefined);
+        let reloaded = false;
+        for (let tries = 0; tries < 120 && !reloaded; tries++) {
+          await connectWorkbench(90_000);
+          const stale = await page
+            .evaluate((key) => globalThis[key] === true, mark)
+            .catch(() => true);
+          reloaded = !stale;
+          if (reloaded) break;
+          await browser.close().catch(() => undefined);
+          await sleep(250); // between two attempts to reach the new page, not a wait for it
+        }
+        if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
+        await waitFor(
+          async () => (await page.locator('.monaco-workbench').count()) > 0,
+          30_000,
+          300,
+        );
+        // The chat view activates the extension; press the activity bar item if it is not showing.
+        let opened = true;
+        try {
+          await openChat(8_000);
+        } catch {
+          opened = false;
+        }
+        if (!opened) {
+          await page
+            .locator('.activitybar [aria-label^="OpenCode"]')
+            .first()
+            .click()
+            .catch(() => undefined);
+          await openChat(60_000);
+        }
+      };
+      const card = () =>
+        web.inDoc((doc) => ({
+          text: doc.querySelector('.connection-card')?.textContent ?? '',
+          start: [...doc.querySelectorAll('.connection-card button')].some(
+            (b) => b.textContent.trim() === 'Start',
+          ),
+          connection: doc.querySelector('.app')?.getAttribute('data-connection') ?? '',
+        }));
+      try {
+        await command('Notifications: Clear All Notifications');
+        // --- N1/N2: autoStart off, Reload ---------------------------------------------------------------
+        writeSettings(vscode.userDataDir, { [KEY]: false });
+        let before = hostLogSizes();
+        await reload('__visualReload32a');
+        const noted = await waitFor(
+          () => logSince(before).includes('server not started'),
+          20_000,
+          200,
+        );
+        await sleep(2_000); // margin: a launch would show within it; the check below is on the final state
+        const afterReload = logSince(before);
+        check(
+          noted === true && !afterReload.includes('starting the server for'),
+          `N1 the log has "server not started" and no "starting the server for" follows (noted ${String(noted === true)}, launched ${String(afterReload.includes('starting the server for'))})`,
+        );
+        const shown = await waitFor(async () => (await card()).start, 15_000, 200);
+        const notStarted = await card();
+        const items = await waitFor(
+          async () =>
+            (await statusItems()).some((t) => t.includes('not started')) ? true : undefined,
+          15_000,
+          200,
+        );
+        console.log(`  status bar items: ${JSON.stringify(await statusItems())}`);
+        check(
+          shown === true && notStarted.text.includes('opencode is not running') && items === true,
+          `N2 the chat shows the "opencode is not running" card with Start (${JSON.stringify(notStarted.text.slice(0, 80))}) and the status bar item reads "not started" (${String(items === true)})`,
+        );
+        await shot('32a-not-started');
+
+        // --- N3: Start connects; the item shows the model ---------------------------------------------
+        check(await clickButton('Start'), 'N3 Start is pressed with the real mouse');
+        await waitConnected(60_000);
+        const connectedItem = await waitFor(
+          async () =>
+            (await statusItems()).find((t) => /OpenCode: \S/.test(t) && !t.includes('not started')),
+          10_000,
+          200,
+        );
+        console.log(`  status bar after Start: ${JSON.stringify(await statusItems())}`);
+        const cardAfter = await card();
+        check(
+          connectedItem !== undefined && cardAfter.text === '',
+          `N3 once connected the card is gone and the item shows the model (${String(connectedItem)})`,
+        );
+        await shot('32b-started');
+
+        // --- N4: Reload again (still autoStart off); the prompt starts the server -------------------
+        before = hostLogSizes();
+        await reload('__visualReload32b');
+        await waitFor(async () => (await card()).connection === 'not-started', 30_000, 200);
+        check(
+          (await card()).connection === 'not-started',
+          'N4 after the second Reload the chat is not started again',
+        );
+        const PROMPT = 'Tab32: Reply with exactly: alpha32. Do not use any tools.';
+        await send(PROMPT);
+        await waitConnected(60_000);
+        check(await waitIdle(60_000), 'N4 the turn of the prompt that started the server ends');
+        const conversation = await snapshotOfChat();
+        check(
+          conversation.messages >= 2 && logSince(before).includes('prompt accepted'),
+          `N4 the prompt sent from not-started was delivered and answered (${String(conversation.messages)} blocks)`,
+        );
+
+        // --- N5: a click on the status bar item brings the hidden chat back ---------------------------
+        await page.keyboard.press('ControlOrMeta+B'); // hide the side bar with the chat
+        await waitFor(async () => !(await webviewVisible()), 5_000, 200);
+        await page
+          .locator('.part.statusbar .statusbar-item[aria-label*="OpenCode"]')
+          .first()
+          .click();
+        const back = await waitFor(() => webviewVisible(), 10_000, 200);
+        await openChat(30_000);
+        // The side bar view comes back with a NEW document (a WebviewView cannot retain its
+        // context). With the old check (`activeElement` AND `doc.hasFocus()`) N5 failed in the
+        // first two full runs of #124 (31/10/2026) and passed 3 of 3 with `--steps 31,32`; the
+        // output only printed the combined boolean. HYPOTHESIS that `hasFocus()` was the false
+        // half, as step 22 saw in the same kind of new document. Same remedy as step 22: the box is
+        // the active element, and the proof of the caret is the real keyboard, a typed letter must
+        // land in the box. Known gap (issue #127): the letter is typed even if the first wait expired.
+        const active = await waitFor(
+          () =>
+            web.inDoc((doc) => {
+              const field = doc.querySelector('textarea.prompt-text');
+              return field !== null && doc.activeElement === field;
+            }),
+          6_000,
+          200,
+        );
+        const boxValue = () =>
+          web.inDoc((doc) => doc.querySelector('textarea.prompt-text')?.value ?? null);
+        await page.keyboard.type('q');
+        const typed = await waitFor(async () => (await boxValue()) === 'q', 2_000, 100);
+        if (typed === true) await page.keyboard.press('Backspace');
+        const focused = active === true && typed === true;
+        check(
+          back === true && focused === true,
+          `N5 a click on the status bar item brings the chat back (visible ${String(back === true)}) with the caret in its prompt (${String(focused === true)})`,
+        );
+        assertNoWebviewErrors('step 32');
+      } finally {
+        // Leave the profile as found: no autoStart key, the dark theme. The server stays alive.
+        writeSettings(vscode.userDataDir, { [KEY]: undefined });
+        await command('Notifications: Clear All Notifications').catch(() => undefined);
+        await setTheme(DARK).catch(() => undefined);
+      }
+    },
+  );
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
