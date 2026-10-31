@@ -11,11 +11,15 @@
 // types must not make a 9-minute full run stale (ciclo-extension section 3 used to demand a rerun
 // after ANY touch of run.mjs), while a change of code must.
 //
-// How: every hashed source file goes through `esbuild.transformSync` (comments dropped, spacing
-// and CRLF normalised, TypeScript types erased), and the sha256 of the sorted (path, output) pairs
-// is the fingerprint. VERIFIED (30/10/2026, Windows 11, esbuild 0.28.2, `transformSync` on two
-// hand-written variants of each file): a ts, a tsx and a css file with different comments and line
-// endings gave identical output. The run also saves a
+// How: every hashed source file goes through `esbuild.transformSync` with `minifyWhitespace`
+// (comments dropped, spacing and CRLF normalised, TypeScript types erased), and the sha256 of the
+// sorted (path, output) pairs is the fingerprint. `minifyWhitespace` is needed: without it esbuild
+// keeps the `/** */` comments of class members, so a header-only change of `chatController.ts`
+// made a run stale (31/10/2026, PR #129). VERIFIED (31/10/2026, Windows 11, esbuild 0.28.2): the
+// case "is the same for a changed comment inside a class" passes with it and fails with
+// `minifyWhitespace` removed (mutation); module-level comments and CRLF: "is the same for a changed
+// comment, CRLF line endings and a type-only annotation"; and for real, `--check` on the output of a
+// `--steps 1` run stayed 0 after a header sentence of `ChatController` changed. The run also saves a
 // manifest of the per-file digests (`.vscode-test/fingerprints/<hash>.json`) so that `--check` can
 // say WHICH files changed and what `selectForFiles` would run for them.
 //
@@ -40,7 +44,10 @@
 //    opencode binary the run does not use (it uses the synthetic one);
 //  - a change that only alters types: it does not alter the runtime, `check-types` covers it;
 //  - a comment that changes behaviour at runtime (none known; `esbuild` keeps `/*! legal */`
-//    comments only when asked, and here they are dropped);
+//    comments only when asked, and here they are dropped). That includes annotation comments:
+//    `minifyWhitespace` also drops `/* @__PURE__ */` and `/* @vite-ignore */`, so adding or
+//    removing one does not change the fingerprint although `@__PURE__` can change tree-shaking
+//    (none in `src` or `webview-ui/src` on 31/10/2026);
 //  - an untracked or ignored file that the code imports from outside the list;
 //  - the OS and the display: a run on Windows says nothing about macOS or Linux.
 //
@@ -144,7 +151,7 @@ export function digestFile(root, rel) {
   let body = `raw\n${text}`;
   if (loader !== undefined) {
     try {
-      body = `code\n${transformSync(text, { loader, legalComments: 'none' }).code}`;
+      body = `code\n${transformSync(text, { loader, legalComments: 'none', minifyWhitespace: true }).code}`;
     } catch {
       // keep the raw body: see the header of this function
     }
