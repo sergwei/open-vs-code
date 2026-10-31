@@ -1843,8 +1843,13 @@ export class ChatController {
    * Issue #31: once the snapshot is out and a session is open, the "Changed files" list the host
    * holds for it is sent again (the webview state was just replaced) and a reload is requested,
    * fire and forget; it never delays or fails the snapshot.
+   * #111: once the five reads answered, the tree's half is published from the catch too, so an error
+   * AFTER them (a pane's messages, the snapshot) never shows the tree as failed: it gets its page, or
+   * the failure of its own read. VERIFIED by `chatController.test.ts` "publishes the tree page when a
+   * pane read fails after the tree was read" (fake client, synthetic error, Windows 11, 31/10/2026).
    * The tree's half (full resync with a sink): published on success, and a non-transport failure of
-   * any read (the fifth one or a pane's) tells the sink `failed()` when the host is not disposed,
+   * any read BEFORE they all answered (the panes' `session.list`, `session.active` or the request
+   * lists) tells the sink `failed()` when the host is not disposed,
    * the client is unchanged and this resync still owns the tree's stamp, EVEN IF the panes' half
    * was overtaken by a newer resync of its own (the check runs before the panes' `dropped()`
    * return). VERIFIED by `chatController.test.ts` "reports a failed tree when a read of the panes
@@ -1897,6 +1902,12 @@ export class ChatController {
     // also bumps `treeEpoch`) may drop the tree's half; the panes' `dropped()` must not, because a
     // one-pane resync racing this one would leave the tree in "Loading sessions…" for good.
     const treeStamp = treeQuery === undefined ? 0 : ++this.treeEpoch;
+    /**
+     * The tree's half, set once the five reads have answered: the page, or the failure of its own
+     * read, unless a newer full resync owns it. It runs at most once, so the catch below can call it
+     * for a failure that came AFTER the reads (#111) without publishing twice.
+     */
+    let publishTreeHalf: (() => void) | undefined;
     try {
       const [list, active, permissionList, formList, treeAnswer] = await Promise.all([
         client.session.list({ directory: server.folder, order: 'desc', limit: SESSION_LIMIT }),
@@ -1913,6 +1924,14 @@ export class ChatController {
               return undefined;
             }),
       ]);
+      let treePublished = false;
+      publishTreeHalf = (): void => {
+        if (sink === undefined || treeQuery === undefined || treePublished) return;
+        treePublished = true;
+        if (this.disposed || client !== this.client || treeStamp !== this.treeEpoch) return;
+        if (treeAnswer === undefined) sink.failed();
+        else this.publishTree(sink, server.folder, treeQuery.accept(treeAnswer), active, token);
+      };
       const restRequests: PendingAsks = {
         permissions: permissionList.data.map(toPermissionAsk),
         forms: formList.data.map(toFormAsk),
@@ -1933,13 +1952,6 @@ export class ChatController {
       // replaced, so the attention feature and the per-pane filters see the chains of this read.
       let learned = this.lineage.learn(list.data.map(toSessionSummary));
       for (const read of reads) if (this.lineage.learn(read.sessions)) learned = true;
-      /** The tree's half: the page, or the failure of its read, unless a newer full resync owns it. */
-      const publishTreeHalf = (): void => {
-        if (sink === undefined || treeQuery === undefined) return;
-        if (this.disposed || client !== this.client || treeStamp !== this.treeEpoch) return;
-        if (treeAnswer === undefined) sink.failed();
-        else this.publishTree(sink, server.folder, treeQuery.accept(treeAnswer), active, token);
-      };
       if (dropped()) {
         publishTreeHalf();
         return;
@@ -1971,7 +1983,11 @@ export class ChatController {
       // resync makes `dropped()` true without the tree's half having been published). It keeps the
       // gate of `publishTreeHalf`: not disposed, same client, and only the resync that still owns
       // the tree's stamp may say it failed. A Transport failure is left to the connection state.
-      if (
+      if (publishTreeHalf !== undefined) {
+        // #111: the five reads answered, so the tree has its own outcome (its page, or the failure
+        // of its own read) whatever a pane did afterwards; publishing it is idempotent.
+        publishTreeHalf();
+      } else if (
         info.code !== 'Transport' &&
         sink !== undefined &&
         treeQuery !== undefined &&

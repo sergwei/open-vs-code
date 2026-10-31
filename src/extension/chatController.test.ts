@@ -5794,6 +5794,32 @@ describe('the Sessions tree sink (issue #77)', () => {
     expect(resets).toEqual([]);
   });
 
+  // Protects #111: the catch told the sink `failed()` for ANY non-transport error, so a pane read
+  // that failed AFTER the five reads answered (here the open session's `message.list`) showed the
+  // tree as failed although its own page was read. Fake client, synthetic server error; the tree
+  // must get its page and no `failed`, and the pane still reports its error.
+  it('publishes the tree page when a pane read fails after the tree was read', async () => {
+    const { api } = fakeApi({
+      sessions: ['ses_a'],
+      messageListImpl: failWithServerError,
+    });
+    const { sink, resets, failures } = recordingSink();
+    const { controller, posted } = setup(
+      api,
+      'ses_a',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      sink,
+    );
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    expect(failures).toEqual([]);
+    expect(resets).toHaveLength(1);
+    expect(posted.some((message) => message.type === 'notice')).toBe(true);
+  });
+
   // Protects W1 of the delta review of round 2: the failure gate sat AFTER the panes' `dropped()`
   // return, so a full resync overtaken by a pane-only one (a tab becoming ready) whose pane read
   // then failed with a server error left the tree "Loading sessions…". Fake client, synthetic
