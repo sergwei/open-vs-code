@@ -1749,6 +1749,63 @@ describe('fake server', function () {
     });
 
     /**
+     * Protects the owner choice of `SHOW_REQUEST_COMMAND_ID` in `sidebar` mode (#114): a chat tab
+     * left over from `editor` mode that owns the request is revealed, and the side bar view is NOT
+     * resolved nor given the card. Switching to `sidebar` closes no tab, so tab B (behind tab A)
+     * still lists the request. Provenance: SYNTHETIC server, same SLOW ask as above. The card in
+     * the side bar when no tab owns it is `test:visual` step 30 (D5). Not asserted: that the toast
+     * closes after the reveal. In a first run it did not log `attention: closed … (visible)` in
+     * `sidebar` mode (HYPOTHESIS: a tab is only "seen" in `editor` mode; unexplored).
+     */
+    it('reveals the leftover tab that owns the request when Open chat runs in sidebar mode', async function () {
+      const cursor = await openLogCursor();
+      await toEditorWithoutTabs(cursor);
+      const sessionA = await tabWithAnsweredSession('E4 sidebar A first', 1);
+      await tabWithAnsweredSession('E4 sidebar B first', 2);
+      const labelA = chatTabs().find((tab) => tab.label.includes('E4 sidebar A'))?.label;
+      assert.ok(labelA, `tab A has no title: ${JSON.stringify(chatTabs().map((t) => t.label))}`);
+
+      const log = await openLogCursor();
+      await sendPrompt(log, 'ASK_PERMISSION SLOW E4 sidebar B');
+      const sessionB = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+      assert.ok(sessionB && sessionB !== sessionA, `wrong session for tab B:\n${log.added()}`);
+      await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, sessionA);
+      const asked = await matchInLog(
+        log,
+        /permission asked (per_\S+) for (ses_\S+) \(read\)/,
+        TURN_WAIT_MS,
+        'permission asked',
+      );
+      const permissionID = asked[1];
+      assert.ok(permissionID && asked[2] === sessionB, `the ask is not B's:\n${log.added()}`);
+      await log.waitFor(`attention: notified ${permissionID}`, 5_000);
+
+      await setChatLocation('sidebar', log);
+      await log.waitForQuiet();
+      assert.strictEqual(chatTabs().length, 2, 'the switch to sidebar closed a tab');
+      assert.strictEqual(activeChatLabel(), labelA, 'tab A must still be the active one');
+
+      log.mark();
+      await vscode.commands.executeCommand(SHOW_REQUEST_COMMAND_ID, {
+        sessionID: sessionB,
+        id: permissionID,
+        kind: 'permission',
+      });
+      await log.waitFor('chat tab revealed (pane', 8_000);
+      await sleep(SETTLE_MS);
+      assert.notStrictEqual(activeChatLabel(), labelA, 'Open chat left tab A in front');
+      assert.strictEqual(chatTabs().length, 2, 'Open chat opened another tab');
+      log.assertAbsent('Chat view resolved');
+
+      await vscode.commands.executeCommand(REPLY_PERMISSION_COMMAND_ID, {
+        sessionID: sessionB,
+        permissionID,
+        decision: 'reject',
+      });
+      await log.waitFor('turn finished:', TURN_WAIT_MS);
+    });
+
+    /**
      * Control of the case above (the opposite transition must NOT happen): the same permission,
      * asked by the tab that IS the active editor, raises the badge and no toast. After the margin
      * the absence is asserted (`vscode-extension` §11: an absence cannot be proven instantly).
