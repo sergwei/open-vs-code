@@ -699,6 +699,7 @@ describe('requests', () => {
       expect(store.state.requests.permissions).toHaveLength(1);
       for (const connection of [
         { state: 'starting' },
+        { state: 'not-started' },
         { state: 'stopped' },
         {
           state: 'unavailable',

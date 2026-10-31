@@ -139,8 +139,11 @@ export type BinaryDiagnosis = { settingPath?: string; checks: BinaryCheck[] };
  * `unavailable` that came from the binary detection (`binary-missing`, or `unsupported-version`
  * of a binary that answered `--version`); the `unsupported-version` found through `/api/info`
  * after the server started has none, which is how the webview tells step 1 from step 2.
+ * `not-started` (issue #124) means `openVsCode.autoStart` is off and nobody asked for a server
+ * yet: the chat shows a Start button and the first prompt launches it.
  */
 export type ConnectionState =
+  | { state: 'not-started' }
   | { state: 'starting' }
   | { state: 'connected'; serverVersion: string }
   | { state: 'reconnecting'; attempt: number; error?: ErrorInfo }

@@ -187,6 +187,18 @@ export const SERVER_URL_KEY = 'serverUrl';
  */
 export const SERVER_URL_SETTING = `${CONFIG_SECTION}.${SERVER_URL_KEY}`;
 
+/** Key of the auto-start setting inside {@link CONFIG_SECTION} (issue #124). */
+export const AUTO_START_KEY = 'autoStart';
+
+/**
+ * Full id of the auto-start setting (`contributes.configuration.properties`). `false` keeps the
+ * window from launching its own server until the user or the first prompt asks for it.
+ */
+export const AUTO_START_SETTING = `${CONFIG_SECTION}.${AUTO_START_KEY}`;
+
+/** Id of the server status item of the status bar (issue #124). */
+export const SERVER_STATUS_ITEM_ID = 'openVsCode.serverStatus';
+
 /** Command id of "OpenCode: Set Server Password" (contributed; issue #11). */
 export const SET_SERVER_PASSWORD_COMMAND_ID = 'openVsCode.setServerPassword';
 

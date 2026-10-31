@@ -3,6 +3,9 @@ import { CHAT_SHOW_GRACE_MS, notifyUnlessChatShows, type ChatSurfaceGate } from 
 import type { DetectionResult } from './opencodeBinary';
 import { fetchServerInfo, safeLog, startServer, stopServer } from './opencodeServer';
 import {
+  AUTO_START_KEY,
+  AUTO_START_SETTING,
+  CONFIG_SECTION,
   RESTART_SERVER_COMMAND_ID,
   SELECT_FOLDER_COMMAND_ID,
   SERVER_URL_SETTING,
@@ -29,7 +32,8 @@ const SERVED_FOLDER_KEY = 'openVsCode.servedFolder';
  * Restarts the server (the command, the toolbar button and the webview's Restart button) and,
  * when nothing could be restarted, tells the user why instead of failing silently. With an
  * external target (issue #11) "restart" means reconnect: the external server is not ours to
- * restart, and the manager never answers `no-binary` in that case.
+ * restart, and the manager never answers `no-binary` in that case. From `not-started` (autoStart
+ * off, issue #124) it STARTS the server: a `command` restart opens the manager's autoStart gate.
  *
  * Resolves after the restart attempt settled; the outcome of the new start is the manager's
  * state, not this function's. `no-binary` (no detection accepted an opencode v2 yet) and
@@ -134,6 +138,8 @@ async function runFailureAction(
  * that VS Code hands back right after it is not used. The failure notification takes its buttons from `failureActions(reason)`: Set
  * Password, Open Settings, Retry or Restart Server (the last two both reconnect when the target is
  * external) and Show Logs.
+ * `openVsCode.autoStart` (issue #124) is read right after the manager is built and on every change
+ * of the setting (`manager.setAutoStart`).
  * Workspace Trust: the extension declares no `capabilities.untrustedWorkspaces`, so it does not
  * activate in Restricted Mode and nothing is launched against an untrusted folder (HYPOTHESIS:
  * VS Code's documented default, not exercised).
@@ -175,6 +181,10 @@ export function registerServerLifecycle(
       fetchServerInfo(url, password, undefined, undefined, signal),
     log,
   });
+  // Read before the first detection (asynchronous), so a window with autoStart off never launches.
+  const readAutoStart = (): boolean =>
+    vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>(AUTO_START_KEY, true);
+  manager.setAutoStart(readAutoStart());
   const preferred = (): string | undefined => context.workspaceState.get<string>(SERVED_FOLDER_KEY);
   manager.setFolder(pickWorkspaceFolder(vscode.workspace.workspaceFolders, preferred()));
 
@@ -260,6 +270,9 @@ export function registerServerLifecycle(
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       manager.setFolder(pickWorkspaceFolder(vscode.workspace.workspaceFolders, preferred()));
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration(AUTO_START_SETTING)) manager.setAutoStart(readAutoStart());
     }),
   );
 

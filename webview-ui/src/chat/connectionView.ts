@@ -64,7 +64,8 @@ function isExternalReason(reason: Unavailable['reason']): boolean {
  * The guide's latch (decision P1=1): it turns on at an `unavailable` that has no conversation
  * behind it, stays on through the `starting` / `reconnecting` that follows (so the step "Start the
  * server" is seen running after Choose binary) and goes off at `connected`, at `stopped`, when a
- * conversation exists, or for the folder problem, which has its own card (P15=2). A normal start
+ * conversation exists, in `not-started` (issue #124: it has its own "not running" card), or for
+ * the folder problem, which has its own card (P15=2). A normal start
  * (`starting` then `connected`) never turns it on, so nothing flickers.
  * VERIFIED on Windows 11 with VS Code 1.143.1 (27/10/2026) by the visual checks "step 1 is done and
  * step 2 (Start the server) fails", "the guide is gone once connected" and "the normal empty state
@@ -81,6 +82,7 @@ export function nextGuideLatch(
       return connection.reason !== 'no-workspace';
     case 'connected':
     case 'stopped':
+    case 'not-started': // the "not running" card takes the place of the guide
       return false;
     case 'starting':
     case 'reconnecting':
@@ -219,13 +221,22 @@ export function guideSteps(
  * The card for the problem `connection` shows inside the conversation (or in the empty view when
  * there is no conversation but the guide does not apply), or `undefined` when there is none.
  * `reconnecting` is a neutral `status` with only Show logs (the host is already retrying).
- * `no-workspace` is the simple "Open a folder to start" card (P15=2).
+ * `no-workspace` is the simple "Open a folder to start" card (P15=2). `not-started` (issue #124)
+ * is the "opencode is not running" status card with a Start button.
  */
 export function describeProblem(connection: ConnectionState): ProblemView | undefined {
   if (connection.state === 'reconnecting') {
     return {
       title: `Reconnecting to opencode (attempt ${String(connection.attempt)})…`,
       actions: [showLogs],
+      role: 'status',
+    };
+  }
+  if (connection.state === 'not-started') {
+    return {
+      title: 'opencode is not running',
+      cause: 'openVsCode.autoStart is off. Send a prompt or press Start.',
+      actions: [restart('Start')],
       role: 'status',
     };
   }
@@ -304,5 +315,7 @@ export function describeConnection(connection: ConnectionState): string {
       return `Unavailable: ${connection.error.message}`;
     case 'stopped':
       return 'Stopped';
+    case 'not-started':
+      return 'Not started';
   }
 }

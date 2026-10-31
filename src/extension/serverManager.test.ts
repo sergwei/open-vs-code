@@ -1303,3 +1303,95 @@ describe('describeServerState / describeServerFailure', () => {
     expect(describeServerFailure(starting, running)).toBeUndefined();
   });
 });
+
+// Issue #124: the autoStart gate. SYNTHETIC: fake start/stop/fetchInfo and fabricated detections;
+// nothing here says how a real window behaves (that is `test:visual` step 32).
+describe('ServerManager with autoStart off (issue #124)', () => {
+  /** A manager with the gate closed, a folder and a usable detection: held in `not-started`. */
+  function held() {
+    const h = harness();
+    h.manager.setAutoStart(false);
+    h.manager.setFolder(folderChoice);
+    h.manager.onDetection(okResult());
+    return h;
+  }
+
+  it('holds the launch of a usable detection in not-started and never calls start', () => {
+    const { manager, start, states } = held();
+    expect(manager.state).toEqual({ kind: 'not-started' });
+    expect(states.map((s) => s.kind)).toEqual(['not-started']);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('Restart Server (a command restart) launches from not-started', async () => {
+    const { manager, start } = held();
+    await expect(manager.restart('command')).resolves.toBe('attempted');
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(manager.state.kind).toBe('running');
+  });
+
+  it('turning autoStart on launches the held server; turning it off never stops a live one', async () => {
+    const { manager, start, stop } = held();
+    manager.setAutoStart(true);
+    await reach(manager, 'running');
+    expect(start).toHaveBeenCalledTimes(1);
+    manager.setAutoStart(false);
+    expect(manager.state.kind).toBe('running');
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it('a folder change keeps not-started without restarting or starting', () => {
+    const { manager, start, states } = held();
+    manager.setFolder({ folder: '/work/other', ignored: [] });
+    expect(manager.state).toEqual({ kind: 'not-started' });
+    expect(states.some((s) => s.kind === 'restarting')).toBe(false);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('autoStart has no effect on an external target', async () => {
+    const { manager, start, states } = harness();
+    manager.setAutoStart(false);
+    manager.setFolder(folderChoice);
+    manager.setTarget({ kind: 'external', url: 'http://127.0.0.1:4096', password: 'pw' });
+    await reach(manager, 'running');
+    expect(states.map((s) => s.kind)).toEqual(['connecting', 'running']);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('going from an external target back to spawn with the gate closed ends in not-started', async () => {
+    const { manager, start } = harness();
+    manager.setAutoStart(false);
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    manager.setTarget({ kind: 'external', url: 'http://127.0.0.1:4096', password: 'pw' });
+    await reach(manager, 'running');
+    manager.setTarget({ kind: 'spawn' });
+    await reach(manager, 'not-started');
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('after the user started it, a crash backs off as before', async () => {
+    const { manager, created, timers } = held();
+    await manager.restart('command');
+    created[0]?.child.emit('exit', 1, null);
+    expect(manager.state).toMatchObject({ kind: 'unavailable', reason: 'exited', retryInMs: 1000 });
+    expect(timers.filter((t) => !t.cancelled)).toHaveLength(1);
+  });
+
+  it('an unusable detection is still binary-missing, not not-started', () => {
+    const { manager } = harness();
+    manager.setAutoStart(false);
+    manager.setFolder(folderChoice);
+    manager.onDetection(notFound);
+    expect(manager.state).toMatchObject({ kind: 'unavailable', reason: 'binary-missing' });
+  });
+
+  it('the not-started log line is stable and it is not a failure to notify', () => {
+    expect(describeServerState({ kind: 'not-started' })).toEqual({
+      level: 'info',
+      message:
+        'server not started: openVsCode.autoStart is off (send a prompt or run Restart Server)',
+    });
+    expect(describeServerFailure({ kind: 'idle' }, { kind: 'not-started' })).toBeUndefined();
+  });
+});

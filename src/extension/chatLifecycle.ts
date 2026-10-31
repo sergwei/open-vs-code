@@ -22,7 +22,7 @@ import { ChatTabs } from './chatTabs';
 import { registerChatView } from './chatViewProvider';
 import { chatWebviewOptions } from './chatWebview';
 import { createEditorActions, trackLastTextEditor } from './editorActions';
-import type { ModelRef } from '../shared/model';
+import type { Catalog, ModelRef } from '../shared/model';
 import {
   ADD_SELECTION_TO_CHAT_COMMAND_ID,
   ADD_TO_CHAT_COMMAND_ID,
@@ -50,6 +50,7 @@ import {
   RESTORE_CHAT_TAB_TEST_COMMAND_ID,
   SEARCH_SESSIONS_COMMAND_ID,
   SHOW_MORE_SESSIONS_COMMAND_ID,
+  SERVER_STATUS_ITEM_ID,
   SHOW_REQUEST_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
   TEST_SESSION_ANSWERS_COMMAND_ID,
@@ -60,6 +61,7 @@ import { safeLog } from './opencodeServer';
 import { createSetupActions } from './setupActions';
 import { pickSavedPermissionsToRevoke } from './savedPermissionsUi';
 import { restartServerWithFeedback } from './serverLifecycle';
+import { describeServerStatus } from './serverStatus';
 import type { ServerManager } from './serverManager';
 import { registerSessionDiffProvider } from './sessionDiffEditor';
 import type { PendingSummary } from './pendingRequests';
@@ -537,7 +539,39 @@ export function registerChat(
       if (sessionTree.setPending(marked)) sessionsView.refresh();
     },
   };
+  // Issue #124: the status bar item with the state of the server and its model. Created here (the
+  // controller feeds it), shown at once and disposed with the rest; a click opens the chat.
+  const statusItem = vscode.window.createStatusBarItem(
+    SERVER_STATUS_ITEM_ID,
+    vscode.StatusBarAlignment.Right,
+    100,
+  );
+  statusItem.name = 'OpenCode';
+  statusItem.command = OPEN_CHAT_COMMAND_ID;
+  let statusConnection: ConnectionState = { state: 'starting' };
+  let statusCatalog: Catalog | undefined;
+  const paintStatus = (): void => {
+    const status = describeServerStatus(statusConnection, statusCatalog);
+    statusItem.text = status.text;
+    statusItem.tooltip = status.tooltip;
+    statusItem.accessibilityInformation = { label: status.ariaLabel };
+    statusItem.backgroundColor = status.error
+      ? new vscode.ThemeColor('statusBarItem.errorBackground')
+      : undefined;
+  };
+  paintStatus();
+  statusItem.show();
   const controller = new ChatController({
+    serverStatus: {
+      connection: (next) => {
+        statusConnection = next;
+        paintStatus();
+      },
+      catalog: (next) => {
+        statusCatalog = next;
+        paintStatus();
+      },
+    },
     createClient: createOpencodeClient,
     log,
     editor: createEditorActions(log, { lastEditor, tabs }),
@@ -1083,6 +1117,7 @@ export function registerChat(
       log,
     ),
     { dispose: () => controller.dispose() },
+    statusItem,
     { dispose: () => attention.dispose() },
     vscode.commands.registerCommand(MANAGE_PERMISSIONS_COMMAND_ID, async () => {
       const target = targetPane(false);

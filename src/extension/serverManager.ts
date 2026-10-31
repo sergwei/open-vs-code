@@ -85,7 +85,9 @@ export type RestartReason =
   'command' | 'binary-changed' | 'folder-changed' | 'crash' | 'target-changed';
 
 /**
- * Lifecycle of the single server. `stopped` is final. `restarting` covers the stop of the old
+ * Lifecycle of the single server. `not-started` (issue #124) means a binary and a folder are known
+ * but `openVsCode.autoStart` is off and nothing asked for a server yet; Restart Server, the Start
+ * button or the first prompt launch it. `stopped` is final. `restarting` covers the stop of the old
  * process and the wait for its start attempt to settle; the new attempt then goes through
  * `starting` (own process) or `connecting` (external server, issue #11). An `unavailable/exited`
  * with `retryInMs` is NOT final: a restart is scheduled (`attempt` is 1-based); without it the
@@ -93,6 +95,7 @@ export type RestartReason =
  */
 export type ServerState =
   | { kind: 'idle' }
+  | { kind: 'not-started' }
   | { kind: 'starting'; folder: string; binaryPath: string }
   | { kind: 'connecting'; folder: string; url: string }
   | { kind: 'running'; server: RunningServerInfo }
@@ -116,8 +119,12 @@ export type ServerState =
 export type FolderChoice =
   { folder: string; ignored: string[] } | { reason: 'no-workspace'; message: string };
 
-/** How {@link ServerManager.restart} ended; only `attempted` means a new start was tried. */
-export type RestartResult = 'attempted' | 'no-workspace' | 'no-binary' | 'disposed';
+/**
+ * How {@link ServerManager.restart} ended; only `attempted` means a new start was tried.
+ * `not-started` means the autoStart gate held a launch that no user action asked for (a
+ * `command` restart opens the gate first, so it never ends this way).
+ */
+export type RestartResult = 'attempted' | 'no-workspace' | 'no-binary' | 'disposed' | 'not-started';
 
 /** A timer that can be cancelled; what `ServerManagerDeps.schedule` returns. */
 export interface ScheduledTimer {
@@ -211,6 +218,12 @@ export function describeServerState(state: ServerState): {
   switch (state.kind) {
     case 'idle':
       return { level: 'info', message: 'server idle' };
+    case 'not-started':
+      return {
+        level: 'info',
+        message:
+          'server not started: openVsCode.autoStart is off (send a prompt or run Restart Server)',
+      };
     case 'starting':
       return {
         level: 'info',
@@ -335,6 +348,15 @@ export function describeServerFailure(
  * stream of the chat shows "Reconnecting", and Restart Server (reconnect) re-checks it. The
  * messages that reach the webview carry no URL, port or raw cause (see `describeExternalFailure`).
  *
+ * autoStart (issue #124, {@link setAutoStart}): with it off and an own-process target the manager
+ * never launches by itself until a launch happened or the user asked (`restart('command')`); a
+ * usable detection, a folder change or a return from an external target publish `not-started`
+ * instead. After the first launch everything above behaves as before. VERIFIED with fakes (unit
+ * test "Restart Server (a command restart) launches from not-started") and in a real VS Code
+ * (Windows 11, 31/10/2026): the gate holds with "ok   N1 the log has "server not started" and no
+ * "starting the server for" follows (noted true, launched false)", and Start opens it with "ok   N3
+ * once connected the card is gone and the item shows the model".
+ *
  * `stop()` is idempotent and final: afterwards no detection or timer starts anything; it also
  * cancels the backoff timer and waits for a restart in flight. The injected log is wrapped with
  * `safeLog`, so a log that throws (a closed channel) can never interrupt a transition or the stop.
@@ -364,6 +386,14 @@ export class ServerManager {
   /** The last binary a detection accepted; the restart launches this one. */
   private lastUsablePath: string | undefined;
   private restartPromise: Promise<RestartResult> | undefined;
+  /** Mirrors `openVsCode.autoStart` (issue #124); see {@link setAutoStart}. */
+  private autoStart = true;
+  /**
+   * True once this manager launched its own server or the user asked for one (`restart('command')`).
+   * From then on the autoStart gate is open for good, so crashes, binary changes and folder changes
+   * behave as before and turning the setting off never stops a live server.
+   */
+  private launchedOnce = false;
   /** What the manager follows: its own server (default) or an external one. See {@link setTarget}. */
   private target: ServerTarget = { kind: 'spawn' };
   /**
@@ -410,8 +440,10 @@ export class ServerManager {
    * detection, and again whenever the choice changes (a folder removed or picked by the user).
    * A `no-workspace` choice stops whatever runs and moves to `unavailable/no-workspace`; a
    * different folder than before restarts the server (reason `folder-changed`) once a binary is
-   * known (or an external target is set), and the first call, made before any detection, just
-   * records it. Extra folders are logged as not served.
+   * known (or an external target is set) and a launch happened or the user asked for one; with the
+   * autoStart gate closed (issue #124) it restarts nothing and only publishes `not-started`. The
+   * first call, made before any detection, just records the folder. Extra folders are logged as
+   * not served.
    */
   setFolder(choice: FolderChoice): void {
     const previous = this.folderChoice;
@@ -438,9 +470,43 @@ export class ServerManager {
     const unchanged =
       previous !== undefined && !('reason' in previous) && previous.folder === choice.folder;
     const canLaunch = this.lastUsablePath !== undefined || this.target.kind !== 'spawn';
+    if (this.holdsLaunch()) {
+      // Gate closed: no restart (it would flash `restarting`), just keep the state honest.
+      if (!unchanged && this.lastUsablePath !== undefined && kind !== 'not-started') {
+        this.setState({ kind: 'not-started' });
+      }
+      return;
+    }
     if (!unchanged && canLaunch && !this.disposed) {
       void this.restart('folder-changed');
     }
+  }
+
+  /**
+   * Mirrors `openVsCode.autoStart` (issue #124). Call it right after constructing the manager,
+   * before the first detection, and whenever the setting changes. Turning it on while the state
+   * is `not-started` launches the held server; turning it off never stops a server that was
+   * already launched. It has no effect on an external target (nothing is launched). VERIFIED with
+   * fakes (unit tests only).
+   */
+  setAutoStart(on: boolean): void {
+    this.autoStart = on;
+    const choice = this.folderChoice;
+    if (
+      on &&
+      !this.disposed &&
+      this.current.kind === 'not-started' &&
+      this.lastUsablePath !== undefined &&
+      choice !== undefined &&
+      'folder' in choice
+    ) {
+      this.launching = this.launch(this.lastUsablePath, choice.folder);
+    }
+  }
+
+  /** True when the autoStart gate must hold a launch nobody asked for: own server, never launched. */
+  private holdsLaunch(): boolean {
+    return !this.autoStart && !this.launchedOnce && this.target.kind === 'spawn';
   }
 
   /**
@@ -475,7 +541,9 @@ export class ServerManager {
    * later switch back to `spawn` can use it, and a missing binary is not an error. An unusable
    * result becomes `unavailable` WITH `binary` (E2, issue #85: the attempts and the setting path,
    * so the chat can say what was searched); every other `unavailable` in this file is built
-   * without it, which is what keeps a later `start-failed` from showing step 1 as failed.
+   * without it, which is what keeps a later `start-failed` from showing step 1 as failed. With
+   * the autoStart gate closed (issue #124) a usable result launches nothing and publishes
+   * `not-started` instead.
    * VERIFIED by unit tests with fabricated detections (synthetic, not a real run).
    */
   onDetection(result: DetectionResult): void {
@@ -488,11 +556,15 @@ export class ServerManager {
       this.lastUsablePath = binaryPath;
       if (this.target.kind !== 'spawn') return;
       if (this.folderChoice === undefined || 'reason' in this.folderChoice) return;
-      if (kind === 'idle' || kind === 'unavailable') {
+      if (kind === 'idle' || kind === 'unavailable' || kind === 'not-started') {
         // A detection is a user action: it overrides a pending backoff and clears the counter.
         this.cancelRetryTimer();
         this.crashAttempts = 0;
-        this.launching = this.launch(binaryPath, this.folderChoice.folder);
+        if (this.holdsLaunch()) {
+          if (kind !== 'not-started') this.setState({ kind: 'not-started' });
+        } else {
+          this.launching = this.launch(binaryPath, this.folderChoice.folder);
+        }
       } else if (kind === 'starting') {
         this.pendingPath = binaryPath;
       } else if (this.current.kind === 'running' && binaryPath !== this.current.server.binaryPath) {
@@ -503,7 +575,7 @@ export class ServerManager {
     }
 
     if (this.target.kind !== 'spawn') return;
-    if (kind === 'idle' || kind === 'unavailable') {
+    if (kind === 'idle' || kind === 'unavailable' || kind === 'not-started') {
       if (this.folderChoice !== undefined && 'reason' in this.folderChoice) return;
       this.setState({
         kind: 'unavailable',
@@ -526,8 +598,11 @@ export class ServerManager {
    * injected `stop`, waits for the attempt to settle and launches again; the states are
    * `restarting` (with the reason) and then the usual `starting` / `running`. The Promise never
    * rejects. Resolves `no-binary` when no detection accepted a binary yet, `no-workspace` for a
-   * `command` restart with no folder, `disposed` after `stop()`, else `attempted` (the new start
-   * may still fail; that shows in the state). A user-made restart (any reason but `crash`)
+   * `command` restart with no folder, `disposed` after `stop()`, `not-started` when the autoStart
+   * gate is closed (issue #124) and the restart is a `folder-changed` / `target-changed` one:
+   * nothing is launched and the state is `not-started`. A `command` restart is what opens the
+   * gate (`launchedOnce`). Otherwise `attempted` (the new start may still fail; that shows in the
+   * state). A user-made restart (any reason but `crash`)
    * resets the automatic-restart counter. With an external target it RECONNECTS instead of
    * launching (and never answers `no-binary`, since no binary is needed); a `target-changed`
    * restart back to `spawn` with no known binary ends in `idle` and answers `no-binary`, the next
@@ -552,6 +627,9 @@ export class ServerManager {
       this.deps.log.info('restart ignored: no usable opencode binary has been detected yet');
       return Promise.resolve('no-binary');
     }
+    // Restart Server, the Start button and the first prompt all come here as `command`: they open
+    // the autoStart gate, so a held server launches (issue #124).
+    if (reason === 'command') this.launchedOnce = true;
     const promise = this.doRestart(reason).finally(() => {
       if (this.restartPromise === promise) this.restartPromise = undefined;
     });
@@ -633,6 +711,11 @@ export class ServerManager {
       this.setState({ kind: 'idle' });
       return 'no-binary';
     }
+    if (this.holdsLaunch()) {
+      // `folder-changed` / `target-changed` back to spawn with autoStart off and nothing launched.
+      this.setState({ kind: 'not-started' });
+      return 'not-started';
+    }
     this.lastLaunch = { target, binaryPath, folder: choice.folder };
     this.launching = this.launch(binaryPath, choice.folder);
     await this.launching;
@@ -692,6 +775,7 @@ export class ServerManager {
     const controller = new AbortController();
     this.abort = controller;
     this.pendingPath = undefined;
+    this.launchedOnce = true;
     this.setState({ kind: 'starting', folder, binaryPath });
     let started: RunningServer | undefined;
     try {

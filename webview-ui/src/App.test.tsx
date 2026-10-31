@@ -611,6 +611,22 @@ describe('connection states', () => {
       expect(h.textarea().readOnly).toBe(false);
     });
 
+    // Issue #124. SYNTHETIC: a fabricated `not-started` state, no host behind it.
+    it('not-started shows the Start card, sends server.restart, and still lets a prompt go', () => {
+      const h = start();
+      h.apply({ type: 'connection.state', connection: { state: 'not-started' } });
+      const card = must(h.container, '.connection-card');
+      expect(card.getAttribute('role')).toBe('status');
+      expect(card.textContent).toContain('opencode is not running');
+      expect(h.container.querySelector('.setup-guide')).toBeNull();
+      h.button('Start').click();
+      expect(h.sent).toEqual([{ type: 'server.restart' }]);
+      expect(h.textarea().placeholder).not.toBe('Waiting for opencode…');
+      h.type('hello');
+      h.button('Send').click();
+      expect(h.sent.at(-1)).toMatchObject({ type: 'prompt.send', text: 'hello' });
+    });
+
     it('reconnecting is a neutral status card with only Show logs', () => {
       const h = start();
       h.apply(...openSession([user('m1', 'hello there'), assistant('m2')]));

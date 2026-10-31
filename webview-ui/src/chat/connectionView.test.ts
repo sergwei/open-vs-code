@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Catalog } from '../../../src/shared/model';
 import type { ConnectionState } from '../../../src/shared/protocol';
-import { describeProblem, guideSteps, nextGuideLatch } from './connectionView';
+import { describeConnection, describeProblem, guideSteps, nextGuideLatch } from './connectionView';
 
 type Unavailable = Extract<ConnectionState, { state: 'unavailable' }>;
 const failure = (
@@ -219,6 +219,14 @@ describe('describeProblem', () => {
     expect(describeProblem({ state: 'connected', serverVersion: '2' })).toBeUndefined();
   });
 
+  it('not-started is a neutral status card whose only action is Start (server.restart)', () => {
+    const view = describeProblem({ state: 'not-started' });
+    expect(view?.title).toBe('opencode is not running');
+    expect(view?.role).toBe('status');
+    expect(view?.actions).toEqual([{ label: 'Start', message: { type: 'server.restart' } }]);
+    expect(describeConnection({ state: 'not-started' })).toBe('Not started');
+  });
+
   it('the exited card says the conversation is kept, not the raw server text', () => {
     expect(describeProblem(failure('exited', 'code 1'))?.cause).toBe(
       'The server exited unexpectedly. Your conversation is kept.',
@@ -234,6 +242,10 @@ describe('nextGuideLatch', () => {
     expect(latch).toBe(true);
     latch = nextGuideLatch(latch, { state: 'connected', serverVersion: '2' }, false);
     expect(latch).toBe(false);
+  });
+
+  it('not-started turns it off even when it was on: the Start card takes its place', () => {
+    expect(nextGuideLatch(true, { state: 'not-started' }, false)).toBe(false);
   });
 
   it('a normal start never turns it on', () => {

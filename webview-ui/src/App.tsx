@@ -96,7 +96,8 @@ interface LastRevert {
  * `nextGuideLatch`); with a conversation the {@link ConnectionCard} sits at the end of the log; with
  * neither (reconnecting, or no folder) the card takes the place of the empty state. While there
  * is no connection the prompt box stays editable with the placeholder "Waiting for opencode…"
- * (P5=2). `.app` carries `data-connection` (the state) for the tests and is a size container for
+ * (P5=2). Exception (issue #124): in `not-started` (autoStart off) Send is enabled and starts the
+ * server with the prompt, while attachments, `/` and the selectors stay disabled. `.app` carries `data-connection` (the state) for the tests and is a size container for
  * the CSS. VERIFIED in jsdom by `App.test.tsx` ("setup guide and connection card").
  *
  * Issue #20 adds the session list to the header (open, search, rename, delete; the host confirms a
@@ -257,7 +258,9 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   });
   /** The card of the current connection problem, if any (inside the conversation or in its place). */
   const problem = createMemo(() => describeProblem(state.connection));
-  const canSend = () => connected() && !busy() && state.pending.length === 0;
+  // Issue #124: with autoStart off the first prompt starts the server (the host waits for it).
+  const notStarted = () => state.connection.state === 'not-started';
+  const canSend = () => (connected() || notStarted()) && !busy() && state.pending.length === 0;
   /** What the selectors and the next `prompt.send` read: catalog, open session row and draft. */
   const selectionInput = (): SelectionInput => ({
     catalog: state.catalog,
@@ -696,8 +699,9 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
    * With `send` and room to send ({@link canSend}) it goes through {@link sendPrompt}, the code of
    * Send and Retry, so the chosen model and agent, `lastSend` and the restore-on-failure apply, and
    * the user's draft and chips are left alone. Otherwise (`send` false: the host asks for a review,
-   * as with a buffer with unsaved changes or a message that waited too long; or not connected; or
-   * a request in flight or a busy session) the text goes to the prompt box: an empty draft is
+   * as with a buffer with unsaved changes or a message that waited too long; or not connected, except
+   * in `not-started` (issue #124), where {@link canSend} allows it and the send starts the server;
+   * or a request in flight or a busy session) the text goes to the prompt box: an empty draft is
    * replaced, a draft with text gets it on a new last line, and the chips are added without
    * duplicates, so nothing the user wrote is lost. A `send` that had to fall back says why in a
    * notice of its own; one the host asked to be a draft (`send` false) adds none here because the
@@ -952,7 +956,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
             history={history}
             files={state.draftFiles}
             busy={busy()}
-            waiting={!connected()}
+            waiting={!connected() && !notStarted()}
             sendDisabled={!canSend()}
             attachDisabled={!connected()}
             commands={state.catalog?.commands}
