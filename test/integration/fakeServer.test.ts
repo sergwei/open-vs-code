@@ -81,6 +81,11 @@ const TURN_WAIT_MS = 20_000;
 // Margin before asserting that a transition did NOT happen. Our own choice: longer than the 1 s of
 // the first crash backoff and than the flush delay of the log (100 ms), short enough not to add
 // minutes.
+// Every remaining use of `SETTLE_MS` is either a NEGATIVE window (it precedes an `assertAbsent` or
+// a count that must not grow: absence cannot be waited for, so it stays fixed) or the pause after
+// "OpenCode: New Session" in the side bar, whose round trip through the webview logs nothing to
+// wait on. The pauses that preceded a `mark()` and a positive wait now use `log.waitForQuiet()`
+// (tooling/test-speed phase 1).
 const SETTLE_MS = 1_500;
 
 /** Counts the occurrences of `text` in what the log gained since its mark. */
@@ -1253,7 +1258,7 @@ describe('fake server', function () {
       await log.waitFor('chat tab created (pane', 8_000);
       await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
       await waitForChatTabs(2);
-      await sleep(SETTLE_MS);
+      await log.waitForQuiet(); // what the second tab still logs lands before the mark
 
       log.mark();
       await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
@@ -1368,7 +1373,7 @@ describe('fake server', function () {
       await toEditorWithOneTab(log);
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await waitForChatTabs(0);
-      await sleep(SETTLE_MS);
+      await log.waitForQuiet(); // what the closed tab still logs lands before the mark
 
       log.mark();
       await restoreTab({ sessionID }, 'Seeded old title');
@@ -1396,7 +1401,7 @@ describe('fake server', function () {
       await setChatLocation('editor', log);
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await waitForChatTabs(0);
-      await sleep(SETTLE_MS);
+      await log.waitForQuiet(); // what the closed tab still logs lands before the mark
 
       log.mark();
       await restoreTab({ sessionID: 'ses_gone77' }, 'Seeded gone title');
@@ -1421,7 +1426,7 @@ describe('fake server', function () {
       const log = await openLogCursor();
       const sessionID = await answeredSession('Restore77 duplicate');
       await toEditorWithOneTab(log);
-      await sleep(SETTLE_MS);
+      await log.waitForQuiet(); // what the tab still logs lands before the mark
 
       log.mark();
       await restoreTab({ sessionID }, 'Seeded duplicate title');
@@ -1500,7 +1505,7 @@ describe('fake server', function () {
       await setChatLocation('editor', log);
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await waitForChatTabs(0);
-      await sleep(SETTLE_MS);
+      await log.waitForQuiet(); // what the closed tab still logs lands before the caller's mark
     }
 
     afterEach(async () => {
@@ -1525,7 +1530,7 @@ describe('fake server', function () {
       await waitForChatTabs(1);
       await log.waitFor('chat tab created (pane', 8_000);
       await log.waitFor('webview ready', 8_000);
-      await sleep(SETTLE_MS);
+      await log.waitForQuiet(); // what the new tab still logs lands before the mark
 
       log.mark();
       await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, sessionID);
@@ -1541,7 +1546,7 @@ describe('fake server', function () {
       await toEditorWithoutTabs(log);
       await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, sessionID);
       await waitForChatTabs(1);
-      await sleep(SETTLE_MS);
+      await log.waitForQuiet(); // the new tab's first requests land before the rename
 
       await vscode.commands.executeCommand(TEST_SESSION_ANSWERS_COMMAND_ID, {
         title: 'Tree77 renamed',
@@ -1618,7 +1623,7 @@ describe('fake server', function () {
       await setChatLocation('editor', log);
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await waitForChatTabs(0);
-      await sleep(SETTLE_MS);
+      await log.waitForQuiet(); // what the closed tab still logs lands before the caller's mark
     }
 
     /** A NEW tab with the prompt `text` answered to the end; returns the session it created. */
