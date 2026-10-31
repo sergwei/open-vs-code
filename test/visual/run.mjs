@@ -5342,8 +5342,8 @@ try {
   // window) the line has no cost (the model is free) and the level is normal. Part 2: a COSTLY
   // turn on the `tiny-context` model (5000 tokens: 4248 is 85 %) shows the cost and the `high`
   // level. Both are measured for text, accessible sentence, tag, own attributes, `style`, width
-  // and contrast in the four themes. A compaction has no UI before issue #34 and stays covered by
-  // the Vitest e2e. Self-contained: it makes its own sessions.
+  // and contrast in the four themes. The compaction line and `/compact` (issue #125) are judged in
+  // step 33; here a compaction stays covered by the Vitest e2e. Self-contained: it makes its own sessions.
   await step('17 context and cost line (issue #25)', async () => {
     const THEMES = [
       ['light', 'Default Light Modern'],
@@ -7288,7 +7288,7 @@ try {
   // the bar with the new button, each at 300 px, wide and compact in the four themes (36 cells),
   // and C4, one cell on purpose (behaviour, not geometry): dark, 300 px. The workspace has two
   // project commands (`hello`, `broken`, see `createWorkspace`) next to the built-in `init` and
-  // `review` of the fixture.
+  // `review` of the fixture, and the client command `compact` (issue #125) the webview appends.
   await step('24 slash commands (issue #33)', async () => {
     const slashState = () =>
       web.inDoc((doc) => {
@@ -7459,8 +7459,8 @@ try {
           s.menuOpen &&
             s.expanded === 'true' &&
             inView(s.menu, s.view) &&
-            ['/init', '/review', '/hello', '/broken'].every((n) => s.items.includes(n)),
-          `${where}: C1 the menu opens inside the view with the four commands (${JSON.stringify(s.items)}, ${JSON.stringify(s.menu)})`,
+            ['/init', '/review', '/hello', '/broken', '/compact'].every((n) => s.items.includes(n)),
+          `${where}: C1 the menu opens inside the view with the five commands (${JSON.stringify(s.items)}, ${JSON.stringify(s.menu)})`,
         );
         const menuLook = await web.inDoc(measureText, {
           // A row that is neither focused nor hovered: on those the description takes the row's
@@ -7529,7 +7529,7 @@ try {
     let state = await slashState();
     const firstItem = state.items[0];
     check(
-      state.menuOpen && state.items.length === 4 && state.activeItem === firstItem,
+      state.menuOpen && state.items.length === 5 && state.activeItem === firstItem,
       `C4 Enter on the "/" button opens the menu with the focus on the first item (${JSON.stringify(state.items)}, focus "${state.activeItem}")`,
     );
     await press('ArrowDown');
@@ -7539,8 +7539,8 @@ try {
     );
     await press('End');
     check(
-      (await slashState()).activeItem === state.items[3],
-      `C4 End goes to the last item (${state.items[3]})`,
+      (await slashState()).activeItem === state.items[4],
+      `C4 End goes to the last item (${state.items[4]})`,
     );
     await press('ArrowDown');
     check((await slashState()).activeItem === firstItem, 'C4 ArrowDown wraps to the first item');
@@ -11429,6 +11429,314 @@ try {
       }
     },
   );
+
+  // Step 33 (issue #125, E8-chat-commands; plan Engram `E8-chat-commands/plan`, section 6, step 5).
+  // The matrix is component x width x theme, all at a 300 px side bar: F1 a long user message is
+  // folded (a "Show more" button inside the view, the text shorter than its full height,
+  // `aria-expanded` false, `aria-controls` pointing at the text, no `style` attribute, contrast of
+  // the button >= 4.5) in the four themes; F2 the keyboard path (Shift+Tab reaches the button, Enter
+  // opens and closes it, a short message has no button) in dark; K1 `/compact` chosen in the "/"
+  // menu with the real mouse and sent with Enter ends in ONE "Conversation compacted" line, the host
+  // logs `compaction requested for ses_`, and the context part of the usage line is gone, with the
+  // contrast of the line measured in the four themes; K2 a session the fake says has nothing to
+  // compact (KEEP_ALL) shows "Compaction failed: Nothing to compact yet" with a solid border (>= 1 px) and a
+  // text contrast >= 4.5 in the four themes; R1 `/init FAIL` fails, Retry runs the command again
+  // (a second `command accepted /init for ses_` and no `prompt accepted` in between) in dark.
+  // The transient "Compacting" activity stays in Vitest: the fake finishes in about 60 ms, too fast
+  // to observe without flicker. SYNTHETIC server (the compaction route and its events are invented
+  // from the types: see the fixture), so a pass proves our UI, host and protocol, not a real
+  // opencode. The step is self-contained: it makes its own sessions.
+  await step('33 chat commands: compact, fold and retry (issue #125)', async () => {
+    const WIDTH = 300;
+    const hostLog = () => {
+      const files = [];
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'OpenCode.log') files.push(full);
+        }
+      };
+      try {
+        walk(path.join(vscode.userDataDir, 'logs'));
+      } catch {
+        return '';
+      }
+      return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+    };
+    // The folding of the user messages: the one with a "Show more" button and the one without.
+    const foldState = () =>
+      web.inDoc((doc) => {
+        const users = [...doc.querySelectorAll('[role="log"] .message-user')];
+        const long = users.find((m) => m.querySelector('button.message-fold') !== null);
+        const short = users.find((m) => m.querySelector('button.message-fold') === null);
+        const text = long?.querySelector('.part-text') ?? null;
+        const button = long?.querySelector('button.message-fold') ?? null;
+        const box = button?.getBoundingClientRect();
+        return {
+          users: users.length,
+          shortButtons: short === undefined ? -1 : short.querySelectorAll('.message-fold').length,
+          shortFolded: short?.querySelector('.part-text')?.hasAttribute('data-folded') ?? null,
+          label: button?.textContent?.trim() ?? null,
+          expanded: button?.getAttribute('aria-expanded') ?? null,
+          controlsOk:
+            button !== null &&
+            text !== null &&
+            text.id !== '' &&
+            button.getAttribute('aria-controls') === text.id &&
+            doc.getElementById(text.id) === text,
+          folded: text?.hasAttribute('data-folded') ?? null,
+          height: text === null ? null : text.getBoundingClientRect().height,
+          full: text === null ? null : text.scrollHeight,
+          left: box?.left ?? null,
+          right: box?.right ?? null,
+          view: doc.defaultView.innerWidth,
+          activeIsFold: button !== null && doc.activeElement === button,
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+        };
+      });
+    const notices = () =>
+      web.inDoc((doc) =>
+        [...doc.querySelectorAll('[role="log"] .message-notice')].map((n) => ({
+          text: (n.textContent ?? '').trim(),
+          compaction: n.getAttribute('data-compaction') ?? '',
+        })),
+      );
+    const usageText = () =>
+      web.inDoc(
+        (doc) => doc.querySelector('.usage-line [aria-hidden="true"]')?.textContent?.trim() ?? '',
+      );
+    const failedBorder = () =>
+      web.inDoc((doc) => {
+        const element = doc.querySelector('.message-notice[data-compaction="failed"]');
+        if (element === null) return null;
+        const style = doc.defaultView.getComputedStyle(element);
+        return {
+          width: style.borderLeftWidth,
+          line: style.borderLeftStyle,
+          color: style.borderLeftColor,
+        };
+      });
+    // Types a multi-line text in one go (the real keyboard would take seconds for 14 lines) and sends it.
+    const sendMultiline = async (text) => {
+      if (!(await focusPromptBox())) {
+        throw new Error('the prompt box did not keep the focus: the long message was not sent');
+      }
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.press('Backspace');
+      await sleep(150); // the first typed character is lost without it (see `send`)
+      await page.keyboard.insertText(text);
+      await page.keyboard.press('Enter');
+    };
+    const LONG_TEXT = Array.from(
+      { length: 14 },
+      (_, index) => `Tab33 line ${String(index + 1)} of a long message, not a command.`,
+    ).join('\n');
+
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    await setSideBarWidth(WIDTH).catch(() => undefined);
+    check(await clickButton('New session'), 'New session is pressed');
+    await waitEmptyView();
+    assertNoWebviewErrors('before the chat commands step');
+
+    // --- a short and a long message, then F1 in the four themes ----------------------------------------
+    await send('Tab33 short: Reply with exactly: alpha33. Do not use any tools.');
+    check(await waitIdle(60_000), 'F1 the turn of the short message ends');
+    await sendMultiline(LONG_TEXT);
+    await waitFor(async () => (await foldState()).label !== null, 20_000, 200);
+    check(await waitIdle(60_000), 'F1 the turn of the long message ends');
+    for (const [themeName, theme] of PROBLEM_THEMES) {
+      await setTheme(theme);
+      await waitFor(async () => (await foldState()).label !== null, 60_000, 500);
+      const f = await foldState();
+      const where = `at ${String(WIDTH)} px, ${themeName}`;
+      check(
+        f.label === 'Show more' && f.expanded === 'false' && f.controlsOk && f.folded === true,
+        `${where}: F1 the long message is folded behind "Show more" (label ${JSON.stringify(f.label)}, aria-expanded ${JSON.stringify(f.expanded)}, aria-controls ok ${String(f.controlsOk)}, folded ${String(f.folded)})`,
+      );
+      check(
+        f.height !== null && f.full !== null && f.height < f.full - 1,
+        `${where}: F1 the folded text is shorter than the whole text (${String(f.height)} of ${String(f.full)} px)`,
+      );
+      check(
+        f.left !== null && f.left >= -0.5 && f.right <= f.view + 0.5 && f.styled === 0,
+        `${where}: F1 the button is inside the view (${String(f.left)}..${String(f.right)} of ${String(f.view)} px) and the view has no style attribute (${String(f.styled)})`,
+      );
+      const look = await web.inDoc(measureText, { button: 'button.message-fold' });
+      check(
+        look.button != null && look.button.ratio >= 4.5,
+        `${where}: F1 the "Show more" button has contrast >= 4.5 (${look.button ? look.button.ratio.toFixed(2) : 'not found'})`,
+      );
+      await shot(`33-fold-${themeName}`);
+    }
+
+    // --- F2: the keyboard path, in dark ------------------------------------------------------------------
+    await setTheme('Default Dark Modern');
+    await waitFor(async () => (await foldState()).label !== null, 60_000, 500);
+    check(await focusPromptBox(), 'F2 the prompt box has the focus');
+    let reached = false;
+    for (let presses = 0; presses < 60 && !reached; presses += 1) {
+      await page.keyboard.press('Shift+Tab');
+      reached = (await foldState()).activeIsFold;
+    }
+    check(reached, 'F2 Shift+Tab from the prompt box reaches the "Show more" button');
+    const folded = await foldState();
+    await page.keyboard.press('Enter');
+    await waitFor(async () => (await foldState()).expanded === 'true', 3_000, 100);
+    const opened = await foldState();
+    check(
+      opened.label === 'Show less' &&
+        opened.expanded === 'true' &&
+        opened.folded === false &&
+        folded.height !== null &&
+        opened.height !== null &&
+        opened.height > folded.height + 1,
+      `F2 Enter unfolds it: "Show less", aria-expanded true, taller (${String(folded.height)} -> ${String(opened.height)} px)`,
+    );
+    await page.keyboard.press('Enter');
+    await waitFor(async () => (await foldState()).expanded === 'false', 3_000, 100);
+    const closed = await foldState();
+    check(
+      closed.label === 'Show more' && closed.expanded === 'false' && closed.folded === true,
+      `F2 Enter again folds it: "Show more", aria-expanded false (${JSON.stringify(closed.label)}, ${JSON.stringify(closed.expanded)})`,
+    );
+    check(
+      closed.users >= 2 && closed.shortButtons === 0 && closed.shortFolded === false,
+      `F2 the short message has no button and is not folded (${String(closed.users)} user messages, ${String(closed.shortButtons)} buttons)`,
+    );
+
+    // --- K1: /compact from the "/" menu with the real mouse ----------------------------------------------
+    const usageBefore = await usageText();
+    const logBefore = hostLog().length;
+    check(await clickButton('Commands'), 'K1 the "/" button is pressed with the real mouse');
+    await waitPresent('.command-menu');
+    check(
+      await clickIn(
+        '.command-menu button.command-item[title="Summarize the conversation to free context"]',
+      ),
+      'K1 the /compact row is pressed with the real mouse',
+    );
+    check(
+      (await waitFor(
+        () => web.inDoc((doc) => doc.querySelector('textarea.prompt-text')?.value === '/compact '),
+        3_000,
+        100,
+      )) === true,
+      'K1 choosing /compact writes "/compact " in the box',
+    );
+    await page.keyboard.press('Enter');
+    const compacted = await waitFor(
+      async () => (await notices()).some((n) => n.text === 'Conversation compacted'),
+      20_000,
+      200,
+    );
+    check(await waitIdle(30_000), 'K1 the session is idle again after the compaction');
+    const lines = await notices();
+    check(
+      compacted === true && lines.length === 1 && lines[0]?.compaction === 'completed',
+      `K1 the conversation has ONE compaction line, "Conversation compacted" (${JSON.stringify(lines)})`,
+    );
+    check(
+      /compaction requested for ses_/.test(hostLog().slice(logBefore)),
+      'K1 the host log says "compaction requested for ses_…"',
+    );
+    const lost = await waitFor(async () => !(await usageText()).includes('Context'), 10_000, 200);
+    check(
+      usageBefore.includes('Context') && lost === true,
+      `K1 the usage line loses its context part after the compaction (${JSON.stringify(usageBefore)} -> ${JSON.stringify(await usageText())})`,
+    );
+    for (const [themeName, theme] of PROBLEM_THEMES) {
+      await setTheme(theme);
+      await waitFor(async () => (await notices()).length > 0, 60_000, 500);
+      const look = await web.inDoc(measureText, { line: '.message-notice' });
+      check(
+        look.line != null && look.line.ratio >= 4.5,
+        `at ${String(WIDTH)} px, ${themeName}: K1 the compaction line has contrast >= 4.5 (${look.line ? look.line.ratio.toFixed(2) : 'not found'})`,
+      );
+      await shot(`33-compacted-${themeName}`);
+    }
+
+    // --- K2: a session with nothing to compact -----------------------------------------------------------
+    await setTheme('Default Dark Modern');
+    check(await clickButton('New session'), 'K2 New session is pressed');
+    await waitEmptyView();
+    await send('Tab33 KEEP_ALL: nothing to compact. Do not use any tools.');
+    check(await waitIdle(60_000), 'K2 the turn of the first message ends');
+    await send('/compact');
+    const failedLine = await waitFor(
+      async () =>
+        (await notices()).some((n) => n.text === 'Compaction failed: Nothing to compact yet'),
+      20_000,
+      200,
+    );
+    check(await waitIdle(30_000), 'K2 the session is idle again after the failure');
+    // The execution ends as a success (read in runner/llm.ts@843a6c51), so no red banner.
+    check(
+      (await web.inDoc((doc) => doc.querySelectorAll('.alert').length)) === 0,
+      'K2 a failed compaction shows no red .alert banner',
+    );
+    check(
+      failedLine === true,
+      `K2 the failed compaction says "Compaction failed: Nothing to compact yet" (${JSON.stringify(await notices())})`,
+    );
+    for (const [themeName, theme] of PROBLEM_THEMES) {
+      await setTheme(theme);
+      await waitFor(async () => (await failedBorder()) !== null, 60_000, 500);
+      const border = await failedBorder();
+      const look = await web.inDoc(measureText, {
+        line: '.message-notice[data-compaction="failed"]',
+      });
+      const where = `at ${String(WIDTH)} px, ${themeName}`;
+      check(
+        border !== null &&
+          Number.parseFloat(border.width) >= 1 &&
+          border.line === 'solid' &&
+          border.color !== 'rgba(0, 0, 0, 0)',
+        // The CSS says 2px; the computed width is 1.6px at this zoom in the light theme (seen 31/10/2026).
+        `${where}: K2 the failed line has a visible solid warning border (${JSON.stringify(border)})`,
+      );
+      check(
+        look.line != null && look.line.ratio >= 4.5,
+        `${where}: K2 the text of the failed line has contrast >= 4.5 (${look.line ? look.line.ratio.toFixed(2) : 'not found'})`,
+      );
+      await shot(`33-failed-${themeName}`);
+    }
+
+    // --- R1: Retry of a turn started by a command, in dark ----------------------------------------------
+    await setTheme('Default Dark Modern');
+    check(await clickButton('New session'), 'R1 New session is pressed');
+    await waitEmptyView();
+    const commandsBefore = hostLog().length;
+    await send('/init FAIL');
+    const first = await waitFor(
+      () => /command accepted \/init for ses_/.test(hostLog().slice(commandsBefore)),
+      20_000,
+      200,
+    );
+    check(first === true, 'R1 the first "/init FAIL" reached the host as a command');
+    check(await waitIdle(30_000), 'R1 the failed turn ends');
+    check(await clickButton('Retry'), 'R1 Retry is pressed with the real mouse');
+    const second = await waitFor(
+      () =>
+        (
+          hostLog()
+            .slice(commandsBefore)
+            .match(/command accepted \/init for ses_/g) ?? []
+        ).length >= 2,
+      20_000,
+      200,
+    );
+    const since = hostLog().slice(commandsBefore);
+    check(
+      second === true && !since.includes('prompt accepted'),
+      `R1 Retry ran the command again: two "command accepted /init for ses_…" and no "prompt accepted" (${String((since.match(/command accepted \/init for ses_/g) ?? []).length)} command lines, prompt lines ${String((since.match(/prompt accepted/g) ?? []).length)})`,
+    );
+    check(await waitIdle(30_000), 'R1 the retried turn ends');
+    assertNoWebviewErrors('step 33');
+    await setTheme('Default Dark Modern');
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;

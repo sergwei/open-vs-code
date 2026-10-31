@@ -59,6 +59,10 @@
  * the window twice with the key in the profile and sends one prompt. Its `budgetS` of 25 is the
  * criterion above applied to its first full run (31/10/2026, Windows 11, VS Code 1.144.0:
  * 18.1 s; a partial `--steps 21,32 --bail` had taken 10.6 s).
+ * The step 33 (chat commands: `/compact`, folded user messages and Retry of a command, issue
+ * #125) came after it too: it needs the 1 (it drives the chat), makes its own sessions and sends
+ * six turns. Its `budgetS` of 40 is an ESTIMATE (the 24, with 36 cells, has 50): recalibrate it
+ * from its first full run with the criterion above.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -106,6 +110,7 @@ export const STEPS = [
   { id: '30', needs: ['1'], sendsPrompt: true, groups: ['requests', 'tabs'], budgetS: 60 },
   { id: '31', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 20 },
   { id: '32', needs: ['1'], sendsPrompt: true, groups: ['setup'], budgetS: 25 },
+  { id: '33', needs: ['1'], sendsPrompt: true, groups: ['composer', 'render'], budgetS: 40 },
 ];
 
 /** Every valid id, in canonical order. */
