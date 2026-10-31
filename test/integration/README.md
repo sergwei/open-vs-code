@@ -90,7 +90,7 @@ modes restore with `restoreChatLocation` (`support/chatLocation.ts`), never with
 `setChatLocation(undefined, …)`, which would now mean `editor`.
 
 The default itself is checked by the `default-location` configuration (`defaultLocation.test.ts`):
-its own profile `.vscode-test/user-data-default`, whose `settings.json` is rewritten to `{}`, no
+its own profile `.vscode-test/user-data-default`, deleted and recreated with `settings.json` `{}`, no
 folder and no server. It proves what VS Code registers as default, that the first activation logs
 `chat location at start: editor`, that the Chat view does not resolve until `sidebar` is written,
 that New Session opens a tab, and that an unknown value reads as `editor` in the host and in the

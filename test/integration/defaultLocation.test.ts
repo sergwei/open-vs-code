@@ -116,12 +116,12 @@ describe('default chat location (no setting written)', function () {
    * Protects the agreement `manifest.test.ts` checks on paper: the host stays in `editor` (no
    * `chat location changed to`, and New Session opens a tab, which `sidebar` would not) and the
    * Chat view stays hidden (`!= sidebar` hides it). VERIFIED: the case passes in the
-   * default-location run (Windows 11, VS Code 1.144.0, 30/10/2026, "5 passing"), so
+   * default-location run (Windows 11, VS Code 1.144.0, 31/10/2026 with the `finally` below, "5 passing"), so
    * `configuration.update` accepts a value outside the enum. Printed title: "reads an unknown value
    * as editor in the host and in the views". UNVERIFIED on macOS and Linux (first CI run on the
-   * pull request). The key is removed in a `finally` with a direct `update`,
-   * not with `setChatLocation`: the host never logs a change from `panel` to `editor` (both read
-   * as `editor`), so that helper would wait for a line that cannot come.
+   * pull request). The key is removed in a `finally` with `setChatLocation`, which compares the
+   * two values as the host reads them (`panel` and `editor` are both `editor`), so it waits for
+   * no log line there.
    */
   it('reads an unknown value as editor in the host and in the views', async () => {
     const log = await openLogCursor();
@@ -136,7 +136,7 @@ describe('default chat location (no setting written)', function () {
       log.assertAbsent('Chat view resolved');
       assert.strictEqual(chatTabs().length, 1);
     } finally {
-      await configuration.update(CHAT_LOCATION_KEY, undefined, vscode.ConfigurationTarget.Global);
+      await setChatLocation(undefined, log);
     }
   });
 });

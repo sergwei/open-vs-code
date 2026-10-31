@@ -8,7 +8,7 @@ import {
   CHAT_PANEL_VIEW_TYPE,
   CONFIG_SECTION,
 } from '../../../src/extension/ids';
-import type { ChatLocation } from '../../../src/extension/chatLocation';
+import { readChatLocation, type ChatLocation } from '../../../src/extension/chatLocation';
 import type { LogCursor } from './extensionLog';
 
 /** Our own margin for a slow CI runner, as in the other suites; not a VS Code value. */
@@ -20,7 +20,7 @@ const APPLY_WAIT_MS = 8000;
  * default of the setting is `editor`, the ~95 cases written for the side bar would otherwise start
  * in the wrong mode. The default itself is checked by the `default-location` suite, whose profile
  * does NOT carry this key. Keep it equal to `TEST_CHAT_LOCATION` in `.vscode-test.mjs` (a plain
- * `.mjs` that cannot import this file).
+ * `.mjs` that cannot import this file); `src/extension/testConfig.test.ts` fails if they differ.
  */
 export const TEST_BASELINE_CHAT_LOCATION: ChatLocation = 'sidebar';
 
@@ -53,9 +53,11 @@ export async function waitForChatTabs(count: number, timeoutMs = APPLY_WAIT_MS):
 
 /**
  * Writes the setting in the GLOBAL (user) settings of the isolated test profile and waits for the
- * host to log that it applied it. A value equal to the current one writes nothing and waits for
- * nothing (no change event would come). `undefined` removes the key, i.e. the DEFAULT of the
- * manifest (`editor` since E5; read from `inspect`, not hard-coded, so it follows the manifest).
+ * host to log that it applied it. It waits only when the location the host reads
+ * (`readChatLocation`) changes: raw values that read the same (an unknown value and `editor`) log
+ * nothing, so comparing them raw would wait for a line that never comes. `undefined` removes the
+ * key, i.e. the DEFAULT of the manifest (`editor` since E5; read from `inspect`, not hard-coded,
+ * so it follows the manifest).
  * The profiles of the existing suites carry the `sidebar` baseline (see
  * {@link TEST_BASELINE_CHAT_LOCATION}), and removing the key would drop it: those suites restore
  * with {@link restoreChatLocation}. Only the `default-location` suite removes the key.
@@ -66,11 +68,12 @@ export async function setChatLocation(
   log: LogCursor,
 ): Promise<void> {
   const configuration = vscode.workspace.getConfiguration(CONFIG_SECTION);
-  const current = configuration.get<string>(CHAT_LOCATION_KEY);
-  const wanted = value ?? configuration.inspect<string>(CHAT_LOCATION_KEY)?.defaultValue;
+  const current = readChatLocation(configuration.get<string>(CHAT_LOCATION_KEY));
+  const wanted = readChatLocation(
+    value ?? configuration.inspect<string>(CHAT_LOCATION_KEY)?.defaultValue,
+  );
   await configuration.update(CHAT_LOCATION_KEY, value, vscode.ConfigurationTarget.Global);
-  if (current !== wanted)
-    await log.waitFor(`chat location changed to ${String(wanted)}`, APPLY_WAIT_MS);
+  if (current !== wanted) await log.waitFor(`chat location changed to ${wanted}`, APPLY_WAIT_MS);
 }
 
 /**

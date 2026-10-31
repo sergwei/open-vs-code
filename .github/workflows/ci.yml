@@ -15,14 +15,13 @@
 #   files that do not exist in CI.
 # - The integration step runs every configuration of `.vscode-test.mjs` that is not opt-in
 #   (`main`, `external-server`, `fake-server` and `default-location`; issues #41 and #77). No
-#   `--if-present`: if the script is
-#   renamed the step must fail, not be skipped.
+#   `--if-present`: if the script is renamed the step must fail, not be skipped.
 #
 # UNVERIFIED until the first run on the pull request: nothing here has run on macOS or Linux.
 # Check there: Node version (>= 24.15), the Vitest summary, the four "passing" lines of the
-# integration step (main 43 + 1 pending, external-server 9, fake-server 44, default-location 5 on
-# Windows, VS Code 1.144.0, 30/10/2026), "OK: N files"
-# from the "Check package contents" step printed after the canaries, and one .vsix artifact per OS.
+# integration step (main 43 + 1 pending, external-server 9, fake-server 45, default-location 5 on
+# Windows, VS Code 1.144.0, 31/10/2026), "OK: N files" from the "Check package contents" step
+# printed after the canaries, and one .vsix artifact per OS.
 
 name: CI
 
