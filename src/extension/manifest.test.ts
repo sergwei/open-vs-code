@@ -349,6 +349,15 @@ describe('activation by a restored chat tab (issue #77)', () => {
  * after the setting goes back to `sidebar`. HYPOTHESIS for the Sessions view (that it shows with
  * its welcome in `editor` mode) from this file alone: `test:visual` step 27 looks at it on screen.
  */
+describe('autoStart (issue #124)', () => {
+  it('declares a boolean setting that defaults to true, per window, with a description', () => {
+    const setting = manifest.contributes.configuration.properties[ids.AUTO_START_SETTING];
+    expect(ids.AUTO_START_SETTING).toBe(`${ids.CONFIG_SECTION}.${ids.AUTO_START_KEY}`);
+    expect(setting).toMatchObject({ type: 'boolean', default: true, scope: 'window' });
+    expect(setting?.markdownDescription).toContain('openVsCode.serverUrl');
+  });
+});
+
 describe('chat location (issue #77)', () => {
   const views = manifest.contributes.views[ids.VIEW_CONTAINER_ID] ?? [];
   const commandIds = manifest.contributes.commands.map((c) => c.command);

@@ -50,7 +50,7 @@ import type {
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ModelRef } from '../shared/model';
+import type { Catalog, ModelRef } from '../shared/model';
 import type { ConnectionState, HostToWebview, Snapshot, WebviewToHost } from '../shared/protocol';
 import type { AttachmentRef, PromptFileRef } from '../shared/protocol';
 import { MAX_SESSION_TITLE_LENGTH } from '../shared/protocol';
@@ -669,6 +669,12 @@ function setup(
   if (remembered !== undefined) stored.set(SERVER.folder, remembered);
   const attentionCalls: Array<readonly PendingSummary[]> = [];
   const serverCalls: string[] = [];
+  /** What the status bar sink received (issue #124), and a hook a test sets to react to `restart`. */
+  const statusCalls: { connections: string[]; catalogs: Array<Catalog | undefined> } = {
+    connections: [],
+    catalogs: [],
+  };
+  const restartHook: { run: (() => void) | undefined } = { run: undefined };
   /**
    * The `setup.action`s that reached `deps.setup`. `binary` scripts the "Choose binary…" dialog:
    * `picked` is what the dialog returns, `current` the setting's value, `pickError` makes the
@@ -751,9 +757,18 @@ function setup(
         return confirmRevertDiscard();
       },
     },
+    serverStatus: {
+      connection: (connection) => {
+        statusCalls.connections.push(connection.state);
+      },
+      catalog: (catalog) => {
+        statusCalls.catalogs.push(catalog);
+      },
+    },
     server: {
       restart: () => {
         serverCalls.push('restart');
+        restartHook.run?.();
       },
       showLogs: () => {
         serverCalls.push('showLogs');
@@ -825,6 +840,8 @@ function setup(
     snapshots,
     attentionCalls,
     serverCalls,
+    statusCalls,
+    restartHook,
     setupCalls,
     /** Scripts the "Choose binary…" dialog and the setting; see `binary` above. */
     binary,
@@ -6130,5 +6147,119 @@ describe('renameSessionById and deleteSessionById (issue #77)', () => {
     await expect(controller.deleteSessionById('ses_a')).rejects.toMatchObject({
       name: 'ServerUnavailable',
     });
+  });
+});
+
+// Issue #124: autoStart off. SYNTHETIC: the server manager is replaced by `restartHook`, which
+// stands for what `restart()` does to the state (the real manager publishes `restarting` before
+// its first await; that is read in `serverManager.ts`, and `test:visual` step 32 runs the whole
+// chain in a real VS Code). The fake client and stream are the usual ones of this file.
+describe('autoStart off: not-started and the prompt that starts the server (issue #124)', () => {
+  type PromptSend = Extract<WebviewToHost, { type: 'prompt.send' }>;
+  const send = (requestId = 'r1'): PromptSend => ({
+    type: 'prompt.send',
+    requestId,
+    text: 'hi',
+    delivery: 'queue',
+    files: [],
+  });
+  const STARTING: ServerState = { kind: 'restarting', reason: 'command' };
+  const results = (posted: HostToWebview[]) =>
+    posted.flatMap((m) => (m.type === 'request.result' ? [m] : []));
+
+  it('shows not-started to the panes and the status sink, and the status sink hears the catalog', async () => {
+    const { api } = fakeApi();
+    const { controller, posted, statusCalls, streams } = setup(api);
+    controller.onServerState({ kind: 'not-started' });
+    expect(posted).toContainEqual({
+      type: 'connection.state',
+      connection: { state: 'not-started' },
+    });
+    expect(statusCalls.connections).toEqual(['not-started']);
+    controller.onServerState(RUNNING);
+    emit(streams, 'server.connected', {});
+    await flush();
+    await flush();
+    expect(statusCalls.catalogs.at(-1)?.models.length).toBe(2);
+    controller.onServerState({ kind: 'stopped' });
+    expect(statusCalls.catalogs.at(-1)).toBeUndefined();
+  });
+
+  it('starts the server once for the prompt and sends it after connecting, in a new session', async () => {
+    const { api, calls, prompts } = fakeApi();
+    // The pane shows no session, but the first server will hand it the remembered one (P3=1).
+    const { controller, posted, serverCalls, restartHook, streams } = setup(api, 'ses_old');
+    controller.onServerState({ kind: 'not-started' });
+    restartHook.run = () => {
+      controller.onServerState(STARTING);
+    };
+    const first = controller.handle(send('r1'));
+    const second = controller.handle(send('r2'));
+    await flush();
+    controller.onServerState(RUNNING);
+    streams[0]?.options.onState({ kind: 'connected' });
+    await Promise.all([first, second]);
+    expect(serverCalls.filter((call) => call === 'restart')).toHaveLength(1);
+    expect(calls).toContain('session.create');
+    expect(prompts.map((p) => p.sessionID)).toEqual(['ses_new', 'ses_new']);
+    expect(results(posted)).toEqual([
+      { type: 'request.result', requestId: 'r1' },
+      { type: 'request.result', requestId: 'r2' },
+    ]);
+  });
+
+  it('answers ServerUnavailable when the start ends unavailable', async () => {
+    const { api, prompts } = fakeApi();
+    const { controller, posted, restartHook } = setup(api);
+    controller.onServerState({ kind: 'not-started' });
+    restartHook.run = () => {
+      controller.onServerState(STARTING);
+    };
+    const done = controller.handle(send());
+    await flush();
+    controller.onServerState({ kind: 'unavailable', reason: 'start-failed', message: 'boom' });
+    await done;
+    expect(prompts).toEqual([]);
+    expect(results(posted)[0]).toMatchObject({ error: { code: 'ServerUnavailable' } });
+  });
+
+  // Protects the review finding W1 (#124): without `startWaiter?.(false)` in `dispose()`, a prompt
+  // waiting for the server stays pending forever once the controller is disposed. SYNTHETIC.
+  it('dispose releases a prompt that waits for the server to start', async () => {
+    const { api, prompts } = fakeApi();
+    const { controller, restartHook } = setup(api);
+    controller.onServerState({ kind: 'not-started' });
+    restartHook.run = () => {
+      controller.onServerState(STARTING);
+    };
+    let settled = false;
+    const done = controller.handle(send()).then(() => {
+      settled = true;
+    });
+    await flush();
+    expect(settled).toBe(false);
+    controller.dispose();
+    await done;
+    expect(settled).toBe(true);
+    expect(prompts).toEqual([]);
+  });
+
+  it('answers ServerUnavailable at once when the manager refuses the restart', async () => {
+    const { api } = fakeApi();
+    const { controller, posted, serverCalls } = setup(api);
+    controller.onServerState({ kind: 'not-started' });
+    // `restartHook` does nothing: the state stays not-started, like a refused restart.
+    await controller.handle(send());
+    expect(serverCalls).toContain('restart');
+    expect(results(posted)[0]).toMatchObject({ error: { code: 'ServerUnavailable' } });
+  });
+
+  it('keeps the answer ServerUnavailable and starts nothing when the connection is not not-started', async () => {
+    const { api } = fakeApi();
+    const { controller, posted, serverCalls } = setup(api);
+    controller.onServerState({ kind: 'stopped' });
+    await controller.handle(send());
+    expect(serverCalls).toEqual([]);
+    expect(results(posted)[0]).toMatchObject({ error: { code: 'ServerUnavailable' } });
   });
 });

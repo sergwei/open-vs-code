@@ -527,7 +527,12 @@ export function createChatStore(): ChatStore {
         // `reconnecting`: that is also the SSE loop retrying against a server that is still up,
         // and its next snapshot replaces the set anyway.
         const kind = m.connection.state;
-        if (kind === 'starting' || kind === 'unavailable' || kind === 'stopped') {
+        if (
+          kind === 'starting' ||
+          kind === 'not-started' ||
+          kind === 'unavailable' ||
+          kind === 'stopped'
+        ) {
           setState('requests', { permissions: [], forms: [] });
           setState('replying', reconcile({}));
           setState('requestErrors', reconcile({}));

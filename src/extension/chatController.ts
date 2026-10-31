@@ -415,6 +415,16 @@ export interface DroppedFiles {
   skipped: { folders: number; outside: number; remote: number; missing: number };
 }
 
+/**
+ * What the status bar item of the server (issue #124) is fed: every connection state and every
+ * change of the held catalog (`undefined` when the server goes away). The model it shows lives
+ * only here, in the catalog; `connected` comes from the event stream, not from the manager.
+ */
+export interface ServerStatusSink {
+  connection(connection: ConnectionState): void;
+  catalog(catalog: Catalog | undefined): void;
+}
+
 /** External effects of the controller, injected so tests need no VS Code, network or processes. */
 export interface ChatControllerDeps {
   createClient(server: RunningServerInfo): ChatApi;
@@ -427,6 +437,8 @@ export interface ChatControllerDeps {
    * any host that has no tree; see {@link SessionListSink}.
    */
   sessionList?: SessionListSink;
+  /** The status bar item (issue #124); absent in tests that do not care. */
+  serverStatus?: ServerStatusSink;
   /** The QuickPick that picks which saved permissions to revoke; resolves with their ids. */
   savedPermissions: { pickToRevoke(items: SavedPermission[]): Promise<string[]> };
   /**
@@ -766,6 +778,9 @@ export class ChatController {
   private treeMirrored = false;
   /** Models, providers and agents of the CURRENT server; `undefined` until the first load succeeds. */
   private catalog: Catalog | undefined;
+  /** The wait of {@link startOnPrompt}: its resolver while a prompt is starting the server. */
+  private startWaiter: ((connected: boolean) => void) | undefined;
+  private startingForPrompt: Promise<boolean> | undefined;
   /**
    * The load in flight, or `undefined`. A request that arrives meanwhile sets `catalogDirty` and
    * shares this promise, so a burst of reload events costs at most one more load.
@@ -1115,12 +1130,58 @@ export class ChatController {
   /**
    * Changes the connection state and tells every pane and, when there is one, the native Sessions
    * tree (`deps.sessionList`, issue #77 E3), which empties its rows unless the state is
-   * `connected`. VERIFIED by `chatController.test.ts` "tells the sink every connection state".
+   * `connected`, and the status bar item (`deps.serverStatus`, issue #124). It also settles the
+   * wait of {@link startOnPrompt} (see {@link settleStartOnPrompt}). VERIFIED by `chatController.test.ts` "tells the sink every connection state".
    */
   private setConnection(connection: ConnectionState): void {
     this.connection = connection;
     this.broadcast({ type: 'connection.state', connection });
     this.deps.sessionList?.connection(connection);
+    this.deps.serverStatus?.connection(connection);
+    this.settleStartOnPrompt(connection);
+  }
+
+  /**
+   * Resolves the wait of {@link startOnPrompt} when the connection reaches an end: `connected`
+   * is `true`; a final `unavailable` (no retry scheduled), `stopped` or a fall back to
+   * `not-started` is `false`. `starting` and `reconnecting` keep waiting (the manager is still
+   * working on it and has its own 30 s start timeout, so there is no timer here).
+   */
+  private settleStartOnPrompt(connection: ConnectionState): void {
+    if (this.startWaiter === undefined) return;
+    const state = connection.state;
+    if (state === 'starting' || state === 'reconnecting') return;
+    const resolve = this.startWaiter;
+    this.startWaiter = undefined;
+    resolve(state === 'connected');
+  }
+
+  /**
+   * Starts the server for a prompt sent while it is `not-started` (autoStart off, issue #124, P1=1)
+   * and resolves `true` once the chat is connected, `false` if it cannot be. One promise is shared
+   * by prompts that arrive meanwhile. It relies on `deps.server.restart()` having published its
+   * first state synchronously (`restarting` -> `starting`): if the connection is still
+   * `not-started` right after the call, the manager refused and the answer is `false` at once
+   * instead of a hang. With the real manager that refusal cannot happen from `not-started` (that
+   * state needs a binary and a folder); the check is a defensive net against a later refactor of
+   * the manager (R2 of the plan). Known limit: if the stream stays `reconnecting` for good after
+   * `running`, the wait has no timeout of its own and the prompt waits as long as it does. VERIFIED by the unit tests of `chatController.test.ts`
+   * with a fake `server.restart`, and with the real manager by `test:visual` step 32 ("ok   N4 the
+   * turn of the prompt that started the server ends", Windows 11, 31/10/2026). The refusal path
+   * is only unit-tested with the fake.
+   */
+  private startOnPrompt(): Promise<boolean> {
+    this.startingForPrompt ??= (async () => {
+      const connected = new Promise<boolean>((resolve) => {
+        this.startWaiter = resolve;
+      });
+      this.deps.server.restart();
+      if (this.connection.state === 'not-started') this.settleStartOnPrompt({ state: 'stopped' });
+      return connected;
+    })().finally(() => {
+      this.startingForPrompt = undefined;
+    });
+    return this.startingForPrompt;
   }
 
   /**
@@ -1216,6 +1277,10 @@ export class ChatController {
         this.stopStream();
         this.setConnection({ state: 'starting' });
         return;
+      case 'not-started':
+        this.stopStream();
+        this.setConnection({ state: 'not-started' });
+        return;
       case 'unavailable':
         this.stopStream();
         if (state.retryInMs !== undefined) {
@@ -1276,7 +1341,7 @@ export class ChatController {
     this.searchTicket++;
     this.treeMirrored = false;
     // The catalog belongs to the server that served it: another server may offer other models.
-    this.catalog = undefined;
+    this.setCatalog(undefined);
     this.catalogEpoch++;
     this.catalogRun = undefined;
     this.catalogDirty = false;
@@ -2422,11 +2487,12 @@ export class ChatController {
       // The server lists its default agent first (core/agent.ts L106-111 at v2.0.32, read).
       const first = agentOptions[0];
       if (first !== undefined) catalog.defaultAgent = first.id;
-      this.catalog = this.withPreferredModel(catalog);
+      const loaded = this.withPreferredModel(catalog);
+      this.setCatalog(loaded);
       this.log.info(
         `catalog loaded (${String(catalog.models.length)} models, ${String(catalog.agents.length)} agents, ${catalog.commands === undefined ? 'no' : String(catalog.commands.length)} commands)`,
       );
-      this.broadcast({ type: 'catalog', catalog: this.catalog });
+      this.broadcast({ type: 'catalog', catalog: loaded });
       if ('data' in commands && commands.data.length === 0) this.scheduleCommandRetry(epoch, 0);
     } catch (error) {
       if (epoch !== this.catalogEpoch) return;
@@ -2487,13 +2553,15 @@ export class ChatController {
       epoch !== this.catalogEpoch || this.disposed || generation !== this.commandRetryGeneration;
     try {
       const listed = await client.command.list();
-      if (stale() || this.catalog === undefined) return;
+      const held = this.catalog;
+      if (stale() || held === undefined) return;
       if (listed.data.length > 0) {
-        this.catalog = { ...this.catalog, commands: listed.data.map(toCommandOption) };
+        const next = { ...held, commands: listed.data.map(toCommandOption) };
+        this.setCatalog(next);
         this.log.info(
           `commands loaded after retry ${String(attempt + 1)} (${String(listed.data.length)} commands)`,
         );
-        this.broadcast({ type: 'catalog', catalog: this.catalog });
+        this.broadcast({ type: 'catalog', catalog: next });
       } else if (attempt < 2) {
         this.scheduleCommandRetry(epoch, attempt + 1);
       } else {
@@ -2566,8 +2634,15 @@ export class ChatController {
    */
   onPreferencesChanged(): void {
     if (this.catalog === undefined || this.disposed) return;
-    this.catalog = this.withPreferredModel(this.catalog);
-    this.broadcast({ type: 'catalog', catalog: this.catalog });
+    const next = this.withPreferredModel(this.catalog);
+    this.setCatalog(next);
+    this.broadcast({ type: 'catalog', catalog: next });
+  }
+
+  /** Holds `catalog` (or forgets it) and tells the status bar sink, which shows its model. */
+  private setCatalog(catalog: Catalog | undefined): void {
+    this.catalog = catalog;
+    this.deps.serverStatus?.catalog(catalog);
   }
 
   /** The held catalog, loading it first when there is none; `undefined` if the load failed. */
@@ -4437,6 +4512,15 @@ export class ChatController {
    * the work goes to a child session and the parent may show nothing (HYPOTHESIS: check by running
    * such a command against a real server).
    *
+   * Issue #124: with no client and the connection `not-started` (autoStart off) the prompt first
+   * starts the server through {@link startOnPrompt} and waits for `connected`; if that fails the
+   * answer is `ServerUnavailable` as before. The session is the one captured BEFORE the wait, so a
+   * pane that showed none gets a new session even though the first server gives it the remembered
+   * one. VERIFIED by the unit test "starts the server once for the prompt and sends it after
+   * connecting, in a new session" (fake manager) and by `test:visual` step 32 (Windows 11, VS Code
+   * 1.144.0, 31/10/2026): "ok   N4 the prompt sent from not-started was delivered and answered (2
+   * blocks)". Not observed: a pane with a remembered session in a real window (P3).
+   *
    * VERIFIED
    * against a real opencode 2.0.32 on Windows 11 (22/10/2026), on the final tree: the opt-in
    * `real-opencode` case "applies a chosen reasoning variant before the prompt" logged
@@ -4451,7 +4535,16 @@ export class ChatController {
     message: Extract<WebviewToHost, { type: 'prompt.send' }>,
   ): Promise<void> {
     const { requestId } = message;
-    const client = this.client;
+    let client = this.client;
+    // The session the user was looking at, captured BEFORE any wait (issue #124, P3=1).
+    const requestedSession = message.sessionID ?? pane.sessionID;
+    if (client === undefined && (this.connection.state === 'not-started' || this.startWaiter)) {
+      // autoStart is off: this prompt starts the server (P1=1) and then goes out. A pane that
+      // showed no session gets a NEW one, not the remembered session the first server hands it.
+      const connected = await this.startOnPrompt();
+      client = this.client;
+      if (!connected || client === undefined) return this.result(pane, requestId, unavailable());
+    }
     if (client === undefined) return this.result(pane, requestId, unavailable());
     // The `data:` URLs are taken NOW, before any await: an image evicted or forgotten while the
     // catalog or the session loads must not leave its raw `pasted-image:` uri for the server
@@ -4503,7 +4596,7 @@ export class ChatController {
           return this.result(pane, requestId, problem);
         }
       }
-      let sessionID = message.sessionID ?? pane.sessionID;
+      let sessionID = requestedSession;
       if (sessionID === undefined) {
         sessionID = (
           await client.session.create({
@@ -4591,10 +4684,15 @@ export class ChatController {
   /**
    * Stops the stream and makes the controller inert. Synchronous: the abort does not wait. Tells
    * the attention feature there is nothing pending any more (it closes its notifications), even
-   * when the registry was already empty.
+   * when the registry was already empty. A prompt waiting in {@link startOnPrompt} is released
+   * with `false` (it answers `ServerUnavailable`), because after this `onServerState` returns
+   * early and nothing else would ever settle it. VERIFIED by the unit test "dispose releases a
+   * prompt that waits for the server to start" (synthetic).
    */
   dispose(): void {
     this.disposed = true;
+    this.startWaiter?.(false);
+    this.startWaiter = undefined;
     this.stopStream();
     this.deps.attention.update([]);
   }

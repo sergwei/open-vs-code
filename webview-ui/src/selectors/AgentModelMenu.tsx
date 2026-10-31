@@ -41,6 +41,7 @@ const CONNECTION_TEXT: Record<ConnectionState['state'], string> = {
   reconnecting: 'Reconnecting',
   unavailable: 'Unavailable',
   stopped: 'Stopped',
+  'not-started': 'Not started',
 };
 
 /** Key of a model in the roving tab stop: provider and catalog id never contain a newline. */

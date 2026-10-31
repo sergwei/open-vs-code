@@ -133,6 +133,13 @@
           "scope": "window",
           "order": 4,
           "markdownDescription": "Where the chat lives. **editor** (the default) opens one editor tab per session and replaces the chat in the OpenCode view with a Sessions view that lists the sessions of the folder; click one to open it in a tab. **sidebar** keeps one chat in the OpenCode view. Any other value counts as **editor**. A change applies at once, without reloading the window. Reload Window restores the open tabs."
+        },
+        "openVsCode.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "order": 5,
+          "markdownDescription": "Launch the opencode server when the window starts. Turn it off to keep the window from launching a server by itself: the chat shows **not started**, and **OpenCode: Restart Server**, the Start button or your first prompt starts it. Has no effect while `#openVsCode.serverUrl#` is set. Turning it back on starts the server at once."
         }
       }
     },

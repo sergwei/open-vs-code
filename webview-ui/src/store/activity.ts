@@ -55,6 +55,7 @@ export function deriveActivity(
 ): Activity {
   if (
     connection.state === 'starting' ||
+    connection.state === 'not-started' ||
     connection.state === 'unavailable' ||
     connection.state === 'stopped'
   ) {
