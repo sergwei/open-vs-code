@@ -1750,12 +1750,16 @@ describe('fake server', function () {
 
     /**
      * Protects the owner choice of `SHOW_REQUEST_COMMAND_ID` in `sidebar` mode (#114): a chat tab
-     * left over from `editor` mode that owns the request is revealed, and the side bar view is NOT
-     * resolved nor given the card. Switching to `sidebar` closes no tab, so tab B (behind tab A)
+     * left over from `editor` mode that owns the request is revealed, and Open chat does not
+     * resolve the side bar view again. Switching to `sidebar` closes no tab, so tab B (behind tab A)
      * still lists the request. Provenance: SYNTHETIC server, same SLOW ask as above. The card in
-     * the side bar when no tab owns it is `test:visual` step 30 (D5). Not asserted: that the toast
-     * closes after the reveal. In a first run it did not log `attention: closed … (visible)` in
-     * `sidebar` mode (HYPOTHESIS: a tab is only "seen" in `editor` mode; unexplored).
+     * the side bar when no tab owns it is `test:visual` step 30 (D5). VERIFIED by this case
+     * (fake-server suite, Windows 11, 31/10/2026; #123, the premise of #120 refuted by running):
+     * `attention: closed … (visible)` is logged right after
+     * the switch to `sidebar`, BEFORE Open chat, and the case asserts that. HYPOTHESIS for why: the
+     * side bar view the switch shows lists every request (it is not `ownRequestsOnly`) and counts
+     * as seen while visible; the log line does not say which surface closed the toast. Whether a
+     * tab counts as seen in `sidebar` mode with the side bar hidden is not covered.
      */
     it('reveals the leftover tab that owns the request when Open chat runs in sidebar mode', async function () {
       const cursor = await openLogCursor();
@@ -1782,6 +1786,11 @@ describe('fake server', function () {
 
       await setChatLocation('sidebar', log);
       await log.waitForQuiet();
+      // The toast is already closed by the switch itself (see the header), before Open chat runs.
+      assert.ok(
+        log.added().includes(`attention: closed ${permissionID} (visible)`),
+        `the switch to sidebar did not close the toast:\n${log.added()}`,
+      );
       assert.strictEqual(chatTabs().length, 2, 'the switch to sidebar closed a tab');
       assert.strictEqual(activeChatLabel(), labelA, 'tab A must still be the active one');
 
