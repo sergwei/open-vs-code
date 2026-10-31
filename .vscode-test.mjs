@@ -35,7 +35,8 @@ const userDataDir = path.join(import.meta.dirname, '.vscode-test', 'user-data');
  * `default-location` configuration below is for: its profile never carries this key. Written
  * into every profile's `settings.json` when this file loads, so a dead run cannot leave another
  * value behind. Keep it equal to `TEST_BASELINE_CHAT_LOCATION` in
- * `test/integration/support/chatLocation.ts`, which restores to it between cases.
+ * `test/integration/support/chatLocation.ts`, which restores to it between cases
+ * (`src/extension/testConfig.test.ts` fails if they differ).
  */
 const TEST_CHAT_LOCATION = 'sidebar';
 
@@ -312,8 +313,8 @@ fs.writeFileSync(
  *
  * Why its own profile: every other profile carries the `sidebar` baseline of
  * {@link TEST_CHAT_LOCATION}, so none of them can tell what happens with no key. This one has its
- * own user data dir whose `settings.json` is rewritten to `{}` on every load (a dead run cannot
- * leave the key behind), no folder (like `main`: no server, every tab lazy) and no extensions
+ * own user data dir, deleted and recreated with a `settings.json` of `{}` on every load (a dead
+ * run cannot leave the key, globalState or an open tab behind), no folder (like `main`: no server, every tab lazy) and no extensions
  * but ours. The suite reads the log of the FIRST activation of this window, so it must be the
  * only suite of the configuration. Not opt-in: it needs no server and no model.
  * `--password-store=basic`, as in the other private profiles, for SecretStorage under `xvfb-run`.
@@ -331,6 +332,15 @@ const defaultLocation = {
     '--password-store=basic',
   ],
 };
+// Wiped like `fakeRoot`, so a dead run cannot leave globalState or an open tab behind: the profile
+// is NEW on every load. Best effort: a failure only warns, because `settings.json` is rewritten.
+try {
+  fs.rmSync(defaultUserDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+} catch (error) {
+  console.warn(
+    `could not wipe ${defaultUserDataDir}: ${error instanceof Error ? error.message : String(error)}`,
+  );
+}
 fs.mkdirSync(path.join(defaultUserDataDir, 'User'), { recursive: true });
 fs.writeFileSync(path.join(defaultUserDataDir, 'User', 'settings.json'), '{}\n');
 
