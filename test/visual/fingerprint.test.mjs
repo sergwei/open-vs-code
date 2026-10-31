@@ -48,6 +48,24 @@ describe('fingerprint', () => {
     expect(fingerprint(root).hash).toBe(before);
   });
 
+  // Pins the bug found on 31/10/2026 (PR #129): esbuild without `minifyWhitespace` keeps the
+  // `/** */` comment of a class member, so editing a method header made a full run stale.
+  it('is the same for a changed comment inside a class', () => {
+    const cls = (doc) =>
+      `export class C {\n  /**\n   * ${doc}\n   */\n  run(): number {\n    return 1;\n  }\n}\n`;
+    put('src/extension/c.ts', cls('First wording.'));
+    const before = fingerprint(root).hash;
+    put('src/extension/c.ts', cls('Second wording, longer.'));
+    expect(fingerprint(root).hash).toBe(before);
+    put('src/extension/c.ts', cls('Second wording, longer.').replace('return 1', 'return 2'));
+    expect(fingerprint(root).hash).not.toBe(before);
+    // Spaces inside a string still count: `minifyWhitespace` only drops spacing between tokens.
+    put('src/extension/s.ts', 'export const s = `a b`;\n');
+    const single = fingerprint(root).hash;
+    put('src/extension/s.ts', 'export const s = `a  b`;\n');
+    expect(fingerprint(root).hash).not.toBe(single);
+  });
+
   it('changes when a literal changes, in ts, tsx and css', () => {
     const before = fingerprint(root).hash;
     put('src/extension/a.ts', 'export const a: number = 2;\n');
