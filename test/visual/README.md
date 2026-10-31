@@ -27,14 +27,46 @@ npm run test:visual
   focus under it is unverified, macOS needs `Cmd+B` where step 22 sends `Control+b` (step 5 clicks
   the layout button, and sends it only when the notification has no "Open" link), and contrast and
   screenshots vary per system.
-- **Duration.** A clean full run takes about 553 s counted from the moment VS Code starts
-  (Windows 11, VS Code 1.144.0, 30/10/2026, steps up to 31: 1382 ok, no FAIL; 553.4 s), of which
-  step 31 takes 13.8 s, step 30 43.2 s, step 27 47.5 s, step 28 37.0 s and step 29 78.9 s (from that one full run); before step 27 existed it was 230-245 s on VS Code 1.143.1. That figure is the `total … since VS
-  Code was started` line of the summary: the build of the host and the webview before it, and the
-  start-up of VS Code, are not in it. Every step prints its own `time N.N s` and the summary ends
-  with a `== timings` table, so a slow step shows.
-- **What was measured, and on which code.** The last full run (30/10/2026, with steps up to 31 and
-  D0 in step 25) ended "all visual checks passed", and so did the ones before it with step 27. The two before them, without step 27 (230.6 s and 231.4 s,
+- **Duration.** A clean full run takes about 570 s counted from the moment VS Code starts
+  (Windows 11, VS Code 1.144.0, 30/10/2026, steps up to 31: 1382 ok, 0 FAIL, `total 569.0 s since
+  VS Code was started`; wall clock 582 s, so the build, the launch and the close add about 13 s).
+  Source: the `== timings` table of that run (a local file under `.vscode-test/`, overwritten by
+  later runs: the figures stay here, the path does not last). The
+  slowest steps in it: 29 82.2 s, 27 47.9 s, 30 45.3 s, 24 39.5 s, 28 38.4 s, 26 30.2 s. Steps 24
+  to 31 are 317.6 s of the 569.0 s (the sum of their lines in that table). For comparison, before
+  step 27 existed a full run was 230-245 s on VS Code 1.143.1 (28/10/2026). The `total … since VS
+  Code was started` line leaves out the build of the host and the webview and the start-up of VS
+  Code. Every step prints its own `time N.N s` and the summary ends with a `== timings` table, so a
+  slow step shows. After it comes `== waits` (expired `waitFor`s, the 2 s floor of `waitIdle`, fixed
+  sleeps and the longest gaps between checks); none of its lines starts with `ok`, `FAIL` or `warn`,
+  and each run also writes its records to `.vscode-test/visual/trace-full-<stamp>.tsv`
+  (`trace-partial-<stamp>.tsv` for a filtered run).
+- **Cost of verifying one area, measured on the final tree (31/10/2026).** Each part is timed with
+  the wall clock; the webview and host examples are the ones the plan asked for, and the
+  transversal row is an estimate, not a measured run:
+
+  | Case (Windows 11, VS Code 1.144.0) | `npm test` | `test:visual` | `test:integration` | Total |
+  |---|---|---|---|---|
+  | Webview: `webview-ui/src/selectors/**`, group `selectors` | 33 s | 49 s (`--group selectors`) | 117 s (`--label fake-server`, 44 passing) | 199 s (3.3 min) |
+  | Host: `src/extension/chatTabs.ts`, group `tabs` | 32 s | 234 s (`--group tabs`) | 170 s (`main` 43, `fake-server` 44, `default-location` 5; three builds) | 436 s (7.3 min) |
+  | Transversal (`src/shared/**`, the store, `chatController.ts`): full run and the whole integration suite | 32 s | 559 s (full run) | about 197 s (not measured on the close) | about 13 min (ESTIMATE: the sum of the parts) |
+
+  The webview run had one Vitest failure (`opencodeServer.test.ts`, `EBUSY` on a temp folder, the
+  intermittent of [#90](https://github.com/sergwei/open-vs-code/issues/90)); it passed 2 of 2 on the
+  rerun, and `src/` had not changed. The 10 minutes of the criterion hold per area: a file the map
+  sends to the full run costs the table's transversal row, not the area's.
+
+- **Where the time goes, and what is not worth chasing.** Measured in that same run (`== waits`):
+  only 9 `waitFor`s expired, 14.3 s in all; the 2 s floor of `waitIdle` was paid 18 times (36.2 s);
+  fixed sleeps add up to 111.0 s; many of them are negative windows (checking that something does
+  NOT happen), which cannot be shortened without weakening the check. What can be recovered without losing a
+  check is small (about 8-12 s, 2 %; Sergio closed the speed work there on 31/10/2026). So the lever
+  is not a faster full run but **running it fewer times**: see "What to run when".
+- **What was measured, and on which code.** The final full run (31/10/2026, the tree of the close:
+  1382 ok, 6 warn, 0 FAIL, total 545.5 s, wall clock 559 s) ended "all visual checks passed", and
+  `compare-runs` against the base below found "no differences". The base is the full run of
+  30/10/2026 (with steps up to 31 and D0 in step 25, total 569.0 s), which ended "all visual checks
+  passed", and so did the ones before it with step 27. The two before them, without step 27 (230.6 s and 231.4 s,
   28/10/2026), ended "all visual checks passed", and `compare-runs` against the baseline found "no
   differences". They are the first runs with VS Code's own Chat (Copilot) turned off in the test
   profile (`chat.disableAIFeatures`, the secondary side bar hidden). Earlier the same day, runs
@@ -83,8 +115,145 @@ npm run test:visual -- --steps 11,14,23       # builds first
 - `--all-themes` takes the screenshots that are only screenshots (11g, 12b, 12d, 12f, 14b, 14d) in
   the four themes. By default they are taken once, in dark. It never changes a check, so it never
   changes the `ok` lines; use it when a task touches the CSS of those views.
-- **Only the full run (no `--steps`, no `--bail`) is evidence for a commit.** A filtered run answers
-  "does my change to step N still hold" in seconds; it does not prove that the other steps do.
+- **Only the full run (no `--steps`, no `--group`, no `--affected`, no `--bail`) is evidence for a
+  commit.** A filtered run answers "does my change to step N still hold" in seconds; it does not
+  prove that the other steps do.
+
+### Groups, `--affected` and `--list`
+
+```sh
+node test/visual/run.mjs --list --group tabs        # prints the resolved selection, runs nothing
+npm run test:visual -- --group selectors --bail     # builds first
+npm run test:visual -- --affected --bail            # the groups of the files you changed
+npm run test:visual -- --affected main              # changes since the merge-base with `main`
+```
+
+- **`--group a,b`** runs every step of those groups, joined with `--steps` if both are given, and
+  closes over `needs` like `--steps` does. An unknown group exits with `2` and lists the valid ones.
+  The groups are the `groups` of each step in `steps.mjs` (a step can be in several). Step time is
+  the `time` of the step in the full run of 30/10/2026 (its `== timings` table; the saved file is
+  local and gets overwritten); "with prerequisites" adds the steps `needs` pulls in (1, 2, 5, 6, 6b), and neither
+  counts the build and the start-up of VS Code (about 13 s in that run):
+
+  | Group | Steps | Steps alone (s) | With prerequisites (s) |
+  |---|---|---|---|
+  | `smoke` | 1, 2, 5, 8 | 15.9 | 23.0 |
+  | `setup` | 0, 7, 7b, 21, 25 | 55.6 | 68.3 |
+  | `render` | 2, 3, 4, 15, 17, 18, 19 | 67.7 | 67.8 |
+  | `requests` | 5, 6, 6b, 8, 30 | 58.2 | 58.3 |
+  | `sessions` | 9, 10, 29 | 117.8 | 127.9 |
+  | `selectors` | 11, 14, 23 | 33.4 | 33.5 |
+  | `composer` | 13, 16, 20, 24, 26 | 115.1 | 125.2 |
+  | `keyboard` | 22 | 15.9 | 26.0 |
+  | `tabs` | 27, 28, 29, 30, 31 | 229.2 | 229.3 |
+
+  Observed wall time of `--group selectors --bail` (31/10/2026): 37 s in the run that passed in
+  phase 2 and 50 s in the one of phase 3 (the figure is from the phase notes, not from a saved file).
+  The steps 22, 24, 28 and 29 are unstable in the background (issue #117) and a group can fail once
+  on a check that passes on the next run: rerun before concluding anything.
+- **`--affected [ref]`** reads the files changed since the merge-base of `HEAD` and `ref` (default
+  `origin/main`) plus the untracked ones, and `affected.mjs` maps each one to groups. It prints
+  `affected: <groups | full | none>` with one reason per file. A cross-cutting file (for example
+  `src/shared/**`, the store, `chatController.ts`, `package.json`, the fixture or the harness
+  itself) or one that is not mapped means the **full** run, and so does `git` failing (the reason is
+  printed). If no changed file has a visual effect (tests, Markdown, `test/integration/**`) it
+  prints `affected: no changed file has a visual effect; nothing to run` and exits `0`. It does not
+  combine with `--steps` or `--group`. The map is the `AFFECTED_RULES` of `affected.mjs`; add a
+  line there when you add a file that belongs to an area.
+- **`--list`** prints the selection (and `FULL RUN (all N steps)` when nothing filters) and exits `0`
+  before starting VS Code, so it is the cheap way to see what a flag combination does. With
+  `node test/visual/run.mjs --list` nothing is built; `npm run test:visual -- --list` runs the
+  build scripts first, because npm runs them before `run.mjs`.
+- **Banner.** Every filtered run starts with `PARTIAL RUN (steps …): not evidence for a commit` and
+  a `groups touched (prerequisites included):` line. A filtered run is NEVER the evidence of a commit.
+
+### Budget per step
+
+Each step has a `budgetS` in `steps.mjs`: the larger of its duration in two full runs of
+30/10/2026 (the phase-0 baseline and the first phase-1 run, each with 0 FAIL), times 1.25, rounded up
+to the next multiple of 5 s. `== timings` appends `over budget (N s)` to a step that exceeds it. It
+is a signal, not a failure: it never prints `warn` or `FAIL` and does not change the exit code, so
+`compare-runs` does not see it. A new step declares its group and its budget when it is added.
+
+### Code fingerprint
+
+**The fingerprint is only valid for `test:visual`.** It hashes neither `test/integration/**` nor
+`.vscode-test.mjs`, so it says nothing about the integration suite (rerun it whole when the
+CODE changed: comments, README and markers do not count, and whoever changes a file judges it from
+the diff). Every run prints `fingerprint <sha256>` before VS Code starts;
+`npm run test:visual` builds just before `run.mjs`, so the hash is the tree that build saw, while
+running `node test/visual/run.mjs` over a stale `dist/` makes the line lie. The run also saves a
+manifest of per-file digests in `.vscode-test/fingerprints/<hash>.json` (one file per tree: it is
+accumulated by hash, never overwritten, and the run does not prune them). Afterwards:
+
+```sh
+node test/visual/fingerprint.mjs --print                        # the hash of the tree as it is now
+node test/visual/fingerprint.mjs --check .vscode-test/run.txt   # does that saved run still cover it?
+```
+
+`--check` exits `0` if the run covers the tree AND ended "all visual checks passed" (and was not a
+`--bail` run), `1` if it is stale (it names the changed files, and what `--affected` would run for
+them, when the manifest exists), `2` if the output has no `fingerprint` line and `3` if the hash is
+the same but the run is not evidence (it failed, was cut, or was `--bail`). The point: a change of comments, formatting, line endings or types must not
+make a 9-minute run stale, while a change of code must. The following summarises the header of
+`fingerprint.mjs`; the header is the source, this is a summary and not a copy.
+
+How: every hashed source file goes through `esbuild.transformSync` (comments dropped, spacing and
+CRLF normalised, TypeScript types erased), and the sha256 of the sorted (path, output) pairs is the
+fingerprint. VERIFIED (30/10/2026, Windows 11, esbuild 0.28.2, `transformSync` on two hand-written
+variants of each file): a ts, a tsx and a css file with different comments and line endings gave
+identical output.
+
+What is hashed:
+
+- `src/**` and `webview-ui/src/**` except tests (`*.test.*`, `*.spec.*`), Markdown and
+  `tsconfig*.json`. `src/extension/test-fixtures/**` IS hashed: the synthetic opencode is the
+  server the run drives, so a change there moves the checks (and `selectForFiles` calls it
+  cross-cutting).
+- `test/visual/*.mjs` except tests, `compare-runs.mjs` and `fingerprint.mjs` (post-processors that
+  never feed the run). `run.mjs`, `steps.mjs`, `affected.mjs`, `vscodeProcess.mjs` and
+  `webviewCdp.mjs` ARE the harness.
+- Raw (line endings normalised): `package.json`, `package-lock.json`, `esbuild.mjs`,
+  `webview-ui/build.mjs`, `webview-ui/vite.config.mts` and `webview-ui/index.html` when it exists
+  (today it does not: Vite's HTML is generated).
+- `media/**` (the icons the run captures), without compiling: text files (`.svg`, `.json`,
+  `.html`, `.txt`) with normalised line endings, anything else as raw bytes.
+
+What the fingerprint does NOT see (a stale run can hide any of these):
+
+- the VS Code version (the run prints "Validated version" apart);
+- `node_modules` changed without a lockfile change, and the Node version;
+- any file outside the list: `.vscode-test.mjs`, `test/integration/**`, `scripts/`, `docs/`, tsconfigs, the
+  opencode binary the run does not use (it uses the synthetic one);
+- a change that only alters types: it does not alter the runtime, `check-types` covers it;
+- a comment that changes behaviour at runtime (none known; `esbuild` keeps `/*! legal */`
+  comments only when asked, and here they are dropped);
+- an untracked or ignored file that the code imports from outside the list;
+- the OS and the display: a run on Windows says nothing about macOS or Linux.
+
+### What to run when
+
+| Moment | `test:visual` | Integration |
+|---|---|---|
+| Iteration of the developer | `--affected --bail` (or `--group`) | `--label` of what was touched |
+| End of a phase or of a round of fixes | `--affected`, saved to a file | the affected labels |
+| Evidence of the commit, ONCE per task and on the final tree | the full run, saved to a file | the full run |
+| After the full run | `fingerprint --check`: same hash, it still holds; changed only in files of some groups, rerun those groups to a file; cross-cutting, the full run | no fingerprint: rerun it whole (about 200 s) if the CODE changed (comments, README and markers do not count; judged from the diff), `test/integration/**` and `.vscode-test.mjs` included |
+
+- Before this, a task paid between 2 and 5 full runs (20-45 minutes of `test:visual`, counted from
+  the saved outputs of E8-slash-commands, E9-context-menus, E9-chat-location, E9-sessions-sidebar
+  and E9-tab-requests). The policy, not the speed of one run, is what saves the time.
+- **A filtered run (`--steps`, `--group`, `--affected`, `--bail`) is never the evidence of a
+  commit** (rule 6 of `.claude/CLAUDE.md`): the evidence is the full run plus, when
+  `fingerprint --check` says the tree changed afterwards, the groups it names, with their own
+  fingerprint.
+- A round that only touches headers, README or marks does not change the hash, so it relaunches
+  nothing.
+- **The 10 minutes are per area.** A change in one area (the groups of the table above) is verified
+  in about the time of its row. A file that `--affected` sends to the full run (a transversal one)
+  costs the full run plus the whole integration suite: about 13 minutes, not 10.
+- Save the output of the runs you may want to cite
+  (`npm run test:visual > .vscode-test/<name>.txt 2>&1`): `--check` and `compare-runs` read it.
 
 The ids 24 and 25 (issue #33) were added later and were run with `--steps 24,25` and `--steps 25`
 (28/10/2026, Windows 11, VS Code 1.144.0), not with `--bail`; the 24 needs the 1 because it drives
