@@ -9,15 +9,17 @@
 
 /**
  * Files with no visual effect: tests, docs, the integration suite, the agent configuration and the
- * post-processing tool `compare-runs.mjs`. They never select a group by themselves. Tested before
- * the cross-cutting list, so `chatController.test.ts` is `none` although `chatController.ts` is not.
+ * post-processing tools `compare-runs.mjs` and `fingerprint.mjs` (they change no check: `run.mjs`
+ * only calls the fingerprint to print its line and save its manifest, and the fingerprint does not
+ * hash itself). They never select a group by themselves. Tested before the cross-cutting list, so
+ * `chatController.test.ts` is `none` although `chatController.ts` is not.
  */
 const NO_EFFECT = [
   /\.(test|spec)\.[cm]?[jt]sx?$/,
   /\.md$/,
   /^test\/integration\//,
   /^\.claude\//,
-  /^test\/visual\/compare-runs\.mjs$/,
+  /^test\/visual\/(compare-runs|fingerprint)\.mjs$/,
 ];
 
 /**

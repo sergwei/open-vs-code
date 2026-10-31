@@ -222,6 +222,16 @@ export function parseAllThemesArg(argv) {
 }
 
 /**
+ * The line `run.mjs` prints when `--bail` is on.
+ *
+ * One constant for the two sides that must agree: `run.mjs` prints it, and `fingerprint.mjs`
+ * looks for it to refuse a `--bail` run as evidence (exit 3). With the text copied in both, a
+ * reworded banner would let a `--bail` run pass `--check` with exit 0 (review #1586 of #118).
+ */
+export const BAIL_BANNER =
+  '--bail: the run stops after the first step that fails; not evidence for a commit';
+
+/**
  * Whether `--bail` is in `argv` (the arguments after the script name).
  *
  * Decision of Sergio (Engram `tooling/visual-speed/decisions/bail-flag`, 28/10/2026): for

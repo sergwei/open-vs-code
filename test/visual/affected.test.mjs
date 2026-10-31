@@ -56,6 +56,7 @@ describe('selectForFiles', () => {
       'test/visual/README.md',
       'test/visual/steps.test.mjs',
       'test/visual/compare-runs.mjs',
+      'test/visual/fingerprint.mjs',
       'test/integration/fakeServer.test.ts',
       'test/integration/support/extensionLog.ts',
       '.claude/CLAUDE.md',

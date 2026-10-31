@@ -16,7 +16,7 @@ checkout/worktree). It opens a real VS Code window for a few seconds.
 
 ### Duration
 
-Measured on Windows 11, 31/10/2026, in `.vscode-test/integration-test-speed-1.txt` (the Mocha
+Measured on Windows 11, 31/10/2026, in a full `npm run test:integration` run (the Mocha
 `passing (…)` line of each label; exit 0, wall clock 197 s as noted in the phase, with
 `OPEN_VS_CODE_REAL_OPENCODE` unset):
 

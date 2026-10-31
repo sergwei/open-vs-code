@@ -16,7 +16,7 @@ import {
   report,
   saveManifest,
 } from './fingerprint.mjs';
-import { compareRuns, extractChecks } from './steps.mjs';
+import { BAIL_BANNER, compareRuns, extractChecks } from './steps.mjs';
 
 let root;
 
@@ -160,8 +160,12 @@ describe('checkRun', () => {
     const passed = `${savedRun()}all visual checks passed\n`;
     expect(report(checkRun(root, passed))).toBe(0);
     expect(report(checkRun(root, savedRun()))).toBe(3);
-    const bail = `${savedRun('--bail: the run stops after the first step that fails; not evidence for a commit\n')}all visual checks passed\n`;
+    const bail = `${savedRun(`${BAIL_BANNER}\n`)}all visual checks passed\n`;
     expect(report(checkRun(root, bail))).toBe(3);
+    // A saved output with CRLF and a trailing space is still a --bail run.
+    expect(
+      report(checkRun(root, bail.replace(BAIL_BANNER, `${BAIL_BANNER} `).replace(/\n/g, '\r\n'))),
+    ).toBe(3);
     put('src/extension/a.ts', 'export const a: number = 7;\n');
     expect(report(checkRun(root, passed))).toBe(1);
     expect(report(checkRun(root, '== 0 first\n'))).toBe(2);

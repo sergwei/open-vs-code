@@ -241,6 +241,7 @@ import { WEBVIEW_STUCK, openWebview } from './webviewCdp.mjs';
 import { parseAffectedArg, selectForFiles } from './affected.mjs';
 import { fingerprint, saveManifest } from './fingerprint.mjs';
 import {
+  BAIL_BANNER,
   STEP_IDS,
   budgetNote,
   groupsOf,
@@ -358,8 +359,7 @@ if (partial) {
 } else if (parseListArg(cliArgs)) {
   console.log(`FULL RUN (all ${String(STEP_IDS.length)} steps)`);
 }
-if (bail)
-  console.log('--bail: the run stops after the first step that fails; not evidence for a commit');
+if (bail) console.log(BAIL_BANNER);
 // `--list` stops here: it only shows what the flags above resolve to; this file starts no VS Code.
 if (parseListArg(cliArgs)) process.exit(0);
 // The code this run covers (`fingerprint.mjs`, tooling/test-speed phase 3; only valid for

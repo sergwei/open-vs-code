@@ -52,6 +52,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { selectForFiles } from './affected.mjs';
+import { BAIL_BANNER } from './steps.mjs';
 
 /** Files that are raw-hashed when present. */
 const RAW_FILES = [
@@ -227,7 +228,7 @@ export function checkRun(root, savedText) {
   const current = fingerprint(root);
   const partial = /^PARTIAL RUN .*$/m.exec(savedText)?.[0];
   const passed = /^all visual checks passed\s*$/m.test(savedText);
-  const bail = /^--bail: the run stops after the first step that fails/m.test(savedText);
+  const bail = savedText.split(/\r?\n/).some((line) => line.trimEnd() === BAIL_BANNER);
   if (current.hash === saved) return { status: 'covers', hash: saved, partial, passed, bail };
   const manifest = loadManifest(root, saved);
   if (manifest === undefined) return { status: 'stale', hash: saved, current: current.hash };
