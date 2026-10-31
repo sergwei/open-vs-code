@@ -33,12 +33,14 @@ import type {
   ProviderListOutput,
   SessionActive,
   SessionCommandInput,
+  SessionCompactInput,
   SessionCreateInput,
   SessionDiffInput,
   SessionFormCancelInput,
   SessionForkInput,
   SessionFormReplyInput,
   SessionGetInput,
+  SessionInboxCompaction,
   SessionInboxUser,
   SessionInfo,
   SessionInterruptInput,
@@ -148,6 +150,15 @@ export interface ChatApi {
      * bare body was read correctly. POSIX UNVERIFIED.
      */
     interrupt(input: SessionInterruptInput): Promise<SessionInterruptResponse>;
+    /**
+     * `POST /api/session/:id/compact` (issue #125): admits a manual compaction into the inbox and
+     * answers with that item (its `id` is the `inputID` of the `session.compaction.*` events and
+     * the id of the REST `compaction` message). The summary is made afterwards, so the progress
+     * comes through the stream. Read in `client.d.ts` and `types.d.ts` of 2.0.32 and in the tag's
+     * `solid-compaction.test.ts`; UNVERIFIED against a running server except through the
+     * synthetic fixture (the opt-in `realOpencode.test.ts` does not call it).
+     */
+    compact(input: SessionCompactInput): Promise<SessionInboxCompaction>;
     /**
      * `GET /api/session/:id/diff?from=&to=&context=` (issue #31): the files changed in a RANGE OF
      * TURNS, not "the session". The answer is the bare `FileDiffInfo[]` (the client unwraps

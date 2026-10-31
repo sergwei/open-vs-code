@@ -3105,7 +3105,11 @@ describe('slash commands (issue #33)', () => {
       [...h.container.querySelectorAll('.command-menu [role="menuitem"]')].map(
         (i) => i.textContent,
       ),
-    ).toEqual(['/initguided AGENTS.md setup', '/hello']);
+    ).toEqual([
+      '/initguided AGENTS.md setup',
+      '/hello',
+      '/compactSummarize the conversation to free context',
+    ]);
   });
 
   // Engram #1425: the same absent `commands` reads "Loading commands…" before the catalog arrives
@@ -3125,5 +3129,285 @@ describe('slash commands (issue #33)', () => {
     const trigger = must<HTMLButtonElement>(h.container, 'button[aria-label="Commands"]');
     expect(trigger.getAttribute('aria-disabled')).toBe('true');
     expect(trigger.disabled).toBe(false);
+  });
+
+  // Issue #105 (decision P2=1/P3=1): a long user message is folded behind a native button, and
+  // the unfolded state is not remembered across sessions. FABRICATED messages; jsdom has no layout,
+  // so the height is not measured here.
+  describe('folds a long user message', () => {
+    const long = Array(13).fill('line').join('\n');
+    const toggle = (h: Harness) =>
+      h.container.querySelector<HTMLButtonElement>('button.message-fold');
+
+    it('shows Show more with aria-expanded false and aria-controls pointing at the text', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', long)]));
+      const button = toggle(h);
+      expect(button?.textContent).toBe('Show more');
+      expect(button?.getAttribute('aria-expanded')).toBe('false');
+      const text = must(h.container, '.message-user .part-text');
+      expect(button?.getAttribute('aria-controls')).toBe(text.id);
+      expect(text.hasAttribute('data-folded')).toBe(true);
+      expect(text.textContent).toBe(long);
+      expect(h.container.querySelector('[style]')).toBeNull();
+    });
+
+    it('unfolds and folds again with the click, flipping the label and aria-expanded', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', long)]));
+      toggle(h)?.click();
+      expect(toggle(h)?.textContent).toBe('Show less');
+      expect(toggle(h)?.getAttribute('aria-expanded')).toBe('true');
+      expect(must(h.container, '.message-user .part-text').hasAttribute('data-folded')).toBe(false);
+      toggle(h)?.click();
+      expect(toggle(h)?.textContent).toBe('Show more');
+    });
+
+    it('has no button on a short message', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'short')]));
+      expect(toggle(h)).toBeNull();
+      expect(must(h.container, '.message-user .part-text').hasAttribute('data-folded')).toBe(false);
+    });
+
+    it('keeps it unfolded when a snapshot of the same session updates the message', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', long)]));
+      toggle(h)?.click();
+      h.apply(...openSession([user('m1', long), assistant('m2')]));
+      expect(toggle(h)?.getAttribute('aria-expanded')).toBe('true');
+    });
+
+    it('folds it again when the session is opened again', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', long)]));
+      toggle(h)?.click();
+      h.apply({
+        type: 'snapshot',
+        snapshot: {
+          sessions: [{ id: 'ses_2', title: 'Other', createdAt: 1, updatedAt: 2 }],
+          statuses: {},
+          open: { sessionID: 'ses_2', messages: [user('n1', 'other')], parts: {} },
+          requests: { permissions: [], forms: [] },
+          resolutions: [],
+        },
+      });
+      h.apply(...openSession([user('m1', long)]));
+      expect(toggle(h)?.getAttribute('aria-expanded')).toBe('false');
+    });
+  });
+
+  // Issue #125, /compact (decision P1=1): a client command that asks the host for `session.compact`.
+  describe('/compact', () => {
+    const compactions = (h: Harness) => h.sent.filter((m) => m.type === 'session.compact');
+
+    it('asks the host to compact the open session and sends no prompt', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+      h.type('/compact');
+      h.button('Send').click();
+      expect(h.sent).toMatchObject([{ type: 'session.compact', sessionID: SES }]);
+      expect(h.store.state.pending).toHaveLength(1);
+      expect(h.textarea().value).toBe('');
+      expect(h.saved.at(-1)).toMatchObject({ history: ['/compact'] });
+    });
+
+    // Protects review S1 of #125: with the catalog still loading (or failed) "/compact" must not
+    // reach the model as a normal prompt. FABRICATED state (no catalog applied).
+    it('still compacts, and sends no prompt, while the command catalog is not loaded', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]));
+      h.type('/compact');
+      h.button('Send').click();
+      expect(h.sent).toMatchObject([{ type: 'session.compact', sessionID: SES }]);
+    });
+
+    it('leaves the chips of the draft alone', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+      h.apply({
+        type: 'attachments.picked',
+        requestId: 'pick',
+        files: [{ uri: 'file:///x.ts', name: 'x.ts' }],
+      });
+      h.type('/compact');
+      h.button('Send').click();
+      expect(compactions(h)).toHaveLength(1);
+      expect(h.container.querySelector('.chip')?.textContent).toContain('x.ts');
+    });
+
+    it('says there is nothing to compact, and sends nothing, with no user message', () => {
+      const h = start();
+      h.apply(...openSession([]), withCommands(COMMANDS));
+      h.type('/compact');
+      h.button('Send').click();
+      expect(h.sent).toEqual([]);
+      expect(h.store.state.pending).toEqual([]);
+      expect(h.container.textContent).toContain('There is nothing to compact yet');
+    });
+
+    it('says the same with no session open', () => {
+      const h = start();
+      h.apply(connected, withCommands(COMMANDS));
+      h.type('/compact');
+      h.button('Send').click();
+      expect(h.sent).toEqual([]);
+      expect(h.container.textContent).toContain('There is nothing to compact yet');
+    });
+
+    it('runs the server command when the server lists one called compact', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]), withCommands([{ name: 'compact' }]));
+      h.type('/compact now');
+      h.button('Send').click();
+      expect(compactions(h)).toEqual([]);
+      expect(lastSent(h)).toMatchObject({ command: 'compact', text: 'now' });
+    });
+
+    it('shows "Compacting" as the activity while the compaction line runs', () => {
+      const h = start();
+      h.apply(
+        ...openSession(
+          [
+            user('m1', 'hi'),
+            {
+              kind: 'notice',
+              id: 'msg_c',
+              createdAt: 3,
+              text: 'Compacting the conversation…',
+              compaction: 'running',
+            },
+          ],
+          { type: 'busy' },
+        ),
+      );
+      expect(h.container.querySelector('.activity')?.textContent).toContain('Compacting');
+      expect(h.container.querySelector('.message-notice')?.textContent).toBe(
+        'Compacting the conversation…',
+      );
+    });
+  });
+
+  // Issue #125, decision P4=1: Retry of a turn this document sent as a command runs the command
+  // again; anything else keeps resending the stored text. FABRICATED snapshots: the server keeps
+  // the expanded template as the user message, which the second user message stands for.
+  describe('Retry of a command turn', () => {
+    const failedTurn = (extra: MessageInfo[] = []): HostToWebview[] =>
+      openSession([
+        user('m1', 'hi'),
+        user('m2', 'expanded template'),
+        assistant('m3', { error: { code: 'boom', message: 'it broke' } }),
+        ...extra,
+      ]);
+    const answer = (h: Harness): void => {
+      h.apply({ type: 'request.result', requestId: lastSent(h).requestId });
+    };
+
+    it('runs the command again with its arguments and files', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+      h.apply({
+        type: 'attachments.picked',
+        requestId: 'pick',
+        files: [{ uri: 'file:///x.ts', name: 'x.ts' }],
+      });
+      h.type('/hello world');
+      h.button('Send').click();
+      answer(h);
+      h.apply(...failedTurn());
+      h.button('Retry').click();
+      expect(lastSent(h)).toMatchObject({
+        command: 'hello',
+        text: 'world',
+        sessionID: SES,
+        files: [{ uri: 'file:///x.ts', name: 'x.ts' }],
+      });
+      expect(h.sent.filter((m) => m.type === 'prompt.send')).toHaveLength(2);
+    });
+
+    it('resends the stored text once a normal prompt came after the command', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+      h.type('/hello world');
+      h.button('Send').click();
+      answer(h);
+      h.type('plain prompt');
+      h.button('Send').click();
+      answer(h);
+      h.apply(
+        ...openSession([
+          user('m1', 'hi'),
+          user('m2', 'plain prompt'),
+          assistant('m3', { error: { code: 'boom', message: 'it broke' } }),
+        ]),
+      );
+      h.button('Retry').click();
+      const sent = lastSent(h);
+      expect(sent.command).toBeUndefined();
+      expect(sent.text).toBe('plain prompt');
+    });
+
+    // Protects review W1 of #125: /compact is not a prompt, but it ends the "last turn was a
+    // command" memory, so a Retry after a failed compaction does not rerun an older command.
+    // FABRICATED snapshots (our logic only).
+    it('resends the stored text, not the command, after a /compact came in between', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+      h.type('/hello world');
+      h.button('Send').click();
+      answer(h);
+      h.type('/compact');
+      h.button('Send').click();
+      const compaction = h.sent.find((m) => m.type === 'session.compact');
+      h.apply({
+        type: 'request.result',
+        requestId: compaction?.type === 'session.compact' ? compaction.requestId : '',
+      });
+      h.apply(...failedTurn());
+      h.button('Retry').click();
+      const sent = lastSent(h);
+      expect(sent.command).toBeUndefined();
+      expect(sent.text).toBe('expanded template');
+    });
+
+    it('does not reuse the command in another session', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS));
+      h.type('/hello world');
+      h.button('Send').click();
+      answer(h);
+      h.apply({
+        type: 'snapshot',
+        snapshot: {
+          sessions: [{ id: 'ses_2', title: 'Other', createdAt: 1, updatedAt: 2 }],
+          statuses: {},
+          open: {
+            sessionID: 'ses_2',
+            messages: [
+              user('n1', 'older'),
+              assistant('n2', { error: { code: 'boom', message: 'it broke' } }),
+            ],
+            parts: {},
+          },
+          requests: { permissions: [], forms: [] },
+          resolutions: [],
+        },
+      });
+      h.button('Retry').click();
+      expect(lastSent(h)).toMatchObject({ sessionID: 'ses_2', text: 'older' });
+      expect(lastSent(h).command).toBeUndefined();
+    });
+
+    it('adopts the session a command created when none was open', () => {
+      const h = start();
+      h.apply(connected, withCommands(COMMANDS));
+      h.type('/init');
+      h.button('Send').click();
+      expect(lastSent(h).sessionID).toBeUndefined();
+      answer(h);
+      h.apply(...failedTurn());
+      h.button('Retry').click();
+      expect(lastSent(h)).toMatchObject({ command: 'init', text: '', sessionID: SES });
+    });
   });
 });

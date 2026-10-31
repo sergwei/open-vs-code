@@ -7,7 +7,16 @@ import type { ConnectionState } from '../../../src/shared/protocol';
 
 /** The line shown above the input. `error` is set only for `kind: 'error'`. */
 export interface Activity {
-  kind: 'offline' | 'idle' | 'thinking' | 'tool' | 'writing' | 'working' | 'retrying' | 'error';
+  kind:
+    | 'offline'
+    | 'idle'
+    | 'thinking'
+    | 'tool'
+    | 'writing'
+    | 'working'
+    | 'retrying'
+    | 'compacting'
+    | 'error';
   label: string;
   error?: ErrorInfo;
 }
@@ -47,11 +56,15 @@ export function isStopError(error: ErrorInfo | undefined): boolean {
  * (between steps, before the first part) is "Working". Parts are read from the end, since the
  * newest part is the one in progress. HYPOTHESIS: reasoning blocks keep `completed: false` until
  * their `reasoning.ended`, as the translator maps it; not observed in a long real turn.
+ * `compacting` (issue #125) is true when the newest visible message is the running compaction line:
+ * the session is busy while the summary is made, and without it the last answer's text would read
+ * "Writing". It wins over the parts, never over `offline`, `error` or `retrying`.
  */
 export function deriveActivity(
   connection: ConnectionState,
   status: SessionStatus | undefined,
   lastAssistantParts: readonly Part[],
+  compacting = false,
 ): Activity {
   if (
     connection.state === 'starting' ||
@@ -66,6 +79,7 @@ export function deriveActivity(
   if (status.type === 'retry') {
     return { kind: 'retrying', label: `Retrying (attempt ${String(status.attempt)})` };
   }
+  if (compacting) return { kind: 'compacting', label: 'Compacting' };
   const last = lastAssistantParts.at(-1);
   if (last?.type === 'reasoning' && !last.completed) return { kind: 'thinking', label: 'Thinking' };
   for (let index = lastAssistantParts.length - 1; index >= 0; index--) {

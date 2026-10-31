@@ -414,6 +414,8 @@ export type HostToWebview =
  * empty), the host calls `session.command` instead of `session.prompt`, and the files travel
  * without their `mention` because the command template rewrites the text. The host checks the
  * name against its own catalog and answers `CommandUnavailable` for one it does not list.
+ * `session.compact` (issue #125) asks the host to compact the open session; it is answered by
+ * `request.result`, and the progress arrives as `message.upserted` notices.
  */
 export type WebviewToHost =
   | { type: 'ready' }
@@ -435,6 +437,7 @@ export type WebviewToHost =
       command?: string;
     }
   | { type: 'session.abort'; requestId: string; sessionID: string }
+  | { type: 'session.compact'; requestId: string; sessionID: string }
   | {
       type: 'permission.reply';
       requestId: string;
@@ -765,6 +768,8 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
     isOptional(field(m, 'command'), isCommandName) &&
     hasPromptContent(m),
   'session.abort': (m) =>
+    isNonEmptyString(field(m, 'requestId')) && isNonEmptyString(field(m, 'sessionID')),
+  'session.compact': (m) =>
     isNonEmptyString(field(m, 'requestId')) && isNonEmptyString(field(m, 'sessionID')),
   'permission.reply': (m) =>
     isNonEmptyString(field(m, 'requestId')) &&

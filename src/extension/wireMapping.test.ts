@@ -245,6 +245,60 @@ describe('lastCompactionAt', () => {
   });
 });
 
+// Issue #125. Protects the compaction line of the conversation: the three statuses and the `auto`
+// reason each give their own text with the id of the REST message (the one the stream notice
+// uses), and a failure's text goes through the secret scrubbing. Fabricated messages in the shape
+// of the types (the completed one also matches the planner's spike of 22/10/2026): they pin OUR
+// mapping, not what a running server lists for a running compaction.
+describe('toMessage of a compaction', () => {
+  const message = (fields: string): SessionMessageInfo =>
+    wire<SessionMessageInfo>(
+      `{"id": "msg_c", "type": "compaction", "reason": "manual", "time": {"created": 77}, ${fields}}`,
+    );
+
+  it('maps running, completed and failed to a notice with the status', () => {
+    expect(toMessage(message('"status": "running", "summary": "", "recent": ""'), {})).toEqual({
+      message: {
+        kind: 'notice',
+        id: 'msg_c',
+        createdAt: 77,
+        text: 'Compacting the conversation…',
+        compaction: 'running',
+      },
+      parts: [],
+    });
+    expect(
+      toMessage(message('"status": "completed", "summary": "s", "recent": "r"'), {})?.message,
+    ).toMatchObject({ text: 'Conversation compacted', compaction: 'completed' });
+    expect(
+      toMessage(
+        message(
+          '"status": "failed", "error": {"type": "compaction.unavailable", "message": "Nothing to compact yet"}',
+        ),
+        {},
+      )?.message,
+    ).toMatchObject({ text: 'Compaction failed: Nothing to compact yet', compaction: 'failed' });
+  });
+
+  it('says so when an automatic compaction completed', () => {
+    const auto = wire<SessionMessageInfo>(
+      '{"id": "msg_a", "type": "compaction", "status": "completed", "reason": "auto", "summary": "s", "recent": "r", "time": {"created": 1}}',
+    );
+    expect(toMessage(auto, {})?.message).toMatchObject({
+      text: 'Conversation compacted automatically',
+    });
+  });
+
+  it('keeps the server URL and the password out of a failure text', () => {
+    const failed = message(
+      `"status": "failed", "error": {"type": "x", "message": "down at ${SECRETS.url} with ${SECRETS.password}"}`,
+    );
+    const text = JSON.stringify(toMessage(failed, SECRETS));
+    expect(text).not.toContain('43211');
+    expect(text).not.toContain(SECRETS.password);
+  });
+});
+
 describe('toMessage', () => {
   it('maps a user message and drops base64 file data', () => {
     const info = wire<SessionMessageInfo>(`{

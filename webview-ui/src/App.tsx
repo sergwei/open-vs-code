@@ -19,7 +19,12 @@ import { mentionsFor } from './chat/mentionQuery';
 import { MessageList, type UserMessage } from './chat/MessageList';
 import { nextRequestId, PromptInput } from './chat/PromptInput';
 import { createHistory } from './chat/promptHistory';
-import { parseCommand } from './chat/slashCommand';
+import {
+  CLIENT_COMMANDS,
+  isClientCommand,
+  parseCommand,
+  withClientCommands,
+} from './chat/slashCommand';
 import { StatusBar } from './chat/StatusBar';
 import { RequestDock } from './requests/RequestDock';
 import { AgentModelMenu } from './selectors/AgentModelMenu';
@@ -53,6 +58,18 @@ interface LastSend {
   files: AttachmentRef[];
   /** True for a `prompt.compose` of the host: a failure then appends the text, see {@link runCompose}. */
   compose?: boolean;
+}
+
+/**
+ * The server command this document last sent (issue #125, decision P4=1 of Sergio, 31/10/2026), so
+ * Retry can run it again instead of resending the expanded template the server stored.
+ * `sessionID` is `undefined` for a command that created its session (lazy "New session").
+ */
+interface LastCommand {
+  sessionID: string | undefined;
+  name: string;
+  args: string;
+  files: AttachmentRef[];
 }
 
 /** What the last `session.fork` carried: the text (and known files) to refill the prompt with. */
@@ -136,12 +153,26 @@ interface LastRevert {
  * `text: args`, and its files WITHOUT `mention` (the template rewrites the text, P9=1); a name that
  * is not listed, or no catalog list at all, goes as a normal prompt with the full text (P4=1).
  * `lastSend.text` and the history keep the FULL typed text (`/name args`), so a failed send gives
- * the draft back as it was typed. Retry resends the stored message text as a normal prompt: the
- * server keeps the expanded template, not the command (P8=1, a known limit). The catalog's
- * `commands` reach the prompt box as they are (absent stays absent). VERIFIED by `App.test.tsx`
+ * the draft back as it was typed. Retry resends the stored message text as a normal prompt unless
+ * it can remember the command (issue #125, below): the server keeps the expanded template, not
+ * the command. The catalog's `commands` reach the prompt box as they are plus the client commands
+ * (absent stays absent). VERIFIED by `App.test.tsx`
  * in jsdom with a fake host, and in a real window (Windows 11, VS Code 1.144.0, 28/10/2026) by the
  * `test:visual` check "C4 the turn of /hello Ana ends" (the command runs end to end against the
  * synthetic server).
+ *
+ * Issue #125 (decisions P1-P5 of Sergio, 31/10/2026, Engram `E8-chat-commands/decisions/p1-p5`):
+ * `/compact` is a CLIENT command ({@link withClientCommands}): the menu and the popup list it after
+ * the server's, and sending it asks the host for `session.compact` instead of a prompt (a command
+ * the server lists with that name wins). With no open session, or nothing from the user in it, it
+ * says so in a notice and sends nothing. The draft text is cleared and kept in the history, the
+ * attachment chips are left alone. While the summary is made the session is busy and the activity
+ * line reads "Compacting". Retry of a turn started by a server command (`/init`, `/review`...) runs
+ * the command again with its arguments and files, so its `agent:` / `model:` apply, but only when
+ * this document sent it to the open session and no normal prompt came after (`lastCommand`); after
+ * hiding the view or a Reload Window the memory is gone and Retry resends the stored text as
+ * before, because a template cannot be told from a long prompt. Init has no button of its own: it is
+ * the `/init` row of the "/" menu (issue #33).
  *
  * Issue #31: the header shows the "Changed files" list of the open session, and `openChangedFile`
  * turns a click on a row into `session.diff.open` for the open session (no `requestId`).
@@ -196,6 +227,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   /** Closes the panel of the agent and model chip; set by the chip itself (review W1). */
   let closeChipPanel: (() => void) | undefined;
   let lastSend: LastSend | undefined;
+  let lastCommand: LastCommand | undefined;
   const [lastFork, setLastFork] = createSignal<LastFork | undefined>(undefined);
   const [lastRevert, setLastRevert] = createSignal<LastRevert | undefined>(undefined);
   /** `requestId` of a clear or commit in flight (the stage has its own, in `lastRevert`). */
@@ -230,9 +262,16 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     }
     return [];
   };
+  /** True when the newest visible message is the compaction line still running (issue #125). */
+  const compacting = () => {
+    const last = messages().at(-1);
+    return last?.kind === 'notice' && last.compaction === 'running';
+  };
   const activity = createMemo(() =>
-    deriveActivity(state.connection, status(), lastAssistantParts()),
+    deriveActivity(state.connection, status(), lastAssistantParts(), compacting()),
   );
+  /** The server's commands plus the ones this webview carries out (`/compact`). */
+  const commands = createMemo(() => withClientCommands(state.catalog?.commands));
   const lastUser = () => {
     const shown = messages();
     for (let index = shown.length - 1; index >= 0; index--) {
@@ -484,6 +523,11 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   ): void => {
     const requestId = nextRequestId();
     lastSend = { requestId, text, files, ...(fromCompose ? { compose: true } : {}) };
+    // Retry runs the command again only while nothing else was sent after it.
+    lastCommand =
+      command === undefined
+        ? undefined
+        : { sessionID: state.open.sessionID, name: command.name, args: command.args, files };
     // Only the dock lines of other sessions' requests go; the answers of the open session are
     // history in the conversation (`state.resolutions`) and stay.
     props.store.clearResolved();
@@ -512,12 +556,45 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   const submit = (): void => {
     const text = draft().trim();
     if (!canSend() || (text === '' && state.draftFiles.length === 0)) return;
-    const command = parseCommand(text, state.catalog?.commands);
+    // Without a catalog only the client commands are known, so "/compact" never goes out as a prompt.
+    const command = parseCommand(text, commands() ?? CLIENT_COMMANDS);
+    if (command !== undefined && isClientCommand(command.name, state.catalog?.commands)) {
+      history.push(text);
+      setDraft('');
+      persist();
+      compact();
+      return;
+    }
     const files = props.store.takeDraftFiles();
     history.push(text);
     setDraft('');
     persist();
     sendPrompt(text, files, command);
+  };
+
+  /**
+   * `/compact` (issue #125): asks the host to compact the open session. With no open session, or
+   * no message of the user in what is shown, there is nothing to summarize: an info notice says so
+   * and nothing is sent (the server would only answer `compaction.failed`; and `begin` must come
+   * after the session id is known to be non-empty, or the host's validator would drop the message
+   * and leave the request pending). The progress is the notice line the host streams; the
+   * activity reads "Compacting". It clears `lastCommand`: a Retry after a compaction that ended
+   * badly must not rerun an older command.
+   */
+  const compact = (): void => {
+    const sessionID = state.open.sessionID;
+    if (sessionID === undefined || !messages().some((message) => message.kind === 'user')) {
+      props.store.notify('info', {
+        code: 'NothingToCompact',
+        message: 'There is nothing to compact yet',
+      });
+      return;
+    }
+    lastCommand = undefined;
+    const requestId = nextRequestId();
+    props.store.begin(requestId);
+    props.send({ type: 'session.compact', requestId, sessionID });
+    focusInput?.();
   };
 
   /** Interrupts the running turn; the session goes idle when the host relays the event. */
@@ -531,10 +608,35 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     focusInput?.();
   };
 
-  /** Resends the last user message of the open session (there is no retry endpoint in v2). */
+  // `lastCommand` belongs to the session it was sent to: a command sent with no session open
+  // (lazy "New session") adopts the one the snapshot brings, and any other change forgets it.
+  createEffect(
+    on(
+      () => state.open.sessionID,
+      (sessionID) => {
+        if (lastCommand === undefined) return;
+        if (lastCommand.sessionID === undefined) {
+          if (sessionID !== undefined) lastCommand = { ...lastCommand, sessionID };
+        } else if (lastCommand.sessionID !== sessionID) lastCommand = undefined;
+      },
+      { defer: true },
+    ),
+  );
+
+  /**
+   * Resends the last user message of the open session (there is no retry endpoint in v2). When
+   * this document sent that turn as a server command (`lastCommand`, issue #125) the command runs
+   * again with the same arguments and files instead of the expanded template.
+   */
   const retry = (): void => {
     const message = lastUser();
     if (message === undefined || !canSend()) return;
+    const command = lastCommand;
+    if (command !== undefined && command.sessionID === state.open.sessionID) {
+      const typed = command.args === '' ? `/${command.name}` : `/${command.name} ${command.args}`;
+      sendPrompt(typed, command.files, { name: command.name, args: command.args });
+      return;
+    }
     const files: AttachmentRef[] = [];
     for (const file of message.files) {
       const known = file.uri === undefined ? undefined : knownFiles.get(file.uri);
@@ -959,7 +1061,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
             waiting={!connected() && !notStarted()}
             sendDisabled={!canSend()}
             attachDisabled={!connected()}
-            commands={state.catalog?.commands}
+            commands={commands()}
             commandsLoading={state.catalog === undefined}
             commandsDisabled={!connected()}
             fileSearch={state.fileSearch}

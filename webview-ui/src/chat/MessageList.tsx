@@ -31,6 +31,7 @@ import type { OpenView } from '../store/chatStore';
 import { isStopError } from '../store/activity';
 import { AttachmentOpenButton } from './AttachmentOpenButton';
 import { PartView } from './PartView';
+import { UserText } from './UserText';
 
 type AssistantMessage = Extract<MessageInfo, { kind: 'assistant' }>;
 export type UserMessage = Extract<MessageInfo, { kind: 'user' }>;
@@ -134,6 +135,12 @@ function prefersReducedMotion(): boolean {
  * permissions and forms; the tool a request names (`tool.partID`) is told it is waiting for
  * approval. Cards stay folded: a card that opens, or a request that appears, adds no child to the
  * log and never moves the focus.
+ *
+ * Issue #105: a USER message longer than 12 lines or 1000 characters (what a slash command's
+ * template usually is) is folded to six lines behind a "Show more" button (`UserText`, thresholds in
+ * `longMessage.ts`). Issue #125: a `notice` is the compaction line ("Compacting the conversation…",
+ * "Conversation compacted", "Compaction failed: …"); `data-compaction` carries its state for the CSS,
+ * and the failed one is marked by its border, not by a text colour.
  *
  * Issues #23/#24: every ASSISTANT message starts with a muted line "Agent · model" ("Plan · GLM-5.3
  * Flash Free", from `session.step.started`, named through `catalog`). It took over what the header
@@ -276,7 +283,7 @@ export function MessageList(props: {
                 <Match when={asUser(message)}>
                   {(user) => (
                     <article class="message message-user">
-                      <div class="part-text">{user().text}</div>
+                      <UserText id={user().id} text={user().text} />
                       <Show when={user().files.length > 0}>
                         <ul class="message-files" aria-label="Attached files">
                           <For each={user().files}>
@@ -377,7 +384,11 @@ export function MessageList(props: {
                   )}
                 </Match>
                 <Match when={asNotice(message)}>
-                  {(notice) => <div class="message-notice">{notice().text}</div>}
+                  {(notice) => (
+                    <div class="message-notice" data-compaction={notice().compaction}>
+                      {notice().text}
+                    </div>
+                  )}
                 </Match>
               </Switch>
             </ErrorBoundary>

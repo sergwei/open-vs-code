@@ -475,12 +475,36 @@ export function toAssistantMessage(
 }
 
 /**
- * Maps one REST message to the shared model, or `undefined` when phase 1 does not show it.
+ * The conversation line of a compaction (issue #125), shared by the REST mapping and the event
+ * translator so the same id gives the same text from both. `auto` only changes the completed
+ * text; `detail` is the already scrubbed reason of a failed one.
+ */
+export function compactionNotice(
+  id: string,
+  createdAt: number,
+  compaction: 'running' | 'completed' | 'failed',
+  options: { auto?: boolean; detail?: string } = {},
+): Extract<MessageInfo, { kind: 'notice' }> {
+  let text: string;
+  if (compaction === 'running') text = 'Compacting the conversation…';
+  else if (compaction === 'completed') {
+    text =
+      options.auto === true ? 'Conversation compacted automatically' : 'Conversation compacted';
+  } else text = `Compaction failed: ${options.detail ?? 'unknown error'}`;
+  return { kind: 'notice', id, createdAt, text, compaction };
+}
+
+/**
+ * Maps one REST message to the shared model, or `undefined` when it is not shown.
  *
- * `user` and `assistant` are mapped; `idle` (which REST returns, with `outcome`), `model-switched`
- * and every other type give `undefined` (the shared `notice` kind is not produced yet).
+ * `user`, `assistant` and `compaction` (a `notice`, issue #125) are mapped; `idle` (which REST
+ * returns, with `outcome`), `model-switched` and every other type give `undefined`. The id of a
+ * compaction message is the inbox item that asked for it, which is also the `inputID` of the
+ * stream events, so a notice built from either is the same one.
  * VERIFIED with recordings of a real opencode 2.0.32 (Windows 11, 2026-10-20): user message,
- * assistant `[reasoning, text]`, and the `idle` failure message.
+ * assistant `[reasoning, text]`, and the `idle` failure message. The `compaction` message of
+ * status `completed` was recorded in the planner's spike of 22/10/2026 (Windows 11); `running`
+ * and `failed` come from the types only (HYPOTHESIS that a running one is ever listed).
  */
 export function toMessage(
   info: SessionMessageInfo,
@@ -500,6 +524,17 @@ export function toMessage(
       };
     case 'assistant':
       return toAssistantMessage(info, secrets);
+    case 'compaction': {
+      const created = info.time.created;
+      if (info.status === 'failed') {
+        const detail = toStructuredErrorInfo(info.error, secrets).message;
+        return { message: compactionNotice(info.id, created, 'failed', { detail }), parts: [] };
+      }
+      return {
+        message: compactionNotice(info.id, created, info.status, { auto: info.reason === 'auto' }),
+        parts: [],
+      };
+    }
     default:
       return undefined;
   }

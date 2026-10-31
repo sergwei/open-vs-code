@@ -20,7 +20,8 @@
 //
 // The info lines of the log are STABLE on purpose: the opt-in integration test waits for them
 // (`webview ready`, `event stream connected`, `snapshot sent`, `prompt accepted for`,
-// `turn finished`, `abort requested for <sid> (interrupted: <bool>)`, and from phase 3
+// `turn finished`, `abort requested for <sid> (interrupted: <bool>)`,
+// `compaction requested for <sid> (input <id>)` (issue #125), and from phase 3
 // `permission asked <id> for <sid> (<action>)`, `permission <id> resolved: <decision>`,
 // `form asked <id> for <sid>`, `form <id> resolved: answered|cancelled`,
 // `permission reply sent for <id> (<decision>)`, `form reply sent for <id>`,
@@ -1460,9 +1461,11 @@ export class ChatController {
         const showing = this.panesOf(event.data.sessionID);
         if (showing.length > 0) {
           // The boundary of the context indicator lives in the snapshot (`compactedAt`), not in a
-          // message of its own (issue #25). Not translated: the branch returns first, and the
-          // translator has no case for it anyway (it would give `[]`). Only the panes showing the
-          // session are refreshed.
+          // message of its own (issue #25). The line "Conversation compacted" (issue #125) is
+          // published first, so the user sees it before the snapshot lands; the snapshot then
+          // brings the same notice from REST (same id). Only the panes showing the session are
+          // refreshed.
+          this.publish(this.translator.translate(event));
           this.log.info(`compaction ended for ${event.data.sessionID}; refreshing the snapshot`);
           void this.resync(showing);
           return;
@@ -2788,6 +2791,31 @@ export class ChatController {
   }
 
   /**
+   * `session.compact` (issue #125): asks the server to compact the conversation of `sessionID`.
+   *
+   * Calls `session.compact` with `delivery: 'queue'`, like every prompt of this UI, and answers the
+   * request as soon as the server admitted the item; the summary is made afterwards and its
+   * progress reaches the chat as the notice the translator builds from `session.compaction.*`.
+   * A server refusal (unknown session) answers with the usual scrubbed error. When there is
+   * nothing to compact the server accepts the request and later publishes `compaction.failed`
+   * ("Nothing to compact yet", read in `compaction.ts@843a6c51`), shown as a failed line.
+   * The log line is stable (see the header). HYPOTHESIS for the real route: the types and the
+   * tag's client test were read, the call was never made against a running server (the opt-in
+   * `realOpencode.test.ts` does not cover it); the synthetic fixture covers the rest.
+   */
+  private async compact(pane: ChatPane, requestId: string, sessionID: string): Promise<void> {
+    const client = this.client;
+    if (client === undefined) return this.result(pane, requestId, unavailable());
+    try {
+      const item = await client.session.compact({ sessionID, delivery: 'queue' });
+      this.log.info(`compaction requested for ${sessionID} (input ${item.id})`);
+      this.result(pane, requestId);
+    } catch (error) {
+      this.result(pane, requestId, error);
+    }
+  }
+
+  /**
    * Runs one editor-side action. These webview messages have no `requestId`, so a failure is
    * reported as a `warning` notice (scrubbed like every error text) and a `warn` log line; it
    * never throws.
@@ -3977,6 +4005,9 @@ export class ChatController {
       },
       'session.abort': (m) => {
         pending.push(this.abort(pane, m.requestId, m.sessionID));
+      },
+      'session.compact': (m) => {
+        pending.push(this.compact(pane, m.requestId, m.sessionID));
       },
       'permission.reply': (m) => {
         pending.push(this.answerPermission(pane, m));

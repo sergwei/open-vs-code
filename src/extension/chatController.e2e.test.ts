@@ -1418,6 +1418,87 @@ describe('chat over HTTP and SSE against the synthetic server', () => {
     );
   }, 20_000);
 
+  // Issue #125. SYNTHETIC server: `POST /api/session/:id/compact` and the events around it are
+  // invented from the types and the source (see the fixture), so these pass for OUR transport,
+  // mapping and notice, not for what a real server sends.
+  const compactionLines = (posted: HostToWebview[]) =>
+    posted.flatMap((m) =>
+      m.type === 'message.upserted' && m.message.kind === 'notice'
+        ? [[m.message.id, m.message.compaction, m.message.text]]
+        : [],
+    );
+
+  it('E8 #125: /compact answers the request, shows running then completed, and the snapshot has the boundary', async () => {
+    const { controller, posted, state } = await boot('ok');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await controller.handle({ type: 'ready' });
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'p1',
+      text: 'hello',
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn to finish',
+    );
+    const sessionID = lastSnapshot(posted).open?.sessionID ?? '';
+    posted.length = 0;
+    await controller.handle({ type: 'session.compact', requestId: 'k1', sessionID });
+    expect(posted).toContainEqual({ type: 'request.result', requestId: 'k1' });
+    await waitUntil(
+      () =>
+        posted.some(
+          (m) => m.type === 'snapshot' && typeof m.snapshot.open?.compactedAt === 'number',
+        ),
+      'a snapshot with compactedAt',
+    );
+    const lines = compactionLines(posted);
+    expect(lines.map(([, compaction]) => compaction)).toEqual(['running', 'completed']);
+    expect(lines[0]?.[0]).toBe(lines[1]?.[0]);
+    // The REST message of the snapshot is the same notice (same id), completed.
+    const open = lastSnapshot(posted).open;
+    expect(open?.messages.filter((m) => m.kind === 'notice')).toMatchObject([
+      { id: lines[0]?.[0], compaction: 'completed', text: 'Conversation compacted' },
+    ]);
+  }, 20_000);
+
+  it('E8 #125: a session with nothing to compact shows a failed line and the turn ends idle', async () => {
+    const { controller, posted, state } = await boot('ok');
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await controller.handle({ type: 'ready' });
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'p1',
+      text: 'KEEP_ALL please',
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn to finish',
+    );
+    const sessionID = lastSnapshot(posted).open?.sessionID ?? '';
+    posted.length = 0;
+    await controller.handle({ type: 'session.compact', requestId: 'k1', sessionID });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the execution to end',
+    );
+    expect(compactionLines(posted).map(([, compaction, text]) => [compaction, text])).toEqual([
+      ['running', 'Compacting the conversation…'],
+      ['failed', 'Compaction failed: Nothing to compact yet'],
+    ]);
+    // Real opencode ends this execution as a success (read in compaction.ts@843a6c51 L235-237 and
+    // L639-646, not recorded): no error status, so no red banner.
+    expect(posted.some((m) => m.type === 'session.status' && m.status.type === 'error')).toBe(
+      false,
+    );
+  }, 20_000);
+
   // tooling/tests-without-model. What `npm run test:visual` needs from the synthetic server, now that
   // it runs on it. SYNTHETIC like everything here: the shapes are the ones of the 2.0.32 tag
   // (the failed tool's error is READ in `read.ts` / `to-session-error.ts`, never recorded), so a

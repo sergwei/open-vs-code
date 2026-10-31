@@ -257,6 +257,7 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
     files: [{ uri: 'file:///a.ts', name: 'a.ts' }],
   },
   'session.abort': { type: 'session.abort', requestId: 'r1', sessionID: 's1' },
+  'session.compact': { type: 'session.compact', requestId: 'r1', sessionID: 's1' },
   'permission.reply': {
     type: 'permission.reply',
     requestId: 'r1',
@@ -463,6 +464,7 @@ describe('isWebviewToHost', () => {
       'session.delete',
       'session.fork',
       'session.abort',
+      'session.compact',
       'permission.reply',
       'form.reply',
       'form.cancel',
