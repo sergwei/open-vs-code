@@ -48,6 +48,9 @@ import {
 const EXTENSION_ID = 'sergwei.open-vs-code';
 // Our own margins: a document needs well under a second to say `ready`; absence is asserted after
 // this pause (vscode-extension skill, section 11).
+// Every remaining use of `SETTLE_MS` is a NEGATIVE window (it precedes an `assertAbsent` or a
+// count that must not grow): absence cannot be waited for, so these stay fixed. The pauses that
+// preceded a `mark()` and a positive wait now use `log.waitForQuiet()` (tooling/test-speed).
 const READY_WAIT_MS = 8000;
 const SETTLE_MS = 1500;
 
@@ -95,7 +98,7 @@ async function openOneTab(): Promise<LogCursor> {
   await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
   await waitForChatTabs(1);
   await log.waitFor('webview ready', READY_WAIT_MS);
-  await pause(SETTLE_MS);
+  await log.waitForQuiet(); // what the new tab still logs lands before the mark
   log.mark();
   return log;
 }
@@ -274,8 +277,8 @@ describe('chat in editor tabs', function () {
     const log = await openLogCursor();
     await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
     // The view may have been resolved by an earlier case, so no `Chat view resolved` line is
-    // waited for: the pause lets a first resolve finish before the mark.
-    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+    // waited for: waiting for a quiet log lets a first resolve finish before the mark.
+    await log.waitForQuiet();
     log.mark();
     await setChatLocation('editor', log);
     await setChatLocation('sidebar', log);
@@ -320,7 +323,7 @@ describe('chat in editor tabs', function () {
     await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
     await waitForChatTabs(1);
     await log.waitFor('webview ready', READY_WAIT_MS);
-    await pause(SETTLE_MS);
+    await log.waitForQuiet(); // what the new tab still logs lands before the mark
     log.mark();
     await vscode.commands.executeCommand(FOCUS_PROMPT_COMMAND_ID, { to: 'editor' });
     const deadline = Date.now() + READY_WAIT_MS;

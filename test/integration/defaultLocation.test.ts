@@ -27,6 +27,8 @@ import { chatTabs, setChatLocation, waitForChatTabs } from './support/chatLocati
 const EXTENSION_ID = 'sergwei.open-vs-code';
 // Our own margins, not VS Code values: a document needs well under a second to say `ready`, and an
 // absence is asserted after this pause (vscode-extension skill, section 11).
+// All three uses of `SETTLE_MS` precede an `assertAbsent` (tooling/test-speed phase 1 reviewed
+// them): an absence cannot be waited for, so the window stays fixed.
 const READY_WAIT_MS = 8000;
 const SETTLE_MS = 1500;
 

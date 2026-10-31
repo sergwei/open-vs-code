@@ -140,6 +140,39 @@ export class LogCursor {
   }
 
   /**
+   * Waits until the log has stopped growing: its size is the same for `quietMs` in a row.
+   *
+   * For the pause a case used to take BEFORE a `mark()` so that what the previous action still
+   * writes (a tab's first requests, a view's resolve) lands before the mark: it ends as soon as
+   * the log is quiet instead of after a fixed 1.5 s. It says nothing about an event that has not
+   * been logged yet, so it is NOT a substitute for waiting on a line that must appear, and it
+   * does not prove the absence of anything (those cases keep their fixed margin).
+   *
+   * `quietMs` defaults to 500 ms: five polls, and five times the 100 ms flush delay of the
+   * logger (HYPOTHESIS: leaves room for it, as `waitFor` assumes; read in `fileLog.ts` of
+   * microsoft/vscode on 20/10/2026, see {@link openLogCursor}). Rejects after `timeoutMs` (default
+   * 8000) if the log never stays quiet that long, with the size it had.
+   */
+  async waitForQuiet(quietMs = 500, timeoutMs = 8000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let size = fs.statSync(this.file).size;
+    let since = Date.now();
+    for (;;) {
+      await sleep(POLL_INTERVAL_MS);
+      const now = fs.statSync(this.file).size;
+      if (now !== size) {
+        size = now;
+        since = Date.now();
+      } else if (Date.now() - since >= quietMs) {
+        return;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`The log did not stay quiet for ${quietMs} ms within ${timeoutMs} ms`);
+      }
+    }
+  }
+
+  /**
    * Throws if `text` is present in the lines added since the mark.
    *
    * It checks the current content only; the caller decides how long to wait before asking,

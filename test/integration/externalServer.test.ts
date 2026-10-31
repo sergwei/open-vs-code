@@ -42,6 +42,8 @@ const EXTENSION_ID = 'sergwei.open-vs-code';
 const WAIT_MS = 10_000;
 // Our own choice: the late reconnection of the Forget race came 20-40 ms after the first
 // `unauthorized` (22/10/2026 trace); 2 s is fifty times that, and still below the 60 s timeout.
+// Both uses precede an `assertAbsent` (tooling/test-speed phase 1 reviewed them): an absence
+// cannot be waited for, so the window stays fixed.
 const SETTLE_MS = 2_000;
 const PASSWORD = 'integration-secret-pw';
 const NO_LOG = {
