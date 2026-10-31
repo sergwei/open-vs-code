@@ -327,8 +327,9 @@ function warnSessionFailure(action: string, error: unknown): void {
  *   decision Q1=1): the default is `editor`, and `chat location at start: <mode>` is logged on
  *   activation. VERIFIED for the `editor` line: `chat location at start: editor` on the first
  *   activation of a profile with no key, read by the integration case "starts in editor on the
- *   first activation" and by D0 of step 25 of `test:visual` (Windows 11, VS Code 1.144.0,
- *   30/10/2026). UNVERIFIED on macOS and Linux; the `sidebar` line is read by no test.
+ *   first activation" and by "ok   D0 a profile with no chatLocation key starts in editor
+ *   mode: …" of `test:visual` (Windows 11, VS Code 1.144.0, 30/10/2026). UNVERIFIED on macOS and
+ *   Linux; the `sidebar` line is read by no test.
  * - `editor` (the default): no side-bar pane. Every chat is an editor tab (`ChatPanels`), one pane each; New
  *   Session always opens a NEW lazy tab; a command goes to the active tab, else the most recent
  *   (`ChatTabs.commandTarget`), else it opens one with the last session of the folder.

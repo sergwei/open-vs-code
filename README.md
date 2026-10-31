@@ -177,7 +177,7 @@ Command Palette (they act on the active editor); the two Explorer entries are no
 | **OpenCode: New Session** | Opens a new empty chat tab (the default, `chatLocation` set to `editor`). With `chatLocation` set to `sidebar` it is the same as the **New session** button: the next prompt starts a new session and your draft is kept. |
 | **OpenCode: Open Settings** | Opens Settings filtered to this extension. |
 | **OpenCode: Stop Response** | Same as **Stop**: interrupts the running turn. Run from the editor it also shows the chat; with no turn running it only says "No response is running". |
-| **OpenCode: Rename Session…** | Row of the Sessions list (shown when `chatLocation` is not `sidebar`, the default): asks for a new title. Also the pencil on the row and `F2`; not in the Command Palette. |
+| **OpenCode: Rename Session…** | Row of the Sessions list (shown while `chatLocation` is not `sidebar`; the default is `editor`): asks for a new title. Also the pencil on the row and `F2`; not in the Command Palette. |
 | **OpenCode: Delete Session** | Row of the Sessions list: after a confirmation, deletes the session for every opencode client and closes its tab. Also the bin on the row and `Delete`; not in the Command Palette. |
 | **OpenCode: Search Sessions…** | Searches the session titles on the server and opens the one you pick. Only offered while `chatLocation` is not `sidebar` (the default is `editor`). Also a button in the Sessions title bar. |
 | **Add to OpenCode Chat** | Explorer right-click menu: attaches the selected files to the prompt. |
