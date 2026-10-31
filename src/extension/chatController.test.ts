@@ -40,6 +40,7 @@ import type {
   PermissionSavedInfo,
   ProviderInfo,
   SessionDiffInput,
+  SessionInboxCompaction,
   SessionInfo,
   SessionListInput,
   SessionMessageInfo,
@@ -126,6 +127,8 @@ type FakeOptions = Partial<{
   promptImpl: () => Promise<unknown>;
   active: Record<string, { type: 'running' }>;
   interruptImpl: () => Promise<{ interrupted: boolean }>;
+  /** Rejects `session.compact` with this server error body (issue #125). */
+  compactError: object;
   permissions: PermissionRequest[];
   forms: FormInfo[];
   saved: PermissionSavedInfo[];
@@ -268,6 +271,7 @@ function fakeApi(options: FakeOptions = {}) {
     files?: ReadonlyArray<{ uri: string; name?: string; mention?: object }>;
   }> = [];
   const interrupts: unknown[] = [];
+  const compacts: unknown[] = [];
   const permissionReplies: unknown[] = [];
   const formReplies: unknown[] = [];
   const formCancels: unknown[] = [];
@@ -444,6 +448,17 @@ function fakeApi(options: FakeOptions = {}) {
         interrupts.push(input);
         return (options.interruptImpl ?? (() => Promise.resolve({ interrupted: true })))();
       },
+      compact: (input) => {
+        calls.push('session.compact');
+        compacts.push(input);
+        return options.compactError === undefined
+          ? Promise.resolve(
+              wire<SessionInboxCompaction>(
+                `{"id":"msg_cmp","sessionID":"${input.sessionID}","time":{"created":1},"type":"compaction","payload":{},"delivery":"queue"}`,
+              ),
+            )
+          : failWith(options.compactError);
+      },
       form: {
         reply: (input) => {
           calls.push('session.form.reply');
@@ -566,6 +581,7 @@ function fakeApi(options: FakeOptions = {}) {
     prompts,
     commandRuns,
     interrupts,
+    compacts,
     permissionReplies,
     formReplies,
     formCancels,
@@ -1172,7 +1188,8 @@ describe('resync', () => {
 describe('context usage (issue #25)', () => {
   const compaction = (status: string, created: number): SessionMessageInfo =>
     wire<SessionMessageInfo>(
-      `{"id":"msg_c${String(created)}","type":"compaction","status":"${status}","reason":"manual","summary":"s","recent":"r","time":{"created":${String(created)}}}`,
+      // A failed message carries `error` (types of 2.0.32), which the notice line now reads.
+      `{"id":"msg_c${String(created)}","type":"compaction","status":"${status}","reason":"manual","summary":"s","recent":"r","error":{"type":"compaction.unavailable","message":"Nothing to compact yet"},"time":{"created":${String(created)}}}`,
     );
   const usageRow = (id: string, input: number): SessionInfo =>
     wire<SessionInfo>(
@@ -1283,6 +1300,37 @@ describe('context usage (issue #25)', () => {
     await flush();
     expect(calls.filter((c) => c === 'session.list')).toHaveLength(before + 1);
     expect(logs).toContain('info: compaction ended for ses_open; refreshing the snapshot');
+  });
+
+  // Issue #125: the line "Conversation compacted" must be published BEFORE the resync, and the
+  // resync still happens (it carries `compactedAt`).
+  it('publishes the compaction line of the open session and then resyncs', async () => {
+    const { api, calls } = fakeApi();
+    const { controller, streams, posted } = setup(api, 'ses_open');
+    controller.onServerState(RUNNING);
+    await controller.resync();
+    const before = calls.filter((c) => c === 'session.list').length;
+    emit(streams, 'session.compaction.started', {
+      sessionID: 'ses_open',
+      reason: 'manual',
+      recent: '',
+      inputID: 'msg_in',
+    });
+    emit(streams, 'session.compaction.ended', {
+      sessionID: 'ses_open',
+      reason: 'manual',
+      text: 't',
+      recent: 'r',
+    });
+    await flush();
+    const lines = posted.flatMap((m) =>
+      m.type === 'message.upserted' && m.message.kind === 'notice' ? [m.message] : [],
+    );
+    expect(lines.map((m) => [m.id, m.compaction])).toEqual([
+      ['msg_in', 'running'],
+      ['msg_in', 'completed'],
+    ]);
+    expect(calls.filter((c) => c === 'session.list')).toHaveLength(before + 1);
   });
 });
 
@@ -1435,6 +1483,43 @@ describe('session.abort (issue #16)', () => {
   it('answers ServerUnavailable without a server', async () => {
     const { controller, posted } = setup(fakeApi().api);
     await controller.handle({ type: 'session.abort', requestId: 'a1', sessionID: 'ses_1' });
+    expect(posted.at(-1)).toMatchObject({ error: { code: 'ServerUnavailable' } });
+  });
+});
+
+// Issue #125. The fake client answers the item the real route would (shape read in the types and
+// the tag's client test), so this protects OUR handler: `delivery: 'queue'`, the answer, the stable
+// log line and the scrubbed error. It does not prove what a real server does with the call.
+describe('session.compact (issue #125)', () => {
+  it('asks the server to compact with delivery queue, answers ok and logs the stable line', async () => {
+    const { api, compacts } = fakeApi();
+    const { controller, posted, logs } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'session.compact', requestId: 'c1', sessionID: 'ses_1' });
+    expect(compacts).toEqual([{ sessionID: 'ses_1', delivery: 'queue' }]);
+    expect(posted.at(-1)).toEqual({ type: 'request.result', requestId: 'c1' });
+    expect(logs).toContain('info: compaction requested for ses_1 (input msg_cmp)');
+  });
+
+  it('answers a scrubbed error when the server rejects it', async () => {
+    const { api } = fakeApi({
+      compactError: {
+        _tag: 'SessionNotFoundError',
+        message: `Session not found at ${SERVER.url} with ${SERVER.password}`,
+      },
+    });
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({ type: 'session.compact', requestId: 'c1', sessionID: 'ses_1' });
+    const result = posted.at(-1);
+    expect(result).toMatchObject({ requestId: 'c1', error: { code: 'SessionNotFoundError' } });
+    expect(JSON.stringify(result)).not.toContain('43211');
+    expect(JSON.stringify(result)).not.toContain(SERVER.password);
+  });
+
+  it('answers ServerUnavailable without a server', async () => {
+    const { controller, posted } = setup(fakeApi().api);
+    await controller.handle({ type: 'session.compact', requestId: 'c1', sessionID: 'ses_1' });
     expect(posted.at(-1)).toMatchObject({ error: { code: 'ServerUnavailable' } });
   });
 });

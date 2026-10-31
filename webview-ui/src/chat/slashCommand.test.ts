@@ -6,7 +6,14 @@
 // Provenance: FABRICATED texts and lists; the names `init` and `review` are the built-in ones read
 // in opencode v2.0.32, `docs:search` has the MCP shape. No server was involved.
 import { describe, expect, it } from 'vitest';
-import { applyCommand, filterCommands, findSlash, parseCommand } from './slashCommand';
+import {
+  applyCommand,
+  filterCommands,
+  findSlash,
+  isClientCommand,
+  parseCommand,
+  withClientCommands,
+} from './slashCommand';
 
 const LIST = [
   { name: 'init', description: 'guided AGENTS.md setup' },
@@ -90,6 +97,38 @@ describe('parseCommand', () => {
     expect(parseCommand('hello /init', LIST)).toBeUndefined();
     expect(parseCommand('/init', undefined)).toBeUndefined();
     expect(parseCommand('/init', [])).toBeUndefined();
+  });
+});
+
+// Issue #125 (decision P1=1): `/compact` is a client command that the server does not list.
+describe('client commands', () => {
+  it('appends compact after the server commands', () => {
+    expect(withClientCommands(LIST)?.map((c) => c.name)).toEqual([
+      ...LIST.map((c) => c.name),
+      'compact',
+    ]);
+    expect(withClientCommands([])?.map((c) => c.name)).toEqual(['compact']);
+  });
+
+  it('does not duplicate a compact the server lists, which then runs as the server command', () => {
+    const served = [{ name: 'compact', description: 'mine' }];
+    expect(withClientCommands(served)).toEqual(served);
+    expect(isClientCommand('compact', served)).toBe(false);
+    expect(isClientCommand('compact', LIST)).toBe(true);
+    expect(isClientCommand('init', LIST)).toBe(false);
+  });
+
+  it('keeps an absent list absent, so "loading" and "could not be loaded" still show', () => {
+    expect(withClientCommands(undefined)).toBeUndefined();
+    expect(isClientCommand('compact', undefined)).toBe(true);
+  });
+
+  it('lets parseCommand recognise /compact once it is in the list', () => {
+    expect(parseCommand('/compact', withClientCommands(LIST))).toEqual({
+      name: 'compact',
+      args: '',
+    });
+    expect(parseCommand('/compact', LIST)).toBeUndefined();
   });
 });
 

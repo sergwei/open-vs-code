@@ -27,6 +27,16 @@
 //     the totals of `usage.updated` equal `session.get` and `session.list` after a turn
 //     (plan line "tras el turno `usage.updated` = `GET` = `list` = `{input:4951, output:4,
 //     cache.read:4608}`"). UNVERIFIED for paid models and for the compaction usage in a live VS Code.
+//   - `session.compaction.started|ended|failed` (issue #125) become ONE `notice` message that is
+//     upserted in place: `started` draws "Compacting…" with the id of the inbox item (`inputID`, the
+//     id of the REST `compaction` message too), `ended` and `failed` (which may lack `inputID`) update
+//     it through a bounded per-session memory, and a turn that closes with the compaction still
+//     running turns the line into a failure ("it did not finish"). Stop of a manual compaction
+//     DOES publish `failed {type:'aborted', message:'Compaction cancelled', inputID}` (read in
+//     `runner/llm.ts@843a6c51` L150-158); the abandon path is only a net for a lost `failed`.
+//     `compaction.delta` is ignored.
+//     The order started -> ended was recorded from a real 2.0.32 (planner spike #25, Windows 11,
+//     22/10/2026); `failed` and the abandoned case come from the types and the source only.
 // Self-healing instead of buffering: every closing event (`*.ended`, `step.*`, `tool.*`) emits the
 // WHOLE object, so what a snapshot/stream gap lost is repaired when the block closes. A delta for
 // an unknown message or block is dropped (deltas are not idempotent, so they cannot be replayed).
@@ -51,6 +61,7 @@ import {
 import {
   toAttachments,
   toAssistantMessage,
+  compactionNotice,
   toFormAsk,
   toJsonObject,
   toModelRef,
@@ -328,6 +339,22 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
   const restNewest = new Map<string, number | undefined>();
   /** The sessions whose messages are forwarded (one per chat surface). */
   let tracked = new Set<string>();
+  /**
+   * The compaction in progress per session (issue #125): the id and start time of its notice, so
+   * `ended` (which carries no `inputID`) and `failed` update the line `started` drew. Bounded like
+   * `liveStatuses`; an entry leaves when the compaction ends, fails or its turn closes.
+   */
+  const liveCompactions = new Map<string, { id: string; createdAt: number }>();
+
+  /** Remembers the compaction of `sessionID`, evicting the oldest entry beyond the bound. */
+  const rememberCompaction = (sessionID: string, live: { id: string; createdAt: number }): void => {
+    if (liveCompactions.size >= MAX_LIVE_STATUSES) {
+      const oldest = liveCompactions.keys().next();
+      if (!oldest.done) liveCompactions.delete(oldest.value);
+    }
+    liveCompactions.delete(sessionID);
+    liveCompactions.set(sessionID, live);
+  };
 
   /** The tracker of an assistant message of a tracked session, if we know it. */
   const assistantOf = (sessionID: string, messageID: string): AssistantTracker | undefined =>
@@ -365,6 +392,25 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
     messageID,
     part,
   });
+
+  /**
+   * Closes a compaction still running when its turn ends, so the line does not say "Compacting…"
+   * for ever. Stop of a manual one publishes `failed` ("Compaction cancelled", read in
+   * `runner/llm.ts@843a6c51` L150-158), so this is only a net for a lost `failed` (a stream gap).
+   * HYPOTHESIS that the net is ever needed: it would take a dropped event to see it. Gives `[]`
+   * when none is live.
+   */
+  const abandonCompaction = (sessionID: string): HostToWebview[] => {
+    const live = liveCompactions.get(sessionID);
+    if (live === undefined) return [];
+    liveCompactions.delete(sessionID);
+    return [
+      upsertMessage(
+        sessionID,
+        compactionNotice(live.id, live.createdAt, 'failed', { detail: 'it did not finish' }),
+      ),
+    ];
+  };
 
   /** Builds the tracker of one REST assistant message (counters and open blocks come from `content[]`). */
   const trackerFromMessage = (
@@ -540,6 +586,7 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
         if (!next.has(live.sessionID)) liveUsers.delete(id);
       }
       for (const id of [...restNewest.keys()]) if (!next.has(id)) restNewest.delete(id);
+      for (const id of [...liveCompactions.keys()]) if (!next.has(id)) liveCompactions.delete(id);
       tracked = next;
     },
 
@@ -620,10 +667,62 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
           return status(event.data.sessionID, { type: 'busy' });
         case 'session.execution.succeeded':
         case 'session.execution.interrupted':
-          return status(event.data.sessionID, { type: 'idle' });
+          return [
+            ...abandonCompaction(event.data.sessionID),
+            ...status(event.data.sessionID, { type: 'idle' }),
+          ];
         case 'session.execution.failed': {
           const error: ErrorInfo = toStructuredErrorInfo(event.data.error, secrets);
-          return status(event.data.sessionID, { type: 'error', error });
+          return [
+            ...abandonCompaction(event.data.sessionID),
+            ...status(event.data.sessionID, { type: 'error', error }),
+          ];
+        }
+
+        // Compaction (issue #125): `started` draws the running line, `ended` / `failed` update the
+        // same one. `session.compaction.delta` (the summary streaming) is ignored on purpose.
+        case 'session.compaction.started': {
+          const { data } = event;
+          if (!tracked.has(data.sessionID)) return [];
+          const live = { id: data.inputID ?? `compaction:${event.id}`, createdAt: event.created };
+          rememberCompaction(data.sessionID, live);
+          return [
+            upsertMessage(data.sessionID, compactionNotice(live.id, live.createdAt, 'running')),
+          ];
+        }
+        case 'session.compaction.ended': {
+          const { data } = event;
+          if (!tracked.has(data.sessionID)) return [];
+          const live = liveCompactions.get(data.sessionID);
+          liveCompactions.delete(data.sessionID);
+          return [
+            upsertMessage(
+              data.sessionID,
+              compactionNotice(
+                live?.id ?? `compaction:${event.id}`,
+                live?.createdAt ?? event.created,
+                'completed',
+                { auto: data.reason === 'auto' },
+              ),
+            ),
+          ];
+        }
+        case 'session.compaction.failed': {
+          const { data } = event;
+          if (!tracked.has(data.sessionID)) return [];
+          const live = liveCompactions.get(data.sessionID);
+          liveCompactions.delete(data.sessionID);
+          return [
+            upsertMessage(
+              data.sessionID,
+              compactionNotice(
+                data.inputID ?? live?.id ?? `compaction:${event.id}`,
+                live?.createdAt ?? event.created,
+                'failed',
+                { detail: toStructuredErrorInfo(data.error, secrets).message },
+              ),
+            ),
+          ];
         }
         case 'session.retry.scheduled':
           return status(event.data.sessionID, {

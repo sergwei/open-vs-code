@@ -400,6 +400,110 @@ describe('session usage', () => {
   });
 });
 
+// Issue #125. Protects the compaction line: ONE notice updated in place (same id from `started` to
+// `ended` / `failed`, although `ended` carries no `inputID`), a notice per session that is open
+// only, and a turn that closes with the compaction still running turning it into a failure (a net
+// for a lost `failed`: a real Stop publishes `failed` "Compaction cancelled", `runner/llm.ts`
+// L150-158 at tag 843a6c51, read). The
+// started -> usage -> ended order was recorded in the planner's spike of 22/10/2026 (opencode
+// 2.0.32, Windows 11); `failed` and the abandoned case come from the types and the source, and
+// every event here is fabricated, so this confirms OUR logic, not the contract.
+describe('compaction', () => {
+  const started = (inputID?: string): V2Event =>
+    ev('session.compaction.started', {
+      sessionID: SES,
+      reason: 'manual',
+      recent: '',
+      ...(inputID === undefined ? {} : { inputID }),
+    });
+  const ended = (reason = 'manual'): V2Event =>
+    ev('session.compaction.ended', { sessionID: SES, reason, text: 's', recent: '' });
+  const notice = (out: HostToWebview[], index: number) => {
+    const message = out[index];
+    return message?.type === 'message.upserted' ? message.message : undefined;
+  };
+  const open = () => {
+    const t = createEventTranslator();
+    t.setOpen(SES);
+    return t;
+  };
+
+  it('draws "Compacting…" with the id of the inbox item and completes the same notice', () => {
+    const t = open();
+    const out = run(t, [started('msg_in'), ended()]);
+    expect(notice(out, 0)).toMatchObject({
+      kind: 'notice',
+      id: 'msg_in',
+      text: 'Compacting the conversation…',
+      compaction: 'running',
+    });
+    expect(notice(out, 1)).toMatchObject({
+      id: 'msg_in',
+      text: 'Conversation compacted',
+      compaction: 'completed',
+    });
+    expect(notice(out, 1)?.createdAt).toBe(notice(out, 0)?.createdAt);
+  });
+
+  it('gives a synthetic id when started has no inputID, and the same one to ended', () => {
+    const out = run(open(), [started(), ended('auto')]);
+    const id = notice(out, 0)?.id ?? '';
+    expect(id.startsWith('compaction:')).toBe(true);
+    expect(notice(out, 1)).toMatchObject({ id, text: 'Conversation compacted automatically' });
+  });
+
+  it('turns failed into a failed line with the scrubbed message', () => {
+    const t = createEventTranslator({ url: 'http://127.0.0.1:43211' });
+    t.setOpen(SES);
+    const out = run(t, [
+      started('msg_in'),
+      ev('session.compaction.failed', {
+        sessionID: SES,
+        reason: 'manual',
+        inputID: 'msg_in',
+        error: { type: 'compaction.unavailable', message: 'Nothing at http://127.0.0.1:43211' },
+      }),
+    ]);
+    expect(notice(out, 1)).toMatchObject({
+      id: 'msg_in',
+      compaction: 'failed',
+      text: 'Compaction failed: Nothing at <server>',
+    });
+  });
+
+  it('says nothing for a session that is not open, and ignores the summary delta', () => {
+    const t = createEventTranslator();
+    t.setOpen('ses_other');
+    expect(run(t, [started('msg_in'), ended()])).toEqual([]);
+    const own = open();
+    expect(
+      own.translate(ev('session.compaction.delta', { sessionID: SES, text: 'partial' })),
+    ).toEqual([]);
+  });
+
+  it('closes a compaction still running when the turn is interrupted, before the idle status', () => {
+    const out = run(open(), [
+      started('msg_in'),
+      ev('session.execution.interrupted', { sessionID: SES, reason: 'user' }),
+    ]);
+    expect(types(out)).toEqual(['message.upserted', 'message.upserted', 'session.status']);
+    expect(notice(out, 1)).toMatchObject({
+      id: 'msg_in',
+      compaction: 'failed',
+      text: 'Compaction failed: it did not finish',
+    });
+  });
+
+  it('leaves a finished compaction alone when its turn closes', () => {
+    const out = run(open(), [
+      started('msg_in'),
+      ended(),
+      ev('session.execution.succeeded', { sessionID: SES }),
+    ]);
+    expect(types(out)).toEqual(['message.upserted', 'message.upserted', 'session.status']);
+  });
+});
+
 describe('tools', () => {
   const a = { sessionID: SES, assistantMessageID: ASSISTANT };
 

@@ -835,6 +835,24 @@ button.secondary:hover:not(:disabled),
   font-style: italic;
 }
 
+/* A failed compaction: the tone is the border; the text keeps the foreground (contrast lesson #1043). */
+.message-notice[data-compaction='failed'] {
+  color: var(--vscode-foreground);
+  font-style: normal;
+  border-left: 2px solid var(--vscode-inputValidation-warningBorder);
+  padding-left: 6px;
+}
+
+/* A long user message folded to six lines (issue #105); "Show more" lives right under it. */
+.part-text[data-folded] {
+  max-height: 6lh;
+  overflow: hidden;
+}
+
+.message-fold {
+  margin-top: 4px;
+}
+
 .message-error {
   color: var(--vscode-errorForeground);
 }

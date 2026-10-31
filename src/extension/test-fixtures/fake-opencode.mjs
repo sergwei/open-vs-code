@@ -107,6 +107,9 @@
 // catalog stays free, so a model-free assumption cannot hide it) and one containing COMPACT plays
 // a manual compaction after the turn (see `compactionSteps`). SYNTHETIC; the shapes copy the
 // planner's spike against a real opencode 2.0.32 (Windows 11, 22/10/2026).
+// E8-chat-commands (issue #125) adds `POST /api/session/:id/compact` (see `playCompaction`): the
+// compaction message now starts `running` with `id` = the inbox item, and a user message containing
+// KEEP_ALL makes the compaction fail with "Nothing to compact yet". SYNTHETIC, like the rest.
 // tooling/tests-without-model: `npm run test:visual` no longer needs a model, so it runs against
 // this fixture too (through the seam of `testLaunch.ts`, in `ExtensionMode.Development`). What that
 // adds is SYNTHETIC: the CONTENT (texts, ids, timing) is invented and the SHAPE of every event is
@@ -864,20 +867,55 @@ function addUsage(sessionID, cost, tokens) {
   broadcast('session.usage.updated', { sessionID, cost: row.cost, tokens: row.tokens });
 }
 
+/** The error a compaction with nothing to compact ends with (`compaction.ts@843a6c51` L336, read). */
+const NOTHING_TO_COMPACT = { type: 'compaction.unavailable', message: 'Nothing to compact yet' };
+
 /**
- * The steps of a manual compaction after a turn (a prompt containing COMPACT): `compaction.started`,
- * `usage.updated` for the summary, `compaction.ended`, and a completed `compaction` message in the
- * history whose `time.created` is the moment of the `started` event. SYNTHETIC; the event ORDER and
- * the message shape copy the planner's spike against a real opencode 2.0.32 (Windows 11,
- * 22/10/2026). The earlier messages stay in the history, as the spike saw.
+ * The steps of a manual compaction (a prompt containing COMPACT, after its turn, or
+ * `POST /api/session/:id/compact`): `compaction.started` with the `inputID` and a `running`
+ * `compaction` message in the history whose `time.created` is the moment of the `started` event,
+ * then either `compaction.delta`, `usage.updated` for the summary and `compaction.ended` (the
+ * message becomes `completed`) or, with `fail`, `compaction.failed` (the message becomes `failed`
+ * with the error). SYNTHETIC; the event ORDER and the message shape of the completed case copy the
+ * planner's spike against a real opencode 2.0.32 (Windows 11, 22/10/2026), whose REST message had
+ * `id` = the `inputID`; the running and failed messages, the delta and the `failed` event come from
+ * the types and the source only. The earlier messages stay in the history, as the spike saw.
  */
-function compactionSteps(sessionID) {
-  let startedAt = 0;
+function compactionSteps(sessionID, inputID, fail = false) {
+  const message = {
+    id: inputID,
+    type: 'compaction',
+    status: 'running',
+    reason: 'manual',
+    summary: '',
+    recent: '',
+    time: { created: 0 },
+  };
+  const started = () => {
+    message.time.created = Date.now();
+    history.get(sessionID).push(message);
+    broadcast('session.compaction.started', { sessionID, reason: 'manual', recent: '', inputID });
+  };
+  if (fail) {
+    return [
+      started,
+      () => {
+        message.status = 'failed';
+        message.error = NOTHING_TO_COMPACT;
+        delete message.summary;
+        delete message.recent;
+        broadcast('session.compaction.failed', {
+          sessionID,
+          reason: 'manual',
+          error: NOTHING_TO_COMPACT,
+          inputID,
+        });
+      },
+    ];
+  }
   return [
-    () => {
-      startedAt = Date.now();
-      broadcast('session.compaction.started', { sessionID, reason: 'manual', recent: '' });
-    },
+    started,
+    () => broadcast('session.compaction.delta', { sessionID, text: 'sum' }),
     () =>
       addUsage(sessionID, 0, {
         input: 300,
@@ -886,15 +924,8 @@ function compactionSteps(sessionID) {
         cache: { read: 0, write: 0 },
       }),
     () => {
-      history.get(sessionID).push({
-        id: nextId('msg'),
-        type: 'compaction',
-        status: 'completed',
-        reason: 'manual',
-        summary: 'summary',
-        recent: '',
-        time: { created: startedAt },
-      });
+      message.status = 'completed';
+      message.summary = 'summary';
       broadcast('session.compaction.ended', {
         sessionID,
         reason: 'manual',
@@ -903,6 +934,37 @@ function compactionSteps(sessionID) {
       });
     },
   ];
+}
+
+/**
+ * Plays the manual compaction `POST /api/session/:id/compact` admitted (issue #125):
+ * `execution.started`, the steps of {@link compactionSteps}, then `execution.succeeded`. A session
+ * with a user message containing KEEP_ALL (INVENTED trigger, `test:visual` step 33 cell K2) has
+ * "nothing to compact": the compaction fails with {@link NOTHING_TO_COMPACT} but the execution
+ * still ends with `execution.succeeded` and no `idle` failed message. Read in the opencode code at
+ * tag 843a6c51 (not recorded from a live server): for "nothing to compact", `compaction.ts`
+ * L235-237 (`matchEffect`) sends it to `publish`, which emits `compaction.failed` and returns
+ * `{status:'failed'}` as a success (L639-646), and `runner/llm.ts` carries on (L161-162), so the
+ * drain ends normally. The timers are kept in
+ * `turnTimers`, so an interrupt cancels what is left.
+ */
+function playCompaction(sessionID, inputID) {
+  const fail = (history.get(sessionID) ?? []).some(
+    (message) => message.type === 'user' && String(message.text).includes('KEEP_ALL'),
+  );
+  const steps = [
+    () => broadcast('session.execution.started', { sessionID }),
+    ...compactionSteps(sessionID, inputID, fail),
+    () => {
+      running.delete(sessionID);
+      broadcast('session.execution.succeeded', { sessionID });
+    },
+  ];
+  let at = 0;
+  turnTimers.set(
+    sessionID,
+    steps.map((step) => setTimeout(step, (at += 15))),
+  );
 }
 
 /**
@@ -1098,7 +1160,7 @@ function playTurn(sessionID, inboxID, text, files = []) {
         });
         addUsage(sessionID, stepCost, STEP_TOKENS);
       },
-      ...(text.includes('COMPACT') ? compactionSteps(sessionID) : []),
+      ...(text.includes('COMPACT') ? compactionSteps(sessionID, nextId('msg')) : []),
       () => {
         // The automatic title of the real server, once the first turn of an untitled session is
         // done; its text here is just the start of the prompt (SYNTHETIC).
@@ -2242,7 +2304,7 @@ function handleChat(request, response) {
   const act = /^\/api\/session\/([^/]+)\/(permission|form)\/([^/]+)(?:\/(reply))?$/.exec(path);
   if (act !== null) return handleAnswer(request, response, act);
   const match =
-    /^\/api\/session\/([^/]+)(?:\/(message\/[^/]+|message|permission|form|prompt|command|interrupt|fork|model|agent|diff|revert\/stage|revert\/commit|revert))?$/.exec(
+    /^\/api\/session\/([^/]+)(?:\/(message\/[^/]+|message|permission|form|prompt|command|interrupt|compact|fork|model|agent|diff|revert\/stage|revert\/commit|revert))?$/.exec(
       path,
     );
   if (match === null) return false;
@@ -2339,6 +2401,26 @@ function handleChat(request, response) {
   }
   if (method === 'POST' && sub === 'interrupt') {
     readBody(request).then(() => json(response, 200, { interrupted: interrupt(session.id) }));
+    return true;
+  }
+  if (method === 'POST' && sub === 'compact') {
+    // Issue #125. The item comes wrapped in `{ data }` (read in the tag's `solid-compaction.test.ts`),
+    // like the prompt's; the compaction plays after the answer.
+    readBody(request).then((body) => {
+      const inboxID = nextId('msg');
+      running.add(session.id);
+      json(response, 200, {
+        data: {
+          id: inboxID,
+          sessionID: session.id,
+          time: { created: Date.now() },
+          type: 'compaction',
+          payload: {},
+          delivery: body.delivery ?? 'steer',
+        },
+      });
+      playCompaction(session.id, inboxID);
+    });
     return true;
   }
   if (method === 'POST' && sub === 'command') {

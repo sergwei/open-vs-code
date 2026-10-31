@@ -4,6 +4,39 @@
 import type { CommandOption } from '../../../src/shared/model';
 
 /**
+ * Slash commands the webview itself carries out (issue #125, decision P1=1 of Sergio, 31/10/2026):
+ * the server has no `compact` command, so `/compact` is a client command like upstream's app
+ * (`session.compact`, read in `use-session-commands.tsx@843a6c51`). They go through
+ * `session.compact`, never through `prompt.send`.
+ */
+export const CLIENT_COMMANDS: readonly CommandOption[] = [
+  { name: 'compact', description: 'Summarize the conversation to free context' },
+];
+
+/**
+ * The server's command list with the client commands appended, so the "/" menu and the popup list
+ * them. One the server also lists wins (a project command called `compact` keeps working as the
+ * server's). An absent list stays absent: it must keep saying "Loading…" or "could not be loaded".
+ */
+export function withClientCommands(
+  list: readonly CommandOption[] | undefined,
+): readonly CommandOption[] | undefined {
+  if (list === undefined) return undefined;
+  return [...list, ...CLIENT_COMMANDS.filter((own) => !list.some((it) => it.name === own.name))];
+}
+
+/** True when `name` is carried out by the webview: a client command that the server does not list. */
+export function isClientCommand(
+  name: string,
+  serverList: readonly CommandOption[] | undefined,
+): boolean {
+  return (
+    CLIENT_COMMANDS.some((own) => own.name === name) &&
+    !(serverList ?? []).some((it) => it.name === name)
+  );
+}
+
+/**
  * The command word being typed: the text between the leading `/` and the caret (`query`) and `end`,
  * where that first word really finishes (the first whitespace at or after the caret), so choosing a
  * command replaces the whole word and leaves no tail of the old one.

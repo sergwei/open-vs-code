@@ -179,7 +179,11 @@ export type AttachmentInfo = { name?: string; mime: string; uri?: string };
 
 /**
  * One message of a session. Assistant content lives in `Part`s, keyed by message id.
- * `notice` collapses opencode's synthetic/system/compaction/model-switched messages into one line.
+ * `notice` is one line of text in the conversation. The only producer is the compaction of a
+ * session (issue #125): `compaction` is its state, drawn as "Compacting the conversation…",
+ * "Conversation compacted" or "Compaction failed: <message>". The REST message and the stream give
+ * the same id (the id of the inbox item that asked for it), so a notice is updated in place.
+ * Synthetic, system and model-switched messages of the server are still not shown.
  */
 export type MessageInfo =
   | { kind: 'user'; id: string; createdAt: number; text: string; files: AttachmentInfo[] }
@@ -195,7 +199,13 @@ export type MessageInfo =
       cost?: number;
       tokens?: TokenUsage;
     }
-  | { kind: 'notice'; id: string; createdAt: number; text: string };
+  | {
+      kind: 'notice';
+      id: string;
+      createdAt: number;
+      text: string;
+      compaction?: 'running' | 'completed' | 'failed';
+    };
 
 /**
  * Output item of a finished tool call. A `file` item never carries base64, like

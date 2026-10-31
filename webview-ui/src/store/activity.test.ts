@@ -91,4 +91,23 @@ describe('deriveActivity', () => {
       label: 'Writing',
     });
   });
+
+  // Issue #125: after a turn the newest assistant message ends in text, so a running compaction
+  // would read "Writing" without the flag.
+  it('is compacting, ahead of the parts, while busy with the compaction line running', () => {
+    expect(deriveActivity(CONNECTED, BUSY, [thought, text], true)).toEqual({
+      kind: 'compacting',
+      label: 'Compacting',
+    });
+    expect(deriveActivity(CONNECTED, BUSY, [thought, text], false).kind).toBe('writing');
+  });
+
+  it('is not compacting when idle, offline or in error, whatever the flag says', () => {
+    expect(deriveActivity(CONNECTED, { type: 'idle' }, [], true).kind).toBe('idle');
+    expect(deriveActivity({ state: 'stopped' }, BUSY, [], true).kind).toBe('offline');
+    expect(
+      deriveActivity(CONNECTED, { type: 'error', error: { code: 'c', message: 'm' } }, [], true)
+        .kind,
+    ).toBe('error');
+  });
 });
