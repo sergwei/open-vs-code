@@ -13,9 +13,15 @@
  * A's request: it is fresher than the one that was waiting. The late reveal made by the focus
  * itself is NOT noted (it would overtake the requests of the surfaces still loading).
  *
- * KNOWN LIMITATION (review 2, W2, decided 30/10/2026): only the reveals made by OUR code are
- * noted. A manual click on a tab of the tab strip (or on a text editor) after a row click is not
- * seen, so the late reveal of the row's tab can still steal the front from it.
+ * KNOWN LIMITATION (review 2, W2, decided 30/10/2026; kept on purpose by the main thread on
+ * 31/10/2026 for #123/#110, with Sergio's "no over-engineering" rule): only the reveals made by OUR
+ * code are noted. A manual click on a tab of the tab strip (or on a text editor) after a row click
+ * is not seen, so the late reveal of the row's tab can still steal the front from it. Not fixed
+ * because the obvious hook, `onSurfaceChange`, would also fire for the activation the late reveal
+ * itself causes, and noting that one would void the focus of tabs still loading; telling them
+ * apart needs expected-activation bookkeeping, more machinery than a window of a few milliseconds
+ * right after `ready` is worth. HYPOTHESIS: that `onDidChangeViewState` reaches the host after
+ * `panel.reveal` returns (not run; logging the order of the two would check it).
  *
  * VERIFIED by `revealOrder.test.ts` (Vitest, Windows 11, 29/10/2026): "drops the late focus of a tab
  * when another one was revealed after it was queued" and the cases around it. UNVERIFIED end to end:
