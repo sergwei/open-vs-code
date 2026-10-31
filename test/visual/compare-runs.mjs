@@ -22,9 +22,12 @@ const next = read(newPath);
 const baseFull = read(basePath);
 const base = presentOnly ? restrictToPresent(baseFull, next) : baseFull;
 const volatile = base2Path === undefined ? new Set() : volatileBetween(baseFull, read(base2Path));
-const { differences, okA, okB, warnsA, warnsB } = compareRuns(base, next, volatile);
+const { differences, okA, okB, warnsA, warnsB, racesA, racesB } = compareRuns(base, next, volatile);
 
 console.log(`volatile lines left out: ${String(volatile.size)}`);
+console.log(
+  `environment: clock times, UUIDs and clipboard format counts are normalised; webview-host race warnings counted apart: base ${String(racesA)}, new ${String(racesB)}`,
+);
 console.log(
   `ok lines: base ${String(okA)}, new ${String(okB)}; warn lines: base ${String(warnsA)}, new ${String(warnsB)}`,
 );

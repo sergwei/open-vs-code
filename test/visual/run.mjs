@@ -96,6 +96,23 @@
 // the summary has `== timings` (those lines never start with ok/FAIL/warn, so `compare-runs.mjs`
 // ignores them). A full run that did not execute exactly the ids of the catalogue fails (a silent
 // guard: it prints no `ok` line).
+// Waits (tooling/test-speed, phase 0): after `== timings` the run prints `== waits` (no line starts
+// with ok/FAIL/warn, and `extractChecks` closes on it): the expired `waitFor`s with step, cap, ms
+// spent and calling line, the `waitIdle` calls that paid the 2 s floor, the fixed `sleep` and
+// `page.waitForTimeout` ms per step and the longest gaps between checks. Every record also goes to
+// `.vscode-test/visual/trace-full-<YYYYMMDD-HHMMSS>.tsv` (`trace-partial-<…>.tsv` for a filtered or
+// bailing run; one file per run, none overwritten). The trace only measures: no wait or check
+// changed.
+// Groups, affected and budget (tooling/test-speed, phase 2): `--group selectors,tabs` runs the steps
+// of those groups (`GROUPS` in `steps.mjs`, from the `groups` of each step) and unites with
+// `--steps`; both close over `needs` and print the PARTIAL banner with the groups. `--affected
+// [ref]` (default `origin/main`) reads the files changed since the merge-base, plus the untracked
+// ones, and `affected.mjs` maps them to groups: it prints `affected: <groups | full | none>` with
+// one reason per file, and a cross-cutting or unmapped file (or git failing) means the FULL run.
+// It does not combine with `--steps`/`--group`. `--list` prints the resolved selection and exits 0
+// before starting VS Code (`node test/visual/run.mjs --list` builds nothing; `npm run test:visual
+// -- --list` runs the build scripts first, because npm runs them before this file). Each step has a `budgetS`; `== timings` appends
+// "over budget (N s)" to the ones that exceed it (no FAIL, no warn: decision P4).
 // `npm run test:visual -- --steps 8` passes the arguments through npm to this script
 // (VERIFIED on Windows 11, 27/10/2026: `npm run test:visual -- --steps 1` printed "PARTIAL RUN
 // (steps 1): not evidence for a commit" and ran only that step; `node test/visual/run.mjs --steps
@@ -221,10 +238,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createWorkspace, startVSCode, writeSettings } from './vscodeProcess.mjs';
 import { WEBVIEW_STUCK, openWebview } from './webviewCdp.mjs';
+import { parseAffectedArg, selectForFiles } from './affected.mjs';
+import { fingerprint, saveManifest } from './fingerprint.mjs';
 import {
   STEP_IDS,
+  budgetNote,
+  groupsOf,
   parseAllThemesArg,
   parseBailArg,
+  parseGroupArg,
+  parseListArg,
   parseStepsArg,
   resolveSelection,
   stepIdOf,
@@ -233,30 +256,122 @@ import {
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const workDir = path.join(repoRoot, '.vscode-test', 'visual');
 
-// `--steps` filter (see the header). Read before anything is created, so a typo costs nothing.
-const parsedSteps = parseStepsArg(process.argv.slice(2));
-if (parsedSteps.error !== undefined) {
-  console.error(`test:visual: ${parsedSteps.error}`);
+/**
+ * The files `--affected` judges: those changed since the merge-base of HEAD and `ref` (committed,
+ * staged or not) plus the untracked ones that git does not ignore. Returns `{ files }`, or
+ * `{ error }` when git or the ref is not there (no `origin/main` in a shallow or detached
+ * checkout), which the caller turns into the full run with the reason printed.
+ * VERIFIED on Windows 11 (31/10/2026): `node test/visual/run.mjs --list --affected` in this tree
+ * printed the changed files of the branch against `origin/main`. NOT run: macOS and Linux; a
+ * checkout without `origin/main` (the `error` branch was only read).
+ */
+function changedFilesSince(ref) {
+  const git = (args) =>
+    execFileSync('git', args, {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+      .split(/\r?\n/)
+      .filter((line) => line !== '');
+  try {
+    const [base] = git(['merge-base', 'HEAD', ref]);
+    const tracked = git(['diff', '--name-only', '--no-renames', base]);
+    const untracked = git(['ls-files', '--others', '--exclude-standard']);
+    return { files: [...tracked, ...untracked] };
+  } catch (error) {
+    return { error: `git could not diff against ${ref} (${String(error.message).split('\n')[0]})` };
+  }
+}
+
+// `--steps`, `--group` and `--affected` filters (see the header). Read before anything is created,
+// so a typo costs nothing.
+const cliArgs = process.argv.slice(2);
+const parsedSteps = parseStepsArg(cliArgs);
+const parsedGroups = parseGroupArg(cliArgs);
+const affectedArg = parseAffectedArg(cliArgs);
+for (const parsed of [parsedSteps, parsedGroups]) {
+  if (parsed.error !== undefined) {
+    console.error(`test:visual: ${parsed.error}`);
+    process.exit(2);
+  }
+}
+if (affectedArg.enabled && (parsedSteps.ids !== undefined || parsedGroups.ids !== undefined)) {
+  console.error(
+    'test:visual: --affected chooses the steps itself; do not combine it with --steps or --group',
+  );
   process.exit(2);
 }
+/** What `--affected` decided (`{ mode, groups, reasons }`), or `undefined` without the flag. */
+let affected;
+if (affectedArg.enabled) {
+  const ref = affectedArg.ref ?? 'origin/main';
+  const changed = changedFilesSince(ref);
+  affected =
+    changed.error === undefined
+      ? selectForFiles(changed.files)
+      : { mode: 'full', groups: [], reasons: [changed.error] };
+}
+/** `--steps` and `--group` together run the union; `--affected` supplies groups instead. */
+const requestedIds =
+  affected !== undefined
+    ? affected.mode === 'groups'
+      ? parseGroupArg(['--group', affected.groups.join(',')]).ids
+      : affected.mode === 'none'
+        ? []
+        : undefined
+    : parsedSteps.ids === undefined && parsedGroups.ids === undefined
+      ? undefined
+      : STEP_IDS.filter(
+          (id) => (parsedSteps.ids ?? []).includes(id) || (parsedGroups.ids ?? []).includes(id),
+        );
 /** `undefined` for the full run, else the requested ids closed over their prerequisites. */
-const selection = parsedSteps.ids === undefined ? undefined : resolveSelection(parsedSteps.ids);
+const selection = requestedIds === undefined ? undefined : resolveSelection(requestedIds);
 const partial = selection !== undefined;
 /** `--all-themes`: the screenshot-only theme loops capture in four themes instead of dark only. */
-const allThemes = parseAllThemesArg(process.argv.slice(2));
+const allThemes = parseAllThemesArg(cliArgs);
 /** `--bail`: stop after the first step that fails (for development; see `parseBailArg`). */
-const bail = parseBailArg(process.argv.slice(2));
+const bail = parseBailArg(cliArgs);
 const selectedIds = new Set(selection?.selected ?? STEP_IDS);
+if (affected !== undefined) {
+  const shown = affected.reasons.slice(0, 12).map((reason) => `\n  ${reason}`);
+  if (affected.reasons.length > 12)
+    shown.push(`\n  … and ${String(affected.reasons.length - 12)} more`);
+  console.log(
+    `affected: ${affected.mode === 'groups' ? affected.groups.join(', ') : affected.mode}${shown.join('')}`,
+  );
+}
+if (affected?.mode === 'none') {
+  console.log('affected: no changed file has a visual effect; nothing to run');
+  process.exit(0);
+}
 if (partial) {
   console.log(`PARTIAL RUN (steps ${selection.selected.join(', ')}): not evidence for a commit`);
+  console.log(
+    `groups touched (prerequisites included): ${groupsOf(selection.selected).join(', ')}`,
+  );
   if (selection.added.length > 0) {
     console.log(
-      `steps added because the requested ones need them: ${selection.added.join(', ')} (requested: ${parsedSteps.ids.join(', ')})`,
+      `steps added because the requested ones need them: ${selection.added.join(', ')} (requested: ${requestedIds.join(', ')})`,
     );
   }
+} else if (parseListArg(cliArgs)) {
+  console.log(`FULL RUN (all ${String(STEP_IDS.length)} steps)`);
 }
 if (bail)
   console.log('--bail: the run stops after the first step that fails; not evidence for a commit');
+// `--list` stops here: it only shows what the flags above resolve to; this file starts no VS Code.
+if (parseListArg(cliArgs)) process.exit(0);
+// The code this run covers (`fingerprint.mjs`, tooling/test-speed phase 3; only valid for
+// `test:visual`). Taken before VS Code starts. `npm run test:visual` builds just before this file,
+// so the hash is the tree that build saw; running this file directly over a stale `dist/` makes
+// the line lie (it hashes the sources, not the bundle that runs). The line does not start with
+// ok/FAIL/warn nor `== `, so `extractChecks` and `compare-runs` skip it. `node
+// test/visual/fingerprint.mjs --check <this output>` later says whether the run still covers the
+// tree. The manifest lets that check name the changed files.
+const codeFingerprint = fingerprint(repoRoot);
+saveManifest(repoRoot, codeFingerprint);
+console.log(`fingerprint ${codeFingerprint.hash}`);
 // A filtered or bailing run never touches the folders of the full run.
 const scratchOutput = partial || bail;
 const shotsDir = path.join(workDir, scratchOutput ? 'shots-partial' : 'shots');
@@ -267,7 +382,94 @@ const shots = [];
 /** Lines the webview logged (CSP violations, console, exceptions), across every connection. */
 const webviewLogs = [];
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * The time trace of the run (tooling/test-speed, phase 0): where the seconds go, with no effect on
+ * what the run checks. `step` sets `traceStep`; `waitFor`, `waitIdle`, `sleep`, `check` and the
+ * wrapped `page.waitForTimeout` append to `trace`; `printWaits` prints `== waits` and `writeTrace`
+ * writes the TSV. Times are `performance.now()` milliseconds, rounded.
+ */
+const trace = {
+  /** `waitFor` calls that ran to their cap: `{ step, capMs, spentMs, line }`. */
+  expired: [],
+  /** `waitIdle` calls that never saw Stop and so paid the 2 s floor: `{ step, paidMs, line }`. */
+  floors: [],
+  /** Every `sleep` call: `{ step, ms, line }`. */
+  sleeps: [],
+  /** Every `page.waitForTimeout` call: `{ step, ms, line }`. */
+  pauses: [],
+  /** Time between consecutive checks of a step: `{ step, gapMs, atMs, text }`. */
+  gaps: [],
+};
+/** Id of the step running now; `-` outside the steps. */
+let traceStep = '-';
+/** `performance.now()` when the running step started. */
+let traceStepStart = performance.now();
+/** `performance.now()` of the step start or of its latest check: the origin of the next gap. */
+let traceMark = performance.now();
+
+/** Function names of the helpers of this file that `callerLine` skips to reach the real caller. */
+const TRACE_HELPERS = new Set([
+  'callerLine',
+  'waitFor',
+  'waitIdle',
+  'sleep',
+  'tracedWaitForTimeout',
+]);
+
+/**
+ * `run.mjs:<line>` of the nearest caller that is not one of the tracing helpers, read from
+ * `new Error().stack`, or `run.mjs:?` when no frame matches.
+ *
+ * Diagnostic only, never a check: it depends on the V8 stack format (`at name (file:///…/run.mjs:L:C)`
+ * and `at async name (…)`), and an inner helper such as `setTheme` shows as itself, not as its own
+ * caller. VERIFIED on the full run of 30/10/2026 (Windows 11): the TSV rows of `sleep` and `floor`
+ * point at the `await sleep(…)` and `waitIdle(` call lines (for example "expired step 7 cap 4000 ms"
+ * at a `waitFor(`), whereas the `page.waitForTimeout` rows all pointed at the wrapper itself, because
+ * the frame is `at Page.tracedWaitForTimeout [as waitForTimeout]`; fixed after that run. VERIFIED on
+ * the full run of 31/10/2026 that ended "all visual checks passed" (Windows 11): its trace has 7
+ * `pause` rows, and none of them points at the wrapper, all point at call lines of the steps.
+ */
+function callerLine() {
+  for (const frame of (new Error().stack ?? '').split('\n').slice(1)) {
+    const found = /at (?:async )?(?:(\S+) \()?.*run\.mjs:(\d+):\d+/.exec(frame);
+    // The wrapped method shows as `at Page.tracedWaitForTimeout [as waitForTimeout] (…)`, a shape
+    // the regex cannot name, so it is skipped by its text.
+    if (
+      found === null ||
+      TRACE_HELPERS.has(found[1] ?? '') ||
+      frame.includes('tracedWaitForTimeout')
+    )
+      continue;
+    return `run.mjs:${found[2]}`;
+  }
+  return 'run.mjs:?';
+}
+
+/** The sleep itself, without trace: the polling pause of `waitFor` must not count as a fixed wait. */
+const rawSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A fixed wait of `ms`; it adds the call to `trace.sleeps` (step, ms and line) before sleeping. */
+const sleep = (ms) => {
+  trace.sleeps.push({ step: traceStep, ms, line: callerLine() });
+  return rawSleep(ms);
+};
+
+/** Pages whose `waitForTimeout` is already wrapped by {@link instrumentPage}. */
+const tracedPages = new WeakSet();
+
+/**
+ * Makes `page.waitForTimeout` add its calls to `trace.pauses`, once per page object. Done by
+ * wrapping the method on the instance (one place) instead of editing its nine call sites.
+ */
+function instrumentPage(target) {
+  if (tracedPages.has(target)) return;
+  tracedPages.add(target);
+  const original = target.waitForTimeout.bind(target);
+  target.waitForTimeout = function tracedWaitForTimeout(ms) {
+    trace.pauses.push({ step: traceStep, ms, line: callerLine() });
+    return original(ms);
+  };
+}
 
 /** Thrown by `check` under `--bail` to end the step at its first FAIL; `step` stops the run. */
 class BailStop extends Error {}
@@ -282,8 +484,21 @@ let inStep = false;
  * s that way on 28/10/2026, against about 17 s when it passes). Outside a step (the final checks
  * after the steps) it never throws. A step body that wraps the check in its own `try/catch` may
  * swallow the throw; that step then runs to its end, and the run still stops after it.
+ *
+ * Inside a step it also records, in `trace.gaps`, the time since the previous check (or the step
+ * start) with this check's text; the printed line is unchanged.
  */
 function check(ok, message) {
+  const now = performance.now();
+  if (inStep) {
+    trace.gaps.push({
+      step: traceStep,
+      gapMs: Math.round(now - traceMark),
+      atMs: Math.round(now - traceStepStart),
+      text: message,
+    });
+  }
+  traceMark = now;
   console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${message}`);
   if (!ok) failures.push(message);
   if (!ok && bail && inStep) throw new BailStop(message);
@@ -305,8 +520,14 @@ function warn(message) {
  * (category H of the #89 plan), and 150 ms keeps the polling cost of `evaluate` calls small.
  * HYPOTHESIS: that 150 ms is better than 500 ms was not measured apart; the full run of phase 3
  * is what was timed.
+ *
+ * An expiry is no longer silent in the output: unless `traceExpiry` is false (the 2 s Stop wait of
+ * `waitIdle`, whose expiry is its normal path), it adds `{ step, capMs, spentMs, line }` to
+ * `trace.expired`, which `== waits` lists. It changes nothing the wait returns or the checks print.
  */
-async function waitFor(fn, ms, intervalMs = 150) {
+async function waitFor(fn, ms, intervalMs = 150, traceExpiry = true) {
+  const line = callerLine();
+  const startedAt = performance.now();
   const end = Date.now() + ms;
   while (Date.now() < end) {
     let value;
@@ -316,7 +537,15 @@ async function waitFor(fn, ms, intervalMs = 150) {
       value = undefined;
     }
     if (value) return value;
-    await sleep(intervalMs);
+    await rawSleep(intervalMs);
+  }
+  if (traceExpiry) {
+    trace.expired.push({
+      step: traceStep,
+      capMs: ms,
+      spentMs: Math.round(performance.now() - startedAt),
+      line,
+    });
   }
   return undefined;
 }
@@ -447,6 +676,7 @@ async function connectWorkbench(timeoutMs = 90_000) {
   const connected = await connectPage(vscode.port, timeoutMs);
   browser = connected.browser;
   page = connected.page;
+  instrumentPage(page);
 }
 
 /** Window size the whole run uses (HYPOTHESIS: VS Code's own default for a new window with a folder). */
@@ -1347,9 +1577,26 @@ const isBusy = () =>
  * that has not started yet is not mistaken for an idle chat; if it never shows, the wait ends
  * after those 2 s, exactly as the fixed sleep did, so it is never slower than before. A turn that
  * both starts and ends between two polls costs the full 2 s. #89 phase 3.
+ *
+ * The 2 s floor is also what lets the focus and the interface settle at the start of a step; two
+ * attempts to drop it (a `{ expectTurn: false }` option, and an early exit on the log size) were
+ * tried in tooling/test-speed phase 1 and removed, because the runs that had them failed in
+ * focus and turn-start checks (steps 22, 24, 28, 29).
+ *
+ * Every call that paid the whole 2 s floor adds `{ step, paidMs, line }` to `trace.floors`, and
+ * `== waits` totals them; that is measurement only, the wait is unchanged.
  */
 async function waitIdle(ms = 150_000) {
-  await waitFor(isBusy, 2_000, 100);
+  const line = callerLine();
+  const floorStartedAt = performance.now();
+  const started = await waitFor(isBusy, 2_000, 100, false);
+  if (!started) {
+    trace.floors.push({
+      step: traceStep,
+      paidMs: Math.round(performance.now() - floorStartedAt),
+      line,
+    });
+  }
   const idle = await waitFor(async () => !(await isBusy()), ms);
   return idle === true;
 }
@@ -1547,6 +1794,7 @@ let bailedAt;
  * are the same in a full and in a filtered run. It prints `  time N.N s` when the body ends (also
  * when it throws) and records it for `== timings`; that line is not an ok/FAIL/warn line. Measured
  * with `performance.now()`, so it includes the settling sleeps of the body, which is the point.
+ * It also tells the trace which step is running (`traceStep`, the origin of the check gaps).
  *
  * Under `--bail` the first step that fails (a FAIL check, which ends the body with `BailStop`, or
  * an exception) takes its FAIL screenshot and stops the run: the later steps return at once, as an
@@ -1573,6 +1821,9 @@ async function step(name, body) {
   // A stuck connection that never reached `web` (it got stuck inside `openChat`) shows only here.
   let stuckInException;
   inStep = true;
+  traceStep = id;
+  traceStepStart = startedAt;
+  traceMark = startedAt;
   try {
     await body();
   } catch (error) {
@@ -1586,6 +1837,7 @@ async function step(name, body) {
     await shot(`FAIL-${name.replace(/\W+/g, '-')}`).catch(() => undefined);
   } finally {
     inStep = false;
+    traceStep = '-';
   }
   const seconds = (performance.now() - startedAt) / 1000;
   timings.push({ id, name, seconds });
@@ -10999,18 +11251,110 @@ if (
   );
 }
 
+/** Sum of `key` over `items`. */
+const sumOf = (items, key) => items.reduce((total, item) => total + item[key], 0);
+
+/** Text of a trace field made safe for one TSV cell (tabs and line breaks become spaces). */
+const tsvCell = (value) => String(value).replace(/[\t\r\n]+/g, ' ');
+
+/**
+ * Writes every trace record to `trace-full-<stamp>.tsv` (or `trace-partial-<stamp>.tsv` for a
+ * filtered or bailing run, like the screenshots) in the work folder, and returns the path relative
+ * to the repo, or the error text if the write failed (a failed write never changes the verdict).
+ * The stamp is the local time of the write as `YYYYMMDD-HHMMSS`, so a run never overwrites the
+ * trace of an earlier one (the trace of a failed run was lost that way on 30/10/2026).
+ *
+ * Columns: `kind` (expired, floor, sleep, pause, gap), `step`, `ms` (spent, paid, asked or gap),
+ * `cap_ms` (expired only), `at_ms` (gap: ms since the step started), `line` (`run.mjs:L`, not for
+ * gaps) and `text` (gap: the check that closes it). VERIFIED on the full run of 30/10/2026 23:07
+ * (Windows 11): its trace file opened with the header row "kind step ms cap_ms at_ms line text".
+ */
+function writeTrace() {
+  const rows = [['kind', 'step', 'ms', 'cap_ms', 'at_ms', 'line', 'text']];
+  for (const e of trace.expired) rows.push(['expired', e.step, e.spentMs, e.capMs, '', e.line, '']);
+  for (const f of trace.floors) rows.push(['floor', f.step, f.paidMs, '', '', f.line, '']);
+  for (const s of trace.sleeps) rows.push(['sleep', s.step, s.ms, '', '', s.line, '']);
+  for (const p of trace.pauses) rows.push(['pause', p.step, p.ms, '', '', p.line, '']);
+  for (const g of trace.gaps) rows.push(['gap', g.step, g.gapMs, '', g.atMs, '', g.text]);
+  const now = new Date();
+  const two = (n) => String(n).padStart(2, '0');
+  const stamp = `${String(now.getFullYear())}${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}${two(now.getMinutes())}${two(now.getSeconds())}`;
+  const file = path.join(workDir, `${scratchOutput ? 'trace-partial' : 'trace-full'}-${stamp}.tsv`);
+  try {
+    fs.mkdirSync(workDir, { recursive: true });
+    fs.writeFileSync(file, rows.map((row) => row.map(tsvCell).join('\t')).join('\n') + '\n');
+    return path.relative(repoRoot, file);
+  } catch (error) {
+    return `not written: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/**
+ * Prints the `== waits` section: the 20 most expensive expired `waitFor`s, the `waitIdle` floors,
+ * the fixed waits per step and the 20 longest gaps between consecutive checks.
+ *
+ * It follows `== timings` and no line starts with ok/FAIL/warn, so `compare-runs` ignores it
+ * (`extractChecks` closes on `== waits` as well). Nothing here is a verdict: an expired wait is
+ * still judged by the check after it (#89). VERIFIED on the full run of 30/10/2026 (Windows 11):
+ * it printed "== waits" with the expired waits (9 calls, 14.3 s) and the waitIdle floors.
+ */
+function printWaits() {
+  const seconds = (ms) => (ms / 1000).toFixed(1);
+  console.log('\n== waits');
+  console.log(
+    `  expired waitFor: ${String(trace.expired.length)} calls, ${seconds(sumOf(trace.expired, 'spentMs'))} s in total (an expired wait does not fail by itself)`,
+  );
+  for (const e of [...trace.expired].sort((a, b) => b.spentMs - a.spentMs).slice(0, 20)) {
+    console.log(
+      `  expired step ${e.step} cap ${String(e.capMs)} ms spent ${String(e.spentMs)} ms at ${e.line}`,
+    );
+  }
+  console.log(
+    `  waitIdle floors: ${String(trace.floors.length)} calls never saw Stop, ${seconds(sumOf(trace.floors, 'paidMs'))} s in total`,
+  );
+  const stepIds = [...new Set([...executedIds, '-'])];
+  console.log('  fixed waits per step (ms): sleep / waitForTimeout / waitIdle floor');
+  for (const id of stepIds) {
+    const stepTotal = (items, key) =>
+      sumOf(
+        items.filter((item) => item.step === id),
+        key,
+      );
+    const cells = [
+      stepTotal(trace.sleeps, 'ms'),
+      stepTotal(trace.pauses, 'ms'),
+      stepTotal(trace.floors, 'paidMs'),
+    ];
+    if (cells.every((cell) => cell === 0)) continue;
+    console.log(
+      `  step ${id.padEnd(3)} ${cells.map((cell) => String(cell).padStart(7)).join(' ')}`,
+    );
+  }
+  console.log(
+    `  fixed waits in total (ms): ${String(sumOf(trace.sleeps, 'ms'))} / ${String(sumOf(trace.pauses, 'ms'))} / ${String(sumOf(trace.floors, 'paidMs'))}`,
+  );
+  console.log('  longest gaps between consecutive checks:');
+  for (const g of [...trace.gaps].sort((a, b) => b.gapMs - a.gapMs).slice(0, 20)) {
+    console.log(
+      `  gap ${String(g.gapMs)} ms step ${g.step} at ${String(g.atMs)} ms before: ${g.text.slice(0, 110)}`,
+    );
+  }
+  console.log(`  trace: ${writeTrace()}`);
+}
+
 console.log('\n== summary');
 console.log(`screenshots (${String(shots.length)}):`);
 for (const file of shots) console.log(`  ${file}`);
 console.log('\n== timings');
 for (const { id, name, seconds } of timings) {
   console.log(
-    `  ${id.padEnd(3)} ${seconds.toFixed(1).padStart(6)} s  ${name.slice(id.length).trim()}`,
+    `  ${id.padEnd(3)} ${seconds.toFixed(1).padStart(6)} s  ${name.slice(id.length).trim()}${budgetNote(id, seconds)}`,
   );
 }
 console.log(
   `  total ${((performance.now() - vscodeStartedAt) / 1000).toFixed(1)} s since VS Code was started`,
 );
+printWaits();
 if (warnings.length) {
   console.log(`warnings (${String(warnings.length)}):`);
   for (const message of warnings) console.log(`  - ${message}`);

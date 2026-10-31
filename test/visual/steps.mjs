@@ -11,6 +11,19 @@
  *   state it starts from). `resolveSelection` closes them transitively.
  * - `sendsPrompt`: whether the step sends a prompt, which is what makes the fake keep a state file
  *   with sessions in it (the final check of `run.mjs` is only judged when one such step ran).
+ * - `groups`: the `--group` names the step belongs to (at least one; several allowed). Chosen by
+ *   reading the step titles of `run.mjs`; the map is the area the step exercises, so that
+ *   `--affected` (`affected.mjs`) can send a changed file to the groups that cover it. The step 18
+ *   (changed files and native diff) is in `render` although the plan's table left it out.
+ * - `budgetS`: seconds the step is expected to fit in. Criterion: the larger of the durations of
+ *   the full runs of 30/10/2026 (Windows 11, VS Code 1.144.0; the phase-0 baseline and the first
+ *   phase-1 run, each with 0 FAIL), times 1.25, rounded UP to the next multiple of 5 s (5 s at
+ *   least). So a step passes on a normal day and is flagged when it grows by about a quarter.
+ *   `== timings` marks the ones that go over; it is not a FAIL or a `warn` (decision P4). The
+ *   planner declares the budget of a new step. The final full run of 31/10/2026 (Windows 11, VS Code
+ *   1.144.0, 0 FAIL) is a third run: no step printed `over budget`. UNVERIFIED beyond those three
+ *   runs; the steps 22, 24, 28 and 29 are unstable in the background (issue #117), so their durations
+ *   vary more.
  *
  * The `needs` come from reading `run.mjs` (Engram `tooling/visual-speed/plan`, section 4).
  * VERIFIED on 28/10/2026 (Windows 11, VS Code 1.143.1): each of the 25 ids ran alone with
@@ -49,43 +62,115 @@
  * 'inDoc')", because `web` was never opened.
  */
 export const STEPS = [
-  { id: '0', needs: [], sendsPrompt: false },
-  { id: '1', needs: [], sendsPrompt: false },
-  { id: '2', needs: ['1'], sendsPrompt: true },
-  { id: '3', needs: ['1'], sendsPrompt: true },
-  { id: '4', needs: ['2'], sendsPrompt: true },
-  { id: '5', needs: ['1'], sendsPrompt: true },
-  { id: '6', needs: ['5'], sendsPrompt: true },
-  { id: '6b', needs: ['5'], sendsPrompt: true },
-  { id: '7', needs: ['5'], sendsPrompt: true },
-  { id: '7b', needs: ['2'], sendsPrompt: true },
-  { id: '8', needs: ['5', '6', '6b'], sendsPrompt: true },
-  { id: '9', needs: ['2'], sendsPrompt: true },
-  { id: '10', needs: ['9'], sendsPrompt: true },
-  { id: '11', needs: ['1'], sendsPrompt: true },
-  { id: '13', needs: ['1'], sendsPrompt: true },
-  { id: '14', needs: ['1'], sendsPrompt: true },
-  { id: '15', needs: ['1'], sendsPrompt: true },
-  { id: '16', needs: ['2'], sendsPrompt: true },
-  { id: '17', needs: ['1'], sendsPrompt: true },
-  { id: '18', needs: ['1'], sendsPrompt: true },
-  { id: '19', needs: ['1'], sendsPrompt: true },
-  { id: '20', needs: ['1'], sendsPrompt: true },
-  { id: '21', needs: ['1'], sendsPrompt: false },
-  { id: '22', needs: ['2'], sendsPrompt: true },
-  { id: '23', needs: ['1'], sendsPrompt: false },
-  { id: '24', needs: ['1'], sendsPrompt: true },
-  { id: '25', needs: [], sendsPrompt: false },
-  { id: '26', needs: ['1'], sendsPrompt: true },
-  { id: '27', needs: ['1'], sendsPrompt: true },
-  { id: '28', needs: ['1'], sendsPrompt: true },
-  { id: '29', needs: ['1'], sendsPrompt: true },
-  { id: '30', needs: ['1'], sendsPrompt: true },
-  { id: '31', needs: ['1'], sendsPrompt: true },
+  { id: '0', needs: [], sendsPrompt: false, groups: ['setup'], budgetS: 25 },
+  { id: '1', needs: [], sendsPrompt: false, groups: ['smoke'], budgetS: 5 },
+  { id: '2', needs: ['1'], sendsPrompt: true, groups: ['smoke', 'render'], budgetS: 15 },
+  { id: '3', needs: ['1'], sendsPrompt: true, groups: ['render'], budgetS: 10 },
+  { id: '4', needs: ['2'], sendsPrompt: true, groups: ['render'], budgetS: 5 },
+  { id: '5', needs: ['1'], sendsPrompt: true, groups: ['smoke', 'requests'], budgetS: 5 },
+  { id: '6', needs: ['5'], sendsPrompt: true, groups: ['requests'], budgetS: 5 },
+  { id: '6b', needs: ['5'], sendsPrompt: true, groups: ['requests'], budgetS: 5 },
+  { id: '7', needs: ['5'], sendsPrompt: true, groups: ['setup'], budgetS: 10 },
+  { id: '7b', needs: ['2'], sendsPrompt: true, groups: ['setup'], budgetS: 15 },
+  {
+    id: '8',
+    needs: ['5', '6', '6b'],
+    sendsPrompt: true,
+    groups: ['smoke', 'requests'],
+    budgetS: 5,
+  },
+  { id: '9', needs: ['2'], sendsPrompt: true, groups: ['sessions'], budgetS: 35 },
+  { id: '10', needs: ['9'], sendsPrompt: true, groups: ['sessions'], budgetS: 15 },
+  { id: '11', needs: ['1'], sendsPrompt: true, groups: ['selectors'], budgetS: 15 },
+  { id: '13', needs: ['1'], sendsPrompt: true, groups: ['composer'], budgetS: 10 },
+  { id: '14', needs: ['1'], sendsPrompt: true, groups: ['selectors'], budgetS: 10 },
+  { id: '15', needs: ['1'], sendsPrompt: true, groups: ['render'], budgetS: 30 },
+  { id: '16', needs: ['2'], sendsPrompt: true, groups: ['composer'], budgetS: 40 },
+  { id: '17', needs: ['1'], sendsPrompt: true, groups: ['render'], budgetS: 10 },
+  { id: '18', needs: ['1'], sendsPrompt: true, groups: ['render'], budgetS: 15 },
+  { id: '19', needs: ['1'], sendsPrompt: true, groups: ['render'], budgetS: 20 },
+  { id: '20', needs: ['1'], sendsPrompt: true, groups: ['composer'], budgetS: 15 },
+  { id: '21', needs: ['1'], sendsPrompt: false, groups: ['setup'], budgetS: 5 },
+  { id: '22', needs: ['2'], sendsPrompt: true, groups: ['keyboard'], budgetS: 20 },
+  { id: '23', needs: ['1'], sendsPrompt: false, groups: ['selectors'], budgetS: 25 },
+  { id: '24', needs: ['1'], sendsPrompt: true, groups: ['composer'], budgetS: 50 },
+  { id: '25', needs: [], sendsPrompt: false, groups: ['setup'], budgetS: 25 },
+  { id: '26', needs: ['1'], sendsPrompt: true, groups: ['composer'], budgetS: 40 },
+  { id: '27', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 60 },
+  { id: '28', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 50 },
+  { id: '29', needs: ['1'], sendsPrompt: true, groups: ['sessions', 'tabs'], budgetS: 105 },
+  { id: '30', needs: ['1'], sendsPrompt: true, groups: ['requests', 'tabs'], budgetS: 60 },
+  { id: '31', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 20 },
 ];
 
 /** Every valid id, in canonical order. */
 export const STEP_IDS = STEPS.map((entry) => entry.id);
+
+/**
+ * The step groups of `--group`: group name to its step ids, in canonical order. Derived from
+ * `groups` in {@link STEPS} (a step can be in several), so there is one place to edit. Insertion
+ * order is the order of first appearance, which is what the error message lists.
+ */
+export const GROUPS = (() => {
+  const map = new Map();
+  for (const entry of STEPS) {
+    for (const group of entry.groups) map.set(group, [...(map.get(group) ?? []), entry.id]);
+  }
+  return map;
+})();
+
+/**
+ * Reads `--group a,b` or `--group=a,b` from `argv` (the arguments after the script name).
+ *
+ * Returns `{ ids: undefined }` when the flag is absent, `{ ids }` with the union of the groups'
+ * step ids in canonical order, or `{ error }` listing the valid groups: an empty or missing list,
+ * or an unknown group. The caller exits with 2 on `error`. The ids are then closed over `needs`
+ * by {@link resolveSelection}, so a group never runs without the steps it starts from.
+ */
+export function parseGroupArg(argv) {
+  const index = argv.findIndex((arg) => arg === '--group' || arg.startsWith('--group='));
+  if (index === -1) return { ids: undefined };
+  const raw = argv[index].startsWith('--group=')
+    ? argv[index].slice('--group='.length)
+    : (argv[index + 1] ?? '');
+  const names = [
+    ...new Set(
+      raw
+        .split(',')
+        .map((name) => name.trim())
+        .filter((name) => name !== ''),
+    ),
+  ];
+  const valid = `valid groups: ${[...GROUPS.keys()].join(', ')}`;
+  if (names.length === 0) return { error: `--group needs a list of group names (${valid})` };
+  const unknown = names.filter((name) => !GROUPS.has(name));
+  if (unknown.length > 0) {
+    return {
+      error: `unknown group${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')} (${valid})`,
+    };
+  }
+  const wanted = new Set(names.flatMap((name) => GROUPS.get(name)));
+  return { ids: STEP_IDS.filter((id) => wanted.has(id)) };
+}
+
+/**
+ * The groups that contain at least one of `ids`, in the order of {@link GROUPS}. `--list` prints
+ * them next to the resolved steps.
+ */
+export function groupsOf(ids) {
+  return [...GROUPS.keys()].filter((name) => GROUPS.get(name).some((id) => ids.includes(id)));
+}
+
+/**
+ * The `== timings` suffix of a step: `'  over budget (Ns)'` when `seconds` exceeds the step's
+ * `budgetS`, else `''`. Never a `warn` or a FAIL (decision P4, Engram
+ * `tooling/test-speed/decisions/p1-p4`: the budget brakes growth, it does not break runs, and a
+ * `warn` would enter `compare-runs`). An id without a budget gets `''`.
+ */
+export function budgetNote(id, seconds) {
+  const budget = STEPS.find((entry) => entry.id === id)?.budgetS;
+  return budget !== undefined && seconds > budget ? `  over budget (${String(budget)} s)` : '';
+}
 
 /** The step id of a step name: its first whitespace-delimited token (`'6b a plain Reject…'` is `6b`). */
 export function stepIdOf(name) {
@@ -149,6 +234,17 @@ export function parseBailArg(argv) {
 }
 
 /**
+ * Whether `--list` is in `argv`: print the resolved selection (steps, groups, `--affected` choice,
+ * PARTIAL banner or full) and exit 0 before starting VS Code (`node test/visual/run.mjs --list` builds nothing;
+ * `npm run test:visual -- --list` runs the build scripts first), so that
+ * `--group` and `--affected` can be checked without paying a run (added by Sergio in phase 2 of
+ * tooling/test-speed).
+ */
+export function parseListArg(argv) {
+  return argv.includes('--list');
+}
+
+/**
  * Turns the requested ids into what the run executes.
  *
  * Returns `{ selected, added, withSetupGuide, sendsPrompt }`: `selected` is the requested ids plus
@@ -182,8 +278,8 @@ export function resolveSelection(ids) {
  *
  * Returns a `Map` from step id to the list of lines, each normalised to `ok <text>`, `FAIL <text>`
  * or `warn <text>` (indentation dropped). A step is opened by a `== <id> …` header; `== summary`
- * and `== timings` close the last one, and the `  time N.N s` lines are not assertion lines, so
- * they never appear. Lines before the first header go under `''`. The final state-file check of
+ * `== timings` and `== waits` close the last one, and the `  time N.N s` lines are not assertion
+ * lines, so they never appear. Lines before the first header go under `''`. The final state-file check of
  * `run.mjs` ("the synthetic opencode kept the conversation…") prints after the last step; it goes
  * under its own group `FINAL_GROUP`, so that a filtered run, which judges it after whatever step
  * ran last, still compares against the full run's. A single line stays comparable across runs only
@@ -195,7 +291,7 @@ export function extractChecks(text) {
   for (const line of text.split(/\r?\n/)) {
     const header = /^== (\S+)/.exec(line);
     if (header !== null) {
-      current = header[1] === 'summary' || header[1] === 'timings' ? '\u0000closed' : header[1];
+      current = CLOSING_HEADERS.has(header[1]) ? '\u0000closed' : header[1];
       continue;
     }
     const check = /^\s+(ok|FAIL|warn)\s+(.*)$/.exec(line);
@@ -207,6 +303,9 @@ export function extractChecks(text) {
   }
   return groups;
 }
+
+/** Headers after the last step that end the assertion lines in `extractChecks`. */
+const CLOSING_HEADERS = new Set(['summary', 'timings', 'waits']);
 
 /** Group of the final state-file check in `extractChecks`. */
 export const FINAL_GROUP = '\u0000final';
@@ -229,22 +328,55 @@ function multiset(lines) {
 }
 
 /**
+ * The `warn` that VS Code's webview host raises on its own while mounting a webview (a race of
+ * VS Code, `run.mjs` already words it that way). Seen in one run and not in another of the same
+ * code (30/10/2026: steps 0 and 1 in the instrumented run only), so it is not a difference.
+ */
+const RACE_WARN = /^warn .*VS Code's webview host threw "Found unexpected null" while mounting/;
+
+/**
+ * Makes a line comparable across runs of the same code: wall-clock times (`07:55 PM`, also when
+ * glued to a word, as in the rows "Untitled session07:52 PM"), UUIDs (the
+ * view id in the C10 check of step 27) and the number of formats the clipboard held (step 20,
+ * "held 3 formats"; it is whatever the user had copied) become fixed placeholders. Only those
+ * three shapes; every other digit still counts. Derived from the 26 differences between two
+ * identical-code full runs of 30/10/2026, all of them one of these shapes or {@link RACE_WARN}.
+ */
+export function normalizeVolatile(line) {
+  return line
+    .replace(/\d{1,2}:\d{2} [AP]M/g, '<time>')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g, '<uuid>')
+    .replace(/(clipboard held) \d+ formats/g, '$1 <n> formats');
+}
+
+/**
  * Compares two runs (`extractChecks` results) as multisets of lines per step.
  *
  * `volatile` is a `Set` of `"<id>\t<line>"` strings to leave out on both sides (the lines that
- * already differ between two runs of the SAME code, see `volatileBetween`). Returns
- * `{ differences, okA, okB, warnsA, warnsB }`: `differences` lists `{ id, line, a, b }` for each
- * line whose count differs (`FAIL` and `warn` lines included, so a new warning is a difference);
- * the counters are the totals of `ok` and `warn` lines after dropping the volatile ones.
+ * already differ between two runs of the SAME code, see `volatileBetween`). Lines are compared
+ * after {@link normalizeVolatile}, and the {@link RACE_WARN} lines are taken out of the
+ * comparison and counted apart. Returns `{ differences, okA, okB, warnsA, warnsB, racesA, racesB }`:
+ * `differences` lists `{ id, line, a, b }` (the line as normalised) for each line whose count
+ * differs (`FAIL` and `warn` lines included, so a new warning is a difference); the counters are
+ * the totals of `ok` and `warn` lines after dropping the volatile ones, and `racesA`/`racesB`
+ * count the race warnings dropped on each side (they are not in `warnsA`/`warnsB`).
  */
 export function compareRuns(a, b, volatile = new Set()) {
   const differences = [];
-  const totals = { okA: 0, okB: 0, warnsA: 0, warnsB: 0 };
+  const totals = { okA: 0, okB: 0, warnsA: 0, warnsB: 0, racesA: 0, racesB: 0 };
   const ids = [...new Set([...a.keys(), ...b.keys()])];
   for (const id of ids) {
     const keep = (line) => !volatile.has(`${id}\t${line}`);
-    const linesA = (a.get(id) ?? []).filter(keep);
-    const linesB = (b.get(id) ?? []).filter(keep);
+    const split = (lines, side) => {
+      const kept = [];
+      for (const line of lines.filter(keep)) {
+        if (RACE_WARN.test(line)) totals[side] += 1;
+        else kept.push(normalizeVolatile(line));
+      }
+      return kept;
+    };
+    const linesA = split(a.get(id) ?? [], 'racesA');
+    const linesB = split(b.get(id) ?? [], 'racesB');
     for (const line of linesA) {
       if (line.startsWith('ok ')) totals.okA += 1;
       if (line.startsWith('warn ')) totals.warnsA += 1;
