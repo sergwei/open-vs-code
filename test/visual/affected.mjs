@@ -77,7 +77,7 @@ export const AFFECTED_RULES = [
   },
   {
     pattern:
-      /^src\/extension\/(opencodeServer|opencodeBinary|binaryDetection|externalServer|setupActions)\.ts$/,
+      /^src\/extension\/(opencodeServer|opencodeBinary|binaryDetection|externalServer|setupActions|serverStatus)\.ts$/,
     groups: ['setup'],
   },
 ];

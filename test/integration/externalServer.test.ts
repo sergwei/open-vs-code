@@ -182,7 +182,11 @@ describe('external server', function () {
   /**
    * The happy path: with the password stored and the setting on the fixture's address the
    * extension checks `/api/info`, reports the connection, opens the event stream and sends the
-   * snapshot, and the password appears nowhere in the log.
+   * snapshot, and the password appears nowhere in the log. The profile of this suite has
+   * `openVsCode.autoStart: false` (issue #124), so the absence of `server not started` shows
+   * that autoStart does not touch an external server. VERIFIED by `npm run test:integration --
+   * --label external-server` (Windows 11, VS Code stable, 31/10/2026, 9 passing): "connects to a
+   * running server, then the chat works as usual". Not run on macOS or Linux (CI).
    */
   it('connects to a running server, then the chat works as usual', async () => {
     const fake = await startFake(extensionPath);
@@ -197,6 +201,7 @@ describe('external server', function () {
     await log.waitFor('snapshot sent (', WAIT_MS);
     log.assertAbsent('launching:');
     log.assertAbsent('starting the server for');
+    log.assertAbsent('server not started');
     const whole = (await openLogFromStart()).added();
     assert.ok(!whole.includes(PASSWORD), 'the password is in the log');
     await stopFake(fake);
