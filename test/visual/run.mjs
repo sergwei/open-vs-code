@@ -9920,6 +9920,13 @@ try {
   // tooltip and the aria label carry the state. That B1 line does NOT prove `RevealOrder`: the late
   // reveal came before the second click in that run (Engram #1511), so it passes with or without
   // it.
+  // Since E9-sessions-organize (R2 of its plan) the row of N, which is asking during V1, is drawn
+  // twice (under "Needs attention" and under "Today"), so V1 expects "Needs attention" as the first
+  // row and "Today" after it, and the locators that take the first match (`rowNamed`, `rowLocator`)
+  // get the copy under "Needs attention", with the same words. VERIFIED in the run of `--steps
+  // 34,29,27` of 1/11/2026 (0 FAIL): "ok   V1 dark: the tree reads Needs attention first and Today
+  // after it". The first run of this step on the new tree failed those five V1 cells on "Today
+  // first" alone, and nothing else of the step.
   // The row classes were found by probing that DOM, not read from its source. Found by it: the
   // first click on a tab sometimes does not take (a hover of the command center is drawn over the
   // tab strip, hence `clickTabAndChat` removes the `.workbench-hover-container` nodes, clicks the
@@ -10367,7 +10374,11 @@ try {
         const shown = (row) => `${JSON.stringify(row?.description)} ${row?.descriptionShown}`;
         return {
           ok:
-            header?.name === 'Today' &&
+            // N asks while this is judged, so since E9-sessions-organize "Needs attention" opens the
+            // tree and "Today" comes after it (R2 of that plan: N is drawn twice, and `find` takes
+            // the first copy, which has the same words).
+            header?.name === 'Needs attention' &&
+            all.some((row) => row.name === 'Today') &&
             /^Tab · \S+/.test(rowA?.description ?? '') &&
             /^Needs input · Running · Tab · \S+/.test(rowN?.description ?? '') &&
             /^Failed · Tab · \S+/.test(rowF?.description ?? '') &&
@@ -10388,7 +10399,7 @@ try {
         const result = await look(name);
         check(
           result.ok,
-          `V1 ${name}: the tree reads Today first; the rows hold the words of each state and the time (shown as the data says), the aria label of N and F names the state, and the needs-input and failed icons have contrast >= 3 on rows that are not selected (${result.text})`,
+          `V1 ${name}: the tree reads Needs attention first and Today after it; the rows hold the words of each state and the time (shown as the data says), the aria label of N and F names the state, and the needs-input and failed icons have contrast >= 3 on rows that are not selected (${result.text})`,
         );
         await shot(`29b-tree-${name}`);
       }
@@ -11957,6 +11968,927 @@ try {
     check(await waitIdle(30_000), 'R1 the retried turn ends');
     assertNoWebviewErrors('step 33');
     await setTheme('Default Dark Modern');
+  });
+
+  // Step 34 (plan Engram `E9-sessions-organize/plan`, sections 8 and 9): organizing the native
+  // Sessions tree of the `editor` mode, judged in the DOM of the workbench. Cells (component x
+  // width x theme; "normal" is a 300 px side bar, "narrow" 170 px): V1 the tree with every section
+  // (Needs attention, Pinned, a folder with a subfolder, the date group, Archived folded) in its
+  // order, with its icon and its description, in the four themes at normal width and in dark at
+  // narrow width; V2 the title bar with a filter on (the "Filtered: Running" description and the
+  // Clear Filters button) and without one, in dark and high contrast dark; V3 the context menu of a
+  // session (Pin, Move to Folder…, Archive in order, then Rename and Delete) and the `when` clauses
+  // with a look-ahead (Pin on a session that is not pinned, Unpin on a pinned one); V4 the context
+  // menu of a folder; V5 the welcome "No sessions match the filters." and its Clear Filters button;
+  // V6 the tooltip with the cost and the folder; B1 New Folder…; B2 Move to Folder…; B3 a row
+  // dragged onto a folder; B4 Pin and Unpin; B5 Archive and Unarchive (the session returns to its
+  // folder); B6 Delete Folder (its sessions go back to the dates, none is deleted on the server);
+  // B7 a session that runs and asks enters Needs attention and leaves it when the turn ends; B8 the
+  // Running and Open in a tab filters, and Clear Filters; B9 Reload Window keeps everything; B10
+  // Search Sessions… finds an archived session and says so; B11 Rename Folder…; B12 New Subfolder…
+  // and a folder dragged into another; B13 in `sidebar` mode the palette offers none of the new
+  // commands. B3 and B12 need a real drag and drop on the tree: when it does not arrive the cell
+  // is printed as a `warn UNVERIFIED …` line and never as `ok` (the list of closed F5 checks for
+  // Sergio takes it). SYNTHETIC server: the sessions, the cost and the permission come from the
+  // fixture, so a pass proves our UI and host, not a real opencode. Cells that stay with Vitest:
+  // the cap of 200 organized sessions read, the midnight move and a corrupt stored JSON.
+  // VERIFIED by `npm run test:visual -- --steps 34,29,27` (Windows 11, VS Code 1.144.0, 1/11/2026,
+  // 0 FAIL, "all visual checks passed"). That run came BEFORE the review fixes of this work; after
+  // them, `npm run test:visual -- --group sessions` (1/11/2026, 180 ok, "all visual checks passed")
+  // passed the same checks again. Both runs printed among their lines: "ok   B3
+  // dragging the row of Org34C onto the folder Spikes34 moves the session into it", "ok   B12
+  // dragging the folder Docs34 onto Spikes34 makes it a subfolder of it" (a real mouse drag with
+  // `page.mouse`, so the drag does reach the tree: no cell went to the F5 list), "ok   V3 the
+  // context menu of a pinned session offers Unpin and not Pin, so VS Code evaluates the look-ahead
+  // of the when clause" and "ok   V5 a filter with no result shows "No sessions match the
+  // filters."". Harness findings of that work: the view's description is NOT drawn (a view alone in
+  // its container shows no description; the first V2 read "OpenCode: Sessions" at 300 and at 520
+  // px), so the host also writes the filter in the message line and V2 judges that line; a click on
+  // a context menu item while the menu still fades in did not run the command, hence
+  // `menuSettled`; the input box is reused, so its message and value are read only once the
+  // message is the asked one (`inputPrompt`). A session is "Untitled session" until a turn ends, so
+  // N sends a first turn before the one that asks (as Tab29N of step 29). NOT measured: macOS and
+  // Linux, a drag of several rows, `reveal` into a folded folder.
+  await step('34 organize the Sessions tree (E9-sessions-organize)', async () => {
+    const DARK = 'Default Dark Modern';
+    const HC_DARK = 'Default High Contrast';
+    const NORMAL = 300;
+    const NARROW = 170;
+    const setLocation = (value) => {
+      writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
+    };
+    const unverified = [];
+    const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const tabsNow = () =>
+      page.evaluate(() =>
+        [...globalThis.document.querySelectorAll('.tab')].map((tab) => ({
+          label: tab.getAttribute('aria-label') ?? '',
+          text: (tab.innerText ?? '').trim(),
+          active: tab.classList.contains('active'),
+        })),
+      );
+    const chatTabs = async () =>
+      (await tabsNow()).filter((tab) => !/\.ts\b/.test(`${tab.label} ${tab.text}`));
+    const connectToNew = async (previous) => {
+      await waitFor(
+        async () => {
+          const id = await visibleChatId();
+          return id !== undefined && id !== previous ? id : undefined;
+        },
+        10_000,
+        100,
+      );
+      await openChat(30_000);
+    };
+    const newSessionTab = async () => {
+      const previous = drivenChatId;
+      const before = (await chatTabs()).length;
+      await command('OpenCode: New Session');
+      await waitFor(async () => (await chatTabs()).length === before + 1, 10_000, 200);
+      await connectToNew(previous);
+    };
+    // The rows of the native tree with what is DRAWN of them: the level (`aria-level`), whether a
+    // folder is open, the icon, and whether the name and the description are fully drawn inside the
+    // label container (`full`), cut by an ellipsis (`cut`) or not drawn (`hidden`).
+    const outline = () =>
+      page.evaluate(() => {
+        const side = globalThis.document.querySelector('.part.sidebar');
+        const sideBox = side?.getBoundingClientRect();
+        return [...(side?.querySelectorAll('.monaco-list-row') ?? [])].map((row) => {
+          const nameElement = row.querySelector('.label-name');
+          const description = row.querySelector('.label-description');
+          const container =
+            row.querySelector('.monaco-icon-label-container') ??
+            row.querySelector('.monaco-icon-label');
+          const containerBox = container?.getBoundingClientRect();
+          const drawn = (element) => {
+            if (!element || !containerBox) return 'hidden';
+            const box = element.getBoundingClientRect();
+            const width = Math.max(
+              0,
+              Math.min(box.right, containerBox.right) - Math.max(box.left, containerBox.left),
+            );
+            if (width < 1) return 'hidden';
+            return element.scrollWidth <= element.clientWidth + 1 &&
+              box.right <= containerBox.right + 1
+              ? 'full'
+              : 'cut';
+          };
+          const rowBox = row.getBoundingClientRect();
+          const icon = row.querySelector('.custom-view-tree-node-item-icon');
+          return {
+            name: (nameElement?.textContent ?? '').trim(),
+            description: (description?.textContent ?? '').trim(),
+            level: Number(row.getAttribute('aria-level') ?? '0'),
+            expanded: row.getAttribute('aria-expanded'),
+            iconClass: icon ? (icon.getAttribute('class') ?? '') : '',
+            nameShown: drawn(nameElement),
+            descriptionShown: description === null ? 'none' : drawn(description),
+            insideSideBar: sideBox !== undefined && rowBox.right <= sideBox.right + 1,
+          };
+        });
+      });
+    // The ancestors of every row whose name contains `needle` (one entry per copy: a session that
+    // asks for attention is drawn twice).
+    const pathsOf = (rows, needle) => {
+      const stack = [];
+      const found = [];
+      for (const row of rows) {
+        stack.length = Math.max(0, row.level - 1);
+        if (row.name.includes(needle)) found.push([...stack]);
+        stack[row.level - 1] = row.name;
+      }
+      return found;
+    };
+    const top = (rows) => rows.filter((row) => row.level === 1).map((row) => row.name);
+    const brief = (rows) => rows.map((row) => `${String(row.level)}:${row.name}`);
+    const rowOf = (rows, needle) => rows.find((row) => row.name.includes(needle));
+    const waitRows = (predicate, ms = 10_000) =>
+      waitFor(async () => predicate(await outline()), ms, 150);
+    const rowLoc = (needle) =>
+      page.locator('.part.sidebar .monaco-list-row', { hasText: needle }).first();
+    const sideState = () =>
+      page.evaluate(() => {
+        const side = globalThis.document.querySelector('.part.sidebar');
+        return {
+          text: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
+            .replace(/\s+/g, ' ')
+            .trim(),
+          buttons: [...(side?.querySelectorAll('.welcome-view-content .monaco-button') ?? [])].map(
+            (b) => (b.textContent ?? '').trim(),
+          ),
+          actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
+            (a) => a.getAttribute('aria-label') ?? '',
+          ),
+        };
+      });
+    const showSessions = async () => {
+      const shows = async () =>
+        (await sideState()).actions.some((label) => label.startsWith('New Session'));
+      if (!(await shows())) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        await waitFor(shows, 5_000, 100);
+      }
+    };
+    // The title bar of the view: the description that carries the filter, and the Clear Filters button.
+    const headerState = () =>
+      page.evaluate(() => {
+        const side = globalThis.document.querySelector('.part.sidebar');
+        const sideBox = side?.getBoundingClientRect();
+        const inside = (element) => {
+          const box = element.getBoundingClientRect();
+          return (
+            sideBox !== undefined &&
+            box.width > 0 &&
+            box.left >= sideBox.left - 1 &&
+            box.right <= sideBox.right + 1 &&
+            element.checkVisibility({ checkVisibilityCSS: true })
+          );
+        };
+        // Drawn = inside the side bar and not clipped by an ancestor with `overflow` other than
+        // visible (the title of a view hides its description when the actions take the room).
+        const unclipped = (element) => {
+          const box = element.getBoundingClientRect();
+          for (let node = element.parentElement; node && node !== side; node = node.parentElement) {
+            if (globalThis.getComputedStyle(node).overflowX === 'visible') continue;
+            const around = node.getBoundingClientRect();
+            if (box.right > around.right + 1 || box.left < around.left - 1) return false;
+          }
+          return true;
+        };
+        // Every leaf that says "Filtered:" outside the rows (the message line and, in the DOM of
+        // some containers, a hidden description): the one that is drawn wins.
+        const labels = [...(side?.querySelectorAll('*') ?? [])].filter(
+          (element) =>
+            !element.closest('.monaco-list') &&
+            element.children.length === 0 &&
+            /Filtered:/.test(element.textContent ?? ''),
+        );
+        const label = labels.find((element) => inside(element) && unclipped(element)) ?? labels[0];
+        const clear = [...(side?.querySelectorAll('.action-label') ?? [])].find((element) =>
+          (element.getAttribute('aria-label') ?? '').startsWith('Clear Filters'),
+        );
+        return {
+          description: (label?.textContent ?? '').trim(),
+          descriptionDrawn: label !== undefined && inside(label) && unclipped(label),
+          clearPresent: clear !== undefined,
+          clearDrawn: clear !== undefined && inside(clear),
+        };
+      });
+    const menuRows = async () =>
+      (await page.locator('.monaco-menu .action-label').allInnerTexts())
+        .map((text) => text.trim())
+        .filter((text) => text !== '');
+    // The menu fades in; a click on an item while it is still fading did NOT run the command in
+    // three runs of 1/11/2026 (the menu stayed open, the screenshot of the failure shows it), so the
+    // menu is used only once its opacity (composed up the tree) is 1 and its box did not move
+    // between two reads 100 ms apart.
+    const menuSettled = async () => {
+      const read = () =>
+        page.evaluate(() => {
+          const menu = globalThis.document.querySelector('.monaco-menu');
+          if (menu === null) return null;
+          let opacity = 1;
+          for (let node = menu; node; node = node.parentElement) {
+            opacity *= Number(globalThis.getComputedStyle(node).opacity);
+          }
+          const box = menu.getBoundingClientRect();
+          return `${opacity.toFixed(2)}|${box.left.toFixed(1)}|${box.top.toFixed(1)}|${box.height.toFixed(1)}`;
+        });
+      let previous = null;
+      return waitFor(
+        async () => {
+          const now = await read();
+          const settled = now !== null && now === previous && now.startsWith('1.00|');
+          previous = now;
+          return settled;
+        },
+        3_000,
+        100,
+      );
+    };
+    const openMenu = async (needle) => {
+      await rowLoc(needle).click({ button: 'right' });
+      await waitFor(async () => (await menuRows()).length > 0, 3_000, 100);
+      await menuSettled();
+      return menuRows();
+    };
+    const chooseMenu = async (label) => {
+      await page
+        .locator('.monaco-menu .action-label')
+        .filter({ hasText: new RegExp(`^\\s*${escapeRegExp(label)}\\s*$`) })
+        .first()
+        .click({ timeout: 5_000 });
+    };
+    const menuAction = async (needle, label) => {
+      await openMenu(needle);
+      await chooseMenu(label);
+    };
+    const inputOpen = () => waitFor(async () => !(await quickInputHidden()), 5_000, 100);
+    // The message of the input box once it is the one that was asked for: the widget is reused, so
+    // right after the previous box closed it can still hold the old text and the old value (run of
+    // 1/11/2026: the "current name" of Rename read the SSE34 typed before). Gives up after 5 s with
+    // what the widget holds, so the caller's check still says what it saw.
+    const inputPrompt = async (wanted) => {
+      const read = () =>
+        page
+          .locator('.quick-input-widget .quick-input-message')
+          .first()
+          .innerText({ timeout: 500 })
+          .catch(() => '');
+      let nudge = 0;
+      await waitFor(
+        async () => {
+          // HYPOTHESIS: after a click on a context menu item the window draws nothing until some input
+          // event reaches it (a box opened by a menu command showed only after a screenshot, runs
+          // of 1/11/2026), so the pointer is moved over the empty editor area between reads.
+          nudge += 1;
+          await page.mouse.move(700 + (nudge % 2), 400);
+          return wanted.test(await read());
+        },
+        5_000,
+        100,
+      );
+      return read();
+    };
+    const answerInput = async (text) => {
+      await inputOpen();
+      await typeInQuickInput(page.locator('.quick-input-widget input').first(), text);
+      await page.keyboard.press('Enter');
+      await waitFor(quickInputHidden, 3_000, 100);
+    };
+    const quickRows = () => page.locator('.quick-input-list .monaco-list-row');
+    // Unfolds the tree row containing `needle` if it is collapsed; does nothing if already open.
+    const ensureOpen = async (needle) => {
+      const row = rowOf(await outline(), needle);
+      if (row?.expanded === 'false') {
+        await rowLoc(needle).click();
+        await waitRows((rows) => rowOf(rows, needle)?.expanded === 'true', 4_000);
+      }
+    };
+    // Opens the Filter Sessions picker, ticks the rows named in `labels` and confirms with Enter.
+    const setFilters = async (labels) => {
+      await page
+        .locator('.part.sidebar .action-label[aria-label^="Filter Sessions"]')
+        .first()
+        .click({ timeout: 5_000 });
+      await inputOpen();
+      await waitFor(async () => (await quickRows().count()) >= 3, 3_000, 100);
+      for (const label of labels) {
+        await quickRows().filter({ hasText: label }).first().click({ timeout: 3_000 });
+      }
+      await page.keyboard.press('Enter');
+      await waitFor(quickInputHidden, 3_000, 100);
+    };
+    const clearFilters = async () => {
+      await page
+        .locator('.part.sidebar .action-label[aria-label^="Clear Filters"]')
+        .first()
+        .click({ timeout: 5_000 });
+      await waitFor(async () => !(await headerState()).clearPresent, 5_000, 100);
+    };
+    // How many sessions the fixture's state file holds; -1 when the file cannot be read or parsed.
+    const serverSessions = () => {
+      try {
+        return JSON.parse(fs.readFileSync(vscode.stateFile, 'utf8')).sessions?.length ?? -1;
+      } catch {
+        return -1;
+      }
+    };
+    // A real drag with the mouse from one row to another; HTML5 drag and drop needs a few moves in
+    // between for Chromium to start the drag.
+    const dragRow = async (from, to) => {
+      const source = await rowLoc(from).boundingBox({ timeout: 3_000 });
+      const target = await rowLoc(to).boundingBox({ timeout: 3_000 });
+      if (source === null || target === null) return false;
+      const sy = source.y + source.height / 2;
+      await page.mouse.move(source.x + 60, sy);
+      await page.mouse.down();
+      await page.mouse.move(source.x + 60, sy + 6, { steps: 3 });
+      await page.mouse.move(target.x + 60, target.y + target.height / 2, { steps: 15 });
+      await page.mouse.move(target.x + 62, target.y + target.height / 2);
+      await page.mouse.up();
+      return true;
+    };
+    const reloadWindow = async (mark) => {
+      await page.evaluate((key) => {
+        globalThis[key] = true;
+      }, mark);
+      await command('Developer: Reload Window');
+      web?.close();
+      await browser.close().catch(() => undefined);
+      let reloaded = false;
+      for (let tries = 0; tries < 120 && !reloaded; tries++) {
+        await connectWorkbench(90_000);
+        const stale = await page
+          .evaluate((key) => globalThis[key] === true, mark)
+          .catch(() => true);
+        reloaded = !stale;
+        if (reloaded) break;
+        await browser.close().catch(() => undefined);
+        await sleep(250); // between two attempts to reach the new page, not a wait for it
+      }
+      if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
+      await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
+      drivenChatId = undefined;
+    };
+    // The `OpenCode:` palette commands that match `query`; the 600 ms sleep is the palette
+    // filtering as you type (no signal to wait on). Closes the palette before returning.
+    const paletteRows = async (query) => {
+      if (!(await clickCommandCenter())) await page.keyboard.press('F1');
+      await inputOpen();
+      await typeInQuickInput(page.locator('.quick-input-widget input').first(), `>${query}`);
+      await sleep(600); // the palette filters as you type; no signal to wait on
+      const rows = (await quickRows().allInnerTexts())
+        .map((text) => text.replace(/\s+/g, ' ').trim())
+        .filter((text) => text.startsWith('OpenCode:'));
+      await page.keyboard.press('Escape');
+      await waitFor(quickInputHidden, 3_000, 100);
+      return rows;
+    };
+
+    // --- Montage: A (costly), B, C, D made in the side bar, then the tree in editor mode -----------
+    setLocation('sidebar');
+    if (
+      (await waitFor(async () => (await visibleChatId()) !== undefined, 8_000, 200)) === undefined
+    ) {
+      await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+      await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+    }
+    await openChat(30_000);
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    await closeAllEditors();
+    const originalWidth = await sideBarPx();
+    try {
+      await setTheme(DARK);
+      await command('Notifications: Clear All Notifications');
+      await waitConnected();
+      for (const prompt of ['Org34A COSTLY', 'Org34B', 'Org34C', 'Org34D']) {
+        check(await clickButton('New session'), `New session is pressed for ${prompt}`);
+        await waitEmptyView();
+        await send(prompt);
+        check(await waitIdle(30_000), `the turn of ${prompt} ends`);
+      }
+      setLocation('editor');
+      await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
+      await connectToNew(drivenChatId);
+      await command('OpenCode: Restart Server');
+      await waitConnected(60_000);
+      await closeAllEditors();
+      await showSessions();
+      await setSideBarWidth(NORMAL);
+      const listed = await waitRows(
+        (rows) => ['Org34A', 'Org34B', 'Org34C', 'Org34D'].every((n) => rowOf(rows, n)),
+        20_000,
+      );
+      check(listed === true, 'the four sessions of the step are listed in the tree');
+
+      // --- B1: New Folder… ------------------------------------------------------------------------
+      await command('OpenCode: New Folder…');
+      const folderPrompt = await inputPrompt(/Name of the new folder/);
+      await answerInput('Temp34');
+      await waitRows((rows) => rowOf(rows, 'Temp34') !== undefined, 8_000);
+      let rows = await outline();
+      const temp = rowOf(rows, 'Temp34');
+      check(
+        /Name of the new folder/.test(folderPrompt) &&
+          temp !== undefined &&
+          temp.level === 1 &&
+          /codicon-folder/.test(temp.iconClass) &&
+          temp.description === '0' &&
+          top(rows).indexOf('Temp34') < top(rows).indexOf('Today'),
+        `B1 New Folder… asks "Name of the new folder" and the tree draws Temp34 at the first level before the date groups, with the folder icon and 0 sessions (${JSON.stringify(temp)}, first level ${JSON.stringify(top(rows))})`,
+      );
+
+      // --- V4 + B12 (menu half): the menu of a folder, and New Subfolder… ---------------------------
+      const folderMenu = await openMenu('Temp34');
+      await shot('34a-folder-menu');
+      check(
+        folderMenu.length === 3 &&
+          folderMenu[0] === 'New Subfolder…' &&
+          folderMenu[1] === 'Rename Folder…' &&
+          folderMenu[2] === 'Delete Folder',
+        `V4 the context menu of a folder lists New Subfolder…, Rename Folder… and Delete Folder in that order (rows: ${JSON.stringify(folderMenu)})`,
+      );
+      await chooseMenu('New Subfolder…');
+      const subPrompt = await inputPrompt(/Name of the new subfolder/);
+      await answerInput('SSE34');
+      await waitRows((rows2) => rowOf(rows2, 'Temp34')?.expanded !== null, 8_000);
+      await ensureOpen('Temp34');
+      await waitRows((rows2) => rowOf(rows2, 'SSE34') !== undefined, 5_000);
+      rows = await outline();
+      await shot('34a2-subfolder');
+      check(
+        /Name of the new subfolder/.test(subPrompt) &&
+          pathsOf(rows, 'SSE34').length === 1 &&
+          pathsOf(rows, 'SSE34')[0]?.join('/') === 'Temp34',
+        `B12 New Subfolder… on Temp34 asks "Name of the new subfolder" and creates SSE34 one level inside it (menu half; prompt ${JSON.stringify(subPrompt.replace(/\s+/g, ' ').slice(0, 60))}, rows ${JSON.stringify(brief(rows))})`,
+      );
+
+      // --- B11: Rename Folder… ----------------------------------------------------------------------
+      await menuAction('Temp34', 'Rename Folder…');
+      const renamePrompt = await inputPrompt(/New name for the folder/);
+      const renameValue = await page.locator('.quick-input-widget input').first().inputValue();
+      await answerInput('Spikes34');
+      const renamed = await waitRows(
+        (rows2) => rowOf(rows2, 'Spikes34') !== undefined && rowOf(rows2, 'Temp34') === undefined,
+        8_000,
+      );
+      rows = await outline();
+      check(
+        /New name for the folder/.test(renamePrompt) &&
+          renameValue === 'Temp34' &&
+          renamed === true &&
+          pathsOf(rows, 'SSE34')[0]?.join('/') === 'Spikes34',
+        `B11 Rename Folder… asks "New name for the folder" with the current name (${JSON.stringify(renameValue)}) and the row reads Spikes34 with its subfolder (paths ${JSON.stringify(pathsOf(rows, 'SSE34'))})`,
+      );
+
+      // --- B2: Move to Folder… ----------------------------------------------------------------------
+      await menuAction('Org34A', 'Move to Folder…');
+      await inputOpen();
+      await waitFor(async () => (await quickRows().count()) >= 3, 3_000, 100);
+      const choices = (await quickRows().allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim());
+      const moveTitle = (await page.locator('.quick-input-title').allInnerTexts()).join(' ');
+      await shot('34b-move-to-folder');
+      const chosen = choices.findIndex((text) => text === 'Spikes34');
+      if (chosen >= 0) await quickRows().nth(chosen).click();
+      await waitFor(quickInputHidden, 3_000, 100);
+      await waitRows((rows2) => pathsOf(rows2, 'Org34A')[0]?.join('/') === 'Spikes34', 8_000);
+      rows = await outline();
+      check(
+        chosen >= 0 &&
+          choices.includes('No Folder') &&
+          choices.includes('Spikes34 / SSE34') &&
+          choices.includes('New Folder…') &&
+          /Move “Org34A/.test(moveTitle) &&
+          pathsOf(rows, 'Org34A').length === 1 &&
+          pathsOf(rows, 'Org34A')[0]?.join('/') === 'Spikes34' &&
+          rowOf(rows, 'Spikes34')?.description === '1',
+        `B2 Move to Folder… lists ${JSON.stringify(choices)} under ${JSON.stringify(moveTitle)}; choosing Spikes34 takes Org34A out of Today and into the folder (paths ${JSON.stringify(pathsOf(rows, 'Org34A'))}, folder shows ${JSON.stringify(rowOf(rows, 'Spikes34')?.description)})`,
+      );
+
+      // --- V6: the tooltip -------------------------------------------------------------------------
+      await rowLoc('Org34A').hover();
+      const tooltip = await waitFor(
+        async () => {
+          const texts = await page.locator('.workbench-hover-container').allInnerTexts();
+          return texts.find((text) => text.includes('Cost:'));
+        },
+        8_000,
+        200,
+      );
+      await shot('34c-tooltip');
+      check(
+        typeof tooltip === 'string' &&
+          /Folder:\s+Spikes34/.test(tooltip) &&
+          /Tokens:/.test(tooltip),
+        `V6 the tooltip of a row shows its cost and tokens and the folder (${JSON.stringify(String(tooltip).replace(/\s+/g, ' ').slice(0, 220))})`,
+      );
+      await page.mouse.move(700, 120);
+
+      // --- V3 + B4: Pin and Unpin ---------------------------------------------------------------------
+      const plainMenu = await openMenu('Org34B');
+      await shot('34d-session-menu');
+      const idx = (label) => plainMenu.indexOf(label);
+      check(
+        idx('Pin') >= 0 &&
+          idx('Pin') < idx('Move to Folder…') &&
+          idx('Move to Folder…') < idx('Archive') &&
+          idx('Archive') < idx('Rename Session…') &&
+          idx('Rename Session…') < idx('Delete Session') &&
+          !plainMenu.includes('Unpin') &&
+          !plainMenu.includes('Unarchive'),
+        `V3 the context menu of a session that is not pinned lists Pin, Move to Folder…, Archive, Rename Session… and Delete Session in that order, with no Unpin and no Unarchive (rows: ${JSON.stringify(plainMenu)})`,
+      );
+      await chooseMenu('Pin');
+      await waitRows((rows2) => pathsOf(rows2, 'Org34B')[0]?.join('/') === 'Pinned', 8_000);
+      rows = await outline();
+      const pinnedAt = pathsOf(rows, 'Org34B');
+      const pinnedMenu = await openMenu('Org34B');
+      await page.keyboard.press('Escape');
+      check(
+        pinnedMenu.includes('Unpin') && !pinnedMenu.includes('Pin'),
+        `V3 the context menu of a pinned session offers Unpin and not Pin, so VS Code evaluates the look-ahead of the when clause (rows: ${JSON.stringify(pinnedMenu)})`,
+      );
+      await menuAction('Org34B', 'Unpin');
+      const unpinned = await waitRows(
+        (rows2) =>
+          pathsOf(rows2, 'Org34B')[0]?.join('/') === 'Today' &&
+          rowOf(rows2, 'Pinned') === undefined,
+        8_000,
+      );
+      await menuAction('Org34B', 'Pin');
+      const pinnedAgain = await waitRows(
+        (rows2) => pathsOf(rows2, 'Org34B')[0]?.join('/') === 'Pinned',
+        8_000,
+      );
+      rows = await outline();
+      check(
+        pinnedAt.length === 1 &&
+          pinnedAt[0]?.join('/') === 'Pinned' &&
+          unpinned === true &&
+          pinnedAgain === true &&
+          top(rows).indexOf('Pinned') < top(rows).indexOf('Spikes34'),
+        `B4 Pin puts Org34B under Pinned (above the folders), Unpin sends it back to Today and the section goes away, and Pin again brings it back (first level ${JSON.stringify(top(rows))})`,
+      );
+
+      // --- B5: Archive and Unarchive -------------------------------------------------------------------
+      await menuAction('Org34A', 'Archive');
+      await waitRows((rows2) => rowOf(rows2, 'Archived') !== undefined, 8_000);
+      rows = await outline();
+      const archivedFolded = rowOf(rows, 'Archived');
+      const emptied = rowOf(rows, 'Spikes34')?.description === '0';
+      const hiddenWhileFolded = pathsOf(rows, 'Org34A').length === 0;
+      await ensureOpen('Archived');
+      await waitRows((rows2) => pathsOf(rows2, 'Org34A')[0]?.join('/') === 'Archived', 5_000);
+      await shot('34e-archived');
+      const archivedMenu = await openMenu('Org34A');
+      await page.keyboard.press('Escape');
+      await menuAction('Org34A', 'Unarchive');
+      const back = await waitRows(
+        (rows2) =>
+          pathsOf(rows2, 'Org34A')[0]?.join('/') === 'Spikes34' &&
+          rowOf(rows2, 'Archived') === undefined,
+        8_000,
+      );
+      check(
+        archivedFolded?.expanded === 'false' &&
+          /codicon-archive/.test(archivedFolded.iconClass) &&
+          emptied &&
+          hiddenWhileFolded &&
+          archivedMenu.includes('Unarchive') &&
+          !archivedMenu.includes('Archive') &&
+          back === true,
+        `B5 Archive takes Org34A out of its folder into Archived, which comes folded (${JSON.stringify(archivedFolded)}, folder left with ${String(emptied)}), its menu offers Unarchive and not Archive (${JSON.stringify(archivedMenu)}), and Unarchive returns it to Spikes34 (${String(back)})`,
+      );
+
+      // --- B3 and B12 (drag half): real drag and drop on the tree ------------------------------------------
+      const dragged = await dragRow('Org34C', 'Spikes34');
+      const dropped =
+        dragged &&
+        (await waitRows((rows2) => pathsOf(rows2, 'Org34C')[0]?.join('/') === 'Spikes34', 5_000));
+      if (dropped === true) {
+        check(
+          true,
+          'B3 dragging the row of Org34C onto the folder Spikes34 moves the session into it',
+        );
+      } else {
+        unverified.push('B3');
+        warn(
+          `UNVERIFIED B3 the drag of Org34C onto Spikes34 did not arrive at the tree (dragged ${String(dragged)}, paths ${JSON.stringify(pathsOf(await outline(), 'Org34C'))}); goes to the F5 list`,
+        );
+      }
+      await command('OpenCode: New Folder…');
+      await inputPrompt(/Name of the new folder/);
+      await answerInput('Docs34');
+      await waitRows((rows2) => rowOf(rows2, 'Docs34') !== undefined, 8_000);
+      const draggedFolder = await dragRow('Docs34', 'Spikes34');
+      const nested =
+        draggedFolder &&
+        (await waitRows((rows2) => pathsOf(rows2, 'Docs34')[0]?.join('/') === 'Spikes34', 5_000));
+      if (nested === true) {
+        check(true, 'B12 dragging the folder Docs34 onto Spikes34 makes it a subfolder of it');
+      } else {
+        unverified.push('B12');
+        warn(
+          `UNVERIFIED B12 the drag of the folder Docs34 onto Spikes34 did not arrive at the tree (dragged ${String(draggedFolder)}, paths ${JSON.stringify(pathsOf(await outline(), 'Docs34'))}); goes to the F5 list`,
+        );
+      }
+
+      // --- B6: Delete Folder ---------------------------------------------------------------------------------
+      await menuAction('Org34C', 'Move to Folder…');
+      await inputOpen();
+      await waitFor(async () => (await quickRows().count()) >= 3, 3_000, 100);
+      const docsChoices = (await quickRows().allInnerTexts()).map((t) =>
+        t.replace(/\s+/g, ' ').trim(),
+      );
+      const docsAt = docsChoices.findIndex((text) => text === 'Docs34' || /\/ Docs34$/.test(text));
+      if (docsAt >= 0) await quickRows().nth(docsAt).click();
+      await waitFor(quickInputHidden, 3_000, 100);
+      await ensureOpen('Docs34');
+      await waitRows((rows2) => pathsOf(rows2, 'Org34C')[0]?.at(-1) === 'Docs34', 8_000);
+      const sessionsBefore = serverSessions();
+      await menuAction('Docs34', 'Delete Folder');
+      const dialog = page.locator('.monaco-dialog-box');
+      const modal = await waitFor(
+        async () => ((await dialog.count()) ? await dialog.first().innerText() : null),
+        10_000,
+        300,
+      );
+      await shot('34f-delete-folder');
+      await dialog
+        .first()
+        .getByRole('button', { name: /^Delete Folder$/ })
+        .click();
+      const goneFolder = await waitRows((rows2) => rowOf(rows2, 'Docs34') === undefined, 8_000);
+      rows = await outline();
+      check(
+        typeof modal === 'string' &&
+          /Delete folder “Docs34”\?/.test(modal) &&
+          /1 session goes back to No Folder\. No session is deleted\./.test(modal) &&
+          goneFolder === true &&
+          pathsOf(rows, 'Org34C')[0]?.join('/') === 'Today' &&
+          sessionsBefore > 0 &&
+          serverSessions() === sessionsBefore,
+        `B6 Delete Folder asks in the modal (${String(modal).replace(/\s+/g, ' ').slice(0, 110)}), the folder goes, Org34C returns to Today (${JSON.stringify(pathsOf(rows, 'Org34C'))}) and the server still holds ${String(serverSessions())} of ${String(sessionsBefore)} sessions`,
+      );
+
+      // --- B7 + V1: N runs and asks; the tree in four themes and at 170 px --------------------------------------
+      await menuAction('Org34D', 'Archive');
+      await waitRows((rows2) => rowOf(rows2, 'Archived') !== undefined, 8_000);
+      await newSessionTab();
+      // The first turn gives the session its title (a session is "Untitled session" until a turn
+      // ends, as the Tab29N of step 29); the second one is the one that asks.
+      await send('Org34N');
+      check(await waitIdle(30_000), 'the first turn of Org34N ends');
+      await send('Org34N again ASK_PERMISSION SLOW');
+      const asking = await waitRows(
+        (rows2) =>
+          pathsOf(rows2, 'Org34N').some((p) => p.join('/') === 'Needs attention') &&
+          rows2
+            .filter((row) => row.name.includes('Org34N'))
+            .every((row) => /^Needs input · Running · Tab · /.test(row.description)),
+        30_000,
+      );
+      rows = await outline();
+      check(
+        asking === true && top(rows)[0] === 'Needs attention',
+        `B7 a session that runs and asks enters Needs attention at the top while it also stays in Today (paths ${JSON.stringify(pathsOf(rows, 'Org34N'))}, first level ${JSON.stringify(top(rows))})`,
+      );
+      const EXPECTED = ['Needs attention', 'Pinned', 'Spikes34', 'Today', 'Archived'];
+      const ICONS = {
+        'Needs attention': 'codicon-bell',
+        Pinned: 'codicon-pinned',
+        Spikes34: 'codicon-folder',
+        Archived: 'codicon-archive',
+      };
+      const lookAtTree = async (label, wide) => {
+        await page.mouse.move(900, 500);
+        await sleep(150); // the hover of the row under the old pointer clears
+        await showSessions();
+        const all = await outline();
+        const levelOne = all.filter((row) => row.level === 1);
+        const iconsOk = levelOne.every(
+          (row) => ICONS[row.name] === undefined || row.iconClass.includes(ICONS[row.name]),
+        );
+        const counts = Object.fromEntries(levelOne.map((row) => [row.name, row.description]));
+        const drawnOk = all
+          .filter((row) => row.level === 1)
+          .every(
+            (row) =>
+              row.insideSideBar &&
+              (wide
+                ? row.nameShown === 'full' && row.descriptionShown !== 'cut'
+                : row.nameShown !== 'hidden'),
+          );
+        const text = `first level ${JSON.stringify(levelOne.map((row) => row.name))}, descriptions ${JSON.stringify(counts)}, shown ${JSON.stringify(levelOne.map((row) => `${row.nameShown}/${row.descriptionShown}`))}, inside ${String(all.every((row) => row.insideSideBar))}`;
+        return {
+          ok:
+            JSON.stringify(levelOne.map((row) => row.name)) === JSON.stringify(EXPECTED) &&
+            iconsOk &&
+            counts['Needs attention'] === '1' &&
+            counts.Pinned === '1' &&
+            counts.Spikes34 === '1' &&
+            counts.Archived === '1' &&
+            drawnOk &&
+            all.every((row) => row.insideSideBar),
+          text: `${label}: ${text}`,
+        };
+      };
+      for (const [name, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        const result = await lookAtTree(name, true);
+        check(
+          result.ok,
+          `V1 ${name} at ${String(NORMAL)} px: the tree reads Needs attention, Pinned, the folder, Today and Archived in that order, each with its icon and its count, drawn whole inside the side bar (${result.text})`,
+        );
+        await shot(`34g-tree-${name}`);
+      }
+      await setTheme(DARK);
+      await setSideBarWidth(NARROW);
+      const narrowLook = await lookAtTree('narrow', false);
+      check(
+        narrowLook.ok,
+        `V1 dark at ${String(NARROW)} px: the same order, icons and counts, every row inside the side bar and its name drawn (${narrowLook.text})`,
+      );
+      await shot('34h-tree-narrow');
+      await setSideBarWidth(NORMAL);
+
+      // --- V2 + B8: the filters ---------------------------------------------------------------------------------------
+      for (const theme of [DARK, HC_DARK]) {
+        await setTheme(theme);
+        await showSessions();
+        const before = await headerState();
+        await setFilters(['Running']);
+        await waitFor(async () => (await headerState()).clearPresent, 5_000, 100);
+        const on = await headerState();
+        if (theme === DARK) {
+          const filtered = await outline();
+          check(
+            rowOf(filtered, 'Org34N') !== undefined &&
+              ['Org34A', 'Org34B', 'Org34C', 'Org34D'].every(
+                (n) => rowOf(filtered, n) === undefined,
+              ),
+            `B8 the Running filter leaves only the running session (rows ${JSON.stringify(filtered.map((row) => row.name))})`,
+          );
+        }
+        await shot(`34i-filter-${theme === DARK ? 'dark' : 'hc-dark'}`);
+        await clearFilters();
+        const off = await headerState();
+        check(
+          !before.clearPresent &&
+            on.description === 'Filtered: Running' &&
+            on.descriptionDrawn &&
+            on.clearPresent &&
+            on.clearDrawn &&
+            !off.clearPresent &&
+            off.description === '',
+          `V2 ${theme}: without a filter the view has no Clear Filters; with Running it draws ${JSON.stringify(on.description)} (drawn ${String(on.descriptionDrawn)}) and the Clear Filters button of the title bar (drawn ${String(on.clearDrawn)}); Clear Filters removes both (${JSON.stringify(off)})`,
+        );
+      }
+      await setTheme(DARK);
+      await showSessions();
+      // Only Org34N should keep a tab for the filter to tell it from the others: the rows that
+      // were clicked or dragged earlier may have opened one, so their tabs are closed first.
+      for (const name of ['Org34A', 'Org34B', 'Org34C', 'Org34D']) {
+        while ((await chatTabs()).some((tab) => tab.text.includes(name))) {
+          const tab = page.locator('.tab', { hasText: name }).first();
+          await tab.hover();
+          await tab.locator('.tab-actions .action-label').first().click({ timeout: 3_000 });
+          await sleep(300); // the tab strip redraws; no signal to wait on
+        }
+      }
+      await setFilters(['Open in a tab']);
+      await waitFor(async () => (await headerState()).clearPresent, 5_000, 100);
+      // The "Tab" flag of a row follows the closing of its tab a moment later (run of 1/11/2026: the
+      // filter still listed Org34B, Org34C and an empty session right after the tabs were closed), so
+      // the rows are read once they are only the ones the filter should keep.
+      await waitRows(
+        (rows2) =>
+          rowOf(rows2, 'Org34N') !== undefined &&
+          rows2.every((row) => ['Needs attention', 'Today', 'Org34N'].includes(row.name)),
+        10_000,
+      );
+      const tabFilter = await outline();
+      const tabHeader = await headerState();
+      await clearFilters();
+      const cleared = await waitRows((rows2) => rowOf(rows2, 'Org34C') !== undefined, 5_000);
+      check(
+        rowOf(tabFilter, 'Org34N') !== undefined &&
+          ['Org34A', 'Org34B', 'Org34C'].every((n) => rowOf(tabFilter, n) === undefined) &&
+          tabHeader.description === 'Filtered: Open in a tab' &&
+          cleared === true,
+        `B8 the Open in a tab filter leaves the session with a tab (rows ${JSON.stringify(tabFilter.map((row) => row.name))}, title ${JSON.stringify(tabHeader.description)}) and Clear Filters brings the others back (${String(cleared)})`,
+      );
+
+      // --- B7 (the end): the turn ends and the section goes away --------------------------------------------------
+      check(await clickButton('Allow once'), 'Allow once is pressed on the request of Org34N');
+      check(await waitIdle(30_000), 'the turn of Org34N ends after Allow once');
+      const left = await waitRows(
+        (rows2) =>
+          rowOf(rows2, 'Needs attention') === undefined && pathsOf(rows2, 'Org34N').length === 1,
+        15_000,
+      );
+      check(
+        left === true,
+        'B7 when the turn ends Needs attention goes away and Org34N stays in Today',
+      );
+
+      // --- V5: the welcome of a filter with no result -------------------------------------------------------------
+      await setFilters(['Running']);
+      const emptyWelcome = await waitFor(
+        async () => (await sideState()).text.includes('No sessions match the filters.'),
+        8_000,
+        200,
+      );
+      const welcome = await sideState();
+      await shot('34j-filtered-empty');
+      await page
+        .locator('.part.sidebar .welcome-view-content .monaco-button', { hasText: 'Clear Filters' })
+        .first()
+        .click({ timeout: 5_000 });
+      const restored = await waitRows((rows2) => rowOf(rows2, 'Org34C') !== undefined, 8_000);
+      check(
+        emptyWelcome === true &&
+          welcome.buttons.includes('Clear Filters') &&
+          restored === true &&
+          !(await headerState()).clearPresent,
+        `V5 a filter with no result shows "No sessions match the filters." with a Clear Filters button (${JSON.stringify(welcome)}) and pressing it brings the rows back (${String(restored)})`,
+      );
+
+      // --- B9: Reload Window keeps the organization -----------------------------------------------------------------
+      await closeAllEditors();
+      await reloadWindow('__visualPreReload34');
+      await showSessions();
+      await waitRows((rows2) => rowOf(rows2, 'Spikes34') !== undefined, 60_000);
+      await ensureOpen('Spikes34');
+      await ensureOpen('Archived');
+      const reloaded = await outline();
+      await shot('34k-after-reload');
+      check(
+        top(reloaded).includes('Pinned') &&
+          pathsOf(reloaded, 'Org34B')[0]?.join('/') === 'Pinned' &&
+          pathsOf(reloaded, 'Org34A')[0]?.join('/') === 'Spikes34' &&
+          pathsOf(reloaded, 'SSE34')[0]?.join('/') === 'Spikes34' &&
+          pathsOf(reloaded, 'Org34D')[0]?.join('/') === 'Archived',
+        `B9 after Reload Window the folder with its subfolder, the pinned session and the archived one are still there (paths B ${JSON.stringify(pathsOf(reloaded, 'Org34B'))}, A ${JSON.stringify(pathsOf(reloaded, 'Org34A'))}, SSE34 ${JSON.stringify(pathsOf(reloaded, 'SSE34'))}, D ${JSON.stringify(pathsOf(reloaded, 'Org34D'))})`,
+      );
+
+      // --- B10: Search Sessions… finds an archived session ---------------------------------------------------------------
+      await page
+        .locator('.part.sidebar .action-label[aria-label^="Search Sessions"]')
+        .first()
+        .click({ timeout: 5_000 });
+      await inputOpen();
+      await page.keyboard.type('Org34D');
+      const found = await waitFor(
+        async () => (await quickRows().allInnerTexts()).find((text) => text.includes('Org34D')),
+        8_000,
+        150,
+      );
+      await shot('34l-search-archived');
+      await page.keyboard.press('Escape');
+      await waitFor(quickInputHidden, 3_000, 100);
+      check(
+        typeof found === 'string' && /Archived/.test(found),
+        `B10 Search Sessions… finds the archived session and its description says Archived (${JSON.stringify(String(found).replace(/\s+/g, ' '))})`,
+      );
+
+      // --- B13: in sidebar mode the palette offers none of the new commands ----------------------------------------------
+      const control = await paletteRows('OpenCode: Folder');
+      setLocation('sidebar');
+      await waitFor(
+        async () =>
+          !(await sideState()).actions.some((label) => label.startsWith('Filter Sessions')),
+        10_000,
+        200,
+      );
+      await sleep(1_000); // the context keys follow the setting a moment later; no signal to wait on
+      const offered = [];
+      for (const word of ['Folder', 'Pin', 'Archive', 'Filter']) {
+        for (const row of await paletteRows(`OpenCode: ${word}`)) {
+          if (/Folder|Pin|Archive|Filter/.test(row)) offered.push(row);
+        }
+      }
+      const kept = await paletteRows('OpenCode: New Session');
+      check(
+        control.some((row) => row.includes('New Folder…')) &&
+          kept.some((row) => row.includes('New Session')) &&
+          offered.length === 0,
+        `B13 in editor mode the palette offers New Folder… (${JSON.stringify(control)}), in sidebar mode it offers none of Folder, Pin, Archive or Filter (${JSON.stringify(offered)}) and still offers New Session`,
+      );
+      if (unverified.length > 0) {
+        console.log(`  UNVERIFIED cells of step 34: ${unverified.join(', ')}`);
+      }
+      assertNoWebviewErrors('step 34');
+    } finally {
+      // Leave the workspace as the step found it: `sidebar`, no editor, the dark theme, the side bar
+      // at its width. The folders and flags it made stay in the workspaceState of the test profile.
+      setLocation('sidebar');
+      await closeAllEditors().catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+      await setSideBarWidth(Math.round(originalWidth)).catch(() => undefined);
+    }
   });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.

@@ -9,6 +9,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Organize the Sessions tree (`chatLocation: editor`): **folders** and subfolders (**New Folder…**,
+  **New Subfolder…**, **Rename Folder…**, **Delete Folder**; **Move to Folder…** or drag the
+  rows, several at once), **Pin** and **Unpin** (a **Pinned** section at the top) and **Archive**
+  and **Unarchive** (a collapsed **Archived** section at the end; the folder is remembered). A
+  **Needs attention** section above them repeats the sessions that are running or waiting for
+  input. **Filter Sessions…** keeps the running, the waiting-for-input or the open-in-a-tab
+  sessions (**Clear Filters** turns it off; the filter is also written above the rows). The
+  tooltip of a row shows the cost and tokens, the folder and, for a session with a tab, the number
+  of changed files. **Search Sessions…** also finds archived sessions and says so. Folders, pins and
+  the archive are stored per workspace folder in VS Code and are lost if the project folder is
+  moved, renamed or cloned again (see Known limitations); no session is ever deleted by them. In
+  `sidebar` mode nothing changes and no new command is offered.
 - Requests per chat tab: with `chatLocation: editor`, a permission or question shows only in the
   tab of its session or of an ancestor of the subagent that asked (the side bar chat still shows
   all of them). The native notification is titled `OpenCode · <session title>: …` and appears when
