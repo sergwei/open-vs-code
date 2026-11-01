@@ -111,6 +111,7 @@ export const STEPS = [
   { id: '31', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 20 },
   { id: '32', needs: ['1'], sendsPrompt: true, groups: ['setup'], budgetS: 25 },
   { id: '33', needs: ['1'], sendsPrompt: true, groups: ['composer', 'render'], budgetS: 40 },
+  { id: '34', needs: ['1'], sendsPrompt: true, groups: ['sessions'], budgetS: 120 },
 ];
 
 /** Every valid id, in canonical order. */

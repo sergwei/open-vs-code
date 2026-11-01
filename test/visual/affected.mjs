@@ -52,7 +52,7 @@ export const AFFECTED_RULES = [
   { pattern: /^webview-ui\/src\/sessions\//, groups: ['sessions'] },
   {
     pattern:
-      /^src\/extension\/(sessionBrowser|sessionTree|sessionsView|sessionsSearch|sessionLineage|sessionUi)\.ts$/,
+      /^src\/extension\/(sessionBrowser|sessionTree|sessionsView|sessionsSearch|sessionLineage|sessionUi|sessionOrganization|sessionsOrganize|organizationStore)\.ts$/,
     groups: ['sessions'],
   },
   { pattern: /^webview-ui\/src\/requests\//, groups: ['requests'] },
