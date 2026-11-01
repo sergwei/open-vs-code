@@ -17,6 +17,23 @@
  * `field-sizing: content` lets the textarea grow with its text (HYPOTHESIS that the Chromium of
  * VS Code 1.105+ supports it; otherwise the box keeps its minimum height and still works).
  */
+/*
+ * Corner radii of the redesign (board 3 "Chip combinado y menú +", chosen by Sergio): round
+ * controls (+, the agent · model chip, Send, attachment chips) are pills; boxes the user types in or
+ * reads as one surface (prompt, request and connection cards) are 8px; menus and panels 6px, as on
+ * the board; buttons and inner boxes 6px; small marks (inline code, error words) 4px, and the 18px
+ * image thumbnail keeps 2px. Buttons and tool cards go past the board, which kept them at 2px and
+ * 4px: Sergio asked for rounder buttons and boxes (01/11/2026). Rows that mark their state with a
+ * left bar stay square, or the bar would bend. Radii are not colours, so they are plain values and
+ * not --vscode-* variables.
+ */
+:root {
+  --ovc-radius-sm: 4px;
+  --ovc-radius-md: 6px;
+  --ovc-radius-lg: 8px;
+  --ovc-radius-pill: 999px;
+}
+
 html,
 body,
 #root {
@@ -72,6 +89,7 @@ button.primary {
   background: var(--vscode-button-background);
   border: 1px solid var(--vscode-button-border, transparent);
   padding: 4px 12px;
+  border-radius: var(--ovc-radius-md);
 }
 
 button.primary:hover:not(:disabled) {
@@ -84,6 +102,7 @@ button.secondary,
   background: var(--vscode-button-secondaryBackground);
   border: 1px solid var(--vscode-button-border, transparent);
   padding: 2px 8px;
+  border-radius: var(--ovc-radius-md);
 }
 
 button.secondary:hover:not(:disabled),
@@ -161,6 +180,7 @@ button.secondary:hover:not(:disabled),
   margin-top: 4px;
   padding: 2px 6px;
   border: 1px solid var(--vscode-panel-border, transparent);
+  border-radius: var(--ovc-radius-md);
 }
 
 .subagent-sessions > summary,
@@ -219,6 +239,7 @@ button.secondary:hover:not(:disabled),
   background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background));
   border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
   box-shadow: 0 2px 8px var(--vscode-widget-shadow, transparent);
+  border-radius: var(--ovc-radius-md);
 }
 
 .session-search {
@@ -230,6 +251,7 @@ button.secondary:hover:not(:disabled),
   color: var(--vscode-input-foreground);
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: var(--ovc-radius-md);
 }
 
 .session-search::placeholder,
@@ -353,6 +375,7 @@ button.secondary:hover:not(:disabled),
   color: var(--vscode-input-foreground);
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-focusBorder);
+  border-radius: var(--ovc-radius-sm);
 }
 
 .session-more {
@@ -399,10 +422,11 @@ button.secondary:hover:not(:disabled),
   gap: 8px;
 }
 
-.jump-latest {
+button.jump-latest {
   position: absolute;
   right: 8px;
   bottom: 8px;
+  border-radius: var(--ovc-radius-pill);
 }
 
 .message {
@@ -413,6 +437,7 @@ button.secondary:hover:not(:disabled),
 .message-user {
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: var(--ovc-radius-md);
 }
 
 .message-assistant {
@@ -453,7 +478,7 @@ button.secondary:hover:not(:disabled),
   margin: 4px 0;
   font-size: 0.9em;
   border: 1px solid var(--vscode-panel-border, transparent);
-  border-radius: 4px;
+  border-radius: var(--ovc-radius-md);
 }
 
 /* A subagent tool block keeps its class (issue #21): the header also holds the session button. */
@@ -493,6 +518,7 @@ button.secondary:hover:not(:disabled),
   text-align: left;
   font: inherit;
   font-family: var(--vscode-editor-font-family);
+  border-radius: var(--ovc-radius-sm);
 }
 
 .tool-toggle:hover {
@@ -579,7 +605,7 @@ button.secondary:hover:not(:disabled),
 .tool-status[data-tone='error'] {
   padding: 0 4px;
   border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
-  border-radius: 3px;
+  border-radius: var(--ovc-radius-sm);
   color: var(--vscode-foreground);
   background: var(--vscode-inputValidation-errorBackground, transparent);
 }
@@ -620,7 +646,7 @@ button.secondary:hover:not(:disabled),
   color: var(--vscode-editor-foreground, var(--vscode-foreground));
   font-family: var(--vscode-editor-font-family);
   font-size: var(--vscode-editor-font-size);
-  border-radius: 3px;
+  border-radius: var(--ovc-radius-sm);
 }
 
 /* VS Code paints every webview `code` with textPreformat colours; the block owns its colours. */
@@ -784,6 +810,7 @@ button.secondary:hover:not(:disabled),
   gap: 4px;
   max-height: 40%;
   overflow-y: auto;
+  border-radius: var(--ovc-radius-md);
 }
 
 .revert-banner p {
@@ -887,7 +914,7 @@ button.secondary:hover:not(:disabled),
   color: var(--vscode-foreground);
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
-  border-radius: 4px;
+  border-radius: var(--ovc-radius-md);
   padding: 6px 8px;
 }
 
@@ -972,7 +999,7 @@ button.secondary:hover:not(:disabled),
   font-size: var(--vscode-editor-font-size);
   color: var(--vscode-textPreformat-foreground);
   background: var(--vscode-textPreformat-background);
-  border-radius: 3px;
+  border-radius: var(--ovc-radius-sm);
   padding: 0 0.3em;
 }
 
@@ -1016,7 +1043,7 @@ button.secondary:hover:not(:disabled),
   margin: 0.5em 0;
   background: var(--vscode-textCodeBlock-background);
   border: 1px solid var(--vscode-panel-border, transparent);
-  border-radius: 4px;
+  border-radius: var(--ovc-radius-md);
 }
 
 .code-header {
@@ -1195,6 +1222,7 @@ button.secondary:hover:not(:disabled),
   border: 1px solid var(--vscode-inputValidation-infoBorder, transparent);
   background: var(--vscode-inputValidation-infoBackground);
   color: var(--vscode-foreground);
+  border-radius: var(--ovc-radius-md);
 }
 
 .alert-error {
@@ -1239,6 +1267,7 @@ button.secondary:hover:not(:disabled),
   color: var(--vscode-foreground);
   background: var(--vscode-inputValidation-errorBackground);
   border: 1px solid var(--vscode-inputValidation-errorBorder, transparent);
+  border-radius: var(--ovc-radius-lg);
 }
 
 .connection-card-neutral {
@@ -1312,6 +1341,7 @@ button.secondary:hover:not(:disabled),
   gap: 8px;
   padding: 8px;
   border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
+  border-radius: var(--ovc-radius-md);
 }
 
 .setup-step[data-status='failed'] {
@@ -1391,7 +1421,7 @@ button.secondary:hover:not(:disabled),
   color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
   background: var(--vscode-editorWidget-background);
   border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder));
-  border-radius: 4px;
+  border-radius: var(--ovc-radius-lg);
 }
 
 .request-title {
@@ -1445,7 +1475,7 @@ button.secondary:hover:not(:disabled),
   font-size: var(--vscode-editor-font-size);
   color: var(--vscode-textPreformat-foreground);
   background: var(--vscode-textPreformat-background);
-  border-radius: 3px;
+  border-radius: var(--ovc-radius-sm);
   padding: 0 0.3em;
   overflow-wrap: anywhere;
 }
@@ -1467,6 +1497,7 @@ button.secondary:hover:not(:disabled),
   gap: 6px;
   padding: 6px;
   border: 1px solid var(--vscode-panel-border, var(--vscode-focusBorder));
+  border-radius: var(--ovc-radius-md);
 }
 
 .request-always p,
@@ -1505,6 +1536,7 @@ button.secondary:hover:not(:disabled),
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, transparent);
   padding: 4px 6px;
+  border-radius: var(--ovc-radius-md);
 }
 
 .request-form {
@@ -1521,6 +1553,7 @@ button.secondary:hover:not(:disabled),
   margin: 0;
   padding: 4px 8px;
   border: 1px solid var(--vscode-panel-border, transparent);
+  border-radius: var(--ovc-radius-md);
 }
 
 .form-field legend {
@@ -1577,6 +1610,7 @@ button.secondary:hover:not(:disabled),
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, transparent);
   padding: 4px 6px;
+  border-radius: var(--ovc-radius-lg);
 }
 
 /* Issue #30: a drag with files is over the box. Colours only from the theme; the border is the
@@ -1584,6 +1618,7 @@ button.secondary:hover:not(:disabled),
 .prompt[data-drop='active'] {
   outline: 2px dashed var(--vscode-focusBorder);
   outline-offset: 2px;
+  border-radius: var(--ovc-radius-lg);
   background: var(--vscode-list-dropBackground);
 }
 
@@ -1636,7 +1671,7 @@ button.send-button {
   width: 28px;
   height: 28px;
   padding: 0;
-  border-radius: 50%;
+  border-radius: var(--ovc-radius-pill);
 }
 
 @container (max-width: 199px) {
@@ -1653,7 +1688,7 @@ button.send-button {
 /*
  * The "+" button and its menu (E2, issue #85, phase 4). The wrapper is NOT positioned, so the menu
  * (absolute, like the chip panel) spans the box (`.prompt` is the positioned ancestor) and opens
- * upwards over it. The button is square-ish and never shrinks.
+ * upwards over it. The button is round and never shrinks.
  */
 .plus-wrap {
   flex: 0 0 auto;
@@ -1667,6 +1702,7 @@ button.plus-trigger {
   width: 28px;
   height: 28px;
   padding: 0;
+  border-radius: var(--ovc-radius-pill);
 }
 
 .plus-menu {
@@ -1686,6 +1722,7 @@ button.plus-trigger {
   background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
   border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
   box-shadow: 0 2px 8px var(--vscode-widget-shadow, transparent);
+  border-radius: var(--ovc-radius-md);
 }
 
 button.plus-item {
@@ -1756,12 +1793,13 @@ button.secondary[aria-disabled='true'] {
   cursor: default;
 }
 
-.agent-model-chip {
+button.agent-model-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   max-width: 100%;
   min-width: 0;
+  border-radius: var(--ovc-radius-pill);
 }
 
 /* The text shrinks with an ellipsis; the dot and the chevron keep their size. */
@@ -1843,6 +1881,7 @@ button.secondary[aria-disabled='true'] {
   background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background));
   border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
   box-shadow: 0 2px 8px var(--vscode-widget-shadow, transparent);
+  border-radius: var(--ovc-radius-md);
 }
 
 .model-groups {
@@ -1917,7 +1956,7 @@ button.secondary[aria-disabled='true'] {
   border: 1px solid transparent;
   color: var(--vscode-badge-foreground);
   background: var(--vscode-badge-background);
-  border-radius: 10px;
+  border-radius: var(--ovc-radius-pill);
 }
 
 .chip-name {
@@ -1973,6 +2012,7 @@ button.secondary[aria-disabled='true'] {
   border: 1px solid
     var(--vscode-editorSuggestWidget-border, var(--vscode-widget-border, transparent));
   box-shadow: 0 2px 8px var(--vscode-widget-shadow, transparent);
+  border-radius: var(--ovc-radius-md);
 }
 
 .mention-list {
@@ -1989,6 +2029,7 @@ button.secondary[aria-disabled='true'] {
   gap: 8px;
   padding: 2px 8px;
   cursor: pointer;
+  border-radius: var(--ovc-radius-sm);
 }
 
 .mention-option:hover {
