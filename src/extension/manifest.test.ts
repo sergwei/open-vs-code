@@ -563,6 +563,17 @@ describe('chat location (issue #77)', () => {
     );
   });
 
+  // E9-chat-view-settings (#133): the Chat view title mirrors the Sessions one: Open Settings is a
+  // button, Restart Server moved to the overflow group. Provenance: the REAL package.json.
+  it('puts Open Settings on the Chat view title and Restart Server in its overflow', () => {
+    const title = (manifest.contributes.menus?.['view/title'] ?? []).filter(
+      (e) => e.when === `view == ${ids.CHAT_VIEW_ID}`,
+    );
+    const group = (id: string): string | undefined => title.find((e) => e.command === id)?.group;
+    expect(group(ids.OPEN_SETTINGS_COMMAND_ID)).toBe('navigation');
+    expect(group(ids.RESTART_SERVER_COMMAND_ID)).toBe('9_server');
+  });
+
   it('gives the title buttons their icons and declares Open Settings', () => {
     const icon = (id: string): string | undefined =>
       manifest.contributes.commands.find((c) => c.command === id)?.icon;

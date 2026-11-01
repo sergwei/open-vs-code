@@ -119,3 +119,5 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Choosing an agent, a model or a reasoning level in the chip panel no longer closes it, so all
   three can be changed in one opening. The chip, Escape, a click outside and moving the focus away
   still close it.
+- Chat view in the side bar: **Open Settings** is a title button and **Restart Server** moved to the
+  "…" menu, as in the Sessions view (issue #133).

@@ -29,7 +29,7 @@ import { launchModesOf, testLaunchFrom, wrapStartServer } from './testLaunch';
 const SERVED_FOLDER_KEY = 'openVsCode.servedFolder';
 
 /**
- * Restarts the server (the command, the toolbar button and the webview's Restart button) and,
+ * Restarts the server (the command, its title bar entry and the webview's Restart button) and,
  * when nothing could be restarted, tells the user why instead of failing silently. With an
  * external target (issue #11) "restart" means reconnect: the external server is not ours to
  * restart, and the manager never answers `no-binary` in that case. From `not-started` (autoStart
