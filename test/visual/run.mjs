@@ -12239,13 +12239,27 @@ try {
           ),
         };
       });
+    // Brings the Sessions view of the side bar on screen. The OpenCode activity bar item TOGGLES:
+    // pressed while the side bar is already open on this container it closes it. After a Reload
+    // Window VS Code restores the open side bar before the extension draws the title actions of
+    // the view, so "no New Session button yet" does not mean "side bar closed": the item is pressed
+    // only when the side bar really has no width, and otherwise the view gets time to draw.
+    // Evidence (E9-chat-view-settings, 01/11/2026, `--steps 32,34`, probe run without the #133
+    // manifest change; the same FAIL reproduced with it): the probe printed "side bar w=300
+    // vis=true actions=[]" before the click and "w=0 vis=false" after it, and B9 failed with the
+    // side bar closed.
     const showSessions = async () => {
       const shows = async () =>
         (await sideState()).actions.some((label) => label.startsWith('New Session'));
-      if (!(await shows())) {
-        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
-        await waitFor(shows, 5_000, 100);
-      }
+      const sideBarOpen = () =>
+        page.evaluate(() => {
+          const side = globalThis.document.querySelector('.part.sidebar');
+          return side !== null && side.getBoundingClientRect().width > 0 && side.checkVisibility();
+        });
+      if (await shows()) return;
+      if ((await sideBarOpen()) && (await waitFor(shows, 15_000, 100))) return;
+      await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+      await waitFor(shows, 5_000, 100);
     };
     // The title bar of the view: the description that carries the filter, and the Clear Filters button.
     const headerState = () =>
