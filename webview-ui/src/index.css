@@ -1403,6 +1403,243 @@ button.jump-latest {
   flex: 0 0 auto;
 }
 
+/*
+ * ---------- OpenCode Settings tab (issue #128, E10) ----------
+ * Same bundle as the chat, another root. D5 language: a centered column of 380 px in a wide tab,
+ * the whole width when narrow (the column simply has no room to be centered), round 20px marks,
+ * grey descriptions, a primary and a secondary button per card. The cards reuse the `.setup-step`
+ * family of the setup guide. Colours are `--vscode-*` only and nothing is set through a `style`
+ * attribute. The error tone is a border and a background; the text stays in the foreground colour.
+ */
+.settings-root {
+  /* A size container: the title grows when the TAB is wide, whatever the window is. */
+  container-type: inline-size;
+  box-sizing: border-box;
+  padding: 24px 6px;
+  color: var(--vscode-foreground);
+}
+
+.settings-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 380px;
+  margin-inline: auto;
+}
+
+.settings-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+@container (min-width: 520px) {
+  .settings-title {
+    font-size: 20px;
+  }
+}
+
+.settings-subtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--vscode-descriptionForeground);
+}
+
+.settings-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+button.settings-tab {
+  padding: 4px 10px;
+  color: var(--vscode-foreground);
+  background: none;
+  border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--ovc-radius-md);
+}
+
+button.settings-tab[aria-selected='true'] {
+  font-weight: 600;
+  border-bottom-color: var(--vscode-panelTitle-activeBorder, var(--vscode-focusBorder));
+}
+
+button.settings-tab:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.settings-panel[hidden] {
+  display: none;
+}
+
+.settings-providers,
+.settings-mcp,
+.settings-methods {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-heading {
+  margin: 8px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vscode-descriptionForeground);
+}
+
+.settings-empty {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.settings-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--vscode-descriptionForeground);
+}
+
+.settings-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: var(--ovc-radius-md);
+}
+
+.settings-input::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+.settings-card:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+/* The 20px round mark of D5: a ring in the text colour with the icon inside. */
+.settings-mark {
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
+  border-radius: var(--ovc-radius-pill);
+}
+
+.settings-mark .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.settings-card[data-status='done'] .settings-mark {
+  color: var(--vscode-testing-iconPassed);
+  border-color: var(--vscode-testing-iconPassed);
+}
+
+.settings-card[data-status='failed'] .settings-mark {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-foreground));
+}
+
+.settings-card[data-status='attention'] {
+  background: var(--vscode-inputValidation-warningBackground);
+  border-color: var(--vscode-inputValidation-warningBorder, transparent);
+}
+
+button.settings-toggle {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 0;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: none;
+  border: 0;
+}
+
+.settings-connection,
+.settings-attempt,
+.settings-method {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-method-label {
+  font-weight: 600;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-label {
+  font-weight: 600;
+}
+
+.settings-code {
+  padding: 1px 4px;
+  font-family: var(--vscode-editor-font-family);
+  color: var(--vscode-foreground);
+  border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
+  border-radius: var(--ovc-radius-sm);
+}
+
+.settings-error {
+  white-space: pre-line;
+}
+
+.settings-resources {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-res-name {
+  font-family: var(--vscode-editor-font-family);
+}
+
+.settings-footer {
+  margin-top: 8px;
+}
+
+[class*='vscode-high-contrast'] .settings-input,
+[class*='vscode-high-contrast'] .settings-code,
+[class*='vscode-high-contrast'] .settings-mark,
+[class*='vscode-high-contrast'] button.settings-tab[aria-selected='true'] {
+  border-color: var(--vscode-contrastBorder);
+}
+
+[class*='vscode-high-contrast'] .settings-card[data-status='attention'] {
+  background: transparent;
+}
+
 /* ---------- request dock: permissions and questions (issues #18, #44) ---------- */
 
 .request-dock {
