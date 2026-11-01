@@ -30,6 +30,19 @@ affiliated with opencode or with Microsoft.
 
   ![A forked session with a "Forked from" crumb above the first exchange and the Fork from here button on the message](docs/images/fork-session.png)
 
+- **Organize the Sessions tree** (with `chatLocation` set to `editor`). Put sessions in **folders**
+  (and folders inside folders) by dragging the rows or with **Move to Folder…**, **Pin** the ones
+  you keep coming back to (they sit under **Pinned** at the top) and **Archive** the ones you are
+  done with (they go to a collapsed **Archived** section, and **Unarchive** brings them back to
+  their folder). A **Needs attention** section above them repeats the sessions that are running or
+  waiting for your answer, so they are never buried in a folder or an archive. **Filter
+  Sessions…** keeps only the running ones, the ones waiting for input or the ones open in a tab
+  (**Clear Filters** removes it), and the tooltip of a row shows its cost and tokens, its folder
+  and, for a session with a tab, how many files it changed. Archiving and folders only change how
+  the list looks: nothing is deleted from opencode, and **Search Sessions…** still finds archived
+  sessions and says so. Folders, pins and the archive are kept per workspace folder by VS Code (see
+  [Known limitations](#known-limitations)).
+
 - **Server status in the status bar.** An `OpenCode` item shows whether the server is starting,
   running (with the model a new session will use), not started or unavailable; click it to open the
   chat.
@@ -148,6 +161,13 @@ tab has no Sessions button: the tree is the one place to browse sessions. Insert
 selection write into the last text editor you used, and file links and diffs open outside the
 chat's group.
 
+To organize the list, right-click a session: **Pin**, **Move to Folder…** and **Archive** are there
+(select several rows to act on all of them, or drag them onto a folder). **New Folder…** is in the
+`…` menu of the view title and in the Command Palette; right-click a folder for **New Subfolder…**,
+**Rename Folder…** and **Delete Folder** (its sessions go back to the date groups, none is
+deleted). The funnel button in the title bar opens **Filter Sessions…**, and **Clear Filters**
+appears next to it while a filter is on. The filters live only in memory: a window reload clears them.
+
 To keep one chat in the side bar instead, set `openVsCode.chatLocation` to `sidebar` (Settings:
 Chat Location); the OpenCode view then is the **Chat** view, and the tabs you had open stay open.
 
@@ -186,6 +206,17 @@ Command Palette (they act on the active editor); the two Explorer entries are no
 | **OpenCode: Rename Session…** | Row of the Sessions list (shown while `chatLocation` is not `sidebar`; the default is `editor`): asks for a new title. Also the pencil on the row and `F2`; not in the Command Palette. |
 | **OpenCode: Delete Session** | Row of the Sessions list: after a confirmation, deletes the session for every opencode client and closes its tab. Also the bin on the row and `Delete`; not in the Command Palette. |
 | **OpenCode: Search Sessions…** | Searches the session titles on the server and opens the one you pick. Only offered while `chatLocation` is not `sidebar` (the default is `editor`). Also a button in the Sessions title bar. |
+| **OpenCode: New Folder…** | Creates a folder in the Sessions list to organize sessions in. Only offered while `chatLocation` is not `sidebar`. Also in the `…` menu of the Sessions title bar. |
+| **OpenCode: New Subfolder…** | Row menu of a folder: creates a folder inside it. Not in the Command Palette. |
+| **OpenCode: Rename Folder…** | Row menu of a folder: asks for a new name. Not in the Command Palette. |
+| **OpenCode: Delete Folder** | Row menu of a folder: after a confirmation, deletes the folder and its subfolders. The sessions inside go back to the date groups; no session is deleted. Not in the Command Palette. |
+| **OpenCode: Move to Folder…** | Row menu of a session (or of several selected): picks a folder, "No Folder" or a new folder. You can also drag the rows onto a folder. Not in the Command Palette. |
+| **OpenCode: Pin** | Row menu of a session: shows it under "Pinned" at the top of the list. Not in the Command Palette. |
+| **OpenCode: Unpin** | Row menu of a pinned session: puts it back. Not in the Command Palette. |
+| **OpenCode: Archive** | Row menu of a session: moves it to the collapsed "Archived" section at the end (its folder is remembered). Not in the Command Palette. |
+| **OpenCode: Unarchive** | Row menu of an archived session: brings it back to its folder or date group. Not in the Command Palette. |
+| **OpenCode: Filter Sessions…** | Shows only the sessions that are running, wait for your input or are open in a tab (the ones you tick are ORed). Only offered while `chatLocation` is not `sidebar`. Also a button in the Sessions title bar. |
+| **OpenCode: Clear Filters** | Turns the Sessions filters off. Offered only while a filter is on; also a button in the Sessions title bar. |
 | **Add to OpenCode Chat** | Explorer right-click menu: attaches the selected files to the prompt. |
 | **Add to OpenCode Chat** | Editor right-click menu: attaches the selection (the whole file when nothing is selected). |
 | **Explain with OpenCode** | Editor right-click menu: sends "Explain what @file#lines does." with the selection (or the file) attached. |
@@ -221,6 +252,14 @@ always `opencode`.
   depending on how VS Code is launched (for example, not from that shell). If the extension cannot
   find opencode, set `openVsCode.opencodePath` to the executable
   (`opencode.exe` on Windows).
+- The folders, pins and archive of the Sessions tree live in VS Code's workspace storage, not in
+  opencode, so the opencode TUI and other clients do not see them. VS Code ties that storage to the
+  folder's path and to when it was created: **moving or renaming the project folder, cloning it
+  again, or opening it by itself instead of through its `.code-workspace` file starts with an empty
+  organization and loses the one you had**, without a warning. In that case opencode also stops
+  listing the old sessions in this window, because it keeps each session under the exact folder
+  path it was created in; so the organization is the smaller loss. There is no export or import of
+  the organization yet.
 - "Allowed once" lines in the history do not survive **Developer: Reload Window**: opencode keeps no
   trace of a permission that was allowed once.
 - Dragging files from the Explorer onto the chat is reported not to work in VS Code 1.140 or later:

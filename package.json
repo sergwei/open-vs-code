@@ -91,6 +91,11 @@
         "view": "openVsCode.sessions",
         "contents": "Open a folder to see its OpenCode sessions.\n[Open Folder](command:workbench.action.files.openFolder)",
         "when": "openVsCode.sessionsState == noFolder"
+      },
+      {
+        "view": "openVsCode.sessions",
+        "contents": "No sessions match the filters.\n[Clear Filters](command:openVsCode.clearFilters)",
+        "when": "openVsCode.sessionsState == filteredEmpty"
       }
     ],
     "configuration": {
@@ -240,6 +245,72 @@
         "title": "Search Sessions…",
         "category": "OpenCode",
         "icon": "$(search)"
+      },
+      {
+        "command": "openVsCode.newFolder",
+        "title": "New Folder…",
+        "category": "OpenCode",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "openVsCode.newSubfolder",
+        "title": "New Subfolder…",
+        "category": "OpenCode",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "openVsCode.renameFolder",
+        "title": "Rename Folder…",
+        "category": "OpenCode",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "openVsCode.deleteFolder",
+        "title": "Delete Folder",
+        "category": "OpenCode",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "openVsCode.moveToFolder",
+        "title": "Move to Folder…",
+        "category": "OpenCode",
+        "icon": "$(folder-active)"
+      },
+      {
+        "command": "openVsCode.pinSession",
+        "title": "Pin",
+        "category": "OpenCode",
+        "icon": "$(pin)"
+      },
+      {
+        "command": "openVsCode.unpinSession",
+        "title": "Unpin",
+        "category": "OpenCode",
+        "icon": "$(pinned)"
+      },
+      {
+        "command": "openVsCode.archiveSession",
+        "title": "Archive",
+        "category": "OpenCode",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "openVsCode.unarchiveSession",
+        "title": "Unarchive",
+        "category": "OpenCode",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "openVsCode.filterSessions",
+        "title": "Filter Sessions…",
+        "category": "OpenCode",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "openVsCode.clearFilters",
+        "title": "Clear Filters",
+        "category": "OpenCode",
+        "icon": "$(clear-all)"
       }
     ],
     "keybindings": [
@@ -298,8 +369,23 @@
           "when": "view == openVsCode.sessions"
         },
         {
-          "command": "openVsCode.openSettings",
+          "command": "openVsCode.filterSessions",
           "group": "navigation@3",
+          "when": "view == openVsCode.sessions"
+        },
+        {
+          "command": "openVsCode.clearFilters",
+          "group": "navigation@4",
+          "when": "view == openVsCode.sessions && openVsCode.sessionsFiltered"
+        },
+        {
+          "command": "openVsCode.openSettings",
+          "group": "navigation@5",
+          "when": "view == openVsCode.sessions"
+        },
+        {
+          "command": "openVsCode.newFolder",
+          "group": "2_organize",
           "when": "view == openVsCode.sessions"
         },
         {
@@ -320,6 +406,31 @@
           "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/"
         },
         {
+          "command": "openVsCode.pinSession",
+          "group": "0_organize@1",
+          "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/ && viewItem =~ /^(?!.*\\b(pinned|archived)\\b)/"
+        },
+        {
+          "command": "openVsCode.unpinSession",
+          "group": "0_organize@1",
+          "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/ && viewItem =~ /\\bpinned\\b/"
+        },
+        {
+          "command": "openVsCode.moveToFolder",
+          "group": "0_organize@2",
+          "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/"
+        },
+        {
+          "command": "openVsCode.archiveSession",
+          "group": "0_organize@3",
+          "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/ && viewItem =~ /^(?!.*\\barchived\\b)/"
+        },
+        {
+          "command": "openVsCode.unarchiveSession",
+          "group": "0_organize@3",
+          "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/ && viewItem =~ /\\barchived\\b/"
+        },
+        {
           "command": "openVsCode.renameSession",
           "group": "1_modification@1",
           "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/"
@@ -328,6 +439,21 @@
           "command": "openVsCode.deleteSession",
           "group": "1_modification@2",
           "when": "view == openVsCode.sessions && viewItem =~ /\\bsession\\b/"
+        },
+        {
+          "command": "openVsCode.newSubfolder",
+          "group": "0_organize@1",
+          "when": "view == openVsCode.sessions && viewItem == folder"
+        },
+        {
+          "command": "openVsCode.renameFolder",
+          "group": "1_modification@1",
+          "when": "view == openVsCode.sessions && viewItem == folder"
+        },
+        {
+          "command": "openVsCode.deleteFolder",
+          "group": "1_modification@2",
+          "when": "view == openVsCode.sessions && viewItem == folder"
         }
       ],
       "explorer/context": [
@@ -379,6 +505,50 @@
         {
           "command": "openVsCode.searchSessions",
           "when": "config.openVsCode.chatLocation != sidebar"
+        },
+        {
+          "command": "openVsCode.newFolder",
+          "when": "config.openVsCode.chatLocation != sidebar"
+        },
+        {
+          "command": "openVsCode.filterSessions",
+          "when": "config.openVsCode.chatLocation != sidebar"
+        },
+        {
+          "command": "openVsCode.clearFilters",
+          "when": "config.openVsCode.chatLocation != sidebar && openVsCode.sessionsFiltered"
+        },
+        {
+          "command": "openVsCode.newSubfolder",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.renameFolder",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.deleteFolder",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.moveToFolder",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.pinSession",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.unpinSession",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.archiveSession",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.unarchiveSession",
+          "when": "false"
         }
       ]
     }

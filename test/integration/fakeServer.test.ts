@@ -37,11 +37,17 @@ import {
   ADD_TO_CHAT_COMMAND_ID,
   EXPLAIN_FILES_COMMAND_ID,
   EXPLAIN_SELECTION_COMMAND_ID,
+  ARCHIVE_SESSION_COMMAND_ID,
+  DELETE_FOLDER_COMMAND_ID,
   DELETE_SESSION_COMMAND_ID,
   FIX_SELECTION_COMMAND_ID,
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
+  MOVE_TO_FOLDER_COMMAND_ID,
+  NEW_FOLDER_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
+  NEW_SUBFOLDER_COMMAND_ID,
   OPEN_SESSION_COMMAND_ID,
+  PIN_SESSION_COMMAND_ID,
   RENAME_SESSION_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
   RESTART_SERVER_COMMAND_ID,
@@ -50,6 +56,9 @@ import {
   SHOW_REQUEST_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
   TEST_SESSION_ANSWERS_COMMAND_ID,
+  TEST_SESSION_ORGANIZATION_COMMAND_ID,
+  UNARCHIVE_SESSION_COMMAND_ID,
+  UNPIN_SESSION_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
 import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
@@ -1470,7 +1479,11 @@ describe('fake server', function () {
   /**
    * The native Sessions tree (issue #77, delivery E3) against the synthetic server: what the model
    * lists (read from the stable log line `sessions view: N rows (more: …)`, the tree itself is not
-   * readable by the test API), and the commands behind its rows: open, repeat, rename, delete.
+   * readable by the test API), and the commands behind its rows: open, repeat, rename, delete. Since
+   * E9-sessions-organize also the organizing commands (folders, move, pin, archive) and the
+   * pruning of a deleted session, read back from the real workspaceState; the filters and the
+   * welcome of an empty filter are NOT covered here (a context key and a tree description are
+   * out of the test API's reach): Vitest for the model, `test:visual` step 34 for the screen.
    *
    * Protects: the 5th read of the full resync and the session events reaching the model; the open
    * rule (a session with a tab is revealed, never duplicated); Rename and Delete going through the
@@ -1597,6 +1610,192 @@ describe('fake server', function () {
       await log.waitFor('chat tab closed (pane', 8_000);
       await waitForChatTabs(0);
       await log.waitFor(`sessions view: ${String(rowsBefore - 1)} rows`, 8_000);
+    });
+
+    /** The part of the organization these cases read back from the REAL workspaceState. */
+    interface StoredOrganization {
+      folders: Record<string, { name: string; parent?: string }>;
+      placement: Record<string, string>;
+      pinned: Record<string, number>;
+      archived: Record<string, number>;
+    }
+
+    /** What the real Memento holds for the served folder (the Test command waits for the writes). */
+    async function storedOrganization(): Promise<StoredOrganization> {
+      const result = await vscode.commands.executeCommand<{
+        folder?: string;
+        stored?: StoredOrganization;
+      }>(TEST_SESSION_ORGANIZATION_COMMAND_ID);
+      return result.stored ?? { folders: {}, placement: {}, pinned: {}, archived: {} };
+    }
+
+    /** Pre-answers the NEXT dialog(s) of the organizing commands. */
+    async function answer(answers: Record<string, unknown>): Promise<void> {
+      await vscode.commands.executeCommand(TEST_SESSION_ANSWERS_COMMAND_ID, answers);
+    }
+
+    /** A tree argument as VS Code passes it for a session row. */
+    const rowOf = (sessionID: string): { kind: 'session'; sessionID: string } => ({
+      kind: 'session',
+      sessionID,
+    });
+
+    /**
+     * The organizing commands of E9-sessions-organize against the synthetic server and the REAL
+     * workspaceState: a folder, a subfolder inside it, a session moved into the subfolder, pinned,
+     * archived (the folder is kept) and unarchived, then the folder deleted (declined, then
+     * confirmed) taking the subfolder with it and no session. The dialogs are replaced by
+     * `TEST_SESSION_ANSWERS_COMMAND_ID`: this does NOT show that the real input box, QuickPick and
+     * modal work, nor the drag (`test:visual` step 34). The state is read back through the Test
+     * command from the real Memento. Provenance: SYNTHETIC server; the session ids are the fixture's.
+     */
+    it('organizes sessions in folders, pins and archives them, and deleting a folder deletes no session', async function () {
+      const sessionID = await newAnsweredSession('Org77 one');
+      const log = await openLogCursor();
+      await toEditorWithoutTabs(log);
+
+      await answer({ folderName: 'Org77 Docs' });
+      const docs = await vscode.commands.executeCommand<string | undefined>(NEW_FOLDER_COMMAND_ID);
+      assert.ok(docs, 'New Folder… created nothing');
+      await answer({ folderName: 'Org77 Sub' });
+      const sub = await vscode.commands.executeCommand<string | undefined>(
+        NEW_SUBFOLDER_COMMAND_ID,
+        docs,
+      );
+      assert.ok(sub, 'New Subfolder… created nothing');
+      let stored = await storedOrganization();
+      assert.strictEqual(stored.folders[docs]?.name, 'Org77 Docs');
+      assert.strictEqual(stored.folders[sub]?.parent, docs);
+
+      await answer({ pickFolder: ['Org77 Docs', 'Org77 Sub'] });
+      await vscode.commands.executeCommand(MOVE_TO_FOLDER_COMMAND_ID, sessionID);
+      stored = await storedOrganization();
+      assert.strictEqual(stored.placement[sessionID], sub, 'the session was not placed in Sub');
+
+      await vscode.commands.executeCommand(PIN_SESSION_COMMAND_ID, sessionID);
+      stored = await storedOrganization();
+      assert.strictEqual(typeof stored.pinned[sessionID], 'number');
+
+      await vscode.commands.executeCommand(ARCHIVE_SESSION_COMMAND_ID, sessionID);
+      stored = await storedOrganization();
+      assert.strictEqual(typeof stored.archived[sessionID], 'number');
+      assert.strictEqual(stored.pinned[sessionID], undefined, 'archiving kept the pin');
+      assert.strictEqual(stored.placement[sessionID], sub, 'archiving dropped the folder');
+
+      await vscode.commands.executeCommand(UNARCHIVE_SESSION_COMMAND_ID, sessionID);
+      stored = await storedOrganization();
+      assert.strictEqual(stored.archived[sessionID], undefined);
+      assert.strictEqual(stored.placement[sessionID], sub, 'unarchiving lost the folder');
+      await log.waitFor('sessions organization: ', 8_000);
+
+      log.mark();
+      await answer({ confirmFolderDelete: false });
+      await vscode.commands.executeCommand(DELETE_FOLDER_COMMAND_ID, docs);
+      await log.waitFor(`folder delete cancelled ${docs}`, 8_000);
+      await sleep(SETTLE_MS);
+      stored = await storedOrganization();
+      assert.ok(stored.folders[docs], 'a declined delete removed the folder');
+
+      await answer({ confirmFolderDelete: true });
+      await vscode.commands.executeCommand(DELETE_FOLDER_COMMAND_ID, docs);
+      stored = await storedOrganization();
+      assert.strictEqual(stored.folders[docs], undefined);
+      assert.strictEqual(stored.folders[sub], undefined, 'the subfolder survived its parent');
+      assert.strictEqual(stored.placement[sessionID], undefined, 'the session stayed placed');
+      log.assertAbsent(`session deleted ${sessionID}`);
+    });
+
+    /**
+     * A session that is deleted leaves the organization too (the `session.removed` event prunes
+     * it), without the server being asked for anything else. "Another client" is the host's own
+     * Delete here, as in the cases above, and it publishes the same event. The stable log line
+     * `sessions organization: F folders, P pinned, A archived, M placed` must show the new counts.
+     * Provenance: SYNTHETIC server.
+     */
+    it('forgets the organization of a session that is deleted', async function () {
+      const sessionID = await newAnsweredSession('Org77 two');
+      const log = await openLogCursor();
+      await toEditorWithoutTabs(log);
+      await answer({ folderName: 'Org77 Gone' });
+      const folder = await vscode.commands.executeCommand<string | undefined>(
+        NEW_FOLDER_COMMAND_ID,
+      );
+      assert.ok(folder);
+      await answer({ pickFolder: ['Org77 Gone'] });
+      await vscode.commands.executeCommand(MOVE_TO_FOLDER_COMMAND_ID, sessionID);
+      await vscode.commands.executeCommand(PIN_SESSION_COMMAND_ID, sessionID);
+      const before = await storedOrganization();
+      assert.strictEqual(before.placement[sessionID], folder);
+      assert.strictEqual(typeof before.pinned[sessionID], 'number');
+
+      log.mark();
+      await answer({ confirmDelete: true });
+      await vscode.commands.executeCommand(DELETE_SESSION_COMMAND_ID, sessionID);
+      await log.waitFor(`session deleted ${sessionID}`, 8_000);
+      const deadline = Date.now() + 8_000;
+      let after = await storedOrganization();
+      while (after.placement[sessionID] !== undefined || after.pinned[sessionID] !== undefined) {
+        assert.ok(Date.now() < deadline, 'the deleted session stayed in the organization');
+        await sleep(100);
+        after = await storedOrganization();
+      }
+      const counts = (org: StoredOrganization): string =>
+        `${String(Object.keys(org.folders).length)} folders, ${String(Object.keys(org.pinned).length)} pinned, ${String(Object.keys(org.archived).length)} archived, ${String(Object.keys(org.placement).length)} placed`;
+      await log.waitFor(`sessions organization: ${counts(after)}`, 8_000);
+      assert.strictEqual(
+        Object.keys(after.placement).length,
+        Object.keys(before.placement).length - 1,
+      );
+
+      await answer({ confirmFolderDelete: true });
+      await vscode.commands.executeCommand(DELETE_FOLDER_COMMAND_ID, folder);
+    });
+
+    /**
+     * Risk R5 of the plan (`canSelectMany`): VS Code passes `(clicked, selected)`. Pin acts on the
+     * whole selection when the clicked row is part of it and on the clicked row alone when it is
+     * not; Rename keeps acting on the clicked row only, never on the other selected rows.
+     * Provenance: SYNTHETIC server; the arguments are built by hand as VS Code builds them, since
+     * the test API cannot select rows of a tree.
+     */
+    it('pins the whole selection but renames only the clicked row', async function () {
+      const a = await newAnsweredSession('Org77 sel a');
+      const b = await newAnsweredSession('Org77 sel b');
+      const c = await newAnsweredSession('Org77 sel c');
+      const log = await openLogCursor();
+      await toEditorWithoutTabs(log);
+
+      await vscode.commands.executeCommand(PIN_SESSION_COMMAND_ID, rowOf(a), [rowOf(a), rowOf(b)]);
+      let stored = await storedOrganization();
+      assert.ok(stored.pinned[a] !== undefined && stored.pinned[b] !== undefined);
+      assert.strictEqual(stored.pinned[c], undefined);
+      await vscode.commands.executeCommand(PIN_SESSION_COMMAND_ID, rowOf(c), [rowOf(a), rowOf(b)]);
+      stored = await storedOrganization();
+      assert.ok(
+        stored.pinned[c] !== undefined,
+        'the clicked row outside the selection was not pinned',
+      );
+
+      log.mark();
+      await answer({ title: 'Org77 renamed a' });
+      await vscode.commands.executeCommand(RENAME_SESSION_COMMAND_ID, rowOf(a), [
+        rowOf(a),
+        rowOf(b),
+      ]);
+      await log.waitFor(`session renamed ${a}`, 8_000);
+      await sleep(SETTLE_MS);
+      log.assertAbsent(`session renamed ${b}`);
+
+      await vscode.commands.executeCommand(UNPIN_SESSION_COMMAND_ID, rowOf(a), [
+        rowOf(a),
+        rowOf(b),
+        rowOf(c),
+      ]);
+      stored = await storedOrganization();
+      assert.deepStrictEqual(
+        [a, b, c].map((id) => stored.pinned[id]),
+        [undefined, undefined, undefined],
+      );
     });
   });
 

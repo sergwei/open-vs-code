@@ -710,6 +710,20 @@ describe('createSessionDiffs: loading the list', () => {
     module.reset();
     expect(module.target('ses_1', 'src/a.ts')).toEqual({ ok: false, reason: 'session not open' });
   });
+
+  // E9-sessions-organize (Q8=1): the tooltip of the Sessions tree reads the size of the list the
+  // tab already holds, with no request of its own. FABRICATED scenario: one listed file.
+  it('counts the files of the held list, and knows nothing before a load or after a forget', async () => {
+    const { module, reads } = build({ rows: [row('src/a.ts', 'deleted')] });
+    expect(module.count('ses_1')).toBeUndefined();
+    await module.request('ses_1');
+    const readsAfterLoad = reads.length;
+    expect(module.count('ses_1')).toBe(1);
+    expect(module.count('ses_other')).toBeUndefined();
+    expect(reads).toHaveLength(readsAfterLoad);
+    module.forget('ses_1');
+    expect(module.count('ses_1')).toBeUndefined();
+  });
 });
 
 describe('createSessionDiffs: what may be opened', () => {

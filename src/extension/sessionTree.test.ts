@@ -4,7 +4,11 @@
 // request of a child that nobody sees on its root, a repaint for every usage tick of a streaming
 // turn, a "Today" group that never turns into "Yesterday", and a description that puts the time
 // before the state (the state comes first so that, when the title leaves room for a description at
-// all, the state is what shows; with a long title VS Code hides the whole description).
+// all, the state is what shows; with a long title VS Code hides the whole description). Plan
+// E9-sessions-organize adds: the order of sections, folders and dates (a session has one home), the
+// "Needs attention" shortcut that leaves the home row in place, OR filters, `adopt`/`orphans` for
+// organized sessions outside the page, and a tooltip (cost, tokens, changed files, folder) that is
+// outside the projection so a usage tick repaints nothing.
 //
 // Provenance: FABRICATED rows and events shaped like the protocol's (`SessionSummary`,
 // `session.upserted|removed|status`). They prove the logic of the model; that a real server sends
@@ -14,6 +18,14 @@
 // machine. The deliberately fixed `NOW` is Wednesday 21 Oct 2026, 15:30.
 import { describe, expect, it } from 'vitest';
 import type { SessionStatus, SessionSummary } from '../shared/model';
+import {
+  archiveSessions,
+  createFolder,
+  emptyOrganization,
+  moveSessions,
+  pinSessions,
+  type SessionOrganization,
+} from './sessionOrganization';
 import {
   createSessionTree,
   msUntilNextLocalMidnight,
@@ -57,9 +69,20 @@ function loaded(
   return tree;
 }
 
-/** The session rows of a projection, flattened, in display order. */
+/** Every session row of a projection, shortcuts included, flattened in display order. */
+const everySession = (nodes: readonly SessionTreeNode[]): SessionTreeSession[] =>
+  nodes.flatMap((node) => {
+    if (node.kind === 'session') return [node];
+    return node.kind === 'group' || node.kind === 'section' || node.kind === 'folder'
+      ? everySession(node.children)
+      : [];
+  });
+/** The HOME rows only (the "Needs attention" duplicates left out), in display order. */
 const sessions = (nodes: SessionTreeNode[]): SessionTreeSession[] =>
-  nodes.flatMap((node) => (node.kind === 'group' ? node.children : []));
+  everySession(nodes).filter((node) => !node.shortcut);
+/** The ids of a list of nodes, to compare orders. */
+const sessionIDsOf = (nodes: readonly SessionTreeNode[]): string[] =>
+  everySession(nodes).map((node) => node.sessionID);
 const ids = (tree: ReturnType<typeof loaded>): string[] =>
   sessions(tree.project()).map((node) => node.sessionID);
 const only = (tree: ReturnType<typeof loaded>, id: string): SessionTreeSession => {
@@ -196,12 +219,341 @@ describe('groups and rows', () => {
       { statuses: { a: BUSY } },
     );
     tree.setTabs(['a']);
-    const lines = only(tree, 'a').tooltip.split('\n');
+    const lines = (tree.tooltipOf('a') ?? '').split('\n');
     expect(lines[0]).toBe('Title a');
     expect(lines[1]).toBe('Running · open in a tab');
     expect(lines[2]).toMatch(/^Last activity: .*14:32/u);
     expect(lines[3]).toMatch(/^Created: /u);
     expect(lines[4]).toBe('build · anthropic/claude-sonnet-4-5');
+    expect(lines).toHaveLength(5); // no usage, no changed files, no folder: no such lines
+    expect(tree.tooltipOf('ghost')).toBeUndefined();
+  });
+});
+
+const USAGE = {
+  cost: 1234.5,
+  tokens: { input: 182340, output: 4210, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+};
+
+describe('tooltip: usage, changed files and folder', () => {
+  it('writes cost and tokens with the number format of the locale, only when the row has usage', () => {
+    const tree = loaded([row('a', at(21, 9), { usage: USAGE }), row('b', at(21, 8))]);
+    const lines = (tree.tooltipOf('a') ?? '').split('\n');
+    expect(lines.at(-1)).toBe('Cost: 1.234,50 $ · Tokens: 182.340 in · 4.210 out');
+    expect(tree.tooltipOf('b')).not.toContain('Cost');
+    expect(tree.tooltipOf('a', 'en-US')).toContain(
+      'Cost: $1,234.50 · Tokens: 182,340 in · 4,210 out',
+    );
+  });
+
+  it('keeps four decimals for a cost under one cent so it does not read as zero', () => {
+    const cheap = { ...USAGE, cost: 0.0042 };
+    const tree = loaded([row('a', at(21, 9), { usage: cheap })]);
+    expect(tree.tooltipOf('a', 'en-US')).toContain('Cost: $0.0042');
+  });
+
+  it('adds the changed files only when the caller knows the count, zero included', () => {
+    const tree = loaded([row('a', at(21, 9))]);
+    expect(tree.tooltipOf('a')).not.toContain('Changed files');
+    expect(tree.tooltipOf('a', undefined, 3)).toContain('\nChanged files: 3');
+    expect(tree.tooltipOf('a', undefined, 0)).toContain('\nChanged files: 0');
+  });
+
+  it('names the folder path of a placed session and nothing for a loose one', () => {
+    const tree = loaded([row('a', at(21, 9)), row('b', at(21, 8))]);
+    tree.setOrganization(organize());
+    expect((tree.tooltipOf('a') ?? '').split('\n').at(-1)).toBe('Folder: Spikes / SSE');
+    expect(tree.tooltipOf('b')).not.toContain('Folder');
+  });
+});
+
+/** Spikes > SSE holding `a`; Docs empty. */
+function organize(extra: (org: SessionOrganization) => SessionOrganization = (o) => o) {
+  let org = emptyOrganization();
+  for (const [id, name, parent] of [
+    ['spikes', 'Spikes', undefined],
+    ['sse', 'SSE', 'spikes'],
+    ['docs', 'Docs', undefined],
+  ] as const) {
+    const made = createFolder(org, id, name, parent);
+    if (!made.ok) throw new Error('fixture refused');
+    org = made.org;
+  }
+  const moved = moveSessions(org, ['a'], 'sse');
+  if (!moved.ok) throw new Error('fixture refused');
+  return extra(moved.org);
+}
+
+/** Top-level nodes as `kind:label` strings, to read the order of the sections. */
+const outline = (tree: ReturnType<typeof loaded>): string[] =>
+  tree.project().map((node) => (node.kind === 'more' ? 'more' : `${node.kind}:${node.label}`));
+
+describe('sections, folders and order', () => {
+  it('orders needs attention, pinned, folders (alphabetical), dates, more and archived', () => {
+    const tree = loaded(
+      [
+        row('a', at(21, 14)),
+        row('run', at(21, 13)),
+        row('pin', at(21, 12)),
+        row('loose', at(21, 11)),
+        row('old', at(20, 11)),
+        row('arch', at(21, 10)),
+      ],
+      { statuses: { run: BUSY }, hasMore: true },
+    );
+    tree.setOrganization(
+      organize((org) => archiveSessions(pinSessions(org, ['pin'], 1), ['arch'], 2)),
+    );
+    expect(outline(tree)).toEqual([
+      'section:Needs attention',
+      'section:Pinned',
+      'folder:Docs',
+      'folder:Spikes',
+      'group:Today',
+      'group:Yesterday',
+      'more',
+      'section:Archived',
+    ]);
+  });
+
+  it('files a session in its folder only, not also under its date; subfolders come first', () => {
+    const tree = loaded([row('a', at(21, 14)), row('s', at(21, 13)), row('loose', at(21, 11))]);
+    tree.setOrganization(
+      organize((org) => {
+        const moved = moveSessions(org, ['s'], 'spikes');
+        if (!moved.ok) throw new Error('fixture refused');
+        return moved.org;
+      }),
+    );
+    const nodes = tree.project();
+    const spikes = nodes.find((n) => n.kind === 'folder' && n.folderID === 'spikes');
+    if (spikes?.kind !== 'folder') throw new Error('no Spikes');
+    expect(spikes.description).toBe('2');
+    expect(spikes.children.map((c) => c.kind)).toEqual(['folder', 'session']);
+    const group = nodes.find((n) => n.kind === 'group');
+    expect(group?.kind === 'group' ? group.children.map((c) => c.sessionID) : []).toEqual([
+      'loose',
+    ]);
+    expect(ids(tree)).toEqual(['a', 's', 'loose']); // every session exactly once
+    expect(only(tree, 'a').contextValue).toBe('session;foldered');
+    expect(only(tree, 'loose').contextValue).toBe('session');
+  });
+
+  it('shows an empty folder with a zero, and sorts folders with the locale', () => {
+    const tree = loaded([row('a', at(21, 14))]);
+    tree.setOrganization(organize());
+    const docs = tree.project().find((n) => n.kind === 'folder' && n.label === 'Docs');
+    expect(docs?.kind === 'folder' ? docs.description : '').toBe('0');
+  });
+
+  it('pinned goes by activity and leaves its folder; archived leaves folders and dates', () => {
+    const tree = loaded([row('a', at(21, 9)), row('b', at(21, 12)), row('c', at(21, 10))]);
+    tree.setOrganization(organize((org) => pinSessions(pinSessions(org, ['a'], 5), ['b'], 6)));
+    const pinned = tree.project().find((n) => n.kind === 'section' && n.section === 'pinned');
+    expect(pinned?.kind === 'section' ? pinned.children.map((c) => c.sessionID) : []).toEqual([
+      'b',
+      'a',
+    ]);
+    expect(only(tree, 'a').contextValue).toBe('session;pinned;foldered');
+    const spikes = tree.project().find((n) => n.kind === 'folder' && n.folderID === 'spikes');
+    expect(spikes?.kind === 'folder' ? spikes.description : '').toBe('0'); // `a` is in Pinned
+  });
+
+  it('puts an archived session only in Archived, collapsed last, and gives it its context value', () => {
+    const tree = loaded([row('a', at(21, 9)), row('b', at(21, 8))]);
+    tree.setOrganization(organize((org) => archiveSessions(org, ['a'], 5)));
+    const nodes = tree.project();
+    const last = nodes.at(-1);
+    expect(last?.kind === 'section' ? [last.section, last.description] : []).toEqual([
+      'archived',
+      '1',
+    ]);
+    expect(only(tree, 'a').contextValue).toBe('session;archived;foldered');
+    const spikes = nodes.find((n) => n.kind === 'folder' && n.folderID === 'spikes');
+    expect(spikes?.kind === 'folder' ? spikes.description : '').toBe('0');
+    // unarchiving puts it back in its folder
+    tree.setOrganization(organize());
+    expect(tree.project().at(-1)?.kind).not.toBe('section');
+  });
+
+  it('survives a placement into a folder that no longer exists and a corrupt folder loop', () => {
+    const tree = loaded([row('a', at(21, 9))]);
+    tree.setOrganization({
+      version: 1,
+      folders: { x: { name: 'X', parent: 'y' }, y: { name: 'Y', parent: 'x' } },
+      placement: { a: 'ghost' },
+      pinned: {},
+      archived: {},
+    });
+    expect(ids(tree)).toEqual(['a']); // falls back to its date group
+    expect(outline(tree)).toEqual(['group:Today']);
+  });
+});
+
+describe('needs attention', () => {
+  it('lists running and waiting sessions as shortcuts while the home row stays put', () => {
+    const tree = loaded(
+      [
+        row('run', at(21, 14)),
+        row('ask', at(21, 13)),
+        row('fail', at(21, 12)),
+        row('idle', at(21, 11)),
+      ],
+      { statuses: { run: BUSY, fail: FAILED } },
+    );
+    tree.setPending([{ sessionID: 'ask' }]);
+    const nodes = tree.project();
+    const section = nodes[0];
+    if (section?.kind !== 'section') throw new Error('no section');
+    expect(section.label).toBe('Needs attention');
+    expect(section.description).toBe('2');
+    expect(section.children.map((c) => [c.id, c.shortcut, c.group])).toEqual([
+      ['attention:run', true, undefined],
+      ['attention:ask', true, undefined],
+    ]);
+    expect(sessionIDsOf(nodes)).toEqual(['run', 'ask', 'run', 'ask', 'fail', 'idle']);
+    expect(ids(tree)).toEqual(['run', 'ask', 'fail', 'idle']); // the homes, "Failed" not promoted
+    expect(only(tree, 'run').id).toBe('session:run');
+  });
+
+  it('marks the root when a request belongs to a child, and keeps an archived one visible', () => {
+    const tree = loaded([row('root', at(21, 12)), row('arch', at(21, 11))]);
+    tree.event({ type: 'session.upserted', session: row('kid', at(21, 12), { parentID: 'root' }) });
+    tree.setPending([{ sessionID: 'kid' }, { sessionID: 'arch' }]);
+    tree.setOrganization(archiveSessions(emptyOrganization(), ['arch'], 1));
+    const section = tree.project()[0];
+    expect(section?.kind === 'section' ? section.children.map((c) => c.id) : []).toEqual([
+      'attention:root',
+      'attention:arch',
+    ]);
+    expect(tree.project().at(-1)?.kind).toBe('section'); // and still listed in Archived
+  });
+
+  it('has no section when nothing runs or waits', () => {
+    const tree = loaded([row('a', at(21, 12))]);
+    expect(outline(tree)).toEqual(['group:Today']);
+    tree.event({ type: 'session.status', sessionID: 'a', status: BUSY });
+    expect(outline(tree)).toEqual(['section:Needs attention', 'group:Today']);
+    tree.event({ type: 'session.status', sessionID: 'a', status: { type: 'idle' } });
+    expect(outline(tree)).toEqual(['group:Today']);
+  });
+});
+
+describe('filters', () => {
+  const ALL = { running: false, needsInput: false, tab: false };
+
+  /** run (busy), ask (request), tab (open tab), idle; a folder `Docs` with `idle` and an empty `Empty`. */
+  function filterable() {
+    const tree = loaded(
+      [
+        row('run', at(21, 14)),
+        row('ask', at(21, 13)),
+        row('tab', at(21, 12)),
+        row('idle', at(21, 11)),
+      ],
+      { statuses: { run: BUSY } },
+    );
+    tree.setPending([{ sessionID: 'ask' }]);
+    tree.setTabs(['tab']);
+    let org = emptyOrganization();
+    for (const [id, name] of [
+      ['docs', 'Docs'],
+      ['empty', 'Empty'],
+    ] as const) {
+      const made = createFolder(org, id, name);
+      if (!made.ok) throw new Error('fixture refused');
+      org = made.org;
+    }
+    const moved = moveSessions(org, ['idle'], 'docs');
+    if (!moved.ok) throw new Error('fixture refused');
+    tree.setOrganization(moved.org);
+    return tree;
+  }
+
+  it('combines the filters that are on with OR and says what it filters', () => {
+    const tree = filterable();
+    expect(tree.filterDescription()).toBeUndefined();
+    expect(tree.setFilters({ ...ALL, running: true })).toBe(true);
+    expect(ids(tree)).toEqual(['run']);
+    expect(tree.filterDescription()).toBe('Filtered: Running');
+    tree.setFilters({ running: true, needsInput: true, tab: true });
+    expect(ids(tree)).toEqual(['run', 'ask', 'tab']);
+    expect(tree.filterDescription()).toBe('Filtered: Running · Needs input · Open in a tab');
+    tree.setFilters({ ...ALL, tab: true });
+    expect(tree.filterDescription()).toBe('Filtered: Open in a tab');
+    expect(tree.filters()).toEqual({ ...ALL, tab: true });
+  });
+
+  it('hides folders with nothing that matches while filtering, and shows them all again after', () => {
+    const tree = filterable();
+    expect(outline(tree)).toContain('folder:Empty');
+    tree.setFilters({ ...ALL, running: true });
+    expect(outline(tree)).toEqual(['section:Needs attention', 'group:Today']);
+    expect(tree.setFilters({ ...ALL })).toBe(true);
+    expect(outline(tree)).toContain('folder:Empty');
+    expect(outline(tree)).toContain('folder:Docs');
+  });
+
+  it('reports a filter with no match as filteredEmpty, but not an empty tree or no filter', () => {
+    const tree = filterable();
+    expect(tree.filteredEmpty()).toBe(false);
+    tree.setFilters({ ...ALL, running: true });
+    expect(tree.filteredEmpty()).toBe(false);
+    tree.event({ type: 'session.status', sessionID: 'run', status: { type: 'idle' } });
+    expect(tree.filteredEmpty()).toBe(true);
+    expect(tree.project().some((n) => n.kind === 'group')).toBe(false);
+    expect(loaded([]).filteredEmpty()).toBe(false);
+    const empty = loaded([]);
+    empty.setFilters({ ...ALL, running: true });
+    expect(empty.filteredEmpty()).toBe(false); // no rows at all: the plain empty welcome applies
+  });
+});
+
+describe('adopt and orphans', () => {
+  it('keeps adopted sessions across a reset while they are older than the page', () => {
+    const tree = loaded([row('n1', at(21, 12))], { hasMore: true });
+    expect(tree.adopt([row('old', at(1, 12)), row('kid', at(1, 13), { parentID: 'n1' })])).toBe(
+      true,
+    );
+    expect(ids(tree)).toEqual(['n1', 'old']);
+    expect(tree.summary()).toEqual({ rows: 2, more: true }); // "more" is untouched
+    tree.reset({ folder: 'C:\\work', rows: [row('n1', at(21, 12))], statuses: {}, hasMore: true });
+    expect(ids(tree)).toEqual(['n1', 'old']);
+    // when the page turns out to be the whole list, nothing is kept
+    tree.reset({ folder: 'C:\\work', rows: [row('n1', at(21, 12))], statuses: {}, hasMore: false });
+    expect(ids(tree)).toEqual(['n1']);
+  });
+
+  it('says what to forget when the page is the whole list, with no request', () => {
+    const tree = loaded([row('a', at(21, 12))]);
+    tree.setOrganization(pinSessions(archiveSessions(organize(), ['arch'], 1), ['gone'], 1));
+    const found = tree.orphans({ rows: [row('a', at(21, 12))], hasMore: false });
+    expect(found.deleted.sort()).toEqual(['arch', 'gone']);
+    expect(found.toRead).toEqual([]);
+  });
+
+  /**
+   * Protects a session that arrives by `session.upserted` after the last full page and is then
+   * organized: `applyLocation` reconciles with that old page when the user returns to editor mode,
+   * and it must not be forgotten (review BLOCKER B1). Synthetic events (the model only).
+   */
+  it('does not call deleted a session the tree holds that the old page lacks', () => {
+    const tree = loaded([row('a', at(21, 12))]);
+    tree.event({ type: 'session.upserted', session: row('s', at(21, 13)) });
+    tree.setOrganization(pinSessions(organize(), ['s', 'gone'], 1));
+    const found = tree.orphans({ rows: [row('a', at(21, 12))], hasMore: false });
+    expect(found.deleted).toEqual(['gone']);
+  });
+
+  it('asks to read only the organized sessions it does not hold when the page is partial', () => {
+    const tree = loaded([row('a', at(21, 12))], { hasMore: true });
+    tree.append([row('held', at(10, 12))], true);
+    tree.setOrganization(pinSessions(archiveSessions(organize(), ['far', 'held'], 1), ['gone'], 1));
+    const found = tree.orphans({ rows: [row('a', at(21, 12))], hasMore: true });
+    expect(found.deleted).toEqual([]);
+    expect(found.toRead.sort()).toEqual(['far', 'gone']);
+    tree.adopt([row('far', at(2, 12))]);
+    expect(tree.orphans({ rows: [row('a', at(21, 12))], hasMore: true }).toRead).toEqual(['gone']);
   });
 });
 
@@ -334,6 +686,15 @@ describe('events', () => {
     );
     expect(tree.setTabs([])).toBe(false);
     expect(tree.setPending([])).toBe(false);
+  });
+
+  // Regression for the tooltip leaving the projection: it used to hold the cost, so every
+  // `session.usage.updated` of a turn repainted the whole tree (risk R4 of E3).
+  it('does not report a change when only the usage of a row moves, and the tooltip follows it', () => {
+    const tree = loaded([row('a', at(21, 12), { usage: USAGE })]);
+    const moved = row('a', at(21, 12), { usage: { ...USAGE, cost: 2000 } });
+    expect(tree.event({ type: 'session.upserted', session: moved })).toBe(false);
+    expect(tree.tooltipOf('a', 'en-US')).toContain('Cost: $2,000.00');
   });
 });
 

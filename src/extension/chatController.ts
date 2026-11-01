@@ -154,6 +154,19 @@ import {
 /** How many sessions the snapshot asks for (the API default is 50; ours, kept explicit). */
 const SESSION_LIMIT = 50;
 
+/**
+ * The most organized sessions {@link ChatController.readSessions} reads in one call (E9-sessions-
+ * organize, decision Q12=1). Own choice: it keeps a folder-heavy window from firing thousands of
+ * local GETs on every reconnection; nobody measured how many a real user organizes. It keeps the
+ * FIRST 200 ids in the order they arrive, which is the one of `organizedSessionIDs` (placed, then
+ * pinned, then archived): the organization stores no date for a placement, so "most recently
+ * organized" cannot be computed, and the ones past the cap stay unread until the tree gets them.
+ */
+const MAX_RESOLVED_SESSIONS = 200;
+
+/** How many `session.get` of {@link ChatController.readSessions} run at once (own choice, Q12=1). */
+const RESOLVE_CONCURRENCY = 4;
+
 /** How many messages of the open session the snapshot asks for (the API maximum is 200). */
 const MESSAGE_LIMIT = 200;
 
@@ -4424,6 +4437,77 @@ export class ChatController {
     this.translator.mirror(page.rows);
     this.log.debug(`sessions search (${String(page.rows.length)} found)`);
     return { rows: page.rows, hasMore: page.hasMore };
+  }
+
+  /**
+   * Reads, one by one, the sessions the user organized that the first page of the tree did not
+   * bring (E9-sessions-organize, decision Q12=1), so a folder lists everything it holds. At most
+   * {@link MAX_RESOLVED_SESSIONS} distinct ids (the first ones received, not the most recently
+   * organized), {@link RESOLVE_CONCURRENCY} requests at a time.
+   * `found` are the ROOT rows the server returned (mirrored in the translator, so a later rename
+   * reaches the sink); `missing` are ONLY the ids the server answered `SessionNotFoundError` for,
+   * which the caller may forget. Any other failure (network, 5xx) leaves the id in neither list:
+   * not being able to ask is not proof that the session is gone, and nothing may be pruned on it.
+   * A session deleted during the reads (`live.removed`) is left out of `found`. Without a server
+   * both lists are empty; if the server changed meanwhile the answer is dropped (empty lists).
+   * Does not touch the sink: the caller feeds the tree.
+   * VERIFIED (Windows 11, 01/11/2026) by `chatController.test.ts` "reads organized sessions one by
+   * one: found, missing only on a 404, nothing on a network failure" and "reads organized sessions
+   * at most four at a time and at most 200 of them" (fake client), and by
+   * `chatController.e2e.test.ts` "reads sessions one by one from the synthetic server: the
+   * existing ones, and the unknown one as missing" (synthetic server over HTTP). UNVERIFIED
+   * against a real opencode: the 404 of `session.get` was read in the types, not provoked.
+   */
+  async readSessions(
+    ids: readonly string[],
+  ): Promise<{ found: SessionSummary[]; missing: string[] }> {
+    const client = this.client;
+    if (client === undefined) return { found: [], missing: [] };
+    const wanted = [...new Set(ids)].slice(0, MAX_RESOLVED_SESSIONS);
+    const found: SessionSummary[] = [];
+    const missing: string[] = [];
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const index = next;
+        next += 1;
+        const sessionID = wanted[index];
+        if (sessionID === undefined) return;
+        try {
+          found.push(toSessionSummary(await client.session.get({ sessionID })));
+        } catch (error) {
+          if (isSessionNotFound(error)) missing.push(sessionID);
+          else this.log.debug(`reading an organized session failed: ${tagOf(error) ?? 'error'}`);
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(RESOLVE_CONCURRENCY, wanted.length) }, () => worker()),
+    );
+    if (client !== this.client || this.disposed) return { found: [], missing: [] };
+    const roots = found.filter(
+      (row) => row.parentID === undefined && !this.live.removed.has(row.id),
+    );
+    this.translator.mirror(roots);
+    this.log.debug(
+      `organized sessions read (${String(roots.length)} found, ${String(missing.length)} missing, ${String(Math.max(0, ids.length - wanted.length))} over the cap)`,
+    );
+    return { found: roots, missing };
+  }
+
+  /**
+   * How many files the "Changed files" list of a tab showing `sessionID` holds right now, for the
+   * tooltip of the Sessions tree (decision Q8=1: only sessions with a tab, zero requests). The
+   * first pane that holds a list for the session answers; `undefined` when no pane does (no tab, or
+   * the list was not loaded yet). Never reads the server.
+   * UNVERIFIED on screen: covered by a unit case of `sessionDiff.test.ts` only.
+   */
+  changedFilesOf(sessionID: string): number | undefined {
+    for (const pane of this.panesOf(sessionID)) {
+      const count = pane.diffs.count(sessionID);
+      if (count !== undefined) return count;
+    }
+    return undefined;
   }
 
   /**

@@ -6148,6 +6148,70 @@ describe('the Sessions tree sink (issue #77)', () => {
       name: 'ServerUnavailable',
     });
   });
+
+  /**
+   * Protects the organized sessions that fall off the first page (E9-sessions-organize, Q12=1): a
+   * 404 is the only proof that a session is gone (the tree prunes its organization on it), so a
+   * network failure must leave the id in neither list. Provenance: a FABRICATED client whose
+   * `session.get` answers by id; the real 404 shape comes from `types.d.ts` of the pinned client.
+   */
+  it('reads organized sessions one by one: found, missing only on a 404, nothing on a network failure', async () => {
+    const { api } = fakeApi({
+      getImpl: (id) => {
+        if (id === 'ses_gone') return reject({ _tag: 'SessionNotFoundError', message: 'gone' });
+        if (id === 'ses_down') return reject({ _tag: 'Transport', message: 'down' });
+        return Promise.resolve(rowWith(id, { title: `Title of ${id}` }));
+      },
+    });
+    const { controller } = setup(api);
+    controller.onServerState(RUNNING);
+    const { found, missing } = await controller.readSessions([
+      'ses_a',
+      'ses_gone',
+      'ses_down',
+      'ses_a',
+    ]);
+    expect(found.map((row) => row.id)).toEqual(['ses_a']);
+    expect(found[0]?.title).toBe('Title of ses_a');
+    expect(missing).toEqual(['ses_gone']);
+  });
+
+  it('reads organized sessions at most four at a time and at most 200 of them', async () => {
+    let running = 0;
+    let peak = 0;
+    const { api, calls } = fakeApi({
+      getImpl: async (id) => {
+        running += 1;
+        peak = Math.max(peak, running);
+        await flush();
+        running -= 1;
+        return rowWith(id, {});
+      },
+    });
+    const { controller } = setup(api);
+    controller.onServerState(RUNNING);
+    const ids = Array.from({ length: 250 }, (_, index) => `ses_${String(index)}`);
+    const { found } = await controller.readSessions(ids);
+    expect(found).toHaveLength(200);
+    expect(calls.filter((call) => call === 'session.get')).toHaveLength(200);
+    expect(peak).toBe(4);
+  });
+
+  it('reads nothing for organized sessions when no server runs, and mirrors the rows it found', async () => {
+    const { api, calls } = fakeApi();
+    const { sink, events } = recordingSink();
+    const { controller, streams } = withSink(api, sink);
+    expect(await controller.readSessions(['ses_a'])).toEqual({ found: [], missing: [] });
+    expect(calls).not.toContain('session.get');
+    controller.onServerState(RUNNING);
+    const { found } = await controller.readSessions(['ses_a']);
+    expect(found).toHaveLength(1);
+    // Mirrored: a later rename of that row still reaches the sink.
+    emit(streams, 'session.renamed', { sessionID: 'ses_a', title: 'Renamed' });
+    expect(events).toMatchObject([
+      { type: 'session.upserted', session: { id: 'ses_a', title: 'Renamed' } },
+    ]);
+  });
 });
 
 describe('renameSessionById and deleteSessionById (issue #77)', () => {

@@ -54,6 +54,7 @@ import {
   SHOW_REQUEST_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
   TEST_SESSION_ANSWERS_COMMAND_ID,
+  TEST_SESSION_ORGANIZATION_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from './ids';
 import { createOpencodeClient } from './opencodeClient';
@@ -68,7 +69,8 @@ import type { PendingSummary } from './pendingRequests';
 import { showSessionsSearch } from './sessionsSearch';
 import { RevealOrder } from './revealOrder';
 import { registerSessionsView, type SessionsState } from './sessionsView';
-import { createSessionTree } from './sessionTree';
+import { registerSessionsOrganize, sessionIDOf, type OrganizeAnswers } from './sessionsOrganize';
+import { createSessionTree, type SessionTreePage } from './sessionTree';
 import { askSessionTitle, confirmRevertDiscard, confirmSessionDelete } from './sessionUi';
 
 /**
@@ -194,19 +196,6 @@ function parseReply(
   if (!isFilled(sessionID) || !isFilled(permissionID)) return undefined;
   if (decision !== 'once' && decision !== 'reject') return undefined;
   return { sessionID, permissionID, decision };
-}
-
-/**
- * The session id a Sessions-tree command was run on: the row VS Code passes as the argument (an
- * object with `kind: 'session'`) or a bare id string (the internal open command). `undefined` for
- * anything else, so the caller falls back to the selection (F2, Delete) instead of trusting a shape
- * anyone can send with `executeCommand`.
- */
-function sessionIDOf(raw: unknown): string | undefined {
-  if (isFilled(raw)) return raw;
-  if (typeof raw !== 'object' || raw === null) return undefined;
-  const { kind, sessionID } = raw as Record<string, unknown>;
-  return kind === 'session' && isFilled(sessionID) ? sessionID : undefined;
 }
 
 /** Shows a failure of a Sessions-tree action as a native warning, without awaiting its dismissal. */
@@ -397,6 +386,20 @@ function warnSessionFailure(action: string, error: unknown): void {
  * on a tab of the tab strip after a row click can be stolen by the late reveal. UNVERIFIED on
  * macOS/Linux.
  *
+ * E9-sessions-organize (decisions Q1-Q14 of Sergio, 01/11/2026): in `editor` mode the Sessions tree
+ * also has folders, pins, an archive, filters and a tooltip. `registerSessionsOrganize`
+ * (`sessionsOrganize.ts`) owns the commands and the organization of the served folder, kept in
+ * `workspaceState`; here it is only wired: it receives the folder of each full read (`reset`) BEFORE
+ * the rows, reads the organized sessions the page lacks through `controller.readSessions` once the
+ * page is in (also when `chatLocation` switches to `editor` later), and forgets a session when
+ * `session.removed` arrives. The tooltip asks `controller.changedFilesOf` for the files of a tab.
+ * Rename and Delete Session still act on the CLICKED row only (`targetSession`, risk R5).
+ * `TEST_SESSION_ORGANIZATION_COMMAND_ID` returns what the real Memento holds. In `sidebar` mode
+ * nothing runs: no commands act, no extra read is made. VERIFIED in a real window by `test:visual`
+ * step 34 (Windows 11, VS Code 1.144.0, 1/11/2026): "B13 in editor mode the palette offers New
+ * Folder…" and, in `sidebar` mode, none of Folder, Pin, Archive or Filter; and "B9 after Reload
+ * Window the folder with its subfolder, the pinned session and the archived one are still there".
+ *
  * E4 (issue #77, decisions Q1=2, Q2=1, Q3=1, Q4=1, T1=1, T2=1 of Sergio, 30/10/2026): in `editor`
  * mode a request is shown in the dock of the tab of its session or of an ancestor, never in the
  * others (`ChatController.displays`), and the toast title names the chat (`labelOf`). A request
@@ -478,8 +481,12 @@ export function registerChat(
   // controller reported, which picks the welcome of the tree when it has no rows.
   const sessionTree = createSessionTree({ locale: vscode.env.language });
   let connection: ConnectionState | undefined;
-  // Answers for the NEXT Rename box and Delete modal, set only by the Test-mode command below.
-  const testAnswers: { title?: string | null; confirmDelete?: boolean } = {};
+  // Answers for the NEXT Rename box, Delete modal and the dialogs of the organizing commands, set
+  // only by the Test-mode command below (the organizing ones are read by `sessionsOrganize.ts`).
+  const testAnswers: { title?: string | null; confirmDelete?: boolean } & OrganizeAnswers = {};
+  // The first page of the last full read, to reconcile the organization again when the tree
+  // comes into use (`chatLocation` switched to `editor` after the page arrived).
+  let lastPage: Pick<SessionTreePage, 'rows' | 'hasMore'> | undefined;
   // `view`, `sessionsView`, `panels` and `controller` are assigned below; the attention feature and
   // the callbacks only use them later, from events and from VS Code callbacks, never during this
   // function.
@@ -600,7 +607,13 @@ export function registerChat(
     },
     sessionList: {
       reset: (page) => {
-        if (sessionTree.reset(page)) sessionsView.refresh();
+        // The organization of the served folder goes in BEFORE the rows, so the first paint is
+        // already laid out in folders; the read of the organized sessions the page lacks follows.
+        const organized = organize.use(page.folder);
+        const reset = sessionTree.reset(page);
+        lastPage = { rows: page.rows, hasMore: page.hasMore };
+        if (organized || reset) sessionsView.refresh();
+        organize.reconcile(lastPage);
       },
       failed: () => {
         if (sessionTree.fail()) sessionsView.refresh();
@@ -610,6 +623,9 @@ export function registerChat(
       },
       event: (message) => {
         if (sessionTree.event(message)) sessionsView.refresh();
+        // A deleted session (here or by another client) leaves the organization too; nothing is
+        // deleted on the server by this (risk R7 of the plan: a move by another client may do the same).
+        if (message.type === 'session.removed') organize.forget([message.sessionID]);
       },
       connection: (next) => {
         connection = next;
@@ -758,6 +774,8 @@ export function registerChat(
     });
     mode = next;
     log.info(`chat location changed to ${next}`);
+    // The tree comes into use: read the organized sessions the page lacked (nothing was read in sidebar).
+    if (mode === 'editor' && lastPage !== undefined) organize.reconcile(lastPage);
     for (const action of actions) {
       switch (action.kind) {
         case 'detachSidebar':
@@ -832,13 +850,18 @@ export function registerChat(
     if (connection?.state === 'unavailable' && connection.reason === 'no-workspace') {
       return 'noFolder';
     }
-    return sessionTree.load() === 'offline' ? 'offline' : 'ready';
+    if (sessionTree.load() === 'offline') return 'offline';
+    return sessionTree.filteredEmpty() ? 'filteredEmpty' : 'ready';
   };
   const sessionsView = registerSessionsView({
     tree: sessionTree,
     log,
     locale: vscode.env.language,
     state: sessionsState,
+    changedFiles: (sessionID) => controller.changedFilesOf(sessionID),
+    drop: (drag, target) => {
+      organize.drop(drag, target);
+    },
     folderName: () => {
       const state = manager.state;
       if ((vscode.workspace.workspaceFolders?.length ?? 0) < 2 || state.kind !== 'running') {
@@ -846,6 +869,16 @@ export function registerChat(
       }
       return path.basename(state.server.folder);
     },
+  });
+  // E9-sessions-organize: folders, pins, archive and the filters of the Sessions tree.
+  const organize = registerSessionsOrganize({
+    memento: context.workspaceState,
+    tree: sessionTree,
+    view: sessionsView,
+    log,
+    editorMode: () => mode === 'editor',
+    readSessions: (ids) => controller.readSessions(ids),
+    answers: testAnswers,
   });
   const panels = new ChatPanels(context.extensionUri, channel, log, tabs, {
     attachPane: (surface) => controller.attachPane(surface),
@@ -1019,13 +1052,20 @@ export function registerChat(
     if (mode !== 'editor') return;
     placeSession(sessionID, true);
   };
-  /** The session a command acts on: its argument (a row), else the row selected in the tree. */
+  /**
+   * The session Rename and Delete act on: its argument (the row that was CLICKED), else the row
+   * selected in the tree. With `canSelectMany` VS Code also passes the whole selection as a second
+   * argument; it is ignored on purpose (risk R5 of E9-sessions-organize): renaming or deleting
+   * every selected row from one click on a row would be a surprise, and Delete is irreversible.
+   * The organizing commands (`sessionsOrganize.ts`) are the ones that act on the selection.
+   */
   const targetSession = (raw: unknown): string | undefined =>
     sessionIDOf(raw) ?? sessionsView.selectedSessions()[0]?.sessionID;
 
   const disposables: vscode.Disposable[] = [
     view.disposable,
     sessionsView.disposable,
+    organize.disposable,
     // Not `dispose`: the tabs stay open so the workbench can save them for the next start.
     { dispose: () => panels.detachAll() },
     // Registered in BOTH modes: VS Code only persists a chat tab if a serializer exists for its
@@ -1094,6 +1134,7 @@ export function registerChat(
         search: (text) => controller.searchSessions(text),
         open: openSession,
         locale: vscode.env.language,
+        placeOf: (sessionID) => organize.placeOf(sessionID),
       });
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
@@ -1261,7 +1302,31 @@ export function registerChat(
           typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
         if (typeof args.title === 'string' || args.title === null) testAnswers.title = args.title;
         if (typeof args.confirmDelete === 'boolean') testAnswers.confirmDelete = args.confirmDelete;
+        // The organizing dialogs: same one-shot rule, `null` cancels.
+        if (typeof args.folderName === 'string' || args.folderName === null) {
+          testAnswers.folderName = args.folderName;
+        }
+        if (
+          args.pickFolder === null ||
+          args.pickFolder === 'none' ||
+          args.pickFolder === 'new' ||
+          (Array.isArray(args.pickFolder) && args.pickFolder.every((p) => typeof p === 'string'))
+        ) {
+          testAnswers.pickFolder = args.pickFolder;
+        }
+        if (typeof args.confirmFolderDelete === 'boolean') {
+          testAnswers.confirmFolderDelete = args.confirmFolderDelete;
+        }
+        if (
+          args.filters === null ||
+          (Array.isArray(args.filters) && args.filters.every((f) => typeof f === 'string'))
+        ) {
+          testAnswers.filters = args.filters;
+        }
       }),
+      vscode.commands.registerCommand(TEST_SESSION_ORGANIZATION_COMMAND_ID, () =>
+        organize.stored(),
+      ),
       vscode.commands.registerCommand(RESTORE_CHAT_TAB_TEST_COMMAND_ID, (raw: unknown) => {
         // The persisted state and title of a tab "revived by VS Code"; a panel we create stands in
         // for the revived one and goes through the SAME `restore` as the serializer.
