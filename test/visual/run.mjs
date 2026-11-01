@@ -2358,6 +2358,8 @@ function measureDiffLines(doc) {
  * background}` or `null` when nothing matches. Self-contained, because it is serialized into the
  * page, so the colour maths is a copy of {@link measureCode}'s; the base is the side bar
  * background (the webview body is transparent) and each element is painted over its ancestors.
+ * A `__base` entry (a CSS variable name, e.g. `--vscode-editor-background`) replaces the side bar
+ * as the base and is not measured: the Settings tab sits on the editor background.
  */
 function measureText(doc, selectors) {
   const parse = (value) => {
@@ -2395,8 +2397,12 @@ function measureText(doc, selectors) {
   };
   const win = doc.defaultView;
   const root = win.getComputedStyle(doc.documentElement);
+  // `__base` (E10-config-views, steps 35-36) names the variable the text sits on when it is not the
+  // side bar: the OpenCode Settings tab is an EDITOR, so it asks for `--vscode-editor-background`.
+  // It is not a selector: it is taken out before the names are measured.
+  const { __base: baseVariable, ...named } = selectors;
   const base =
-    parse(root.getPropertyValue('--vscode-sideBar-background')) ??
+    parse(root.getPropertyValue(baseVariable ?? '--vscode-sideBar-background')) ??
     parse(root.getPropertyValue('--vscode-editor-background'));
   if (!base) return { error: 'no base background variable' };
   const measure = (selector) => {
@@ -2419,7 +2425,7 @@ function measureText(doc, selectors) {
       background: `rgb(${background.slice(0, 3).map(Math.round).join(', ')})`,
     };
   };
-  return Object.fromEntries(Object.entries(selectors).map(([name, sel]) => [name, measure(sel)]));
+  return Object.fromEntries(Object.entries(named).map(([name, sel]) => [name, measure(sel)]));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -9011,9 +9017,9 @@ try {
       // Provenance: the real DOM of VS Code, the same `.action-label` read as C1.
       const chatBar = await launcher();
       check(
-        chatBar.actions.includes('Open Settings') &&
+        chatBar.actions.includes('Open Settings…') &&
           !chatBar.actions.some((label) => label.startsWith('Restart Server')),
-        `C10 the side bar Chat view shows the Open Settings title button and no Restart Server button (${JSON.stringify(chatBar.actions)})`,
+        `C10 the side bar Chat view shows the Open Settings… title button and no Restart Server button (${JSON.stringify(chatBar.actions)})`,
       );
       const inSidebar = await view();
       setLocation('editor');
@@ -9053,9 +9059,9 @@ try {
           bar.rows.some((row) => row.includes(TITLE_A)) &&
           bar.actions.some((label) => label.startsWith('New Session')) &&
           bar.actions.some((label) => label.startsWith('Search Sessions')) &&
-          bar.actions.includes('Open Settings') &&
+          bar.actions.includes('Open Settings…') &&
           bar.chatFrames === 0,
-        `C1 the Sessions view lists the session of the tab with no welcome text, shows the New Session, Search Sessions and Open Settings title buttons, and holds no chat (${JSON.stringify(bar)})`,
+        `C1 the Sessions view lists the session of the tab with no welcome text, shows the New Session, Search Sessions and Open Settings… title buttons, and holds no chat (${JSON.stringify(bar)})`,
       );
 
       // --- C2 + C3: the tab beside the code, in the four themes ---------------------------------
@@ -10779,9 +10785,9 @@ try {
         empty === true &&
           emptyState.rows === 0 &&
           emptyState.buttons.includes('New Session') &&
-          emptyState.buttons.includes('Open Settings') &&
+          emptyState.buttons.includes('Open Extension Settings') &&
           emptyState.chatFrames === 0,
-        `V4 with no sessions the view says "No sessions in this folder yet." and offers New Session and Open Settings (${JSON.stringify(emptyState)})`,
+        `V4 with no sessions the view says "No sessions in this folder yet." and offers New Session and Open Extension Settings (${JSON.stringify(emptyState)})`,
       );
 
       // --- V5: no server ----------------------------------------------------------------------------------
@@ -13021,6 +13027,1333 @@ try {
       await setSideBarWidth(Math.round(originalWidth)).catch(() => undefined);
     }
   });
+
+  // ===========================================================================================
+  // Steps 35 and 36 (issue #128, E10-config-views): the OpenCode Settings tab, judged in the DOM
+  // of the workbench and, through its own CDP connection, in the DOM of the tab's webview. The
+  // fixture is SYNTHETIC (`fake-opencode.mjs`): 4 MCP servers, a small catalog of integrations
+  // and an OAuth approval page; nothing here talks to a real provider.
+  // ===========================================================================================
+
+  /** The fake API key every step-36 flow types into the native InputBox (V10 looks for it). */
+  const SETTINGS_FAKE_KEY = 'sk-visual-FAKE-KEY-0136';
+  /** Everything the settings webview logs (CSP violations come through here). */
+  const settingsLogs = [];
+  /** CDP connection to the settings webview, and the `name` of its iframe in the workbench. */
+  let settingsWeb;
+  let settingsFrameId;
+  /** Cells nobody could judge, named by the steps that print them. */
+  const settingsUnverified = [];
+
+  /**
+   * (Re)connects `settingsWeb` to the CDP target whose document says
+   * `<meta name="open-vs-code-surface" content="settings">`, and returns its iframe id. Every target
+   * of the extension is probed (a chat in the side bar is one too) with a throw-away log array, so
+   * the console history of a chat target never lands in `settingsLogs`; the match is then reopened
+   * with `settingsLogs`. Throws when none shows up in `timeoutMs`.
+   */
+  async function connectSettings(timeoutMs = 30_000) {
+    settingsWeb?.close();
+    settingsWeb = undefined;
+    settingsFrameId = undefined;
+    const end = Date.now() + timeoutMs;
+    while (Date.now() < end) {
+      let list;
+      try {
+        list = await (await fetch(`http://127.0.0.1:${String(vscode.port)}/json`)).json();
+      } catch {
+        list = [];
+      }
+      for (const entry of list) {
+        if (entry.type !== 'iframe' || !entry.url.includes('extensionId=sergwei.open-vs-code')) {
+          continue;
+        }
+        const id = /[?&]id=([^&]+)/.exec(entry.url)?.[1];
+        if (id === undefined) continue;
+        const probe = await openWebview(vscode.port, [], 3_000, id).catch(() => undefined);
+        if (probe === undefined) continue;
+        const surface = await probe
+          .inDoc(
+            (doc) =>
+              doc.querySelector('meta[name="open-vs-code-surface"]')?.getAttribute('content') ??
+              null,
+          )
+          .catch(() => null);
+        probe.close();
+        if (surface !== 'settings') continue;
+        settingsWeb = await openWebview(vscode.port, settingsLogs, 10_000, id);
+        settingsFrameId = id;
+        return id;
+      }
+      await rawSleep(300);
+    }
+    throw new Error('the OpenCode Settings webview did not appear as a CDP target');
+  }
+
+  /** Box of the settings iframe in page coordinates; `options` goes to `boundingBox`. */
+  const settingsBox = (options) =>
+    page.locator(`${CHAT_FRAME}[name="${settingsFrameId}"]`).first().boundingBox(options);
+
+  /** Number of editor tabs titled "OpenCode Settings". */
+  const settingsTabCount = () =>
+    page.evaluate(
+      () =>
+        [...globalThis.document.querySelectorAll('.tab')].filter((tab) =>
+          (tab.getAttribute('aria-label') ?? '').includes('OpenCode Settings'),
+        ).length,
+    );
+
+  /** Opens the tab with the palette command and connects to its webview once it has rendered. */
+  async function openSettingsTab() {
+    await command('OpenCode: Open Settings…');
+    await waitFor(async () => (await settingsTabCount()) >= 1, 15_000, 200);
+    await connectSettings();
+  }
+
+  /**
+   * A real mouse click on the first element of the settings webview that matches `selector` (and,
+   * with `text`, whose trimmed text is exactly that). Right before clicking, the page is asked what
+   * is under the point; if it is not the element, nothing is clicked and the call throws. Returns
+   * false when nothing matches. Same idea as {@link clickButton}, for the second webview.
+   */
+  async function settingsClick(selector, text) {
+    const target = await settingsWeb.inDoc(
+      (doc, spec) => {
+        const element = [...doc.querySelectorAll(spec.selector)].find(
+          (candidate) => spec.text === null || candidate.textContent.trim() === spec.text,
+        );
+        if (!element) return null;
+        element.scrollIntoView({ block: 'nearest' });
+        element.setAttribute('data-visual-click', 'true');
+        const rect = element.getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      },
+      { selector, text: text ?? null },
+    );
+    if (!target) return false;
+    try {
+      const landed = await settingsWeb.inDoc((doc, point) => {
+        const hit = doc.elementFromPoint(point.x, point.y);
+        const mark = doc.querySelector('[data-visual-click="true"]');
+        return hit !== null && mark !== null && (mark === hit || mark.contains(hit));
+      }, target);
+      if (!landed) {
+        throw new Error(`the pointer for "${selector}" ${text ?? ''} would land on something else`);
+      }
+      const frame = await settingsBox();
+      if (!frame) return false;
+      await page.mouse.click(frame.x + target.x, frame.y + target.y);
+      return true;
+    } finally {
+      await settingsWeb
+        .inDoc((doc) => {
+          for (const element of doc.querySelectorAll('[data-visual-click]')) {
+            element.removeAttribute('data-visual-click');
+          }
+        })
+        .catch(() => undefined);
+    }
+  }
+
+  /** Waits (up to `ms`) until `fn(doc, arg)` evaluated in the settings webview is truthy. */
+  const settingsWait = (fn, arg, ms = 10_000) => waitFor(() => settingsWeb.inDoc(fn, arg), ms, 150);
+
+  /**
+   * Narrows or widens the Settings tab to about `target` CSS px by dragging the sash of the side
+   * bar (the window stays 1440 px wide, the editor takes what the bar leaves) and returns the width
+   * the iframe really has. A drag the workbench refuses is swallowed: the caller judges the width.
+   */
+  async function fitSettingsTab(target) {
+    const before = await settingsBox();
+    const bar = await sideBarPx();
+    const wanted = Math.max(170, Math.round(bar + before.width - target));
+    await setSideBarWidth(wanted).catch(() => undefined);
+    await settleLayout();
+    let last = -1;
+    await waitFor(
+      async () => {
+        const now = await settingsWeb.inDoc((doc) => doc.documentElement.clientWidth);
+        const same = now === last;
+        last = now;
+        return same;
+      },
+      3_000,
+      150,
+    );
+    return Math.round((await settingsBox()).width);
+  }
+
+  /** Applies a theme and waits until the settings webview carries its kind too. */
+  async function setSettingsTheme(theme) {
+    await setTheme(theme);
+    const kind = THEME_KINDS[theme].webview;
+    const ok = await settingsWait(
+      (doc, expected) => doc.body?.dataset.vscodeThemeKind === expected,
+      kind,
+      10_000,
+    );
+    if (ok === undefined) throw new Error(`the settings webview did not take the theme ${theme}`);
+    await settingsWeb.inDoc(twoFrames);
+  }
+
+  /**
+   * Contrast of `names` (a `measureText` result) against 4.5. Returns `{ ok, text }`: `text` lists
+   * the lowest ratio and any name that is missing or below the bar.
+   */
+  function contrastVerdict(measured, names) {
+    if (measured === undefined || measured === null || measured.error !== undefined) {
+      return { ok: false, text: `not measured (${JSON.stringify(measured)})` };
+    }
+    const missing = names.filter((name) => !measured[name]);
+    const low = names.filter((name) => measured[name] && measured[name].ratio < 4.5);
+    const ratios = names.filter((name) => measured[name]).map((name) => measured[name].ratio);
+    const min = ratios.length === 0 ? 0 : Math.min(...ratios);
+    return {
+      ok: missing.length === 0 && low.length === 0,
+      text: `min contrast ${min.toFixed(2)} over ${String(ratios.length)} texts${missing.length ? `, missing ${missing.join('/')}` : ''}${low.length ? `, below 4.5: ${low.map((name) => `${name} ${measured[name].ratio.toFixed(2)}`).join('/')}` : ''}`,
+    };
+  }
+
+  /** Fails when the settings webview logged a CSP violation or an exception since the last call. */
+  function assertNoSettingsErrors(where) {
+    const logged = settingsLogs
+      .splice(0)
+      .filter((line) => /Refused to|Content Security Policy|^\[exception\]/i.test(line))
+      .filter((line) => !isVsCodeFrameRace(line));
+    check(
+      logged.length === 0,
+      `${where}: no CSP violation or exception in the settings webview${logged.length ? ` (${logged.slice(0, 3).join(' | ')})` : ''}`,
+    );
+  }
+
+  /** What the settings document shows of its layout: column, overflow and `style` attributes. */
+  function settingsLayout(doc) {
+    const column = doc.querySelector('.settings-column')?.getBoundingClientRect();
+    const root = doc.documentElement;
+    return {
+      docWidth: root.clientWidth,
+      overflow: root.scrollWidth - root.clientWidth,
+      columnWidth: column ? column.width : null,
+      columnLeft: column ? column.left : null,
+      // Same rule as the other steps: an EMPTY `style=""` (left behind when a script clears it) is
+      // not a style; any value is.
+      styled: [...doc.querySelectorAll('#root, #root *, body')].filter(
+        (el) => (el.getAttribute('style') ?? '').trim() !== '',
+      ).length,
+    };
+  }
+
+  /** The Providers tab as drawn: headings, connected and addable ids, their lines, the search box. */
+  function providersShape(doc) {
+    const text = (element) => (element?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    const lists = [...doc.querySelectorAll('.settings-providers > ul')];
+    const idsOf = (list) =>
+      [...(list?.querySelectorAll('[data-provider]') ?? [])].map((li) => li.dataset.provider);
+    const card = (id) => doc.querySelector(`[data-provider="${id}"]`);
+    const search = doc.querySelector('input[type="search"]');
+    const removeOf = (id) =>
+      [...(card(id)?.querySelectorAll('button') ?? [])].some((button) =>
+        (button.getAttribute('aria-label') ?? '').startsWith('Remove'),
+      );
+    return {
+      headings: [...doc.querySelectorAll('h2.settings-heading')].map(text),
+      connected: idsOf(lists[0]),
+      addable: idsOf(lists[1]),
+      anthropic: [...(card('anthropic')?.querySelectorAll('.step-line') ?? [])].map(text),
+      vertex: [...(card('google-vertex')?.querySelectorAll('.step-line') ?? [])].map(text),
+      anthropicRemove: removeOf('anthropic'),
+      vertexRemove: removeOf('google-vertex'),
+      placeholder: search?.getAttribute('placeholder') ?? null,
+      searchLabel: search?.getAttribute('aria-label') ?? null,
+      passwordInputs: doc.querySelectorAll('input[type="password"]').length,
+    };
+  }
+
+  /** The MCP tab as drawn: per server its title, error, lines and resource lists. */
+  function mcpShape(doc) {
+    const text = (element) => (element?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    const width = doc.documentElement.clientWidth;
+    return [...doc.querySelectorAll('[data-server]')].map((li) => ({
+      name: li.dataset.server,
+      tone: li.dataset.status,
+      title: text(li.querySelector('.step-title')),
+      error: li.querySelector('.settings-error')?.textContent ?? null,
+      lines: [...li.querySelectorAll('.step-line')].map(text),
+      lists: [...li.querySelectorAll('.settings-resources')].map((ul) =>
+        [...ul.querySelectorAll('li')].map(text),
+      ),
+      inside: li.getBoundingClientRect().right <= width + 1,
+    }));
+  }
+
+  const SETTINGS_BASE = { __base: '--vscode-editor-background' };
+  const PROVIDERS_TEXT = {
+    ...SETTINGS_BASE,
+    title: '.settings-title',
+    subtitle: '.settings-subtitle',
+    heading: '.settings-heading',
+    cardTitle: '[data-provider="anthropic"] .step-title',
+    cardLine: '[data-provider="anthropic"] .step-line',
+    cardStatus: '.settings-providers .settings-toggle .step-status',
+    tabOn: 'button.settings-tab[aria-selected="true"]',
+    tabOff: 'button.settings-tab[aria-selected="false"]',
+    search: 'input[type="search"]',
+    refresh: '.settings-toolbar > button.secondary',
+    remove: '[data-provider="anthropic"] button.secondary',
+    footer: '.settings-footer .link-button',
+  };
+  const MCP_TEXT = {
+    ...SETTINGS_BASE,
+    title: '.settings-title',
+    docsTitle: '[data-server="docs"] .step-title',
+    docsStatus: '[data-server="docs"] .step-title .step-status',
+    docsCounts: '[data-server="docs"] .step-line.step-status',
+    resource: '[data-server="docs"] .settings-res-name',
+    resourceKind: '[data-server="docs"] .settings-resources .step-status',
+    brokenError: '[data-server="broken"] .settings-error',
+    needsAuth: '[data-server="linear"] .step-line',
+    offTitle: '[data-server="off"] .step-title',
+    hint: '.settings-mcp > .settings-hint',
+    tabOn: 'button.settings-tab[aria-selected="true"]',
+    tabOff: 'button.settings-tab[aria-selected="false"]',
+  };
+
+  await step('35 OpenCode Settings tab: providers and MCP servers (E10-config-views)', async () => {
+    const DARK = 'Default Dark Modern';
+    const HC_LIGHT = 'Default High Contrast Light';
+    const WIDTHS = [
+      ['1080', 1080],
+      ['620', 620],
+      ['300', 300],
+    ];
+    const originalWidth = await sideBarPx();
+    try {
+      await closeAllEditors();
+      if ((await visibleChatId()) === undefined) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+      }
+      await openChat(30_000);
+      await waitConnected();
+      const chatId = drivenChatId;
+
+      await openSettingsTab();
+      check(
+        (await settingsTabCount()) === 1 &&
+          (await settingsWeb.inDoc(
+            (doc) => doc.querySelector('meta[name="open-vs-code-surface"]')?.content === 'settings',
+          )),
+        'OpenCode: Open Settings… opens ONE tab titled OpenCode Settings whose document says surface=settings',
+      );
+      const providersReady = await settingsWait(
+        (doc) => doc.querySelectorAll('.settings-providers [data-provider]').length >= 3,
+        null,
+        20_000,
+      );
+      check(providersReady === true, 'the Providers tab lists the providers of the fixture');
+      assertNoSettingsErrors('step 35 start');
+
+      // MCP: the list fills ~300 ms after the fixture starts and the tab follows the events.
+      check(
+        await settingsClick('#settings-tab-mcp'),
+        'the MCP servers tab is pressed with the mouse',
+      );
+      const mcpReady = await settingsWait(
+        (doc) => doc.querySelectorAll('[data-server]').length === 4,
+        null,
+        20_000,
+      );
+      check(mcpReady === true, 'the MCP tab lists the four servers of the fixture');
+      check(await settingsClick('#settings-tab-providers'), 'the Providers tab is pressed again');
+      await settingsWait(
+        (doc) => doc.querySelector('#settings-panel-providers')?.hidden === false,
+        null,
+        5_000,
+      );
+
+      // --- V1, V2, V3: three widths of the tab, four themes ----------------------------------
+      for (const [label, target] of WIDTHS) {
+        const measuredWidth = await fitSettingsTab(target);
+        const ok = Math.abs(measuredWidth - target) <= 60;
+        check(
+          ok,
+          `the Settings tab is ${String(measuredWidth)} px wide for the ${label} px cells (within 60 px of ${String(target)})`,
+        );
+        if (!ok) settingsUnverified.push(`width ${label}`);
+
+        // Providers tab (V1), then MCP tab (V2), each in the four themes.
+        for (const tab of ['providers', 'mcp']) {
+          if (tab === 'mcp') {
+            await setSettingsTheme(DARK);
+            check(await settingsClick('#settings-tab-mcp'), `V2 ${label}: the MCP tab is pressed`);
+            await settingsWait(
+              (doc) => doc.querySelector('#settings-panel-mcp')?.hidden === false,
+              null,
+              5_000,
+            );
+          }
+          for (const [themeName, theme] of PROBLEM_THEMES) {
+            await setSettingsTheme(theme);
+            const layout = await settingsWeb.inDoc(settingsLayout);
+            if (tab === 'providers') {
+              const shape = await settingsWeb.inDoc(providersShape);
+              const contrast = contrastVerdict(
+                await settingsWeb.inDoc(measureText, PROVIDERS_TEXT),
+                Object.keys(PROVIDERS_TEXT).filter((name) => name !== '__base'),
+              );
+              const addCount = shape.addable.length;
+              check(
+                shape.headings.join('|') === 'Connected|Add a provider' &&
+                  shape.connected.includes('anthropic') &&
+                  shape.connected.includes('google-vertex') &&
+                  !shape.connected.includes('azure') &&
+                  shape.anthropic.includes('API key · saved by opencode for all projects') &&
+                  shape.vertex.includes('From GOOGLE_APPLICATION_CREDENTIALS') &&
+                  shape.anthropicRemove &&
+                  !shape.vertexRemove &&
+                  shape.placeholder === `Search ${String(addCount)} providers…` &&
+                  shape.searchLabel === 'Search providers' &&
+                  shape.passwordInputs === 0 &&
+                  addCount >= 4 &&
+                  layout.overflow <= 0 &&
+                  layout.styled === 0 &&
+                  contrast.ok,
+                `V1 ${label} px, ${themeName}: Connected lists Anthropic (API key, Remove) and Google Vertex (From GOOGLE_APPLICATION_CREDENTIALS, no Remove), Add a provider has a search box and ${String(addCount)} providers, no password input, no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+              );
+              if (theme === DARK) {
+                check(
+                  target >= 600
+                    ? Math.abs((layout.columnWidth ?? 0) - 380) <= 1 &&
+                        Math.abs(
+                          (layout.columnLeft ?? 0) -
+                            (layout.docWidth - (layout.columnWidth ?? 0)) / 2,
+                        ) <= 12
+                    : (layout.columnLeft ?? 99) <= 24 &&
+                        layout.docWidth - ((layout.columnLeft ?? 0) + (layout.columnWidth ?? 0)) <=
+                          24,
+                  `V3 ${label} px: the column is ${String(Math.round(layout.columnWidth ?? 0))} px wide at x ${String(Math.round(layout.columnLeft ?? 0))} in a ${String(layout.docWidth)} px document (${target >= 600 ? 'centred, 380 px' : 'the whole width less 24 px of padding at most on each side'})`,
+                );
+                await shot(`35a-providers-${label}`);
+              }
+            } else {
+              const servers = await settingsWeb.inDoc(mcpShape);
+              const contrast = contrastVerdict(
+                await settingsWeb.inDoc(measureText, MCP_TEXT),
+                Object.keys(MCP_TEXT).filter((name) => name !== '__base'),
+              );
+              const by = (name) => servers.find((server) => server.name === name);
+              const docs = by('docs');
+              const broken = by('broken');
+              const linear = by('linear');
+              check(
+                servers.map((server) => server.name).join(',') === 'docs,broken,off,linear' &&
+                  docs?.title.includes('connected') &&
+                  docs.lines.includes('2 resources · 1 template') &&
+                  docs.lists.flat().includes('readme.md text/markdown') &&
+                  docs.lists.flat().includes('api.md file:///docs/api.md') &&
+                  docs.lists.flat().includes('files file:///docs/{path}') &&
+                  broken?.title.includes('failed') &&
+                  typeof broken.error === 'string' &&
+                  broken.error.length <= 201 &&
+                  broken.error.startsWith('Connection closed') &&
+                  !/[\r\n]/.test(broken.error) &&
+                  !broken.error.includes('second stderr line') &&
+                  by('off')?.title.includes('disabled') &&
+                  linear?.title.includes('needs sign-in') &&
+                  linear.lines.includes('Sign in with the opencode CLI; this view is read-only.') &&
+                  servers.every((server) => server.inside) &&
+                  layout.overflow <= 0 &&
+                  layout.styled === 0 &&
+                  contrast.ok,
+                `V2 ${label} px, ${themeName}: docs connected with 2 resources and 1 template, broken failed with the first line of its error (${String(broken?.error?.length)} chars, one line), off disabled, linear needs sign-in, nothing outside the document, no overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+              );
+              if (theme === DARK) await shot(`35b-mcp-${label}`);
+            }
+          }
+        }
+        await setSettingsTheme(DARK);
+        check(
+          await settingsClick('#settings-tab-providers'),
+          `${label}: back to the Providers tab`,
+        );
+        await settingsWait(
+          (doc) => doc.querySelector('#settings-panel-providers')?.hidden === false,
+          null,
+          5_000,
+        );
+      }
+      assertNoSettingsErrors('step 35 widths');
+
+      // The search box filters the addable list (real keyboard, 620 px, dark).
+      await fitSettingsTab(620);
+      check(await settingsClick('input[type="search"]'), 'the search box is clicked');
+      await page.keyboard.type('azu');
+      const filtered = await settingsWait(
+        (doc) =>
+          [...doc.querySelectorAll('.settings-providers > ul:last-of-type [data-provider]')]
+            .length === 1,
+        null,
+        5_000,
+      );
+      const filteredIds = await settingsWeb.inDoc((doc) =>
+        [...doc.querySelectorAll('.settings-providers > ul:last-of-type [data-provider]')].map(
+          (li) => li.dataset.provider,
+        ),
+      );
+      await shot('35c-search');
+      check(
+        filtered === true && filteredIds.join(',') === 'azure',
+        `V1 typing "azu" in the search box leaves one provider (${JSON.stringify(filteredIds)})`,
+      );
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.press('Backspace');
+      await settingsWait(
+        (doc) =>
+          doc.querySelectorAll('.settings-providers > ul:last-of-type [data-provider]').length > 1,
+        null,
+        5_000,
+      );
+
+      // --- V4: MCPFLIP in the stream updates the open tab, no reload --------------------------
+      check(await settingsClick('#settings-tab-mcp'), 'V4: the MCP tab is pressed');
+      await settingsWait(
+        (doc) => doc.querySelector('#settings-panel-mcp')?.hidden === false,
+        null,
+        5_000,
+      );
+      await settingsWeb.inDoc((doc) => {
+        doc.defaultView.__visualMark36 = 'still the same document';
+      });
+      await shot('35d-before-flip');
+      await openChat(30_000, chatId);
+      await send('MCPFLIP now');
+      const flipped = await settingsWait(
+        (doc) => {
+          const broken = doc.querySelector('[data-server="broken"]');
+          return (
+            broken !== null &&
+            broken.querySelector('.step-title')?.textContent.includes('connected') === true &&
+            [...broken.querySelectorAll('.settings-resources li')].some((li) =>
+              li.textContent.includes('status.md'),
+            )
+          );
+        },
+        null,
+        20_000,
+      );
+      const sameDocument = await settingsWeb.inDoc(
+        (doc) => doc.defaultView.__visualMark36 === 'still the same document',
+      );
+      await shot('35e-after-flip');
+      check(
+        flipped === true && sameDocument === true,
+        `V4 after a prompt with MCPFLIP the open tab shows broken as connected with a status.md resource, in the same document (flipped ${String(flipped)}, same document ${String(sameDocument)})`,
+      );
+      check(await waitIdle(30_000), 'V4 the MCPFLIP turn ends');
+
+      // --- V5: the server is down: the tab says so, offers Restart server, and recovers --------
+      await send('CRASH the server now');
+      const down = await settingsWait(
+        (doc) => {
+          const state = doc.querySelector('.connection-card')?.getAttribute('data-state');
+          return state === 'unavailable' || state === 'stopped';
+        },
+        null,
+        60_000,
+      );
+      for (const [label, target] of [
+        ['620', 620],
+        ['300', 300],
+      ]) {
+        const measuredWidth = await fitSettingsTab(target);
+        for (const [themeName, theme] of [
+          ['Dark Modern', DARK],
+          ['High Contrast Light', HC_LIGHT],
+        ]) {
+          await setSettingsTheme(theme);
+          const card = await settingsWeb.inDoc((doc) => ({
+            title: doc.querySelector('.card-title')?.textContent.trim() ?? null,
+            cause: doc.querySelector('.card-cause')?.textContent.trim() ?? null,
+            buttons: [...doc.querySelectorAll('.connection-card button')].map((b) =>
+              b.textContent.trim(),
+            ),
+            tabs: doc.querySelectorAll('.settings-tabs').length,
+            providers: doc.querySelectorAll('[data-provider]').length,
+            overflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+            styled: [...doc.querySelectorAll('#root, #root *, body')].filter(
+              (el) => (el.getAttribute('style') ?? '').trim() !== '',
+            ).length,
+          }));
+          const contrast = contrastVerdict(
+            await settingsWeb.inDoc(measureText, {
+              ...SETTINGS_BASE,
+              title: '.card-title',
+              cause: '.card-cause',
+              restart: '.connection-card button.secondary',
+              heading: '.settings-title',
+            }),
+            ['title', 'cause', 'restart', 'heading'],
+          );
+          check(
+            down === true &&
+              /not available|stopped/.test(card.title ?? '') &&
+              card.cause === 'Providers and MCP servers show up once it is running.' &&
+              card.buttons.includes('Restart server') &&
+              card.tabs === 0 &&
+              card.providers === 0 &&
+              card.overflow <= 0 &&
+              card.styled === 0 &&
+              contrast.ok,
+            `V5 ${label} px (${String(measuredWidth)}), ${themeName}: with the server down the tab says ${JSON.stringify(card.title)}, offers Restart server, shows no tabs or providers, no overflow, no style attribute, ${contrast.text}`,
+          );
+          if (theme === DARK) await shot(`35f-down-${label}`);
+        }
+      }
+      await setSettingsTheme(DARK);
+      fs.rmSync(vscode.downMarker, { force: true });
+      check(
+        await settingsClick('.connection-card button', 'Restart server'),
+        'V5 Restart server is pressed in the tab',
+      );
+      const recovered = await settingsWait(
+        (doc) =>
+          doc.querySelector('.connection-card') === null &&
+          doc.querySelectorAll('.settings-providers [data-provider]').length >= 3,
+        null,
+        60_000,
+      );
+      check(recovered === true, 'V5 Restart server in the tab brings the providers back');
+      settingsUnverified.push(
+        'V5 loading state (Loading… / Reading the MCP servers…) is transient',
+      );
+      assertNoSettingsErrors('step 35');
+      assertNoWebviewErrors('step 35');
+    } finally {
+      fs.rmSync(vscode.downMarker, { force: true });
+      await closeAllEditors().catch(() => undefined);
+      settingsWeb?.close();
+      settingsWeb = undefined;
+      await setTheme(DARK).catch(() => undefined);
+      await setSideBarWidth(Math.round(originalWidth)).catch(() => undefined);
+    }
+  });
+
+  await step(
+    '36 OpenCode Settings tab: sign-in, remove and secrecy (E10-config-views)',
+    withSavedClipboard(async () => {
+      const DARK = 'Default Dark Modern';
+      const originalWidth = await sideBarPx();
+      const quick = () =>
+        page.evaluate(() => {
+          const widget = globalThis.document.querySelector('.quick-input-widget');
+          const visible = widget !== null && globalThis.getComputedStyle(widget).display !== 'none';
+          const input = widget?.querySelector('input');
+          return {
+            visible,
+            type: input?.type ?? null,
+            title: widget?.querySelector('.quick-input-title')?.textContent?.trim() ?? '',
+            focused: widget?.contains(globalThis.document.activeElement) ?? false,
+            valueLength: input?.value.length ?? 0,
+          };
+        });
+      const toastTexts = () =>
+        page.locator('.notifications-toasts .notification-toast').allInnerTexts();
+      const hostLog = () => {
+        const files = [];
+        const walk = (dir) => {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) walk(full);
+            else if (entry.name === 'OpenCode.log') files.push(full);
+          }
+        };
+        try {
+          walk(path.join(vscode.userDataDir, 'logs'));
+        } catch {
+          return '';
+        }
+        return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+      };
+      const readClipboard = () => powershellSta('Get-Clipboard').replace(/\r?\n$/, '');
+      const setClipboard = (value) => {
+        powershellSta(`Set-Clipboard -Value '${value}'`);
+      };
+      const cardState = (id) =>
+        settingsWeb.inDoc((doc, providerId) => {
+          const card = doc.querySelector(`[data-provider="${providerId}"]`);
+          const lists = [...doc.querySelectorAll('.settings-providers > ul')];
+          const inTop = card !== null && lists[0]?.contains(card) === true;
+          const attempt = card?.querySelector('.settings-attempt');
+          return {
+            present: card !== null,
+            inConnected:
+              inTop && doc.querySelector('h2.settings-heading')?.textContent === 'Connected',
+            expanded: card?.querySelector('.settings-methods') != null,
+            phase: attempt?.getAttribute('data-phase') ?? null,
+            lines: [...(card?.querySelectorAll('.step-line') ?? [])].map((p) =>
+              p.textContent.replace(/\s+/g, ' ').trim(),
+            ),
+            buttons: [...(card?.querySelectorAll('.settings-attempt button') ?? [])].map((b) =>
+              b.textContent.trim(),
+            ),
+            fields: [...(card?.querySelectorAll('[data-field]') ?? [])].map((f) => f.dataset.field),
+            removeLabels: [...(card?.querySelectorAll('button') ?? [])]
+              .map((b) => b.getAttribute('aria-label') ?? '')
+              .filter((label) => label.startsWith('Remove')),
+            focusedCard: card !== null && doc.activeElement === card,
+          };
+        }, id);
+      const live = () =>
+        settingsWeb.inDoc(
+          (doc) => doc.querySelector('.visually-hidden[role="status"]')?.textContent ?? '',
+        );
+      const expand = async (id) => {
+        if (!(await cardState(id)).expanded) {
+          check(
+            await settingsClick(`[data-provider="${id}"] button.settings-toggle`),
+            `${id}: the card is opened with the mouse`,
+          );
+          await settingsWait(
+            (doc, providerId) =>
+              doc.querySelector(`[data-provider="${providerId}"] .settings-methods`) !== null,
+            id,
+            5_000,
+          );
+        }
+      };
+      const reloadWindow = async (mark) => {
+        await page.evaluate((key) => {
+          globalThis[key] = true;
+        }, mark);
+        await command('Developer: Reload Window');
+        web?.close();
+        settingsWeb?.close();
+        settingsWeb = undefined;
+        await browser.close().catch(() => undefined);
+        let reloaded = false;
+        for (let tries = 0; tries < 120 && !reloaded; tries++) {
+          await connectWorkbench(90_000);
+          const stale = await page
+            .evaluate((key) => globalThis[key] === true, mark)
+            .catch(() => true);
+          reloaded = !stale;
+          if (reloaded) break;
+          await browser.close().catch(() => undefined);
+          await rawSleep(250);
+        }
+        if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
+        await waitFor(
+          async () => (await page.locator('.monaco-workbench').count()) > 0,
+          30_000,
+          300,
+        );
+        drivenChatId = undefined;
+      };
+
+      try {
+        await closeAllEditors();
+        if ((await visibleChatId()) === undefined) {
+          await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+          await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+        }
+        await openChat(30_000);
+        await waitConnected();
+        await openSettingsTab();
+        await settingsWait(
+          (doc) => doc.querySelectorAll('.settings-providers [data-provider]').length >= 3,
+          null,
+          20_000,
+        );
+        await fitSettingsTab(620);
+
+        // --- V6: a card with a form (GitHub Copilot: deploymentType, enterpriseUrl only for Enterprise)
+        await expand('github-copilot');
+        const formBefore = await cardState('github-copilot');
+        check(
+          formBefore.expanded &&
+            formBefore.fields.join(',') === 'deploymentType' &&
+            formBefore.focusedCard,
+          `V6 opening the GitHub Copilot card shows the deploymentType field only and puts the focus on the card (fields ${JSON.stringify(formBefore.fields)}, card focused ${String(formBefore.focusedCard)})`,
+        );
+        const selectInfo = await settingsWeb.inDoc((doc) => {
+          const select = doc.querySelector('[data-provider="github-copilot"] select');
+          return {
+            options: [...(select?.options ?? [])].map((o) => o.textContent.trim()),
+            value: select?.value ?? null,
+            primary:
+              doc
+                .querySelector('[data-provider="github-copilot"] button.primary')
+                ?.textContent.trim() ?? null,
+          };
+        });
+        check(
+          selectInfo.options.join('|') === 'GitHub.com|GitHub Enterprise' &&
+            selectInfo.value === 'github.com' &&
+            selectInfo.primary === 'Sign in…',
+          `V6 the select offers GitHub.com and GitHub Enterprise with GitHub.com chosen, and the primary button reads Sign in… (${JSON.stringify(selectInfo)})`,
+        );
+        // Enterprise: a click on the label focuses the select without opening it; ArrowDown changes it.
+        check(
+          await settingsClick('[data-provider="github-copilot"] label.settings-label'),
+          'V6 the Deployment type label is clicked',
+        );
+        await page.keyboard.press('ArrowDown');
+        let enterprise = await settingsWait(
+          (doc) =>
+            doc.querySelector('[data-provider="github-copilot"] [data-field="enterpriseUrl"]') !==
+            null,
+          null,
+          3_000,
+        );
+        if (enterprise === undefined) {
+          // The key did not reach the select: set it the way the browser would and say so.
+          await settingsWeb.inDoc((doc) => {
+            const select = doc.querySelector('[data-provider="github-copilot"] select');
+            select.value = 'enterprise';
+            select.dispatchEvent(new doc.defaultView.Event('change', { bubbles: true }));
+          });
+          settingsUnverified.push('V6 the select was changed by script, not by the keyboard');
+          enterprise = await settingsWait(
+            (doc) =>
+              doc.querySelector('[data-provider="github-copilot"] [data-field="enterpriseUrl"]') !==
+              null,
+            null,
+            3_000,
+          );
+        }
+        const formEnterprise = await cardState('github-copilot');
+        await shot('36a-copilot-enterprise');
+        check(
+          enterprise === true && formEnterprise.fields.join(',') === 'deploymentType,enterpriseUrl',
+          `V6 choosing GitHub Enterprise makes the Enterprise URL field appear (fields ${JSON.stringify(formEnterprise.fields)})`,
+        );
+        await page.keyboard.press('ArrowUp');
+        const hidden = await settingsWait(
+          (doc) =>
+            doc.querySelector('[data-provider="github-copilot"] [data-field="enterpriseUrl"]') ===
+            null,
+          null,
+          3_000,
+        );
+        check(hidden === true, 'V6 choosing GitHub.com again hides the Enterprise URL field');
+        for (const [label, target] of [
+          ['620', 620],
+          ['300', 300],
+        ]) {
+          const measuredWidth = await fitSettingsTab(target);
+          for (const [themeName, theme] of PROBLEM_THEMES) {
+            await setSettingsTheme(theme);
+            const layout = await settingsWeb.inDoc(settingsLayout);
+            const contrast = contrastVerdict(
+              await settingsWeb.inDoc(measureText, {
+                ...SETTINGS_BASE,
+                name: '[data-provider="github-copilot"] .step-title',
+                summary: '[data-provider="github-copilot"] .step-status',
+                label: '[data-provider="github-copilot"] .settings-label',
+                hint: '[data-provider="github-copilot"] .settings-hint',
+                select: '[data-provider="github-copilot"] select.settings-input',
+                primary: '[data-provider="github-copilot"] button.primary',
+                cancel: '[data-provider="github-copilot"] button.secondary',
+              }),
+              ['name', 'summary', 'label', 'hint', 'select', 'primary', 'cancel'],
+            );
+            check(
+              layout.overflow <= 0 && layout.styled === 0 && contrast.ok,
+              `V6 ${label} px (${String(measuredWidth)}), ${themeName}: the open Copilot card has no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+            );
+            if (theme === DARK) await shot(`36b-copilot-form-${label}`);
+          }
+        }
+        await setSettingsTheme(DARK);
+        await fitSettingsTab(620);
+        check(
+          await settingsClick('[data-provider="github-copilot"] button.secondary', 'Cancel'),
+          'V6 Cancel closes the Copilot card',
+        );
+        await settingsWait(
+          (doc) => doc.querySelector('[data-provider="github-copilot"] .settings-methods') === null,
+          null,
+          5_000,
+        );
+
+        // --- V7 + W1: the API key goes into a masked native InputBox; Cancel in the card closes it
+        await expand('azure');
+        check(
+          await settingsClick('[data-provider="azure"] [data-field="resourceName"] input'),
+          'V7 the Resource name field is clicked',
+        );
+        await page.keyboard.type('my-resource');
+        check(
+          await settingsClick('[data-provider="azure"] button.primary', 'Enter API key…'),
+          'V7 Enter API key… is pressed',
+        );
+        const boxUp = await waitFor(async () => (await quick()).visible, 8_000, 100);
+        const typedFocus = await waitFor(async () => (await quick()).focused, 3_000, 50);
+        const box = await quick();
+        const noPasswordInWebview = await settingsWeb.inDoc(
+          (doc) => doc.querySelectorAll('input[type="password"]').length === 0,
+        );
+        await shot('36c-key-inputbox');
+        check(
+          boxUp === true &&
+            typedFocus === true &&
+            box.type === 'password' &&
+            box.title.includes('API key for Azure') &&
+            noPasswordInWebview === true,
+          `V7 Enter API key… opens a native InputBox titled ${JSON.stringify(box.title)} whose input is type=${String(box.type)} and has the focus, while the webview holds no password input`,
+        );
+        const during = await cardState('azure');
+        check(
+          during.inConnected &&
+            during.buttons.includes('Cancel') &&
+            during.lines.some((line) => line.includes('Starting sign-in')),
+          `W1 while the box is open the Azure card shows "Starting sign-in…" with a Cancel button (buttons ${JSON.stringify(during.buttons)}, lines ${JSON.stringify(during.lines)})`,
+        );
+        check(
+          await settingsClick('[data-provider="azure"] .settings-attempt button', 'Cancel'),
+          'W1 Cancel is pressed in the card',
+        );
+        const closed = await waitFor(async () => !(await quick()).visible, 5_000, 100);
+        const afterCancel = await cardState('azure');
+        await shot('36d-key-cancelled');
+        check(
+          closed === true && afterCancel.phase === null && !afterCancel.inConnected,
+          `W1 Cancel in the card closes the native InputBox (closed ${String(closed)}) and the card goes back to Add a provider (in Connected ${String(afterCancel.inConnected)}, phase ${String(afterCancel.phase)})`,
+        );
+        check(
+          !hostLog().includes('provider connected: azure'),
+          'W1 the host never logged "provider connected: azure" after the cancelled key box',
+        );
+        // Second try: the key is typed and entered.
+        await expand('azure');
+        const resourceKept = await settingsWeb.inDoc(
+          (doc) =>
+            doc.querySelector('[data-provider="azure"] [data-field="resourceName"] input')?.value ??
+            null,
+        );
+        if (resourceKept === null || resourceKept === '') {
+          check(
+            await settingsClick('[data-provider="azure"] [data-field="resourceName"] input'),
+            'V7 the Resource name field is clicked again',
+          );
+          await page.keyboard.type('my-resource');
+        }
+        check(
+          await settingsClick('[data-provider="azure"] button.primary', 'Enter API key…'),
+          'V7 Enter API key… is pressed again',
+        );
+        const boxAgain = await waitFor(async () => (await quick()).visible, 8_000, 100);
+        check(boxAgain === true, 'V7 the native box is shown again');
+        check(
+          await typeInQuickInput(
+            page.locator('.quick-input-widget input').first(),
+            SETTINGS_FAKE_KEY,
+          ),
+          'V7 the fake key is typed into the native box',
+        );
+        const masked = await quick();
+        check(
+          masked.focused,
+          'V7 the native box still has the focus after the card moved to Connected (the webview card did not take it back)',
+        );
+        check(
+          masked.type === 'password' && masked.valueLength === SETTINGS_FAKE_KEY.length,
+          `V7 the box holds ${String(masked.valueLength)} characters in a type=${String(masked.type)} input (the DOM of the page is read for the type and the length only)`,
+        );
+        await page.keyboard.press('Enter');
+        const connected = await settingsWait(
+          (doc) => {
+            const card = doc.querySelector('[data-provider="azure"]');
+            const first = doc.querySelector('.settings-providers > ul');
+            return (
+              card !== null &&
+              first?.contains(card) === true &&
+              card.querySelector('.settings-attempt') === null
+            );
+          },
+          null,
+          15_000,
+        );
+        const azure = await cardState('azure');
+        const announced = await live();
+        await shot('36e-azure-connected');
+        check(
+          connected === true &&
+            azure.lines.includes('API key · saved by opencode for all projects') &&
+            azure.removeLabels.some((label) => label.startsWith('Remove Azure')) &&
+            announced.includes('Connected to Azure'),
+          `V7 pressing Enter connects Azure: it moves to Connected with "API key · saved by opencode for all projects" and a Remove button, and the live region says ${JSON.stringify(announced.trim())}`,
+        );
+
+        // --- V9: Remove asks in a native modal; declining keeps it; confirming removes it -------
+        const dialog = page.locator('.monaco-dialog-box');
+        check(
+          await settingsClick('[data-provider="azure"] button[aria-label^="Remove Azure"]'),
+          'V9 Remove is pressed on the Azure card',
+        );
+        const modalText = await waitFor(
+          async () => ((await dialog.count()) ? await dialog.first().innerText() : null),
+          8_000,
+          150,
+        );
+        await shot('36f-remove-modal');
+        check(
+          typeof modalText === 'string' &&
+            modalText.includes('Azure') &&
+            /stores it for all your projects/.test(modalText),
+          `V9 Remove opens a VS Code modal that names Azure and says opencode stores it for all projects (${JSON.stringify(String(modalText).replace(/\s+/g, ' ').slice(0, 160))})`,
+        );
+        await page.keyboard.press('Escape');
+        await waitFor(async () => (await dialog.count()) === 0, 5_000, 100);
+        await rawSleep(500); // a declined dialog changes nothing, so there is no positive signal to wait on
+        const declined = await cardState('azure');
+        check(
+          declined.inConnected && declined.removeLabels.length === 1,
+          'V9 declining the modal (Escape) keeps Azure connected with its Remove button',
+        );
+        check(
+          await settingsClick('[data-provider="azure"] button[aria-label^="Remove Azure"]'),
+          'V9 Remove is pressed again',
+        );
+        await waitFor(async () => (await dialog.count()) > 0, 8_000, 150);
+        await dialog
+          .first()
+          .getByRole('button', { name: /^Remove$/ })
+          .click({ timeout: 5_000 });
+        const gone = await settingsWait(
+          (doc) => {
+            const card = doc.querySelector('[data-provider="azure"]');
+            const first = doc.querySelector('.settings-providers > ul');
+            return card !== null && first?.contains(card) !== true;
+          },
+          null,
+          10_000,
+        );
+        const removed = await cardState('azure');
+        await shot('36g-azure-removed');
+        check(
+          gone === true && removed.removeLabels.length === 0,
+          `V9 confirming the modal removes the credential: Azure is back in Add a provider with no Remove button (in Connected ${String(removed.inConnected)})`,
+        );
+
+        // --- V8: OAuth auto: the card waits, the notification has the instructions, Copy code, Cancel
+        await expand('github-copilot');
+        check(
+          await settingsClick('[data-provider="github-copilot"] button.primary', 'Sign in…'),
+          'V8 Sign in… is pressed on the Copilot card',
+        );
+        const waiting = await settingsWait(
+          (doc) =>
+            doc
+              .querySelector('[data-provider="github-copilot"] .settings-attempt')
+              ?.getAttribute('data-phase') === 'waiting',
+          null,
+          15_000,
+        );
+        const toastUp = await waitFor(
+          async () => (await toastTexts()).find((text) => text.includes('ABCD-1234')),
+          10_000,
+          200,
+        );
+        const copilot = await cardState('github-copilot');
+        const toast = page.locator('.notifications-toasts .notification-toast', {
+          hasText: 'ABCD-1234',
+        });
+        const toastParts = await toast
+          .first()
+          .evaluate((node) => ({
+            text: node.innerText.replace(/\s+/g, ' ').trim(),
+            links: [...node.querySelectorAll('a')].map((a) => a.textContent.trim()),
+            buttons: [...node.querySelectorAll('.monaco-button, .monaco-text-button')].map((b) =>
+              b.textContent.trim(),
+            ),
+          }))
+          .catch(() => ({ text: '', links: [], buttons: [] }));
+        await shot('36h-oauth-waiting');
+        check(
+          waiting === true &&
+            copilot.inConnected &&
+            copilot.lines.some((line) => line.includes('Enter code: ABCD-1234')) &&
+            copilot.buttons.join('|') === 'Copy code|Cancel',
+          `V8 the card waits: it shows "Enter code: ABCD-1234" with the buttons Copy code and Cancel (lines ${JSON.stringify(copilot.lines)}, buttons ${JSON.stringify(copilot.buttons)})`,
+        );
+        check(
+          toastUp !== undefined &&
+            toastParts.text.includes('Enter code: ABCD-1234') &&
+            toastParts.links.includes('Copy code') &&
+            toastParts.buttons.includes('Cancel'),
+          `V8 the native notification shows the instructions, a "Copy code" link and a Cancel button (${JSON.stringify(toastParts)})`,
+        );
+        // Copy code, from the card and from the notification.
+        setClipboard('sentinel-before-card');
+        check(
+          await settingsClick(
+            '[data-provider="github-copilot"] .settings-attempt button',
+            'Copy code',
+          ),
+          'V8 Copy code is pressed in the card',
+        );
+        const fromCard = await waitFor(async () => readClipboard() === 'ABCD-1234', 5_000, 200);
+        check(
+          fromCard === true,
+          `V8 Copy code in the card puts ABCD-1234 on the clipboard (clipboard ${JSON.stringify(readClipboard())})`,
+        );
+        setClipboard('sentinel-before-toast');
+        await toast
+          .first()
+          .locator('a', { hasText: 'Copy code' })
+          .first()
+          .click({ timeout: 5_000 });
+        const fromToast = await waitFor(async () => readClipboard() === 'ABCD-1234', 5_000, 200);
+        check(
+          fromToast === true,
+          `V8 the Copy code link of the notification puts ABCD-1234 on the clipboard (clipboard ${JSON.stringify(readClipboard())})`,
+        );
+        // The card in four themes and two widths while the attempt waits.
+        for (const [label, target] of [
+          ['620', 620],
+          ['300', 300],
+        ]) {
+          const measuredWidth = await fitSettingsTab(target);
+          for (const [themeName, theme] of PROBLEM_THEMES) {
+            await setSettingsTheme(theme);
+            const layout = await settingsWeb.inDoc(settingsLayout);
+            const contrast = contrastVerdict(
+              await settingsWeb.inDoc(measureText, {
+                ...SETTINGS_BASE,
+                name: '[data-provider="github-copilot"] .step-title',
+                instructions: '[data-provider="github-copilot"] .settings-attempt .step-line',
+                copy: '[data-provider="github-copilot"] .settings-attempt button.secondary',
+                heading: '.settings-heading',
+              }),
+              ['name', 'instructions', 'copy', 'heading'],
+            );
+            check(
+              layout.overflow <= 0 && layout.styled === 0 && contrast.ok,
+              `V8 ${label} px (${String(measuredWidth)}), ${themeName}: the waiting card has no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+            );
+            if (theme === DARK) await shot(`36i-waiting-${label}`);
+          }
+        }
+        await setSettingsTheme(DARK);
+        await fitSettingsTab(620);
+        // Cancel from the notification.
+        await toast
+          .first()
+          .locator('.monaco-button', { hasText: 'Cancel' })
+          .first()
+          .click({ timeout: 5_000 });
+        const cancelledByToast = await settingsWait(
+          (doc) => {
+            const card = doc.querySelector('[data-provider="github-copilot"]');
+            const first = doc.querySelector('.settings-providers > ul');
+            return (
+              card !== null &&
+              card.querySelector('.settings-attempt') === null &&
+              first?.contains(card) !== true
+            );
+          },
+          null,
+          10_000,
+        );
+        const toastGone = await waitFor(
+          async () => !(await toastTexts()).some((text) => text.includes('ABCD-1234')),
+          8_000,
+          200,
+        );
+        check(
+          cancelledByToast === true && toastGone === true,
+          `V8 Cancel in the notification ends the attempt: the card is back in Add a provider (${String(cancelledByToast)}) and the notification is gone (${String(toastGone)})`,
+        );
+        // Cancel from the card.
+        await expand('github-copilot');
+        check(
+          await settingsClick('[data-provider="github-copilot"] button.primary', 'Sign in…'),
+          'V8 Sign in… is pressed again',
+        );
+        await settingsWait(
+          (doc) =>
+            doc
+              .querySelector('[data-provider="github-copilot"] .settings-attempt')
+              ?.getAttribute('data-phase') === 'waiting',
+          null,
+          15_000,
+        );
+        check(
+          await settingsClick(
+            '[data-provider="github-copilot"] .settings-attempt button',
+            'Cancel',
+          ),
+          'V8 Cancel is pressed in the card',
+        );
+        const cancelledByCard = await settingsWait(
+          (doc) => doc.querySelector('[data-provider="github-copilot"] .settings-attempt') === null,
+          null,
+          10_000,
+        );
+        const toastGone2 = await waitFor(
+          async () => !(await toastTexts()).some((text) => text.includes('ABCD-1234')),
+          8_000,
+          200,
+        );
+        check(
+          cancelledByCard === true && toastGone2 === true,
+          `V8 Cancel in the card ends the attempt too and the notification goes (${String(cancelledByCard)}, ${String(toastGone2)})`,
+        );
+        const focusAfter = await cardState('github-copilot');
+        check(
+          focusAfter.present && focusAfter.focusedCard,
+          `W2 after the attempt the focus is on the Copilot card, not on the body (card focused ${String(focusAfter.focusedCard)})`,
+        );
+        // "Connected": OpenAI's browser method is approved by the fake browser at once.
+        await expand('openai');
+        check(
+          await settingsClick(
+            '[data-provider="openai"] [data-method="oauth"] button.primary',
+            'Sign in…',
+          ),
+          'V8 Sign in… is pressed on the OpenAI card',
+        );
+        const openaiConnected = await settingsWait(
+          (doc) => {
+            const card = doc.querySelector('[data-provider="openai"]');
+            const first = doc.querySelector('.settings-providers > ul');
+            return (
+              card !== null &&
+              first?.contains(card) === true &&
+              card.querySelector('.settings-attempt') === null &&
+              card.textContent.includes('Signed in')
+            );
+          },
+          null,
+          20_000,
+        );
+        const announcedOpenai = await live();
+        await shot('36j-openai-connected');
+        check(
+          openaiConnected === true && announcedOpenai.includes('Connected to OpenAI'),
+          `V8 an approved OAuth login ends in Connected: OpenAI shows "Signed in · saved by opencode…" and the live region says ${JSON.stringify(announcedOpenai.trim())}`,
+        );
+        assertNoSettingsErrors('step 36 flows');
+
+        // --- V10: the fake key is nowhere ---------------------------------------------------------
+        check(
+          await settingsClick('input[type="search"]'),
+          'V10 control: the search box is clicked',
+        );
+        await page.keyboard.type('control-marker-0136');
+        let list = [];
+        try {
+          list = await (await fetch(`http://127.0.0.1:${String(vscode.port)}/json`)).json();
+        } catch {
+          list = [];
+        }
+        const scanned = [];
+        const hits = [];
+        let controlSeen = false;
+        for (const entry of list) {
+          if (entry.type !== 'iframe' || !entry.url.includes('extensionId=sergwei.open-vs-code'))
+            continue;
+          const id = /[?&]id=([^&]+)/.exec(entry.url)?.[1];
+          const handle =
+            id === undefined
+              ? undefined
+              : await openWebview(vscode.port, [], 5_000, id).catch(() => undefined);
+          if (handle === undefined) {
+            scanned.push(`${String(id)}:unreadable`);
+            continue;
+          }
+          const result = await handle
+            .inDoc(
+              (doc, keys) => ({
+                html: doc.documentElement.outerHTML.includes(keys.secret),
+                values: [...doc.querySelectorAll('input,textarea,select')].some((element) =>
+                  element.value.includes(keys.secret),
+                ),
+                control: [...doc.querySelectorAll('input')].some((element) =>
+                  element.value.includes(keys.control),
+                ),
+                surface: doc.querySelector('meta[name="open-vs-code-surface"]')?.content ?? '?',
+              }),
+              { secret: SETTINGS_FAKE_KEY, control: 'control-marker-0136' },
+            )
+            .catch(() => undefined);
+          handle.close();
+          if (result === undefined) {
+            scanned.push(`${String(id)}:unreadable`);
+            continue;
+          }
+          scanned.push(result.surface);
+          if (result.html || result.values) hits.push(result.surface);
+          if (result.control) controlSeen = true;
+        }
+        const workbenchHas = await page.evaluate(
+          (key) => globalThis.document.documentElement.outerHTML.includes(key),
+          SETTINGS_FAKE_KEY,
+        );
+        const log = hostLog();
+        const stateFile = fs.existsSync(vscode.stateFile)
+          ? fs.readFileSync(vscode.stateFile, 'utf8')
+          : '';
+        check(
+          controlSeen &&
+            scanned.length >= 2 &&
+            !scanned.some((entry) => entry.endsWith('unreadable')) &&
+            hits.length === 0 &&
+            !workbenchHas,
+          `V10 the fake key is in no webview target (scanned ${JSON.stringify(scanned)}, hits ${JSON.stringify(hits)}; the control marker typed in the search box was found: ${String(controlSeen)}) and not in the workbench DOM`,
+        );
+        check(
+          log.includes('provider connected: azure (key)') &&
+            !log.includes(SETTINGS_FAKE_KEY) &&
+            !stateFile.includes(SETTINGS_FAKE_KEY) &&
+            !settingsLogs.some((line) => line.includes(SETTINGS_FAKE_KEY)) &&
+            !webviewLogs.some((line) => line.includes(SETTINGS_FAKE_KEY)),
+          'V10 OpenCode.log (which does say "provider connected: azure (key)"), the fixture state file and the console of both webviews do not contain the fake key',
+        );
+        await page.keyboard.press('ControlOrMeta+A');
+        await page.keyboard.press('Backspace');
+
+        // --- Reload Window: does the tab come back without a serializer? -------------------------
+        check((await settingsTabCount()) === 1, 'the Settings tab is open before Reload Window');
+        await reloadWindow('__visualPreReload36');
+        const tabsAfter = await waitFor(async () => (await settingsTabCount()) >= 1, 15_000, 300);
+        let afterReload;
+        if (tabsAfter !== undefined) {
+          await connectSettings(30_000).catch(() => undefined);
+          afterReload = settingsWeb
+            ? await settingsWeb
+                .inDoc((doc) => ({
+                  rootChildren: doc.querySelector('#root')?.childElementCount ?? 0,
+                  title: doc.querySelector('.settings-title')?.textContent ?? null,
+                }))
+                .catch(() => undefined)
+            : undefined;
+        }
+        await shot('36k-after-reload');
+        console.log(
+          `  observed after Reload Window: tabs titled OpenCode Settings ${String(tabsAfter === undefined ? 0 : await settingsTabCount())}, document ${JSON.stringify(afterReload ?? null)}`,
+        );
+        check(
+          tabsAfter === undefined ||
+            (afterReload !== undefined && afterReload.title === 'OpenCode settings'),
+          `Reload Window leaves either no Settings tab or one that shows the settings UI (tab ${String(tabsAfter !== undefined)}, document ${JSON.stringify(afterReload ?? null)})`,
+        );
+        await openChat(30_000);
+        if (settingsUnverified.length > 0) {
+          console.log(`  UNVERIFIED cells of steps 35-36: ${settingsUnverified.join('; ')}`);
+        }
+        assertNoSettingsErrors('step 36');
+        assertNoWebviewErrors('step 36');
+      } finally {
+        await closeAllEditors().catch(() => undefined);
+        settingsWeb?.close();
+        settingsWeb = undefined;
+        await setTheme(DARK).catch(() => undefined);
+        await setSideBarWidth(Math.round(originalWidth)).catch(() => undefined);
+      }
+    }),
+  );
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
