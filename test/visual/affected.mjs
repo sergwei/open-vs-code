@@ -55,6 +55,14 @@ export const AFFECTED_RULES = [
       /^src\/extension\/(sessionBrowser|sessionTree|sessionsView|sessionsSearch|sessionLineage|sessionUi|sessionOrganization|sessionsOrganize|organizationStore)\.ts$/,
     groups: ['sessions'],
   },
+  // E10-config-views: the Settings tab (steps 35-36). `src/shared/settingsProtocol.ts` is already
+  // cross-cutting through `src/shared/`.
+  { pattern: /^webview-ui\/src\/settings\//, groups: ['config'] },
+  {
+    pattern:
+      /^src\/extension\/(serverConfig|providerAuth|providerAuthUi|settingsController|settingsPanel)\.ts$/,
+    groups: ['config'],
+  },
   { pattern: /^webview-ui\/src\/requests\//, groups: ['requests'] },
   {
     pattern: /^src\/extension\/(pendingRequests|attention|attentionPolicy|requestResolutions)\.ts$/,

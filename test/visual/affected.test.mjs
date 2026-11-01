@@ -22,6 +22,20 @@ describe('selectForFiles', () => {
     });
   });
 
+  // E10-config-views: the Settings tab has its own group (steps 35 and 36); the shared protocol file
+  // stays cross-cutting through `src/shared/`.
+  it('maps the Settings tab files to the config group and its shared protocol to a full run', () => {
+    expect(selectForFiles(['webview-ui/src/settings/ProviderCard.tsx'])).toMatchObject({
+      mode: 'groups',
+      groups: ['config'],
+    });
+    expect(selectForFiles(['src/extension/providerAuthUi.ts'])).toMatchObject({
+      mode: 'groups',
+      groups: ['config'],
+    });
+    expect(selectForFiles(['src/shared/settingsProtocol.ts']).mode).toBe('full');
+  });
+
   it('unites the groups of several files, without repeating one', () => {
     const result = selectForFiles([
       'src/extension/chatTabs.ts',
