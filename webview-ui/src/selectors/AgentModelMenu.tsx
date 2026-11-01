@@ -96,16 +96,23 @@ function createRoving(keys: () => string[], current: () => string | undefined) {
  * Opening puts the focus on the current agent (else the search box). Each list is its own roving
  * group: ArrowUp/Down/Home/End move inside it (one tab stop per list, Tab walks between lists), the
  * model list is entered from the search box with ArrowDown and left back to it with ArrowUp from the
- * first row. Enter on the box picks the first match and never submits the prompt's form. Choosing
- * ANYTHING closes the panel and returns the focus to the chip (decision P6=1, Engram #1300); Escape
- * does the same without choosing, with `preventDefault` and `stopPropagation` (the prompt box stops
- * the turn on Escape while busy); a pointer-down outside closes it without moving the focus, and so
- * does the focus leaving for another element of the page, the window losing the focus, or the
- * parent moving the focus by code (`onCloseReady`, as the "+" menu). The current row of each list carries
+ * first row. Enter on the box picks the first match, never submits the prompt's form and leaves the
+ * focus in the box. Choosing NEVER closes the panel (decision of Sergio, 01/11/2026, Engram #1651,
+ * which replaces P6=1: he could not turn the model and then its reasoning from medium to high in one
+ * opening): the focus stays on the chosen row, which becomes the current one, and the live region
+ * says "Agent: <name>", "Model: <name>" or "Reasoning: <level>". The Agent and Reasoning lists
+ * re-render after a choice (their rows are new objects), which would drop the focused button onto
+ * the body (HYPOTHESIS: the drop itself was never observed, jsdom only shows that the focus is on
+ * the new row), so the chosen row is focused again by hand (`refocusRow`). The chip closes it (it
+ * toggles) and so does Escape, which returns the focus to the chip, with `preventDefault` and
+ * `stopPropagation` (the prompt box stops the turn on Escape while busy); a pointer-down outside
+ * closes it without moving the focus, and so does the focus leaving for another element of the
+ * page, the window losing the focus, or the parent moving the focus by code (`onCloseReady`, as the
+ * "+" menu). The current row of each list carries
  * `aria-current="true"` and the word "Current", not only a colour. What is in use but the catalog
  * does not offer (an agent of a subagent session, a retired model, a variant no longer listed)
  * shows first in its list as "<name> (unavailable)", current and not pickable (decision P7=1):
- * choosing it just closes the panel, and Send stays allowed (the host refuses with a notice).
+ * choosing it does nothing, and Send stays allowed (the host refuses with a notice).
  *
  * The chip has `aria-haspopup="dialog"`, `aria-expanded`, `aria-controls` and the name "Agent and
  * model: <text> (<connection>)", whose first part is the visible text (WCAG 2.5.3). The dot is a
@@ -115,20 +122,35 @@ function createRoving(keys: () => string[], current: () => string | undefined) {
  * Picking does NOT talk to the host: it is a draft the prompt carries (decision of 21/10/2026,
  * Engram #1012); the same model keeps its variant, any other starts on Default (Engram #1021).
  * A panel left open when the connection drops closes and keeps the focus only if it was inside it.
- * VERIFIED by `AgentModelMenu.test.tsx` in jsdom on Windows 11 (27/10/2026, `npm test` green; focus
+ * VERIFIED by `AgentModelMenu.test.tsx` in jsdom on Windows 11 (01/11/2026, `npm test` green; focus
  * checked with `document.activeElement`): "Escape closes without picking, returns the focus to the
- * chip and is not left to the prompt", "Enter in the box picks the first match, closes, returns the
- * focus and never submits the form", "the focus moving to another element of the page closes the
- * panel", "picking the model already in use keeps its variant, picking another starts on Default"
- * (fabricated catalog, so they prove the wiring, not the server). VERIFIED on Windows 11 with
+ * chip and is not left to the prompt", "Enter in the box picks the first match, keeps the panel open
+ * with the focus in the box and never submits the form", "a variant is reported, the panel stays open
+ * and the focus stays on its row", "a model and then its reasoning without reopening (Sergio's case),
+ * and the chip shows both", "the chip, Escape and a pointer-down outside close it after choosing",
+ * "the focus moving to another element of the page closes the panel", "picking the model already in
+ * use keeps its variant, picking another starts on Default" (fabricated catalog, so they prove the
+ * wiring, not the server). VERIFIED on Windows 11 with
  * VS Code 1.143.1 (27/10/2026) by `npm run test:visual`: "the columns are stacked at 274 px of
  * container (stacked only under 360)", "the panel is inside the view (top 257)", "Tab from the
  * prompt reaches the chip" and "the focused chip shows a ring". The two-column layout is VERIFIED
  * the same way (27/10/2026, Windows 11, VS Code 1.143.1) in the four themes: "at wide (bar 900
  * px), dark: the chip panel has the Agent and Model columns side by side", "…Reasoning is inside
  * the Model column, under the model list", "…the chip panel fits the view and the page does not
- * scroll sideways" and "…Escape closes the chip panel and the focus returns to the chip". Screen
- * readers, macOS and Linux UNVERIFIED. HYPOTHESIS (review #1015 S2, inherited): the "N models" live region lives in
+ * scroll sideways" and "…Escape closes the chip panel and the focus returns to the chip". That a
+ * choice leaves the panel open is VERIFIED in VS Code 1.144.0 on Windows 11 (01/11/2026) by
+ * `npm run test:visual -- --steps 11,14` (125 ok, "all visual checks passed"; the full run of the
+ * final tree passed too, 1471 ok): "the keyboard alone picked Plan again and the panel stays open", "the
+ * variant \"low\" is chosen in the same opening, without reopening", "model and reasoning set in one
+ * opening: the panel stays open, the chip ends in \"· low\" and the focus stays on that row" and
+ * "agent, model and reasoning set in one opening: the chip reads Plan and the variant \"low\"
+ * (\"Plan\")". That pressing the chip with the panel open closes it is VERIFIED the same way
+ * (same run) by "pressing the chip with the panel open closes it: no panel, aria-expanded=\"false\",
+ * the model \"Big Pickle\" kept" (after "the panel is still open after the choice, with
+ * aria-expanded=\"true\" and the chip on \"Big Pickle\""). Not observed in VS Code: the Agent row
+ * refocus beyond the Plan case, and the unavailable rows (jsdom only: the focus moving away).
+ * Screen readers, macOS and Linux UNVERIFIED (so
+ * is Windows with other VS Code versions). HYPOTHESIS (review #1015 S2, inherited): the "N models" live region lives in
  * the conditionally rendered panel, so a screen reader may not announce its first text.
  */
 export function AgentModelMenu(props: {
@@ -227,21 +249,60 @@ export function AgentModelMenu(props: {
     if (restoreFocus) chip?.focus();
   };
 
+  /**
+   * Puts the focus back on the row of `group` whose `data-<group>` is `value`. Choosing re-renders
+   * the Agent and Reasoning lists (their rows are new objects), which would drop the focused
+   * button onto the body (HYPOTHESIS, not observed); the panel stays open, so the focus must stay
+   * on the row just chosen.
+   * VERIFIED in jsdom on Windows 11 (01/11/2026): "an agent is reported once, the panel stays open
+   * and the focus stays on its row" and "a variant is reported, the panel stays open and the focus
+   * stays on its row" of `AgentModelMenu.test.tsx`. VERIFIED in VS Code 1.144.0 on Windows 11
+   * (01/11/2026, `test:visual`): "model and reasoning set in one opening: the panel stays open, the
+   * chip ends in \"· low\" and the focus stays on that row".
+   */
+  const refocusRow = (group: 'agent' | 'model' | 'variant', value: string): void => {
+    const row = [...(panel?.querySelectorAll<HTMLButtonElement>('button.model-option') ?? [])].find(
+      (button) => button.dataset[group] === value,
+    );
+    row?.focus();
+  };
+
+  /**
+   * Picks an agent without closing the panel (decision of Sergio, 01/11/2026, Engram #1651): it
+   * announces "Agent: <name>" and refocuses the chosen row, because the Agent list re-renders.
+   * The unavailable agent is the one in use already, so it does nothing and announces nothing.
+   * VERIFIED in jsdom (01/11/2026): "an agent is reported once, the panel stays open and the focus
+   * stays on its row"; in VS Code: "the keyboard alone picked Plan again and the panel stays open".
+   */
   const pickAgent = (choice: AgentChoice): void => {
     // The unavailable agent is already the one in use: picking it again changes nothing.
-    if (!choice.unavailable) props.onSelectAgent(choice.id);
-    close(true);
+    if (choice.unavailable) return;
+    props.onSelectAgent(choice.id);
+    announce(`Agent: ${choice.name}`);
+    refocusRow('agent', choice.id);
   };
 
-  const pickModelOption = (option: { providerID: string; id: string }): void => {
+  /** `keepFocus` is false for the search box, whose focus must not jump to the row. */
+  const pickModelOption = (option: ModelOption, keepFocus: boolean): void => {
     props.onSelectModel(pickModel(props.model, option));
-    close(true);
+    announce(`Model: ${option.name}`);
+    if (keepFocus) refocusRow('model', `${option.providerID}/${option.id}`);
   };
 
+  /**
+   * Picks a reasoning level without closing the panel (Engram #1651), so a model and then its
+   * reasoning can be set in one opening: it announces "Reasoning: <level>" and refocuses the row,
+   * because the Reasoning list re-renders. The missing variant is the one in use already: no-op.
+   * VERIFIED in jsdom (01/11/2026): "a variant is reported, the panel stays open and the focus
+   * stays on its row"; in VS Code: "the variant \"low\" is chosen in the same opening, without
+   * reopening".
+   */
   const pickVariant = (entry: VariantEntry): void => {
     // The missing variant is already the one in use: picking it again changes nothing.
-    if (!entry.missing) props.onSelectVariant(entry.value);
-    close(true);
+    if (entry.missing) return;
+    props.onSelectVariant(entry.value);
+    announce(`Reasoning: ${entry.label}`);
+    refocusRow('variant', entry.value ?? 'default');
   };
 
   /** Arrows, Home and End inside the list the focused row belongs to (no wrapping). */
@@ -276,10 +337,10 @@ export function AgentModelMenu(props: {
       (list.find((button) => button.tabIndex === 0) ?? list[0])?.focus();
     } else if (event.key === 'Enter') {
       // The box lives inside the prompt's <form>: Enter must not send the prompt. It picks the
-      // first match instead.
+      // first match instead and leaves the panel open, with the focus still in the box.
       event.preventDefault();
       const first = groups()[0]?.models[0];
-      if (first !== undefined) pickModelOption(first);
+      if (first !== undefined) pickModelOption(first, false);
     }
   };
 
@@ -452,9 +513,7 @@ export function AgentModelMenu(props: {
                           onFocus={() => {
                             modelStop.focused(keyOf(missing()));
                           }}
-                          onClick={() => {
-                            close(true);
-                          }}
+                          // Already the model in use and not pickable: nothing to do.
                         >
                           <span class="model-name">{`${missing().providerID}/${missing().id} (unavailable)`}</span>
                           <span class="model-meta">Current</span>
@@ -488,7 +547,7 @@ export function AgentModelMenu(props: {
                                     modelStop.focused(keyOf(model));
                                   }}
                                   onClick={() => {
-                                    pickModelOption(model);
+                                    pickModelOption(model, true);
                                   }}
                                 >
                                   <span class="model-name">{model.name}</span>

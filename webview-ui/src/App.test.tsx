@@ -1365,9 +1365,16 @@ describe('model and agent selectors (issues #23/#24)', () => {
   const trigger = (h: Harness) => must<HTMLButtonElement>(h.container, 'button.agent-model-chip');
   /** The agent the chip names (the text before the first " · "). */
   const agentOf = (h: Harness) => trigger(h).textContent.split(' · ')[0];
+  /**
+   * Opens the chip's panel unless it is open already: a choice leaves it open (decision of
+   * 01/11/2026), so a second click on the chip would CLOSE it.
+   */
+  const openPanel = (h: Harness) => {
+    if (trigger(h).getAttribute('aria-expanded') !== 'true') trigger(h).click();
+  };
   /** Opens the chip's panel and presses the agent row of `id`. */
   const pickAgent = (h: Harness, id: string) => {
-    trigger(h).click();
+    openPanel(h);
     must<HTMLButtonElement>(h.container, `button[data-agent="${id}"]`).click();
   };
   const lastSent = (h: Harness) => {
@@ -1426,7 +1433,7 @@ describe('model and agent selectors (issues #23/#24)', () => {
     const h = start();
     h.apply(...withRow({ model: GLM, agent: 'plan' }), catalog);
     pickAgent(h, 'build');
-    trigger(h).click();
+    openPanel(h);
     [...h.container.querySelectorAll<HTMLButtonElement>('button[data-model]')][0]?.click();
     h.type('go');
     h.button('Send').click();
@@ -1509,7 +1516,7 @@ describe('model and agent selectors (issues #23/#24)', () => {
     const h = start();
     h.apply(...withRow({ model: PICKLE, agent: 'build' }), catalog);
     pickAgent(h, 'plan');
-    trigger(h).click();
+    openPanel(h);
     const glm = [...h.container.querySelectorAll<HTMLButtonElement>('button[data-model]')].find(
       (b) => b.textContent.startsWith('GLM-5.3-Flash Free'),
     );
@@ -1734,8 +1741,12 @@ describe('reasoning variant selector (issue #61)', () => {
     if (message?.type !== 'prompt.send') throw new Error('the last message is not a prompt.send');
     return message;
   };
+  /** Opens the panel unless it is open already: a choice leaves it open (01/11/2026). */
+  const openPanel = (h: Harness) => {
+    if (chip(h).getAttribute('aria-expanded') !== 'true') chip(h).click();
+  };
   const pickVariant = (h: Harness, id: string) => {
-    chip(h).click();
+    openPanel(h);
     entry(h, id).click();
   };
 
@@ -1817,7 +1828,7 @@ describe('reasoning variant selector (issue #61)', () => {
     h.apply(...withRow(GLM), catalog);
     pickVariant(h, 'high');
     const pickModel = (name: string) => {
-      chip(h).click();
+      openPanel(h);
       [...h.container.querySelectorAll<HTMLButtonElement>('button[data-model]')]
         .find((b) => b.textContent.startsWith(name))
         ?.click();
