@@ -6,8 +6,10 @@
 //     on Escape while busy (lesson #1070: the spy goes on `window`, Solid delegates to `document`);
 //   - a control that is `disabled` while it holds the focus drops the focus onto the page: the chip is
 //     `aria-disabled`, and a panel closed by a lost connection keeps the focus where it was;
-//   - a panel that opens without the focus on its current row, whose Escape or choice does not give the
-//     focus back to the chip, or whose rows mark the current one only by colour;
+//   - a panel that opens without the focus on its current row, whose Escape does not give the focus
+//     back to the chip, that closes on a choice (Sergio could not change model and reasoning in one
+//     opening, 01/11/2026), that drops the focus when a choice re-renders its lists, or whose rows
+//     mark the current one only by colour;
 //   - a pointer-down outside that does not close the panel, or that moves the focus;
 //   - picking the SAME model wiping its reasoning level, or another model keeping a level that means
 //     something else (Engram #1021), and "Default" reaching the host as the string "default";
@@ -111,6 +113,7 @@ function start(options: Options = {}): Harness {
   let closeFromParent: (() => void) | undefined;
   const [off, setOff] = createSignal(options.disabled ?? false);
   const [current, setCurrent] = createSignal<ModelRef | undefined>(options.model);
+  const [chosenAgent, setChosenAgent] = createSignal<string | undefined>(options.agent);
   const effective = () =>
     effectiveModel({
       catalog: withCatalog,
@@ -130,19 +133,29 @@ function start(options: Options = {}): Harness {
     >
       <AgentModelMenu
         catalog={withCatalog}
-        agent={withCatalog === undefined ? undefined : (options.agent ?? withCatalog.defaultAgent)}
+        agent={withCatalog === undefined ? undefined : (chosenAgent() ?? withCatalog.defaultAgent)}
         model={effective()}
         variants={variantChoices(effective())}
         connection={options.connection ?? 'connected'}
         disabled={off()}
+        // The picks feed back into the props, as the prompt's draft does, so the lists re-render
+        // after a choice (their rows are new objects): that is what the focus tests need.
         onSelectAgent={(id) => {
           pickedAgents.push(id);
+          setChosenAgent(id);
         }}
         onSelectModel={(model) => {
           pickedModels.push(model);
+          setCurrent(model);
         }}
         onSelectVariant={(variant) => {
           pickedVariants.push(variant);
+          const base = current() ?? { providerID: 'opencode', id: 'big-pickle' };
+          setCurrent(
+            variant === undefined
+              ? { providerID: base.providerID, id: base.id }
+              : { providerID: base.providerID, id: base.id, variant },
+          );
         }}
         onCloseReady={(close) => {
           closeFromParent = close;
@@ -324,8 +337,7 @@ describe('opening', () => {
     expect(missing.disabled).toBe(false);
     missing.click();
     expect(h.pickedAgents).toEqual([]);
-    expect(h.dialog()).toBeNull();
-    expect(document.activeElement).toBe(h.chip());
+    expect(h.dialog()).not.toBeNull();
   });
 
   it('shows the effective model the catalog lacks first in the Model column, current and not pickable', () => {
@@ -340,7 +352,7 @@ describe('opening', () => {
     expect(h.modelRows()[0]).toBe(missing);
     missing.click();
     expect(h.pickedModels).toEqual([]);
-    expect(h.dialog()).toBeNull();
+    expect(h.dialog()).not.toBeNull();
   });
 
   it('groups the models by provider with a visible heading, and says how many in the live region', () => {
@@ -416,7 +428,7 @@ describe('opening', () => {
     expect(missing.getAttribute('aria-current')).toBe('true');
     missing.click();
     expect(h.pickedVariants).toEqual([]);
-    expect(h.dialog()).toBeNull();
+    expect(h.dialog()).not.toBeNull();
   });
 
   it('the chip toggles: a second click closes it', () => {
@@ -463,15 +475,17 @@ describe('searching', () => {
     expect(h.modelRows()).toHaveLength(1);
   });
 
-  it('Enter in the box picks the first match, closes, returns the focus and never submits the form', () => {
+  it('Enter in the box picks the first match, keeps the panel open with the focus in the box and never submits the form', () => {
     const h = start();
     h.open();
+    h.search().focus();
     type(h, 'sonnet');
     expect(h.key(h.search(), 'Enter')).toBe(true);
     expect(h.pickedModels).toEqual([{ providerID: 'acme', id: 'sonnet' }]);
     expect(h.submits()).toBe(0);
-    expect(h.dialog()).toBeNull();
-    expect(document.activeElement).toBe(h.chip());
+    expect(h.dialog()).not.toBeNull();
+    expect(document.activeElement).toBe(h.search());
+    expect(must(h.view.container, '[role="status"]').textContent.trim()).toBe('Model: Sonnet 4');
   });
 });
 
@@ -565,25 +579,33 @@ describe('keyboard', () => {
   });
 });
 
-describe('choosing (P6=1: every choice closes the panel and returns the focus to the chip)', () => {
-  it('an agent is reported once, the panel closes and the focus returns to the chip', () => {
+// Decision of Sergio, 01/11/2026 (Engram #1651): choosing never closes the panel, so agent, model and
+// reasoning can be changed in one opening. It replaces P6=1 (every choice closed it).
+describe('choosing (01/11/2026: a choice leaves the panel open and the focus on the chosen row)', () => {
+  it('an agent is reported once, the panel stays open and the focus stays on its row', () => {
     const h = start();
     h.open();
     (h.agentRows()[1] as HTMLElement).click();
     expect(h.pickedAgents).toEqual(['plan']);
-    expect(h.dialog()).toBeNull();
-    expect(document.activeElement).toBe(h.chip());
-    expect(h.chip().getAttribute('aria-expanded')).toBe('false');
+    expect(h.dialog()).not.toBeNull();
+    expect(h.chip().getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement).toBe(h.agentRows()[1]);
+    expect(h.agentRows()[1]?.getAttribute('aria-current')).toBe('true');
+    expect(must(h.view.container, '[role="status"]').textContent.trim()).toBe('Agent: Plan');
   });
 
-  it('a model is reported as a plain copy, the panel closes and the focus returns to the chip', () => {
+  it('a model is reported as a plain copy, the panel stays open and the focus stays on its row', () => {
     const h = start();
     h.open();
     (h.modelRows()[1] as HTMLElement).click();
     expect(h.pickedModels).toEqual([GLM]);
     expect(() => structuredClone(h.pickedModels[0])).not.toThrow();
-    expect(h.dialog()).toBeNull();
-    expect(document.activeElement).toBe(h.chip());
+    expect(h.dialog()).not.toBeNull();
+    expect(document.activeElement).toBe(h.modelRows()[1]);
+    expect(h.modelRows()[1]?.getAttribute('aria-current')).toBe('true');
+    expect(must(h.view.container, '[role="status"]').textContent.trim()).toBe(
+      'Model: GLM-5.3-Flash Free',
+    );
   });
 
   it('picking the model already in use keeps its variant, picking another starts on Default', () => {
@@ -591,19 +613,75 @@ describe('choosing (P6=1: every choice closes the panel and returns the focus to
     h.open();
     (h.modelRows()[1] as HTMLElement).click();
     expect(h.pickedModels).toEqual([{ ...GLM, variant: 'high' }]);
-    h.open();
+    expect(h.dialog()).not.toBeNull();
     (h.modelRows()[0] as HTMLElement).click();
     expect(h.pickedModels[1]).toEqual({ providerID: 'opencode', id: 'big-pickle' });
     expect('variant' in (h.pickedModels[1] ?? {})).toBe(false);
   });
 
-  it('a variant is reported, the panel closes and the focus returns to the chip', () => {
+  it('a variant is reported, the panel stays open and the focus stays on its row', () => {
     const h = start({ model: GLM });
     h.open();
     (h.variantRows()[2] as HTMLElement).click();
     expect(h.pickedVariants).toEqual(['high']);
+    expect(h.dialog()).not.toBeNull();
+    expect(document.activeElement).toBe(h.variantRows()[2]);
+    expect(h.variantRows()[2]?.getAttribute('aria-current')).toBe('true');
+    expect(must(h.view.container, '[role="status"]').textContent.trim()).toBe('Reasoning: high');
+  });
+
+  it("a model and then its reasoning without reopening (Sergio's case), and the chip shows both", () => {
+    const h = start({ model: { providerID: 'opencode', id: 'big-pickle' } });
+    h.open();
+    (h.modelRows()[1] as HTMLElement).click();
+    expect(h.variantRows()).toHaveLength(3);
+    (h.variantRows()[2] as HTMLElement).click();
+    expect(h.pickedModels).toEqual([GLM]);
+    expect(h.pickedVariants).toEqual(['high']);
+    expect(h.dialog()).not.toBeNull();
+    expect(h.chip().textContent).toBe('Build · GLM-5.3-Flash Free · high');
+  });
+
+  it('an agent, a model and a reasoning level in one opening', () => {
+    const h = start();
+    h.open();
+    (h.agentRows()[1] as HTMLElement).click();
+    (h.modelRows()[1] as HTMLElement).click();
+    (h.variantRows()[1] as HTMLElement).click();
+    expect(h.pickedAgents).toEqual(['plan']);
+    expect(h.pickedModels).toEqual([GLM]);
+    expect(h.pickedVariants).toEqual(['low']);
+    expect(h.dialog()).not.toBeNull();
+  });
+
+  it('the unavailable current rows do nothing and do not close the panel', () => {
+    const h = start({ model: { providerID: 'old', id: 'gone' }, agent: 'ghost' });
+    h.open();
+    must<HTMLButtonElement>(h.view.container, '[data-model-unavailable]').click();
+    must<HTMLButtonElement>(h.view.container, '[data-agent="ghost"]').click();
+    expect(h.pickedModels).toEqual([]);
+    expect(h.pickedAgents).toEqual([]);
+    expect(h.dialog()).not.toBeNull();
+  });
+
+  it('the chip, Escape and a pointer-down outside close it after choosing', () => {
+    const h = start();
+    h.open();
+    (h.agentRows()[1] as HTMLElement).click();
+    h.chip().click();
+    expect(h.dialog()).toBeNull();
+    h.open();
+    (h.modelRows()[2] as HTMLElement).click();
+    expect(h.key(h.modelRows()[2] as Element, 'Escape')).toBe(true);
     expect(h.dialog()).toBeNull();
     expect(document.activeElement).toBe(h.chip());
+    h.open();
+    (h.modelRows()[0] as HTMLElement).click();
+    const elsewhere = document.createElement('button');
+    document.body.append(elsewhere);
+    elsewhere.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }));
+    expect(h.dialog()).toBeNull();
+    elsewhere.remove();
   });
 
   it('Default reaches the host as undefined, never as the string "default"', () => {
@@ -611,17 +689,6 @@ describe('choosing (P6=1: every choice closes the panel and returns the focus to
     h.open();
     (h.variantRows()[0] as HTMLElement).click();
     expect(h.pickedVariants).toEqual([undefined]);
-  });
-
-  it('changing both an agent and a model takes two openings', () => {
-    const h = start();
-    h.open();
-    (h.agentRows()[1] as HTMLElement).click();
-    expect(h.dialog()).toBeNull();
-    h.open();
-    (h.modelRows()[2] as HTMLElement).click();
-    expect(h.pickedAgents).toEqual(['plan']);
-    expect(h.pickedModels).toEqual([{ providerID: 'acme', id: 'sonnet' }]);
   });
 });
 

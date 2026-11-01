@@ -4170,14 +4170,23 @@ try {
     const chosen = state.options[0];
     await press('Enter');
     state = await ui();
-    check(!state.panel && state.expanded === 'false', 'choosing a model closes the panel');
+    check(
+      state.panel && state.expanded === 'true',
+      'choosing a model leaves the panel open (decision of 01/11/2026)',
+    );
     check(
       state.model === chosen.name,
       `the chip shows the chosen model ("${state.trigger}" for "${chosen.name}")`,
     );
     check(
-      state.focus.cls.includes('agent-model-chip'),
-      `the focus returns to the chip (${JSON.stringify(state.focus)})`,
+      state.focus.cls.includes('model-option'),
+      `the focus stays on the chosen model row (${JSON.stringify(state.focus)})`,
+    );
+    await press('Escape');
+    state = await ui();
+    check(
+      !state.panel && state.focus.cls.includes('agent-model-chip'),
+      `Escape closes it after choosing and the focus returns to the chip (${JSON.stringify(state.focus)})`,
     );
 
     // --- Escape closes without choosing ---------------------------------------------------------
@@ -4194,6 +4203,40 @@ try {
       !state.panel && state.model === chosen.name && state.focus.cls.includes('agent-model-chip'),
       `Escape closes it, keeps the model and returns the focus (${JSON.stringify(state.focus)})`,
     );
+
+    // --- Sergio's phrase (01/11/2026): once to open, closed only by pressing the button again ------
+    // Open with the real mouse, choose a model with the real mouse, see it still open, then press
+    // the chip: that second press is what closes it.
+    check(await clickIn('button.agent-model-chip'), 'the chip is pressed to test its second press');
+    await waitPresent('.agent-model-panel');
+    const second = (await ui()).options.find((o) => !o.current);
+    check(second !== undefined, 'the server lists a model other than the current one to click');
+    if (second !== undefined) {
+      check(
+        await clickIn(`.agent-model-panel button[data-model="${second.id}"]`),
+        `the model "${second.name}" is pressed with the real mouse`,
+      );
+      await waitFor(async () => (await ui()).model === second.name, 3_000, 100);
+      state = await ui();
+      check(
+        state.panel && state.expanded === 'true' && state.model === second.name,
+        `the panel is still open after the choice, with aria-expanded="true" and the chip on "${second.name}"`,
+      );
+      check(await clickIn('button.agent-model-chip'), 'the chip is pressed a second time');
+      await waitPresent('.agent-model-panel', false);
+      state = await ui();
+      check(
+        !state.panel && state.expanded === 'false' && state.model === second.name,
+        `pressing the chip with the panel open closes it: no panel, aria-expanded="false", the model "${second.name}" kept`,
+      );
+      // Put the model back: the checks below expect `chosen`.
+      await clickIn('button.agent-model-chip');
+      await waitPresent('.agent-model-panel');
+      await clickIn(`.agent-model-panel button[data-model="${chosen.id}"]`);
+      await press('Escape');
+      await waitPresent('.agent-model-panel', false);
+      check((await ui()).model === chosen.name, 'the first chosen model is back on the chip');
+    }
 
     // --- A press outside the panel closes it (dismissOutside, review #1015 C1) ------------------
     // A real mouse click on the prompt box: it is outside the panel, so the panel must close, the
@@ -4217,11 +4260,16 @@ try {
     check(await clickIn('button.agent-model-chip'), 'the chip is pressed to pick an agent');
     await waitPresent('.agent-model-panel');
     check(await clickIn('button[data-agent="plan"]'), '"Plan" is pressed');
-    await waitPresent('.agent-model-panel', false);
+    await waitFor(async () => (await ui()).agent === 'Plan', 3_000, 100);
     state = await ui();
     check(
-      !state.panel && state.agent === 'Plan' && state.focus.cls.includes('agent-model-chip'),
-      `choosing an agent closes the panel, the chip reads Plan and the focus returns ("${state.trigger}")`,
+      state.panel && state.agent === 'Plan' && state.focus.agentRow === 'plan',
+      `choosing an agent leaves the panel open, the chip reads Plan and the focus stays on its row ("${state.trigger}", ${JSON.stringify(state.focus)})`,
+    );
+    await press('Escape');
+    check(
+      (await ui()).focus.cls.includes('agent-model-chip'),
+      'Escape closes it and the focus returns to the chip',
     );
     await focusPromptBox();
     await page.keyboard.type('keep this text');
@@ -4262,21 +4310,27 @@ try {
     const kept = await web.inDoc((doc) => doc.querySelector('textarea')?.value ?? '');
     const blocks = await web.inDoc((doc) => doc.querySelectorAll('[role="log"] > *').length);
     check(
-      !state.panel &&
+      state.panel &&
         state.agent === 'Build' &&
         kept === 'keep this text' &&
         blocks === before &&
         !(await isBusy()),
-      `Enter on an agent row picks it and does NOT send the prompt ("${kept}", agent "${state.agent}")`,
+      `Enter on an agent row picks it, leaves the panel open and does NOT send the prompt ("${kept}", agent "${state.agent}")`,
     );
-    // Back to Plan with the keyboard only: Enter, ArrowDown, Enter.
+    // Back to Plan with the keyboard only: Escape, Enter (opens), ArrowDown, Enter (picks).
+    await press('Escape');
     await press('Enter');
     await press('ArrowDown');
     await press('Enter');
     state = await ui();
     check(
-      state.agent === 'Plan' && state.focus.cls.includes('agent-model-chip'),
-      `the keyboard alone picked Plan again ("${state.trigger}")`,
+      state.panel && state.agent === 'Plan' && state.focus.agentRow === 'plan',
+      `the keyboard alone picked Plan again and the panel stays open ("${state.trigger}", ${JSON.stringify(state.focus)})`,
+    );
+    await press('Escape');
+    check(
+      (await ui()).focus.cls.includes('agent-model-chip'),
+      'Escape closes it and the focus returns to the chip',
     );
     for (const [name, theme] of captureThemes(THEMES)) {
       await setTheme(theme);
@@ -4442,7 +4496,10 @@ try {
   // E2 (#85, phase 3): rewritten on the chip. The level is the "· low" at the end of the chip text
   // and the Reasoning section of its panel (present only for a model that lists variants). Not run
   // in phase 3 (decision of Sergio, Engram #1303); its first full run (phase 4, 27/10/2026,
-  // Windows 11, VS Code 1.143.1) passed.
+  // Windows 11, VS Code 1.143.1) passed. The checks added on 01/11/2026 (a choice leaves the panel
+  // open, the chip closes it, agent + model + reasoning in one opening) ran in `--steps 11,14`
+  // (Windows 11, VS Code 1.144.0; the output is quoted in `AgentModelMenu.tsx`). The full run of
+  // the final tree passed too (01/11/2026, 1471 ok, "all visual checks passed").
   await step('14 reasoning variant (issue #61)', async () => {
     /** What the chip and its panel show. Self-contained (serialized). */
     const ui = () =>
@@ -4454,6 +4511,7 @@ try {
         const metas = [...doc.querySelectorAll('.message-assistant .message-meta')];
         const style = active ? doc.defaultView.getComputedStyle(active) : null;
         return {
+          agent: parts[0] ?? '',
           model: parts[1] ?? '',
           // "" for Default (the chip adds nothing), else the level ("low").
           level: parts.slice(2).join(' · '),
@@ -4497,11 +4555,15 @@ try {
       ['hc-dark', 'Default High Contrast'],
       ['hc-light', 'Default High Contrast Light'],
     ];
-    /** Opens the chip's panel with the real mouse and presses model `id`; false if not listed. */
+    /**
+     * Opens the chip's panel with the real mouse, presses model `id` and closes the panel with
+     * Escape (a choice leaves it open since 01/11/2026); false if not listed.
+     */
     const pickModel = async (id) => {
       if (!(await clickIn('button.agent-model-chip'))) return false;
       await waitPresent('.agent-model-panel');
       const pressed = await clickIn(`.agent-model-panel button.model-option[data-model="${id}"]`);
+      await press('Escape');
       await waitPresent('.agent-model-panel', false);
       return pressed;
     };
@@ -4592,15 +4654,20 @@ try {
       await clickIn(`.menu-reasoning button[data-variant="${String(variant)}"]`),
       `the variant "${String(variant)}" is pressed`,
     );
-    await waitPresent('.agent-model-panel', false);
+    await waitFor(async () => (await ui()).level === String(variant), 3_000, 100);
     state = await ui();
     check(
-      !state.panel && state.level === String(variant),
-      `choosing closes the panel and the chip ends in "· ${String(variant)}" ("${state.level}")`,
+      state.panel && state.level === String(variant),
+      `choosing leaves the panel open and the chip ends in "· ${String(variant)}" ("${state.level}")`,
     );
     check(
-      state.focus.cls.includes('agent-model-chip'),
-      `the focus returns to the chip (${JSON.stringify(state.focus)})`,
+      state.focus.variant === String(variant),
+      `the focus stays on the chosen Reasoning row (${JSON.stringify(state.focus)})`,
+    );
+    await press('Escape');
+    check(
+      (await ui()).focus.cls.includes('agent-model-chip'),
+      'Escape closes it and the focus returns to the chip',
     );
     await shot('14c-variant-chosen');
     for (const [name, theme] of captureThemes(THEMES)) {
@@ -4688,13 +4755,52 @@ try {
         state.level === '',
         `...and its variant was NOT remembered across the change ("${state.level}")`,
       );
+      // Sergio's case (01/11/2026): the agent, the model AND then its reasoning level in ONE
+      // opening. The panel was closing on the first choice, so the level took a second opening.
       check(await clickIn('button.agent-model-chip'), 'the chip is pressed again');
       await waitPresent('.agent-model-panel');
       check(
-        await clickIn(`.menu-reasoning button[data-variant="${String(variant)}"]`),
-        `the variant "${String(variant)}" is chosen again`,
+        await clickIn('.agent-model-panel button[data-agent="plan"]'),
+        'the agent "Plan" is pressed first, inside the open panel',
       );
-      await waitPresent('.agent-model-panel', false);
+      check(
+        await clickIn(`.agent-model-panel button.model-option[data-model="${another}"]`),
+        `another model (${another}) is pressed inside the open panel`,
+      );
+      check(
+        await clickIn(`.agent-model-panel button.model-option[data-model="${withVariants}"]`),
+        `the model with variants (${withVariants}) is pressed in the same opening`,
+      );
+      state = await ui();
+      check(
+        state.panel && state.level === '' && state.hasReasoning,
+        `the panel is still open after two model choices and shows the Reasoning section (level "${state.level}")`,
+      );
+      check(
+        await clickIn(`.menu-reasoning button[data-variant="${String(variant)}"]`),
+        `the variant "${String(variant)}" is chosen in the same opening, without reopening`,
+      );
+      await waitFor(async () => (await ui()).level === String(variant), 3_000, 100);
+      state = await ui();
+      check(
+        state.panel &&
+          state.level === String(variant) &&
+          state.focus.variant === String(variant) &&
+          state.entries.find((e) => e.id === String(variant))?.current === true,
+        `model and reasoning set in one opening: the panel stays open, the chip ends in "· ${String(variant)}" and the focus stays on that row ("${state.level}", ${JSON.stringify(state.focus)})`,
+      );
+      check(
+        state.agent === 'Plan',
+        `agent, model and reasoning set in one opening: the chip reads Plan and the variant "${String(variant)}" ("${state.agent}")`,
+      );
+      // Back to Build in the same opening, so the steps after this one start as before.
+      check(
+        await clickIn('.agent-model-panel button[data-agent="build"]'),
+        'the agent "Build" is pressed to restore it',
+      );
+      await waitFor(async () => (await ui()).agent === 'Build', 3_000, 100);
+      check((await ui()).agent === 'Build', 'the chip reads Build again');
+      await press('Escape');
     }
 
     // --- The prompt carries it, and the reply says so -----------------------------------------
@@ -5746,6 +5852,8 @@ try {
       await clickIn('.model-panel button.model-option[data-model="opencode/tiny-context"]'),
       'the model with the 5000-token window is chosen',
     );
+    // A choice leaves the panel open (01/11/2026): Escape closes it before the prompt.
+    await page.keyboard.press('Escape');
     await waitPresent('.model-panel', false);
     await send('Reply with exactly: DONE. COSTLY');
     check(await waitIdle(30_000), 'the costly turn finished');
@@ -7364,7 +7472,7 @@ try {
       for (const id of [...ids.filter((x) => x === GLM), ...ids.filter((x) => x !== GLM)]) {
         await openChipPanel();
         await clickIn(`.agent-model-panel button.model-option[data-model="${id}"]`);
-        await waitPresent('.agent-model-panel', false);
+        await closeByEscape(); // a choice leaves the panel open (01/11/2026)
         await openChipPanel();
         const has = (await chipPanelState()).reasoning !== null;
         await closeByEscape();
