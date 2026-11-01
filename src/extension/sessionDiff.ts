@@ -297,6 +297,12 @@ export interface SessionDiffs {
   target(sessionID: string, path: string): TargetResult;
   /** The text `path` had before the session changed it; rejects when it is not listed or unknowable. */
   original(sessionID: string, path: string): Promise<string>;
+  /**
+   * How many files the list held for `sessionID` has, or `undefined` when no list is held for it
+   * (never loaded, forgotten, or the server went away). Reads memory only: the tooltip of the
+   * Sessions tree asks it (decision Q8=1 of E9-sessions-organize).
+   */
+  count(sessionID: string): number | undefined;
   /** Forgets everything held for `sessionID` (it was deleted). */
   forget(sessionID: string): void;
   /** Forgets the cached first message of `sessionID` (a revert was committed: the range moved). */
@@ -613,6 +619,8 @@ export function createSessionDiffs(deps: SessionDiffsDeps): SessionDiffs {
       }
       return text;
     },
+
+    count: (sessionID) => (listing?.sessionID === sessionID ? listing.files.length : undefined),
 
     forget(sessionID) {
       places.delete(sessionID);

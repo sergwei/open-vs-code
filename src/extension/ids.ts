@@ -155,13 +155,69 @@ export const SHOW_MORE_SESSIONS_COMMAND_ID = 'openVsCode.showMoreSessions';
 export const SESSIONS_STATE_CONTEXT_KEY = 'openVsCode.sessionsState';
 
 /**
- * Internal command that answers the NEXT Rename box and Delete modal of the Sessions tree without
- * showing them (issue #77, E3), because the integration tests cannot type into a `showInputBox` or
- * click a modal. Argument: `{ title?: string | null, confirmDelete?: boolean }` (`null` cancels the
- * box). Registered ONLY in `ExtensionMode.Test`, NOT contributed, like
- * {@link TEST_SET_SERVER_PASSWORD_COMMAND_ID}.
+ * Context key that is `true` while a title-bar filter of the Sessions view is on
+ * (E9-sessions-organize): the `when` of the Clear Filters button. Set with `setContext`.
+ */
+export const SESSIONS_FILTERED_CONTEXT_KEY = 'openVsCode.sessionsFiltered';
+
+/**
+ * `workspaceState` key of the organization of the sessions (folders, pins, archive), one entry per
+ * served folder: `{ [folderPath]: SessionOrganization }` (E9-sessions-organize, decision Q1=1). Not
+ * contributed; `workspaceState` hangs from the `workspaceStorage` of VS Code, so it is lost if the
+ * project folder moves (accepted, Q2=a; README "Known limitations").
+ */
+export const SESSION_ORGANIZATION_KEY = 'openVsCode.sessionOrganizationByFolder';
+
+/** Command id of "OpenCode: New Folder…" (contributed, E9-sessions-organize): a top-level folder. */
+export const NEW_FOLDER_COMMAND_ID = 'openVsCode.newFolder';
+
+/** Command id of "OpenCode: New Subfolder…" (contributed, row menu of a folder; needs a folder). */
+export const NEW_SUBFOLDER_COMMAND_ID = 'openVsCode.newSubfolder';
+
+/** Command id of "OpenCode: Rename Folder…" (contributed, row menu of a folder). */
+export const RENAME_FOLDER_COMMAND_ID = 'openVsCode.renameFolder';
+
+/** Command id of "OpenCode: Delete Folder" (contributed, row menu of a folder; deletes no session). */
+export const DELETE_FOLDER_COMMAND_ID = 'openVsCode.deleteFolder';
+
+/** Command id of "OpenCode: Move to Folder…" (contributed, row menu of a session). */
+export const MOVE_TO_FOLDER_COMMAND_ID = 'openVsCode.moveToFolder';
+
+/** Command id of "OpenCode: Pin" (contributed, row menu of a session). */
+export const PIN_SESSION_COMMAND_ID = 'openVsCode.pinSession';
+
+/** Command id of "OpenCode: Unpin" (contributed, row menu of a pinned session). */
+export const UNPIN_SESSION_COMMAND_ID = 'openVsCode.unpinSession';
+
+/** Command id of "OpenCode: Archive" (contributed, row menu of a session). */
+export const ARCHIVE_SESSION_COMMAND_ID = 'openVsCode.archiveSession';
+
+/** Command id of "OpenCode: Unarchive" (contributed, row menu of an archived session). */
+export const UNARCHIVE_SESSION_COMMAND_ID = 'openVsCode.unarchiveSession';
+
+/** Command id of "OpenCode: Filter Sessions…" (contributed): the multiple-choice filter picker. */
+export const FILTER_SESSIONS_COMMAND_ID = 'openVsCode.filterSessions';
+
+/** Command id of "OpenCode: Clear Filters" (contributed): shown while a filter is on. */
+export const CLEAR_FILTERS_COMMAND_ID = 'openVsCode.clearFilters';
+
+/**
+ * Internal command that answers the NEXT dialogs of the Sessions tree without showing them (issue
+ * #77, E3; E9-sessions-organize), because the integration tests cannot type into a `showInputBox`,
+ * pick from a QuickPick or click a modal. Argument: `{ title?: string | null, confirmDelete?:
+ * boolean, folderName?: string | null, pickFolder?: null | 'none' | 'new' | string[],
+ * confirmFolderDelete?: boolean, filters?: string[] | null }` (`null` cancels; `pickFolder` is the
+ * path of the folder to pick, `'none'` for "No Folder", `'new'` for "New Folder…"). Registered
+ * ONLY in `ExtensionMode.Test`, NOT contributed, like {@link TEST_SET_SERVER_PASSWORD_COMMAND_ID}.
  */
 export const TEST_SESSION_ANSWERS_COMMAND_ID = 'openVsCode.test.sessionAnswers';
+
+/**
+ * Internal command that returns the organization held for the served folder as plain JSON (what
+ * `workspaceState` has after the write queue drained), so the integration tests read the real
+ * Memento. Registered ONLY in `ExtensionMode.Test`, NOT contributed.
+ */
+export const TEST_SESSION_ORGANIZATION_COMMAND_ID = 'openVsCode.test.sessionOrganization';
 
 /** Configuration section (the prefix of every setting id). */
 export const CONFIG_SECTION = 'openVsCode';

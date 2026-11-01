@@ -301,13 +301,22 @@ describe('context menus (issue #36)', () => {
     const hidden = entries('commandPalette')
       .filter((e) => e.when === 'false')
       .map((e) => e.command);
-    // Rename and Delete (E3) also need a tree row and are hidden the same way.
+    // Rename and Delete (E3) and the commands of E9 that need a tree row (a session or a folder)
+    // are hidden the same way.
     expect(hidden.sort()).toEqual(
       [
         ids.ADD_TO_CHAT_COMMAND_ID,
         ids.EXPLAIN_FILES_COMMAND_ID,
         ids.RENAME_SESSION_COMMAND_ID,
         ids.DELETE_SESSION_COMMAND_ID,
+        ids.NEW_SUBFOLDER_COMMAND_ID,
+        ids.RENAME_FOLDER_COMMAND_ID,
+        ids.DELETE_FOLDER_COMMAND_ID,
+        ids.MOVE_TO_FOLDER_COMMAND_ID,
+        ids.PIN_SESSION_COMMAND_ID,
+        ids.UNPIN_SESSION_COMMAND_ID,
+        ids.ARCHIVE_SESSION_COMMAND_ID,
+        ids.UNARCHIVE_SESSION_COMMAND_ID,
       ].sort(),
     );
     const palette = entries('commandPalette').map((e) => e.command);
@@ -407,12 +416,17 @@ describe('chat location (issue #77)', () => {
 
   // E3 (issue #77, Q9=1 and Q10=1): one welcome per state of `SESSIONS_STATE_CONTEXT_KEY`, with the
   // exact texts of the approved sketch; the line of E1 "To keep the chat here…" is gone. Buttons
-  // may point at a built-in command (Open Folder), so only our own ids must be contributed.
+  // may point at a built-in command (Open Folder), so only our own ids must be contributed. Since
+  // E9-sessions-organize there is a fourth state, `filteredEmpty` ("No sessions match the filters."
+  // with its Clear Filters button).
   it('gives the Sessions view one welcome per state, with the approved texts and live buttons', () => {
     const byState = (state: string): string =>
       sessionsWelcomes.find((w) => w.when === `${ids.SESSIONS_STATE_CONTEXT_KEY} == ${state}`)
         ?.contents ?? '';
-    expect(sessionsWelcomes).toHaveLength(3);
+    expect(sessionsWelcomes).toHaveLength(4);
+    expect(byState('filteredEmpty')).toBe(
+      'No sessions match the filters.\n[Clear Filters](command:openVsCode.clearFilters)',
+    );
     expect(byState('ready')).toBe(
       'No sessions in this folder yet.\n[New Session](command:openVsCode.newSession)\n[Open Settings](command:openVsCode.openSettings)',
     );
@@ -433,14 +447,28 @@ describe('chat location (issue #77)', () => {
   // E3: every command of the row menu exists, has a constant, and is offered only on session rows
   // (`viewItem` comes from `contextValue` of `sessionTree.ts`); the palette hides Rename and Delete
   // and shows Search only in `editor` mode, so `sidebar` mode gains no visible command.
+  // E9-sessions-organize: the folder commands are the exception, offered on `viewItem == folder`
+  // (the folder rows), and still carry `view == openVsCode.sessions`. Provenance: the REAL
+  // package.json; how VS Code evaluates these `when` clauses is not covered here.
   it('offers Rename and Delete on session rows only, and Search only in editor mode', () => {
     const rowMenu = manifest.contributes.menus?.['view/item/context'] ?? [];
     expect(rowMenu.length).toBeGreaterThan(0);
+    const folderCommands: string[] = [
+      ids.NEW_SUBFOLDER_COMMAND_ID,
+      ids.RENAME_FOLDER_COMMAND_ID,
+      ids.DELETE_FOLDER_COMMAND_ID,
+    ];
     for (const entry of rowMenu) {
       expect(commandIds, entry.command).toContain(entry.command);
       expect(idValues, entry.command).toContain(entry.command);
       expect(entry.when, entry.command).toContain(`view == ${ids.SESSIONS_VIEW_ID}`);
-      expect(entry.when, entry.command).toContain('viewItem =~ /\\bsession\\b/');
+      // A session entry matches the `session` word of the contextValue; a folder entry is the
+      // exact `folder` value (`sessionTree.ts` builds both).
+      expect(entry.when, entry.command).toContain(
+        folderCommands.includes(entry.command)
+          ? 'viewItem == folder'
+          : 'viewItem =~ /\\bsession\\b/',
+      );
     }
     expect(rowMenu.filter((e) => e.group?.startsWith('inline')).map((e) => e.command)).toEqual([
       ids.RENAME_SESSION_COMMAND_ID,
@@ -455,17 +483,24 @@ describe('chat location (issue #77)', () => {
     );
   });
 
+  // Also protects the E9-sessions-organize title buttons (Filter, then Clear Filters, then Open
+  // Settings; New Folder… in the overflow group `2_organize`) and that the Test-mode commands
+  // stay out of `contributes`.
   it('keeps the open and show-more commands internal and puts Search after New Session', () => {
     expect(commandIds).not.toContain(ids.OPEN_SESSION_COMMAND_ID);
     expect(commandIds).not.toContain(ids.SHOW_MORE_SESSIONS_COMMAND_ID);
     expect(commandIds).not.toContain(ids.TEST_SESSION_ANSWERS_COMMAND_ID);
-    const title = (manifest.contributes.menus?.['view/title'] ?? []).filter(
-      (e) => e.when === `view == ${ids.SESSIONS_VIEW_ID}`,
+    expect(commandIds).not.toContain(ids.TEST_SESSION_ORGANIZATION_COMMAND_ID);
+    const title = (manifest.contributes.menus?.['view/title'] ?? []).filter((e) =>
+      e.when?.startsWith(`view == ${ids.SESSIONS_VIEW_ID}`),
     );
     const order = (id: string): string | undefined => title.find((e) => e.command === id)?.group;
     expect(order(ids.NEW_SESSION_COMMAND_ID)).toBe('navigation@1');
     expect(order(ids.SEARCH_SESSIONS_COMMAND_ID)).toBe('navigation@2');
-    expect(order(ids.OPEN_SETTINGS_COMMAND_ID)).toBe('navigation@3');
+    expect(order(ids.FILTER_SESSIONS_COMMAND_ID)).toBe('navigation@3');
+    expect(order(ids.CLEAR_FILTERS_COMMAND_ID)).toBe('navigation@4');
+    expect(order(ids.OPEN_SETTINGS_COMMAND_ID)).toBe('navigation@5');
+    expect(order(ids.NEW_FOLDER_COMMAND_ID)).toBe('2_organize');
     expect(order(ids.RESTART_SERVER_COMMAND_ID)).toBe('9_server');
   });
 
@@ -487,6 +522,45 @@ describe('chat location (issue #77)', () => {
     for (const entry of manifest.contributes.menus?.['view/title'] ?? []) {
       expect(commandIds).toContain(entry.command);
     }
+  });
+
+  // E9-sessions-organize: the eleven commands exist with the approved titles (Q14) and under the
+  // OpenCode category; the palette offers only New Folder… and Filter Sessions… in editor mode (and
+  // Clear Filters only while a filter is on), so `sidebar` mode gains nothing visible; Clear
+  // Filters is shown only while the context key says a filter is on. Provenance: the REAL package.json.
+  it('contributes the eleven organizing commands with the approved titles, hidden in sidebar mode', () => {
+    const wanted: [string, string][] = [
+      [ids.NEW_FOLDER_COMMAND_ID, 'New Folder…'],
+      [ids.NEW_SUBFOLDER_COMMAND_ID, 'New Subfolder…'],
+      [ids.RENAME_FOLDER_COMMAND_ID, 'Rename Folder…'],
+      [ids.DELETE_FOLDER_COMMAND_ID, 'Delete Folder'],
+      [ids.MOVE_TO_FOLDER_COMMAND_ID, 'Move to Folder…'],
+      [ids.PIN_SESSION_COMMAND_ID, 'Pin'],
+      [ids.UNPIN_SESSION_COMMAND_ID, 'Unpin'],
+      [ids.ARCHIVE_SESSION_COMMAND_ID, 'Archive'],
+      [ids.UNARCHIVE_SESSION_COMMAND_ID, 'Unarchive'],
+      [ids.FILTER_SESSIONS_COMMAND_ID, 'Filter Sessions…'],
+      [ids.CLEAR_FILTERS_COMMAND_ID, 'Clear Filters'],
+    ];
+    for (const [id, title] of wanted) {
+      const command = manifest.contributes.commands.find((c) => c.command === id);
+      expect(command?.title, id).toBe(title);
+      expect(command?.category, id).toBe('OpenCode');
+    }
+    const palette = manifest.contributes.menus?.['commandPalette'] ?? [];
+    const whenOf = (id: string): string | undefined => palette.find((e) => e.command === id)?.when;
+    const editorOnly = `config.${ids.CHAT_LOCATION_SETTING} != sidebar`;
+    expect(whenOf(ids.NEW_FOLDER_COMMAND_ID)).toBe(editorOnly);
+    expect(whenOf(ids.FILTER_SESSIONS_COMMAND_ID)).toBe(editorOnly);
+    expect(whenOf(ids.CLEAR_FILTERS_COMMAND_ID)).toBe(
+      `${editorOnly} && ${ids.SESSIONS_FILTERED_CONTEXT_KEY}`,
+    );
+    const title = (manifest.contributes.menus?.['view/title'] ?? []).find(
+      (e) => e.command === ids.CLEAR_FILTERS_COMMAND_ID,
+    );
+    expect(title?.when).toBe(
+      `view == ${ids.SESSIONS_VIEW_ID} && ${ids.SESSIONS_FILTERED_CONTEXT_KEY}`,
+    );
   });
 
   it('gives the title buttons their icons and declares Open Settings', () => {

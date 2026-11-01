@@ -29,6 +29,12 @@ export interface SessionsSearchHost {
   open(sessionID: string): void;
   /** `vscode.env.language`, for the dates. */
   locale?: string;
+  /**
+   * Where the user keeps a session when it is not just under its date: `Archived`, or the folder
+   * path (`Spikes / SSE`); `undefined` for a loose one. It goes before the time in the description
+   * (E9-sessions-organize, decision Q6=1: the search finds archived sessions and says so).
+   */
+  placeOf?(sessionID: string): string | undefined;
 }
 
 /** A result row of the picker; `sessionID` is absent on the "No sessions match" item. */
@@ -44,7 +50,9 @@ interface SearchItem extends vscode.QuickPickItem {
  * server already filtered, and VS Code's own filter (which in 1.105 has no way to be limited to
  * the label, `matchOnLabel` does not exist there) would hide results whose title does not contain
  * the text literally. `keepScrollPosition` stops the list from jumping back to the top on each new
- * answer. Picking a result calls `host.open`. A failing search shows a native warning and leaves
+ * answer. The description starts with `host.placeOf` (`Archived`, a folder path) when the user
+ * organized the session, so an archived result says so; opening it does NOT unarchive it. Picking a
+ * result calls `host.open`. A failing search shows a native warning and leaves
  * the picker usable. An answer that arrives after the picker closed is dropped.
  * VERIFIED by a full `test:visual` (Windows 11, VS Code 1.144.0, 30/10/2026, 0 FAIL): "ok   B4
  * Search Sessions… lists "Seed29 0711:13 AM" for "Seed29 07" and opens it in a tab (3 -> 4 tabs)". Not
@@ -70,7 +78,12 @@ export async function showSessionsSearch(host: SessionsSearchHost): Promise<void
           ? [{ label: NO_MATCH_LABEL, alwaysShow: true }]
           : result.rows.map((row) => ({
               label: sessionLabel(row),
-              description: formatSessionTime(row.updatedAt, now, host.locale),
+              description: [
+                host.placeOf?.(row.id),
+                formatSessionTime(row.updatedAt, now, host.locale),
+              ]
+                .filter((part) => part !== undefined)
+                .join(' · '),
               iconPath: new vscode.ThemeIcon('comment-discussion'),
               alwaysShow: true,
               sessionID: row.id,

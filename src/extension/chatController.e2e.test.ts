@@ -1928,6 +1928,23 @@ describe('the Sessions tree over HTTP and SSE against the synthetic server', () 
     await expect(core.deleteSessionById(created.id)).resolves.toEqual({ deleted: true });
     expect(events).toContainEqual({ type: 'session.removed', sessionID: created.id });
   }, 30_000);
+
+  // E9-sessions-organize (Q12=1): the one-by-one read of organized sessions over the real client.
+  // The 404 is the synthetic fixture's (`GET /api/session/:id` answers 404 for an unknown id, as
+  // the planner noted for the fake); a pass proves our wiring, not that a real opencode answers
+  // the same body.
+  it('reads sessions one by one from the synthetic server: the existing ones, and the unknown one as missing', async () => {
+    const { core, state, resets, other } = await bootTree();
+    core.onServerState(state);
+    await waitUntil(() => resets.length > 0, 'the first page of the tree');
+    const kept = await other.session.create({ title: 'kept' });
+    const gone = await other.session.create({ title: 'gone' });
+    await other.session.remove({ sessionID: gone.id });
+
+    const { found, missing } = await core.readSessions([kept.id, gone.id]);
+    expect(found.map((row) => [row.id, row.title])).toEqual([[kept.id, 'kept']]);
+    expect(missing).toEqual([gone.id]);
+  }, 30_000);
 });
 
 describe('two panes over HTTP and SSE against the synthetic server', () => {

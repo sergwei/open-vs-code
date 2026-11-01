@@ -28,13 +28,19 @@ import * as vscode from 'vscode';
 import {
   ADD_SELECTION_TO_CHAT_COMMAND_ID,
   ADD_TO_CHAT_COMMAND_ID,
+  ARCHIVE_SESSION_COMMAND_ID,
+  CLEAR_FILTERS_COMMAND_ID,
   FOCUS_PROMPT_COMMAND_ID,
   INJECT_WEBVIEW_MESSAGE_COMMAND_ID,
   MANAGE_PERMISSIONS_COMMAND_ID,
+  MOVE_TO_FOLDER_COMMAND_ID,
+  NEW_FOLDER_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
   OPEN_CHAT_COMMAND_ID,
   OPEN_SESSION_COMMAND_ID,
+  PIN_SESSION_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
+  TEST_SESSION_ORGANIZATION_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
 import { openLogCursor, type LogCursor } from './support/extensionLog';
@@ -473,5 +479,35 @@ describe('chat in editor tabs', function () {
     log.mark();
     await vscode.commands.executeCommand(FOCUS_PROMPT_COMMAND_ID);
     await log.waitFor('chat tab created (pane', READY_WAIT_MS);
+  });
+
+  /**
+   * Protects `sidebar` mode and the no-server case against the organizing commands of
+   * E9-sessions-organize: they must do nothing (no dialog, no write, no log line) when the tree is
+   * not in use or no folder is served, and the Test command must answer with nothing stored.
+   * Provenance: the `main` configuration has no workspace folder, so there is no server and no
+   * served folder at all; the cases with a served folder are in `fakeServer.test.ts`. A dialog
+   * that wrongly opened would block the command (no test answer is set), so each call returning
+   * is part of the check.
+   */
+  it('does nothing for the organizing commands without a served folder', async () => {
+    const log = await openOneTab(); // editor mode, no folder
+    log.mark();
+    assert.strictEqual(await vscode.commands.executeCommand(NEW_FOLDER_COMMAND_ID), undefined);
+    for (const command of [PIN_SESSION_COMMAND_ID, ARCHIVE_SESSION_COMMAND_ID]) {
+      assert.strictEqual(await vscode.commands.executeCommand(command, 'ses_none'), undefined);
+    }
+    assert.strictEqual(
+      await vscode.commands.executeCommand(MOVE_TO_FOLDER_COMMAND_ID, 'ses_none'),
+      undefined,
+    );
+    await vscode.commands.executeCommand(CLEAR_FILTERS_COMMAND_ID);
+    const stored = await vscode.commands.executeCommand<{ folder?: string; stored?: unknown }>(
+      TEST_SESSION_ORGANIZATION_COMMAND_ID,
+    );
+    assert.strictEqual(stored.folder, undefined);
+    assert.strictEqual(stored.stored, undefined);
+    await pause(SETTLE_MS);
+    log.assertAbsent('sessions organization:');
   });
 });
