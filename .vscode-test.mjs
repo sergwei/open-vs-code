@@ -149,6 +149,16 @@ const realOpencode = {
     XDG_DATA_HOME: path.join(import.meta.dirname, '.vscode-test', 'real-opencode-xdg', 'data'),
     XDG_STATE_HOME: path.join(import.meta.dirname, '.vscode-test', 'real-opencode-xdg', 'state'),
     XDG_CACHE_HOME: path.join(import.meta.dirname, '.vscode-test', 'real-opencode-xdg', 'cache'),
+    // E10-config-views (issue #128): the stdio MCP server the settings contract case configures in
+    // the real opencode through `OPENCODE_CONFIG_CONTENT`. The Node that runs it is
+    // `OPEN_VS_CODE_TEST_NODE` (in `env` above). Not read by the extension.
+    OPEN_VS_CODE_TEST_FAKE_MCP: path.join(
+      import.meta.dirname,
+      'src',
+      'extension',
+      'test-fixtures',
+      'fake-mcp.mjs',
+    ),
   },
   files: 'out/test/integration/realOpencode.test.js',
   workspaceFolder: path.join(os.tmpdir(), 'open-vs-code-real-opencode-workspace'),

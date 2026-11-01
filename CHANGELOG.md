@@ -9,6 +9,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **OpenCode Settings** tab (**OpenCode: Open Settings…**, also the gear of the Chat and Sessions views):
+  the providers of the opencode server with **Connect** (API key in a masked native box that only
+  the extension host sees, OAuth `auto` or with a code, external methods) and **Remove**, and the
+  MCP servers of the folder with their status, resources and templates, live and read only. The
+  previous **Open Settings** command is now **Open Extension Settings** (same id) and is a link at
+  the foot of the tab. Credentials are saved by opencode for all your projects; the extension does
+  not store, send to the webview or log a key.
 - Organize the Sessions tree (`chatLocation: editor`): **folders** and subfolders (**New Folder…**,
   **New Subfolder…**, **Rename Folder…**, **Delete Folder**; **Move to Folder…** or drag the
   rows, several at once), **Pin** and **Unpin** (a **Pinned** section at the top) and **Archive**

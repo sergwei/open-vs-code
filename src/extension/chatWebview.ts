@@ -35,7 +35,11 @@ export function chatWebviewOptions(extensionUri: vscode.Uri): vscode.WebviewOpti
  * lines, no "Webview bundle file missing" nor "rejected a message from the webview"). Not
  * observed: a missing bundle, macOS and Linux.
  * `surface` ends up in a `<meta name="open-vs-code-surface">`: `tab` makes the webview hide its
- * session picker, because the Sessions tree view is the one place to browse sessions (issue #77).
+ * session picker, because the Sessions tree view is the one place to browse sessions (issue #77);
+ * `settings` (issue #128, E10) makes the same bundle mount the OpenCode Settings root, so
+ * `settingsPanel.ts` shares this CSP, these resource roots and this bundle check. The validation
+ * of what that tab sends is NOT {@link parseWebviewMessage} (the chat guard): the settings guard is
+ * `isSettingsWebviewToHost`, applied by `settingsPanel.ts`.
  */
 export function renderChatWebview(
   webview: vscode.Webview,

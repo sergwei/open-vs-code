@@ -136,3 +136,50 @@ export function wrapStartServer(
         })
       : start(options);
 }
+
+/** The browser stand-in of the seam: resolves true when it "opened" the link, false when it failed. */
+export type OpenExternalSeam = (url: string) => Promise<boolean>;
+
+/** How long the stand-in waits for the fake's approval page (ms); our own choice, the fake answers at once. */
+const FAKE_BROWSER_TIMEOUT_MS = 5000;
+
+/**
+ * The stand-in for `env.openExternal` that the sign-in flow uses while the seam is on (issue #128,
+ * E10): instead of opening a browser it does an HTTP `GET` of the link when the link points at the
+ * loopback fake (`http(s)://127.0.0.1|localhost|[::1]`, the approval page of `fake-opencode.mjs`),
+ * which is what a user's click on "Approve" does; any other link (the `code` attempt's
+ * `https://fake.example.test/...`) is accepted and NOT fetched, so no test ever reaches the
+ * internet or a real browser. Returns `undefined` when the seam is off, so production gets the real
+ * `env.openExternal`. `redirect: 'manual'` and a 5 s timeout keep it bounded; any error resolves
+ * `false` (the flow then logs `opened: false`) and never throws.
+ * VERIFIED by `testLaunch.test.ts` with an injected `fetch` (off without the seam; a loopback link
+ * is fetched; a remote link is not; a failing fetch is `false`). VERIFIED against the real fake in
+ * a real VS Code 1.144.0 on Windows 11 (1/11/2026, `--label fake-server`): "✔ completes an OAuth
+ * login whose link the test browser approves" (the log said `opened: true` and the credential
+ * appeared). UNVERIFIED on macOS/Linux.
+ */
+export function fakeOpenExternal(
+  launch: TestLaunch | undefined,
+  fetchFn: (url: string, init: RequestInit) => Promise<{ status: number }> = fetch,
+): OpenExternalSeam | undefined {
+  if (launch === undefined) return undefined;
+  return async (url) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return false;
+    }
+    const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname);
+    if (!loopback || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) return true;
+    try {
+      const response = await fetchFn(url, {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(FAKE_BROWSER_TIMEOUT_MS),
+      });
+      return response.status < 400;
+    } catch {
+      return false;
+    }
+  };
+}

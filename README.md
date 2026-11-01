@@ -116,6 +116,10 @@ affiliated with opencode or with Microsoft.
   (but drops what you edited while reverted), and once the revert is final they are gone.
 - **Themes and accessibility:** light, dark and high-contrast, keyboard navigation and screen
   reader labels. Colors come from your VS Code theme.
+- **OpenCode Settings tab:** providers with connect and remove (an API key goes in a masked VS Code
+  input box, OAuth signs in through your browser, or an external method), and the MCP servers with
+  their status and resources, read only. Open it with the gear of the Chat and Sessions views, or
+  with "OpenCode: Open Settings…".
 
 ## Requirements
 
@@ -201,7 +205,8 @@ Command Palette (they act on the active editor); the two Explorer entries are no
 | **OpenCode: Open Chat** | Shows the chat and puts the caret in the prompt. |
 | **OpenCode: Focus Prompt** | Puts the caret in the prompt; pressed again while the chat has the focus, it returns to the editor. |
 | **OpenCode: New Session** | Opens a new empty chat tab (the default, `chatLocation` set to `editor`). With `chatLocation` set to `sidebar` it is the same as the **New session** button: the next prompt starts a new session and your draft is kept. |
-| **OpenCode: Open Settings** | Opens Settings filtered to this extension. Also a button in the title bar of the Chat view and of the Sessions view. |
+| **OpenCode: Open Settings…** | Opens the **OpenCode Settings** tab (or shows it if it is already open): the providers of the opencode server, with **Connect** (API key in a masked box of VS Code, OAuth in your browser, or an external method) and **Remove**, and the MCP servers of the folder with their status and resources (read only, with **Refresh**). It is also the gear in the title bar of the Chat and Sessions views. Credentials are saved by opencode for all your projects; the extension never stores or logs a key. |
+| **OpenCode: Open Extension Settings** | Opens Settings filtered to this extension (a link at the foot of the OpenCode Settings tab). |
 | **OpenCode: Stop Response** | Same as **Stop**: interrupts the running turn. Run from the editor it also shows the chat; with no turn running it only says "No response is running". |
 | **OpenCode: Rename Session…** | Row of the Sessions list (shown while `chatLocation` is not `sidebar`; the default is `editor`): asks for a new title. Also the pencil on the row and `F2`; not in the Command Palette. |
 | **OpenCode: Delete Session** | Row of the Sessions list: after a confirmation, deletes the session for every opencode client and closes its tab. Also the bin on the row and `Delete`; not in the Command Palette. |
@@ -313,6 +318,13 @@ always `opencode`.
   attachments of the old surface stay with it.
 - The editor tabs were only tried on Windows; the integration tests run on Windows, macOS and Linux,
   but the visual checks of the tabs do not.
+- OpenCode Settings tab: opencode does not check an API key when you connect it, so the tab says
+  "Connected" even with a wrong key and the failure shows on your first prompt. Browser OAuth
+  methods probably fail in a remote window (SSH, WSL, Codespaces), because opencode listens for the
+  callback on the remote machine; device-code methods work, and the tab does not warn about it yet.
+  "Sign in with ChatGPT" uses the fixed port 1455, which another process may already hold.
+  opencode saves the credentials for all your projects, not only this one. The tab does not come
+  back after Reload Window.
 - Mostly tested on Windows; CI builds and tests on Windows, macOS and Linux.
 
 ## Privacy and security
@@ -328,6 +340,9 @@ trust whoever wrote its `.opencode` files, its `opencode.json` and its `AGENTS.m
 The chat view never talks to the opencode server. The port and the password live only in the
 extension host, and the server password you set is kept in VS Code's SecretStorage. The extension
 does not send any data anywhere other than to the opencode server you use.
+
+An API key typed in the OpenCode Settings tab is asked only in a native VS Code input box: it does
+not pass through the webview or the log, and opencode stores it.
 
 ## License
 

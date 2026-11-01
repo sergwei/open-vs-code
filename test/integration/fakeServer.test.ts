@@ -46,6 +46,7 @@ import {
   NEW_FOLDER_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
   NEW_SUBFOLDER_COMMAND_ID,
+  OPEN_SERVER_SETTINGS_COMMAND_ID,
   OPEN_SESSION_COMMAND_ID,
   PIN_SESSION_COMMAND_ID,
   RENAME_SESSION_COMMAND_ID,
@@ -53,14 +54,19 @@ import {
   RESTART_SERVER_COMMAND_ID,
   RESTORE_CHAT_TAB_TEST_COMMAND_ID,
   SESSION_DIFF_SCHEME,
+  SETTINGS_PANEL_VIEW_TYPE,
   SHOW_REQUEST_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
+  TEST_PROVIDER_ANSWERS_COMMAND_ID,
   TEST_SESSION_ANSWERS_COMMAND_ID,
   TEST_SESSION_ORGANIZATION_COMMAND_ID,
+  TEST_SETTINGS_MESSAGE_COMMAND_ID,
+  TEST_SETTINGS_STATE_COMMAND_ID,
   UNARCHIVE_SESSION_COMMAND_ID,
   UNPIN_SESSION_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
+import type { SettingsState } from '../../src/shared/settingsProtocol';
 import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
 import {
   chatTabs,
@@ -2042,6 +2048,295 @@ describe('fake server', function () {
         decision: 'reject',
       });
       await log.waitFor('turn finished:', TURN_WAIT_MS);
+    });
+  });
+
+  /**
+   * The OpenCode Settings tab (issue #128, E10) against the SYNTHETIC server: the panel, the MCP
+   * list, and the provider sign-in flows with their dialogs pre-answered.
+   *
+   * What this proves and what it does not. It proves the wiring inside a real VS Code: the command
+   * opens ONE webview panel whose document sends `settings.ready` (the bundle loaded under the
+   * strict CSP and mounted the settings root), the store follows the fake's MCP events, the flows
+   * reach the fake's routes through the host's own client, and the log never holds the key. It does
+   * NOT show the native widgets (the masked InputBox, the notification with its "Copy code" link,
+   * the modal): the test API cannot drive them, so `TEST_PROVIDER_ANSWERS_COMMAND_ID` answers in
+   * their place, and `test:visual` step 36 (cells V7-V9) is what looks at them. The messages of the
+   * webview are fed through `TEST_SETTINGS_MESSAGE_COMMAND_ID`, which runs the same guard and the
+   * same revalidation as a real one; the DOM of the tab is judged by steps 35-36. The fake's answers are
+   * INVENTED from a spike (see `fake-opencode.mjs`), not the real opencode's (`realOpencode.test.ts`).
+   */
+  describe('the OpenCode Settings tab', function () {
+    // A made-up key, long and unlike any word of the log, so a substring search cannot hit by luck.
+    const FAKE_KEY = 'sk-fake-integration-key-DO-NOT-LOG-7f3a91c2';
+
+    /** The state the settings controller would send now. */
+    const readState = (): Thenable<SettingsState> =>
+      vscode.commands.executeCommand<SettingsState>(TEST_SETTINGS_STATE_COMMAND_ID);
+
+    /** Polls the state until `done` accepts it; fails with the last state as JSON. */
+    const waitForState = async (
+      done: (state: SettingsState) => boolean,
+      what: string,
+      timeoutMs = 10_000,
+    ): Promise<SettingsState> => {
+      const deadline = Date.now() + timeoutMs;
+      let state = await readState();
+      while (!done(state)) {
+        if (Date.now() >= deadline) {
+          assert.fail(
+            `${what} did not happen within ${String(timeoutMs)} ms; state:\n${JSON.stringify(state)}`,
+          );
+        }
+        await sleep(100);
+        state = await readState();
+      }
+      return state;
+    };
+
+    /** The settings tabs of the workbench. */
+    const settingsTabs = (): vscode.Tab[] =>
+      vscode.window.tabGroups.all
+        .flatMap((group) => group.tabs)
+        .filter(
+          (tab) =>
+            tab.input instanceof vscode.TabInputWebview &&
+            tab.input.viewType.endsWith(SETTINGS_PANEL_VIEW_TYPE),
+        );
+
+    /** The credentials of an integration of the state, as `{id, method}`. */
+    const credentialsOf = (state: SettingsState, integrationID: string): string[] =>
+      (state.providers.rows.find((row) => row.id === integrationID)?.connections ?? []).flatMap(
+        (connection) => (connection.kind === 'credential' ? [connection.id] : []),
+      );
+
+    after(async () => {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    });
+
+    /**
+     * "OpenCode: Open Settings…" opens one tab titled "OpenCode Settings" whose document says
+     * ready, and running it again shows the same tab instead of a second one.
+     *
+     * Protects H1/H4 of the plan: the panel is created with the strict CSP and the bundle path,
+     * the settings root mounts from the surface meta and posts `settings.ready`, the guard accepts
+     * it, and the command is a reveal when the tab exists. A missing bundle or a CSP that blocks
+     * the script would show as no `settings webview ready` line, or a `Webview bundle file
+     * missing` warning.
+     */
+    it('opens the OpenCode Settings tab once and its document says ready', async function () {
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(OPEN_SERVER_SETTINGS_COMMAND_ID);
+      await log.waitFor('settings webview ready', 15_000);
+      assert.strictEqual(settingsTabs().length, 1, `tabs: ${String(settingsTabs().length)}`);
+      assert.strictEqual(settingsTabs()[0]?.label, 'OpenCode Settings');
+      await vscode.commands.executeCommand(OPEN_SERVER_SETTINGS_COMMAND_ID);
+      await sleep(SETTLE_MS);
+      assert.strictEqual(settingsTabs().length, 1, 'the second command opened another tab');
+      assert.strictEqual(countOf(log, 'settings tab opened'), 1, `log:\n${log.added()}`);
+      log.assertAbsent('Webview bundle file missing');
+      log.assertAbsent('rejected a message from the settings webview');
+    });
+
+    /**
+     * The MCP servers of the fake appear in the state with their status and resources, `broken`'s
+     * error is one short line, and `MCPFLIP` (a prompt text the fake reacts to) turns `broken` into
+     * `connected` and adds a resource: the store follows the stream and writes the stable
+     * `server config loaded (…)` line with one more resource.
+     *
+     * Protects H1/H3 (the log line is the stable contract that this test and the visual cells wait
+     * on) and the store's reaction to `mcp.status.changed` / `mcp.resources.changed`, which the
+     * unit tests only exercise with fabricated clients.
+     */
+    it('lists the MCP servers and follows MCPFLIP in the state and in the log', async function () {
+      const first = await waitForState(
+        (s) => s.mcp.loaded && s.mcp.servers.length === 4,
+        'the four MCP servers',
+      );
+      const server = (name: string) => first.mcp.servers.find((s) => s.name === name);
+      assert.strictEqual(server('docs')?.status, 'connected');
+      assert.strictEqual(server('docs')?.resources.length, 2);
+      assert.strictEqual(server('docs')?.templates.length, 1);
+      assert.strictEqual(server('broken')?.status, 'failed');
+      const error = server('broken')?.error ?? '';
+      assert.ok(
+        error.length > 0 && error.length <= 200 && !/[\r\n]/.test(error),
+        `broken error is not one short line: ${JSON.stringify(error)}`,
+      );
+      assert.strictEqual(server('off')?.status, 'disabled');
+      assert.strictEqual(server('linear')?.status, 'needs_auth');
+
+      const log = await openLogCursor();
+      await sendPrompt(log, 'MCPFLIP: flip the broken MCP server');
+      await matchInLog(
+        log,
+        /server config loaded \(\d+ integrations, \d+ connected, 4 mcp servers, 3 resources\)/,
+        10_000,
+        'the config line after MCPFLIP',
+      );
+      const flipped = await waitForState(
+        (s) => s.mcp.servers.find((x) => x.name === 'broken')?.status === 'connected',
+        'broken turning connected',
+      );
+      assert.strictEqual(
+        flipped.mcp.servers.find((x) => x.name === 'broken')?.resources.length,
+        1,
+        'broken gained no resource',
+      );
+    });
+
+    /**
+     * Connects Azure with an API key typed in the (pre-answered) native box: the fake gets the
+     * key, the state shows a credential, the log has the stable line, and neither the log nor the
+     * state ever holds the key (H3).
+     *
+     * Protects architecture rule 1 from the host side: the key travels box -> `ProviderAuth` ->
+     * `POST connect/key` and nowhere else. The whole `OpenCode.log` of the session is searched,
+     * not only the lines of this case, because a leak could come from any earlier code path. The
+     * fake never logs or echoes the key, so a hit would be the extension's own.
+     */
+    it('connects a provider with an API key and never writes the key to the log or the state', async function () {
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(TEST_PROVIDER_ANSWERS_COMMAND_ID, { key: FAKE_KEY });
+      await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+        type: 'settings.connect',
+        integrationID: 'azure',
+        method: 0,
+        answer: { resourceName: 'my-resource' },
+      });
+      await log.waitFor('provider connected: azure (key)', 10_000);
+      const state = await waitForState(
+        (s) => credentialsOf(s, 'azure').length === 1,
+        'azure showing a credential',
+      );
+      assert.ok(!JSON.stringify(state).includes(FAKE_KEY), 'the key is in the settings state');
+      await log.waitForQuiet();
+      const whole = await openLogFromStart();
+      assert.ok(!whole.added().includes(FAKE_KEY), 'the key is in OpenCode.log');
+    });
+
+    /**
+     * An OAuth `auto` login whose link the test browser approves completes by itself: the flow
+     * opens the fake's approval page (the seam does a `GET`), the poll sees `complete`, and the
+     * state shows the credential.
+     *
+     * Protects the whole `auto` path against the fake: `connect/oauth`, the loopback-http opt-in of
+     * the seam, the 1 s poll and the events that follow. Real browsers and real providers are
+     * `test:visual`/F5 territory; `realOpencode.test.ts` starts and cancels a real device login.
+     */
+    it('completes an OAuth login whose link the test browser approves', async function () {
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(TEST_PROVIDER_ANSWERS_COMMAND_ID, { approve: true });
+      await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+        type: 'settings.connect',
+        integrationID: 'openai',
+        method: 0,
+        answer: {},
+      });
+      await log.waitFor('provider connected: openai (oauth)', 15_000);
+      assert.ok(
+        /provider sign-in started: openai \(auto, [^)]*opened: true\)/.test(log.added()),
+        `the link was not opened; log:\n${log.added()}`,
+      );
+      await waitForState((s) => credentialsOf(s, 'openai').length === 1, 'openai connected');
+    });
+
+    /**
+     * A login nobody approves shows its waiting card data (instructions and the device code), "Copy
+     * code" puts the code on the clipboard, and Cancel ends the attempt without a credential;
+     * a second Cancel changes nothing.
+     *
+     * Protects the cancel path of both buttons (the card's message is the one injected here) and
+     * its idempotence, which the plan's section 6 calls out because the notification and the card
+     * can both ask. The clipboard is global state of the machine: it is saved and restored.
+     */
+    it('shows the waiting attempt, copies its code and cancels it', async function () {
+      const saved = await vscode.env.clipboard.readText();
+      try {
+        const log = await openLogCursor();
+        await vscode.commands.executeCommand(TEST_PROVIDER_ANSWERS_COMMAND_ID, { approve: false });
+        const flow = Promise.resolve(
+          vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+            type: 'settings.connect',
+            integrationID: 'github-copilot',
+            method: 0,
+            answer: { deploymentType: 'github.com' },
+          }),
+        );
+        await log.waitFor('provider sign-in started: github-copilot (auto', 10_000);
+        const waiting = await waitForState(
+          (s) => s.attempt?.phase === 'waiting',
+          'the attempt waiting',
+        );
+        assert.strictEqual(waiting.attempt?.integrationID, 'github-copilot');
+        assert.strictEqual(waiting.attempt?.code, 'ABCD-1234');
+
+        await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+          type: 'settings.copyCode',
+          integrationID: 'github-copilot',
+        });
+        assert.strictEqual(await vscode.env.clipboard.readText(), 'ABCD-1234');
+
+        const cancel = {
+          type: 'settings.cancel',
+          integrationID: 'github-copilot',
+        };
+        await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, cancel);
+        await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, cancel);
+        await flow;
+        const after = await waitForState((s) => s.attempt === undefined, 'the attempt ending');
+        assert.deepStrictEqual(credentialsOf(after, 'github-copilot'), []);
+        assert.ok(!log.added().includes('provider connected: github-copilot'), log.added());
+      } finally {
+        await vscode.env.clipboard.writeText(saved);
+      }
+    });
+
+    /**
+     * Removes a credential only after the modal says yes, and only one that belongs to the
+     * integration named: a "no" removes nothing, another integration's credential id is refused
+     * without a call, and a "yes" removes it and the state follows.
+     *
+     * Protects the webview-as-untrusted-input rule of the plan's section 3: a broken webview must
+     * not delete credentials silently or reach one it does not own.
+     */
+    it('removes a credential only after a yes, and refuses one of another provider', async function () {
+      const before = await readState();
+      const [azureCredential] = credentialsOf(before, 'azure');
+      const [anthropicCredential] = credentialsOf(before, 'anthropic');
+      assert.ok(azureCredential, 'azure has no credential: the key case did not run');
+      assert.ok(anthropicCredential, 'the fake gave anthropic no credential');
+
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(TEST_PROVIDER_ANSWERS_COMMAND_ID, { confirm: false });
+      await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+        type: 'settings.disconnect',
+        integrationID: 'azure',
+        credentialID: azureCredential,
+      });
+      await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+        type: 'settings.disconnect',
+        integrationID: 'azure',
+        credentialID: anthropicCredential,
+      });
+      await log.waitFor('settings request refused: settings.disconnect', 10_000);
+      await sleep(SETTLE_MS);
+      log.assertAbsent('provider credential removed');
+      assert.strictEqual(credentialsOf(await readState(), 'azure').length, 1);
+      assert.strictEqual(credentialsOf(await readState(), 'anthropic').length, 1);
+
+      await vscode.commands.executeCommand(TEST_PROVIDER_ANSWERS_COMMAND_ID, { confirm: true });
+      await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+        type: 'settings.disconnect',
+        integrationID: 'azure',
+        credentialID: azureCredential,
+      });
+      await log.waitFor('provider credential removed: azure', 10_000);
+      await waitForState(
+        (s) => credentialsOf(s, 'azure').length === 0,
+        'azure losing its credential',
+      );
+      assert.strictEqual(credentialsOf(await readState(), 'anthropic').length, 1);
     });
   });
 

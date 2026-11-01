@@ -32,6 +32,7 @@ import {
   CHAT_PANEL_VIEW_TYPE,
   CHAT_VIEW_ID,
   CONFIG_SECTION,
+  COPY_AUTH_CODE_COMMAND_ID,
   DEFAULT_MODEL_KEY,
   DEFAULT_MODEL_SETTING,
   DELETE_SESSION_COMMAND_ID,
@@ -43,20 +44,32 @@ import {
   MANAGE_PERMISSIONS_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
   OPEN_CHAT_COMMAND_ID,
+  OPEN_SERVER_SETTINGS_COMMAND_ID,
   OPEN_SESSION_COMMAND_ID,
   OPEN_SETTINGS_COMMAND_ID,
   RENAME_SESSION_COMMAND_ID,
   REPLY_PERMISSION_COMMAND_ID,
+  RESTART_SERVER_COMMAND_ID,
   RESTORE_CHAT_TAB_TEST_COMMAND_ID,
   SEARCH_SESSIONS_COMMAND_ID,
+  SHOW_LOGS_COMMAND_ID,
   SHOW_MORE_SESSIONS_COMMAND_ID,
   SERVER_STATUS_ITEM_ID,
   SHOW_REQUEST_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
+  TEST_PROVIDER_ANSWERS_COMMAND_ID,
   TEST_SESSION_ANSWERS_COMMAND_ID,
   TEST_SESSION_ORGANIZATION_COMMAND_ID,
+  TEST_SETTINGS_MESSAGE_COMMAND_ID,
+  TEST_SETTINGS_STATE_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from './ids';
+import { ProviderAuth } from './providerAuth';
+import { createProviderAuthUi, type ProviderTestAnswers } from './providerAuthUi';
+import { ServerConfig, type ServerConfigSink } from './serverConfig';
+import { SettingsController } from './settingsController';
+import { SettingsPanel } from './settingsPanel';
+import { fakeOpenExternal, launchModesOf, testLaunchFrom } from './testLaunch';
 import { createOpencodeClient } from './opencodeClient';
 import { safeLog } from './opencodeServer';
 import { createSetupActions } from './setupActions';
@@ -431,6 +444,15 @@ function warnSessionFailure(action: string, error: unknown): void {
  * taking the focus (it lives in the iframe), the adoption of an EMPTY tab by that branch, a
  * subagent that asks (the fake has none), and macOS and Linux locally.
  *
+ * Issue #128 (E10, OpenCode Settings tab): it also creates the store of the server's configuration
+ * (`ServerConfig`), the sign-in flows (`ProviderAuth`) and the `SettingsController` that joins them
+ * with the tab (`SettingsPanel`), hands the controller ONE sink that fans `attach`/`detach`/events out
+ * to the store and to `ProviderAuth`, calls `settings.changed()` when the connection changes, and
+ * registers `OPEN_SERVER_SETTINGS_COMMAND_ID` and the "Copy code" link command. Under
+ * `ExtensionMode.Test` three uncontributed commands pre-answer the sign-in dialogs, feed the
+ * controller a raw settings message and read its state. With the fake/visual seam on, the browser
+ * stand-in `fakeOpenExternal` replaces `env.openExternal` and `http://127.0.0.1` links may be opened.
+ *
  * The two internal commands (`SHOW_REQUEST_COMMAND_ID`, `REPLY_PERMISSION_COMMAND_ID`) are always
  * registered and not contributed: they are the targets of the links of an attention
  * notification. They validate their argument and refuse `always`. A rejected argument logs a
@@ -568,11 +590,90 @@ export function registerChat(
   };
   paintStatus();
   statusItem.show();
+
+  // Issue #128 (E10): the OpenCode Settings tab. The store of the server's configuration and the
+  // sign-in flows are fed by the chat controller (one sink, fanned out below); the controller of
+  // the tab joins them with the panel. The browser stand-in and `allowLoopbackHttp` exist only
+  // while the fake/visual seam is on; the pre-answers only under `ExtensionMode.Test`.
+  const seam = testLaunchFrom(
+    launchModesOf(
+      context.extensionMode,
+      vscode.ExtensionMode.Test,
+      vscode.ExtensionMode.Development,
+    ),
+    process.env,
+  );
+  const providerAnswers: ProviderTestAnswers | undefined =
+    context.extensionMode === vscode.ExtensionMode.Test ? {} : undefined;
+  const openExternalSeam = fakeOpenExternal(seam);
+  const serverConfig = new ServerConfig(log);
+  const providerAuth = new ProviderAuth(
+    log,
+    createProviderAuthUi({
+      ...(openExternalSeam === undefined ? {} : { openExternalSeam }),
+      ...(providerAnswers === undefined ? {} : { answers: providerAnswers }),
+    }),
+    { allowLoopbackHttp: seam !== undefined },
+  );
+  // `ProviderAuth.attach/detach` go next to the store's, so a flow never outlives its server.
+  const configSink: ServerConfigSink = {
+    attach: (api, epoch, secrets) => {
+      serverConfig.attach(api, epoch, secrets);
+      providerAuth.attach(api, secrets);
+    },
+    detach: () => {
+      serverConfig.detach();
+      providerAuth.detach();
+    },
+    event: (type) => {
+      serverConfig.event(type);
+    },
+  };
+  const settings = new SettingsController({
+    config: serverConfig,
+    auth: providerAuth,
+    post: (message) => {
+      settingsPanel.post(message);
+    },
+    header: () => {
+      const state = manager.state;
+      return {
+        connection: statusConnection,
+        folder: state.kind === 'running' ? path.basename(state.server.folder) : '',
+        ...(statusConnection.state === 'connected'
+          ? { serverVersion: statusConnection.serverVersion }
+          : {}),
+      };
+    },
+    runAction: (action) => {
+      const command = {
+        logs: SHOW_LOGS_COMMAND_ID,
+        extensionSettings: OPEN_SETTINGS_COMMAND_ID,
+        restart: RESTART_SERVER_COMMAND_ID,
+      }[action];
+      void vscode.commands.executeCommand(command);
+    },
+    log,
+  });
+  const settingsPanel = new SettingsPanel(context.extensionUri, channel, log, {
+    onReady: () => {
+      settings.onReady();
+    },
+    onMessage: (message) => {
+      void settings.onMessage(message);
+    },
+    onClosed: () => {
+      settings.onClosed();
+    },
+  });
+
   const controller = new ChatController({
+    serverConfig: configSink,
     serverStatus: {
       connection: (next) => {
         statusConnection = next;
         paintStatus();
+        settings.changed(); // the tab's header shows the connection and the server version
       },
       catalog: (next) => {
         statusCatalog = next;
@@ -1147,6 +1248,19 @@ export function registerChat(
         `@ext:${context.extension.id}`,
       );
     }),
+    // Issue #128 (E10): the OpenCode Settings tab, the gear of the Sessions view and the palette.
+    vscode.commands.registerCommand(OPEN_SERVER_SETTINGS_COMMAND_ID, () => {
+      settingsPanel.show();
+    }),
+    // The "Copy code" link of the sign-in notification. It takes no argument: it copies the device
+    // code of the attempt in progress (none: nothing happens), so a crafted link cannot set the clipboard.
+    vscode.commands.registerCommand(COPY_AUTH_CODE_COMMAND_ID, async () => {
+      const integrationID = providerAuth.attempt()?.integrationID;
+      if (integrationID !== undefined) await providerAuth.copyCode(integrationID);
+    }),
+    settingsPanel,
+    { dispose: () => settings.dispose() },
+    { dispose: () => providerAuth.detach() },
     // Issue #31: the original side of "Changed files" diffs. Registered now, not on first use, so
     // a diff tab restored by Reload Window finds its provider.
     registerSessionDiffProvider(
@@ -1327,6 +1441,20 @@ export function registerChat(
       vscode.commands.registerCommand(TEST_SESSION_ORGANIZATION_COMMAND_ID, () =>
         organize.stored(),
       ),
+      // Issue #128: pre-answers of the NEXT sign-in dialogs (one-shot; `approve` stays until changed).
+      vscode.commands.registerCommand(TEST_PROVIDER_ANSWERS_COMMAND_ID, (raw: unknown) => {
+        if (providerAnswers === undefined) return;
+        const args =
+          typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+        if (typeof args.key === 'string' || args.key === null) providerAnswers.key = args.key;
+        if (typeof args.code === 'string' || args.code === null) providerAnswers.code = args.code;
+        if (typeof args.confirm === 'boolean') providerAnswers.confirm = args.confirm;
+        if (typeof args.approve === 'boolean') providerAnswers.approve = args.approve;
+      }),
+      vscode.commands.registerCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, (raw: unknown) =>
+        settings.onMessage(raw),
+      ),
+      vscode.commands.registerCommand(TEST_SETTINGS_STATE_COMMAND_ID, () => settings.buildState()),
       vscode.commands.registerCommand(RESTORE_CHAT_TAB_TEST_COMMAND_ID, (raw: unknown) => {
         // The persisted state and title of a tab "revived by VS Code"; a panel we create stands in
         // for the revived one and goes through the SAME `restore` as the serializer.

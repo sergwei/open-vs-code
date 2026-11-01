@@ -955,6 +955,210 @@ describe('real opencode', function () {
   });
 
   /**
+   * The server side of the OpenCode Settings tab (issue #128, E10) against a REAL opencode, through
+   * the full client and with NO prompt (no model, no quota): the providers list without secrets, a
+   * fake API key connected and removed, a device login started and cancelled, and an MCP server
+   * of the config listed with its resource. These are the routes `serverConfig.ts` and
+   * `providerAuth.ts` call; the unit tests and the `fake-server` suite fabricate their answers, so
+   * this is where a change of shape in a release would show.
+   *
+   * Isolation: the credentials go to the XDG database of this suite (`.vscode-test.mjs`), which
+   * PERSISTS between runs, so the key case removes what an earlier run left before it starts. The
+   * login case needs the network (OpenAI's device-code endpoint) and skips with its reason when the
+   * server cannot get a code; a 4xx with a `_tag` still fails. Nothing here completes a real
+   * login: only start, status and cancel.
+   * VERIFIED (1/11/2026, Windows 11, opencode 2.0.32, `--label real-opencode`, 19 passing): "✔
+   * lists integrations without secrets, connects a fake key and removes it", "✔ starts a device
+   * login, reads an https link and cancels it" (not skipped: the network answered) and "✔ lists an
+   * MCP server of the config with its resource". macOS and Linux are UNVERIFIED.
+   */
+  describe('OpenCode Settings API (own server, no prompt)', function () {
+    const FAKE_KEY = 'sk-fake-real-opencode-key-DO-NOT-LOG-5b8e20d1';
+
+    /** A body error with a `_tag`: the server answered and refused, as opposed to a network failure. */
+    const isTagged = (error: unknown): error is { _tag: string } =>
+      typeof error === 'object' &&
+      error !== null &&
+      typeof (error as { _tag?: unknown })._tag === 'string';
+
+    /**
+     * `integration.list` has the shapes the host maps and no secret; a fake key connects (the
+     * server does not validate it), shows as a `credential` connection of method `key`, appears
+     * nowhere in the answers, and `credential.remove` takes it away.
+     *
+     * Protects the connect/remove pair of the Providers section and the "no secret in the list"
+     * premise of H3 (the host maps `integration.list` without `credential.list`).
+     */
+    it('lists integrations without secrets, connects a fake key and removes it', async function () {
+      this.timeout(60_000);
+      const served = fs.mkdtempSync(path.join(os.tmpdir(), 'ovsc-contract-auth-'));
+      const sub = await startOwnServer(binary, served, 'auth-pw');
+      try {
+        const listed = await sub.client.integration.list({});
+        assert.ok(Array.isArray(listed.data) && listed.data.length > 0, 'no integrations listed');
+        for (const integration of listed.data) {
+          assert.strictEqual(typeof integration.id, 'string');
+          assert.ok(Array.isArray(integration.methods), `${integration.id}: methods`);
+          assert.ok(Array.isArray(integration.connections), `${integration.id}: connections`);
+        }
+        const target = listed.data.find((integration) => integration.id === 'anthropic');
+        assert.ok(target, 'the real catalog has no anthropic integration');
+        assert.ok(
+          target.methods.some((method) => method.type === 'key'),
+          'anthropic offers no key method',
+        );
+
+        // A previous run of this suite may have left a credential in the persistent XDG database.
+        for (const stale of target.connections) {
+          if (stale.type === 'credential') {
+            await sub.client.credential.remove({ credentialID: stale.id });
+          }
+        }
+        await sub.client.integration.connect.key({ integrationID: 'anthropic', key: FAKE_KEY });
+        let connected: string | undefined;
+        const deadline = Date.now() + 10_000;
+        while (connected === undefined && Date.now() < deadline) {
+          const current = (await sub.client.integration.get({ integrationID: 'anthropic' })).data;
+          const credential = current.connections.find((c) => c.type === 'credential');
+          if (credential?.type === 'credential') {
+            assert.strictEqual(credential.method, 'key');
+            connected = credential.id;
+          } else {
+            await sleep(200);
+          }
+        }
+        assert.ok(connected, 'the fake key never showed as a credential connection');
+
+        const after = JSON.stringify([
+          await sub.client.integration.list({}),
+          await sub.client.integration.get({ integrationID: 'anthropic' }),
+        ]);
+        assert.ok(!after.includes(FAKE_KEY), 'the key came back in integration.list/get');
+
+        await sub.client.credential.remove({ credentialID: connected });
+        const removed = (await sub.client.integration.get({ integrationID: 'anthropic' })).data;
+        assert.ok(
+          !removed.connections.some((c) => c.type === 'credential' && c.id === connected),
+          'the credential is still connected after credential.remove',
+        );
+      } finally {
+        await sub.stop();
+        fs.rmSync(served, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      }
+    });
+
+    /**
+     * Starts the OpenAI device login (`chatgpt-headless`, mode `auto`), checks the link is an
+     * `https:` address and the instructions carry a code, then cancels: `status` afterwards is
+     * `IntegrationAttemptNotFoundError`. Nothing is completed.
+     *
+     * Protects the `https`-only rule of `ProviderAuth` against what the real server returns, and
+     * the cancel contract its idempotent Cancel relies on (a 404 after the first cancel).
+     */
+    it('starts a device login, reads an https link and cancels it', async function () {
+      this.timeout(60_000);
+      const served = fs.mkdtempSync(path.join(os.tmpdir(), 'ovsc-contract-oauth-'));
+      const sub = await startOwnServer(binary, served, 'oauth-pw');
+      try {
+        const openai = (await sub.client.integration.list({})).data.find((i) => i.id === 'openai');
+        const method = openai?.methods.find(
+          (m) => m.type === 'oauth' && m.id === 'chatgpt-headless',
+        );
+        if (openai === undefined || method === undefined || method.type !== 'oauth') {
+          this.skip();
+        }
+        let started;
+        try {
+          started = (
+            await sub.client.integration.oauth.connect({
+              integrationID: 'openai',
+              methodID: method.id,
+            })
+          ).data;
+        } catch (error) {
+          if (isTagged(error)) throw error;
+          return this.skip(); // the server could not reach OpenAI: nothing to judge offline
+        }
+        assert.strictEqual(started.mode, 'auto');
+        assert.ok(started.url.startsWith('https://'), `the link is not https: ${started.url}`);
+        assert.ok(/code:\s*[A-Z0-9-]{4,}/i.test(started.instructions), started.instructions);
+        const status = (
+          await sub.client.integration.oauth.status({
+            integrationID: 'openai',
+            attemptID: started.attemptID,
+          })
+        ).data;
+        assert.strictEqual(status.status, 'pending');
+        await sub.client.integration.oauth.cancel({
+          integrationID: 'openai',
+          attemptID: started.attemptID,
+        });
+        await assert.rejects(
+          sub.client.integration.oauth.status({
+            integrationID: 'openai',
+            attemptID: started.attemptID,
+          }),
+          (error: unknown) => {
+            assert.strictEqual(
+              (error as { _tag?: string })._tag,
+              'IntegrationAttemptNotFoundError',
+            );
+            return true;
+          },
+        );
+      } finally {
+        await sub.stop();
+        fs.rmSync(served, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      }
+    });
+
+    /**
+     * An MCP server declared in `mcp.servers` (passed through `OPENCODE_CONFIG_CONTENT`, a stdio
+     * server in `fake-mcp.mjs` run by the suite's Node) shows as `connected` in `mcp.list` and its
+     * resource and template are in `mcp.resource.catalog`.
+     *
+     * Protects the two reads of the MCP section. The list is EMPTY for the first moments of a
+     * server (the spike saw `[]` at 25 ms and 3 s, filled after the first `mcp.status.changed`),
+     * so the case polls up to 30 s instead of reading once.
+     */
+    it('lists an MCP server of the config with its resource', async function () {
+      this.timeout(90_000);
+      const node = process.env['OPEN_VS_CODE_TEST_NODE'];
+      const script = process.env['OPEN_VS_CODE_TEST_FAKE_MCP'];
+      assert.ok(node && script, 'OPEN_VS_CODE_TEST_NODE / OPEN_VS_CODE_TEST_FAKE_MCP are not set');
+      const served = fs.mkdtempSync(path.join(os.tmpdir(), 'ovsc-contract-mcp-'));
+      const config = JSON.stringify({
+        mcp: { servers: { fakemcp: { type: 'local', command: [node, script] } } },
+      });
+      const sub = await startOwnServer(binary, served, 'mcp-pw', {
+        OPENCODE_CONFIG_CONTENT: config,
+      });
+      try {
+        const deadline = Date.now() + 30_000;
+        let status: string | undefined;
+        while (status !== 'connected' && Date.now() < deadline) {
+          const servers = (await sub.client.mcp.list({})).data;
+          status = servers.find((server) => server.name === 'fakemcp')?.status.status;
+          if (status !== 'connected') await sleep(500);
+        }
+        assert.strictEqual(status, 'connected', `fakemcp ended ${String(status)}`);
+        const catalog = (await sub.client.mcp.resource.catalog({})).data;
+        assert.ok(
+          catalog.resources.some((r) => r.server === 'fakemcp' && r.name === 'fake-readme'),
+          `resources: ${JSON.stringify(catalog.resources)}`,
+        );
+        assert.ok(
+          catalog.templates.some((t) => t.server === 'fakemcp' && t.name === 'fake-file'),
+          `templates: ${JSON.stringify(catalog.templates)}`,
+        );
+      } finally {
+        await sub.stop();
+        fs.rmSync(served, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      }
+    });
+  });
+
+  /**
    * "Restart Server" (issue #10) against a real server: the old process is stopped (and really
    * gone), a new one comes up, and the event stream reconnects by itself.
    *
