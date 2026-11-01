@@ -130,6 +130,7 @@ import type { ChatApi } from './opencodeClient';
 import { safeLog, type ServerLog } from './opencodeServer';
 import { createPendingRequests, type PendingSummary } from './pendingRequests';
 import { createRequestResolutions } from './requestResolutions';
+import type { ServerConfigSink } from './serverConfig';
 import type { RunningServerInfo, ServerState } from './serverManager';
 import { createSessionBrowser, type SessionPage } from './sessionBrowser';
 import { codedError, createSessionDiffs, type DiffTarget } from './sessionDiff';
@@ -451,6 +452,14 @@ export interface ChatControllerDeps {
    * any host that has no tree; see {@link SessionListSink}.
    */
   sessionList?: SessionListSink;
+  /**
+   * What the OpenCode Settings tab shows of the server's configuration (issue #128, E10; the model
+   * is `serverConfig.ts`). Absent in the tests written before it and in any host without the tab:
+   * then the controller does exactly what it did before (no extra read, nothing forwarded). The
+   * controller attaches the client of each running server, detaches it when that server goes, and
+   * forwards every stream event (`event(type)`), which the sink filters itself.
+   */
+  serverConfig?: ServerConfigSink;
   /** The status bar item (issue #124); absent in tests that do not care. */
   serverStatus?: ServerStatusSink;
   /** The QuickPick that picks which saved permissions to revoke; resolves with their ids. */
@@ -1230,6 +1239,8 @@ export class ChatController {
    * carries `binary` (the detection's attempts, E2 issue #85) passes it on to the connection state
    * as is, and one without it adds no field, so the webview can tell step 1 from step 2.
    * VERIFIED by unit tests with fabricated states (synthetic).
+   * Issue #128: a new `running` server attaches its client to `deps.serverConfig` (every other
+   * state detaches it through `stopStream`).
    */
   onServerState(state: ServerState): void {
     if (this.disposed) return;
@@ -1246,6 +1257,9 @@ export class ChatController {
         this.stopStream();
         this.server = next;
         this.client = this.deps.createClient(next);
+        // Issue #128: the settings sink reads through the same client; `stopStream` just detached
+        // the previous one, and `catalogEpoch` was bumped there, so it identifies this server.
+        this.deps.serverConfig?.attach(this.client, this.catalogEpoch, this.secrets);
         // Same folder (a restart): every pane keeps its own session. The memory per folder is
         // "last writer wins" across panes, so reading it here would move pane 1 to the session
         // another pane opened last. New folder: the primary pane (else the first) shows the
@@ -1332,7 +1346,8 @@ export class ChatController {
    * The "Changed files" list and its originals go too (issue #31): the paths belong to the old
    * server, and a load in flight is cut off; the next snapshot brings the list back.
    * The Sessions tree's cursors and in-flight pages and searches go as well (issue #77, E3), and
-   * so do the lineage walks in flight (E4); the lineage rows already learned stay.
+   * so do the lineage walks in flight (E4); the lineage rows already learned stay. The settings sink
+   * is detached too (issue #128): the integrations and MCP servers it read described that server.
    */
   private stopStream(): void {
     this.streamAbort?.abort();
@@ -1347,6 +1362,7 @@ export class ChatController {
     }
     this.client = undefined;
     this.server = undefined;
+    this.deps.serverConfig?.detach(); // issue #128: what it read described the server that left
     this.locationGeneration++;
     // The tree's cursors embed the old server's query, and an answer in flight belongs to it.
     this.treeBrowser.reset();
@@ -1415,7 +1431,8 @@ export class ChatController {
   /**
    * Handles one stream event: resync on `server.connected`/`location.shutdown` (both also reload the
    * catalog, as do the events of {@link CATALOG_RELOAD_EVENTS}, which have nothing to translate),
-   * else translate.
+   * else translate. Issue #128: with `deps.serverConfig`, the event type is first handed to that sink
+   * (its own filter picks the config and MCP events), whatever branch follows.
    *
    * Every translated message goes through the registry of pending requests (and the in-flight
    * resync's `live` record); when the set changed, the attention feature is told once per event.
@@ -1443,6 +1460,10 @@ export class ChatController {
    */
   private onEvent(event: V2Event): void {
     try {
+      // Issue #128: the settings sink sees EVERY event first (it picks its own: the config events
+      // and `server.connected` / `location.shutdown`), because the branches below return early,
+      // and `integration.updated` / `credential.updated` never get past the catalog branch.
+      this.deps.serverConfig?.event(event.type);
       if (event.type === 'server.connected') {
         this.log.info('event stream connected');
         void this.resync();

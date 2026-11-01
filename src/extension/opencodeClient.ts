@@ -13,11 +13,28 @@ import type {
   AgentListOutput,
   CommandListInput,
   CommandListOutput,
+  CredentialRemoveInput,
   FileDiffInfo,
   FileFindInput,
   FileFindOutput,
   FormListInput,
   FormListOutput,
+  IntegrationGetInput,
+  IntegrationConnectExternalInput,
+  IntegrationConnectKeyInput,
+  IntegrationGetOutput,
+  IntegrationListInput,
+  IntegrationListOutput,
+  IntegrationOauthCancelInput,
+  IntegrationOauthCompleteInput,
+  IntegrationOauthConnectInput,
+  IntegrationOauthConnectOutput,
+  IntegrationOauthStatusInput,
+  IntegrationOauthStatusOutput,
+  McpListInput,
+  McpListOutput,
+  McpResourceCatalogInput,
+  McpResourceCatalogOutput,
   MessageListInput,
   ModelDefaultInput,
   ModelDefaultOutput,
@@ -67,7 +84,9 @@ import type { RunningServerInfo } from './serverManager';
 /**
  * The slice of the client the chat controller uses. Injecting this narrow shape (instead of the
  * whole client) lets unit tests supply a small fake; the real client satisfies it structurally,
- * which the return type of {@link createOpencodeClient} enforces at compile time.
+ * which the return type of {@link createOpencodeClient} enforces at compile time. Since issue #128
+ * it also holds the READ calls of the settings tab (`integration`, `mcp`), used by `serverConfig.ts`
+ * and never by the controller itself.
  */
 export interface ChatApi {
   event: {
@@ -227,6 +246,57 @@ export interface ChatApi {
     default(input?: ModelDefaultInput): Promise<ModelDefaultOutput>;
   };
   provider: { list(input?: ProviderListInput): Promise<ProviderListOutput> };
+  /**
+   * The READS of the OpenCode Settings tab (issue #128, E10): `GET /api/integration[/:id]`. Both
+   * answers are `{ location, data }` and the client does NOT unwrap them. `IntegrationInfo` carries
+   * no secret (`{id, name, metadata?, methods, connections}`; a credential connection is only
+   * `{id, label, method, status?}`), unlike `credential.list` and `provider.list`, which can hold
+   * keys and are NOT part of this interface on purpose. The write side (connect, OAuth, remove)
+   * is the `connect`, `credential` and cancel members declared below. Types read in `types.d.ts` of 2.0.32; shapes VERIFIED
+   * by the planner spike against a real opencode 2.0.32 (Windows 11, 01/11/2026, 238 integrations).
+   */
+  integration: {
+    list(input?: IntegrationListInput): Promise<IntegrationListOutput>;
+    get(input: IntegrationGetInput): Promise<IntegrationGetOutput>;
+    /**
+     * The WRITES of the tab (issue #128, phase 2); all answer 204 with an empty body except
+     * `oauth.connect` and `oauth.status`, which are `{ location, data }` and NOT unwrapped. `key`
+     * (`POST /api/integration/:id/connect/key`) does not validate the key and accepts an EMPTY one
+     * (the spike), so the caller refuses blank keys; `external` (`…/connect/external`) takes a
+     * `methodID`. An unknown integration throws `IntegrationNotFoundError` (404); after `cancel`,
+     * `status` throws `IntegrationAttemptNotFoundError` (404) and a second `cancel` does too; a
+     * missing required form field is `InvalidRequestError` (400). `complete` without a `code` on an
+     * `auto` attempt is a 500. Shapes read in `types.d.ts` of 2.0.32; status codes VERIFIED by the
+     * planner spike against a real opencode 2.0.32 (Windows 11, 01/11/2026); `external`'s effect is
+     * UNVERIFIED (never run against a real server).
+     */
+    connect: {
+      key(input: IntegrationConnectKeyInput): Promise<void>;
+      external(input: IntegrationConnectExternalInput): Promise<void>;
+    };
+    oauth: {
+      connect(input: IntegrationOauthConnectInput): Promise<IntegrationOauthConnectOutput>;
+      status(input: IntegrationOauthStatusInput): Promise<IntegrationOauthStatusOutput>;
+      complete(input: IntegrationOauthCompleteInput): Promise<void>;
+      cancel(input: IntegrationOauthCancelInput): Promise<void>;
+    };
+  };
+  /**
+   * `DELETE /api/credential/:id` (issue #128): 204, VERIFIED by the planner spike (Windows 11,
+   * 01/11/2026). `credential.list` is NOT part of this interface on purpose: it carries the secrets
+   * in the clear.
+   */
+  credential: { remove(input: CredentialRemoveInput): Promise<void> };
+  /**
+   * `GET /api/mcp` (servers with their status) and `GET /api/mcp/resource` (resources and
+   * templates of all of them), both `{ location, data }` and NOT unwrapped. Read only: the
+   * `/api/experimental/mcp/*` writes are out of scope. The spike saw `mcp.list` answer `[]` for
+   * the first seconds of a server that has MCP servers configured; see `serverConfig.ts`.
+   */
+  mcp: {
+    list(input?: McpListInput): Promise<McpListOutput>;
+    resource: { catalog(input?: McpResourceCatalogInput): Promise<McpResourceCatalogOutput> };
+  };
   agent: { list(input?: AgentListInput): Promise<AgentListOutput> };
   /**
    * `GET /api/command` (issue #33): the slash commands (built-in `init` and `review`, the project's

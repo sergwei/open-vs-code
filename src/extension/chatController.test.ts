@@ -72,6 +72,7 @@ import type { DroppedFiles } from './chatController';
 import type { EventStreamOptions } from './eventStream';
 import type { ChatApi } from './opencodeClient';
 import type { PendingSummary } from './pendingRequests';
+import type { ServerConfigSink } from './serverConfig';
 import type { ServerState } from './serverManager';
 import { onePane } from './test-fixtures/onePane';
 
@@ -519,6 +520,42 @@ function fakeApi(options: FakeOptions = {}) {
         return Promise.resolve({ location: LOCATION, data: [PROVIDER] });
       },
     },
+    // Issue #128: the reads of the settings tab. The controller never calls them itself (only the
+    // optional `serverConfig` sink does), so a call recorded here means a regression.
+    integration: {
+      list: () => {
+        calls.push('integration.list');
+        return Promise.resolve({ location: LOCATION, data: [] });
+      },
+      get: () => Promise.reject(new Error('integration.get is not used by the controller')),
+      connect: {
+        key: () => Promise.reject(new Error('integration.connect is not used by the controller')),
+        external: () =>
+          Promise.reject(new Error('integration.connect is not used by the controller')),
+      },
+      oauth: {
+        connect: () => Promise.reject(new Error('integration.oauth is not used by the controller')),
+        status: () => Promise.reject(new Error('integration.oauth is not used by the controller')),
+        complete: () =>
+          Promise.reject(new Error('integration.oauth is not used by the controller')),
+        cancel: () => Promise.reject(new Error('integration.oauth is not used by the controller')),
+      },
+    },
+    credential: {
+      remove: () => Promise.reject(new Error('credential.remove is not used by the controller')),
+    },
+    mcp: {
+      list: () => {
+        calls.push('mcp.list');
+        return Promise.resolve({ location: LOCATION, data: [] });
+      },
+      resource: {
+        catalog: () => {
+          calls.push('mcp.resource.catalog');
+          return Promise.resolve({ location: LOCATION, data: { resources: [], templates: [] } });
+        },
+      },
+    },
     agent: {
       list: () => {
         calls.push('agent.list');
@@ -662,7 +699,8 @@ function fakeEditor(
 /**
  * Builds a controller with a fake api, a fake stream runner, a recording memory and recording
  * fakes for the attention feature, the saved-permissions picker and the server commands.
- * `remembered` is the session remembered for the folder of `SERVER` (`C:\work`).
+ * `remembered` is the session remembered for the folder of `SERVER` (`C:\work`). The eighth
+ * argument is the optional `deps.serverConfig` sink (issue #128).
  */
 function setup(
   api: ChatApi,
@@ -673,6 +711,7 @@ function setup(
     Promise.resolve(true),
   confirmRevertDiscard: () => Promise<boolean> = () => Promise.resolve(true),
   sessionList?: SessionListSink,
+  serverConfig?: ServerConfigSink,
 ) {
   const confirmations: Array<{ title: string; running: boolean }> = [];
   let discardAsked = 0;
@@ -737,6 +776,7 @@ function setup(
     createClient: () => api,
     editor,
     ...(sessionList === undefined ? {} : { sessionList }),
+    ...(serverConfig === undefined ? {} : { serverConfig }),
     log: {
       info: (m) => logs.push(`info: ${m}`),
       warn: (m) => logs.push(`warn: ${m}`),
@@ -6410,5 +6450,115 @@ describe('autoStart off: not-started and the prompt that starts the server (issu
     await controller.handle(send());
     expect(serverCalls).toEqual([]);
     expect(results(posted)[0]).toMatchObject({ error: { code: 'ServerUnavailable' } });
+  });
+});
+
+// Issue #128 (E10, phase 1): what the controller does for the settings tab through the optional
+// `deps.serverConfig` sink. Provenance: the same FAKE client as the rest of the file, so this
+// proves the controller's wiring (who is attached, detached and told which events), not the
+// contract with a server; the sink itself is covered by `serverConfig.test.ts`.
+describe('the settings sink (issue #128)', () => {
+  /** A sink that records what the controller tells it, in order. */
+  function recordingSink() {
+    const trail: string[] = [];
+    const attached: Array<{ api: unknown; epoch: number; secrets: unknown }> = [];
+    const sink: ServerConfigSink = {
+      attach: (api, epoch, secrets) => {
+        trail.push('attach');
+        attached.push({ api, epoch, secrets });
+      },
+      detach: () => {
+        trail.push('detach');
+      },
+      event: (type) => {
+        trail.push(`event:${type}`);
+      },
+    };
+    return { sink, trail, attached };
+  }
+
+  it('makes no settings read of its own and works without a sink', async () => {
+    const { api, calls } = fakeApi();
+    const { controller, streams } = setup(api);
+    controller.onServerState(RUNNING);
+    emit(streams, 'server.connected', {});
+    emit(streams, 'integration.updated', {});
+    await flush();
+    expect(calls.filter((call) => /^(integration|mcp)\./.test(call))).toEqual([]);
+  });
+
+  it('attaches the client with the server secrets, and detaches when the server goes', () => {
+    const { api } = fakeApi();
+    const { sink, trail, attached } = recordingSink();
+    const { controller } = setup(
+      api,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      sink,
+    );
+    controller.onServerState(RUNNING);
+    // `stopStream` runs at the start of every `running` too, so the first attach is preceded by a
+    // detach of nothing (the sink must tolerate it).
+    expect(trail).toEqual(['detach', 'attach']);
+    expect(attached[0]?.api).toBe(api);
+    expect(attached[0]?.secrets).toEqual({ url: SERVER.url, password: SERVER.password });
+    controller.onServerState({ kind: 'stopped' });
+    expect(trail).toEqual(['detach', 'attach', 'detach']);
+    controller.onServerState(RUNNING);
+    expect(trail).toEqual(['detach', 'attach', 'detach', 'detach', 'attach']);
+    expect(attached[1]?.epoch).toBeGreaterThan(attached[0]?.epoch ?? Number.POSITIVE_INFINITY);
+  });
+
+  it('detaches the old server before attaching a new one at the same moment', () => {
+    const { api } = fakeApi();
+    const { sink, trail } = recordingSink();
+    const { controller } = setup(
+      api,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      sink,
+    );
+    controller.onServerState(RUNNING);
+    controller.onServerState({ kind: 'running', server: { ...SERVER, password: 'pw-secret-2' } });
+    expect(trail).toEqual(['detach', 'attach', 'detach', 'attach']);
+  });
+
+  it('hands every event to the sink first, also those the controller consumes itself', async () => {
+    const { api, calls } = fakeApi();
+    const { sink, trail } = recordingSink();
+    const { controller, streams } = setup(
+      api,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      sink,
+    );
+    controller.onServerState(RUNNING);
+    emit(streams, 'server.connected', {});
+    emit(streams, 'integration.updated', {});
+    emit(streams, 'mcp.status.changed', { server: 'docs' });
+    emit(streams, 'location.shutdown', {});
+    await flush();
+    expect(trail).toEqual([
+      'detach',
+      'attach',
+      'event:server.connected',
+      'event:integration.updated',
+      'event:mcp.status.changed',
+      'event:location.shutdown',
+    ]);
+    // The chat still reloads its catalog on the events it always did.
+    expect(calls.filter((call) => call === 'provider.list').length).toBeGreaterThan(0);
   });
 });

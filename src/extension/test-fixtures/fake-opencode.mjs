@@ -183,6 +183,21 @@
 // spike against a real opencode 2.0.32 on a `shell` message; everything about FILES is invented
 // (the real one only ever answered `files: []` there). EDIT_FILES now turns `value2 = N` into
 // `value2 = N2` (2 -> 22, 5 -> 52), so a run can write its own value first.
+// E10-config-views (issue #128), phase 1: the READ routes of the OpenCode Settings tab. `GET
+// /api/integration[/:id]` (a small SYNTHETIC catalog: key, env, oauth with a form, oauth with
+// several methods, external; `/:id` of an unknown one is 404 `IntegrationNotFoundError`) and `GET
+// /api/mcp` + `GET /api/mcp/resource` (all `{location, data}`). The MCP list is `[]` at start and,
+// 300 ms later, holds 4 servers (connected, failed with a long CRLF error, disabled, needs_auth),
+// each announced with `mcp.status.changed` (the spike saw `[]` for the first moments and the fill
+// after the first event). A prompt containing MCPFLIP turns `broken` into `connected`, adds a
+// resource to it and publishes `mcp.status.changed` and `mcp.resources.changed` (INVENTED trigger).
+// Phase 2 adds the AUTH routes (`handleIntegrationWrites`): `connect/key|external` (204, 404 for an
+// unknown integration), `connect/oauth` (`auto` with a link to `/fake-oauth/approve?attempt=…` on
+// this server, which approves (except for GitHub Copilot, whose page does not, so that `test:visual`
+// can see the "waiting" state); method id `code` gives a `code` attempt that `complete` accepts with
+// FAKE-CODE), `status`, `complete`, `cancel` (afterwards `status` is 404) and `DELETE
+// /api/credential/:id`, each publishing the events in the spike's order. The fake never logs a key.
+// Everything above is synthetic.
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running;
 // FAKE_OPENCODE_LIFETIME_MS (positive integer, ms) overrides it for `serve` (issue #41).
@@ -219,6 +234,205 @@ const gates = new Map(); // session id -> (outcome) => void that resumes a pause
 const activeSteps = new Map(); // session id -> {a, chosen} of the step in flight, failed by an interrupt
 let seq = 0;
 let dropped = false;
+
+// ---- E10-config-views (issue #128), phase 1: the READ routes of the OpenCode Settings tab ----
+
+/**
+ * The MCP servers `GET /api/mcp` lists once {@link populateMcp} ran, in this order: `docs`
+ * connected, `broken` failed (an error whose first line is longer than 200 characters and that has
+ * `\r\n` and more lines, like the stderr the spike saw), `off` disabled, `linear` needs_auth. The
+ * names, statuses and texts are SYNTHETIC; the shapes follow the types of `@opencode/client`
+ * 2.0.32 and the planner's spike (01/11/2026).
+ */
+const MCP_FIXTURE = [
+  { name: 'docs', status: { status: 'connected' } },
+  {
+    name: 'broken',
+    status: {
+      status: 'failed',
+      error: `Connection closed: MCP server process exited with code 1 ${'while starting the server '.repeat(12)}\r\nsecond stderr line\r\nthird stderr line`,
+    },
+  },
+  { name: 'off', status: { status: 'disabled' } },
+  {
+    name: 'linear',
+    status: { status: 'needs_auth', error: 'Sign in with the opencode CLI to use this server' },
+  },
+];
+/** What `GET /api/mcp/resource` lists, per server (`MCPFLIP` adds a resource to `broken`). */
+const MCP_RESOURCES = [
+  { server: 'docs', name: 'readme.md', uri: 'file:///docs/readme.md', mimeType: 'text/markdown' },
+  { server: 'docs', name: 'api.md', uri: 'file:///docs/api.md', description: 'API notes' },
+];
+const MCP_TEMPLATES = [
+  { server: 'docs', name: 'files', uriTemplate: 'file:///docs/{path}', description: 'Any doc' },
+];
+/** Delay of the first fill of the MCP list after the server starts (the spike saw about 580 ms). */
+const MCP_FILL_DELAY_MS = 300;
+/** Empty until {@link populateMcp}: a real server answers `[]` for the first moments. */
+let mcpServers = [];
+let mcpResources = [];
+let mcpTemplates = [];
+let mcpFlipped = false;
+
+/**
+ * Fills the MCP list (4 servers, their resources) and publishes one `mcp.status.changed` per
+ * server, like the first events the spike saw. Runs once, {@link MCP_FILL_DELAY_MS} after start.
+ */
+function populateMcp() {
+  mcpServers = MCP_FIXTURE.map((server) => structuredClone(server));
+  mcpResources = MCP_RESOURCES.map((resource) => ({ ...resource }));
+  mcpTemplates = MCP_TEMPLATES.map((template) => ({ ...template }));
+  for (const server of mcpServers) broadcast('mcp.status.changed', { server: server.name });
+  // The catalog read at `server.connected` came before this fill. `docs` is the connected server
+  // with resources, so announce them. Mirrors upstream opencode 843a6c5
+  // (`packages/core/src/mcp/index.ts`): L463-465 publish `ResourcesChanged` when a server
+  // connects, from the `startServer` calls at L518 and L558 (read in the review of this task, #1689;
+  // not run end to end against a real stream, so the store also re-reads the catalog on
+  // `mcp.status.changed`). Only the order and timing of the burst are invented here.
+  for (const server of new Set(mcpResources.map((resource) => resource.server))) {
+    broadcast('mcp.resources.changed', { server });
+  }
+}
+
+/**
+ * MCPFLIP (INVENTED trigger, for `test:visual` cell V4): `broken` becomes `connected` and gains a
+ * resource, publishing `mcp.status.changed` and `mcp.resources.changed` for it. Idempotent.
+ */
+function flipMcp() {
+  if (mcpFlipped) return;
+  mcpFlipped = true;
+  const broken = mcpServers.find((server) => server.name === 'broken');
+  if (broken !== undefined) broken.status = { status: 'connected' };
+  mcpResources.push({
+    server: 'broken',
+    name: 'status.md',
+    uri: 'file:///broken/status.md',
+    mimeType: 'text/markdown',
+  });
+  broadcast('mcp.status.changed', { server: 'broken' });
+  broadcast('mcp.resources.changed', { server: 'broken' });
+}
+
+/**
+ * The integrations `GET /api/integration` lists: a SMALL catalog (the real one has 238) with one
+ * of each kind the tab handles. Shapes follow `IntegrationInfo` of `@opencode/client` 2.0.32 and the
+ * spike's list of methods; ids, labels and forms are SYNTHETIC. No secret in it, like the real
+ * `integration.list`. Module state, so connect and remove change the connections.
+ */
+const integrationRows = [
+  {
+    id: 'anthropic',
+    name: 'Anthropic',
+    methods: [{ type: 'key' }, { type: 'env', names: ['ANTHROPIC_API_KEY'] }],
+    connections: [
+      { type: 'credential', id: 'cred_fake_anthropic', label: 'default', method: 'key' },
+    ],
+  },
+  {
+    id: 'google-vertex',
+    name: 'Google Vertex',
+    methods: [
+      {
+        type: 'key',
+        form: [
+          { key: 'project', type: 'string', title: 'Project' },
+          {
+            key: 'location',
+            type: 'string',
+            title: 'Location',
+            options: [
+              { value: 'us-central1', label: 'us-central1' },
+              { value: 'europe-west4', label: 'europe-west4' },
+            ],
+          },
+        ],
+      },
+      { type: 'env', names: ['GOOGLE_APPLICATION_CREDENTIALS'] },
+    ],
+    connections: [{ type: 'env', name: 'GOOGLE_APPLICATION_CREDENTIALS' }],
+  },
+  {
+    id: 'azure',
+    name: 'Azure',
+    methods: [
+      {
+        type: 'key',
+        form: [{ key: 'resourceName', type: 'string', title: 'Resource name', required: true }],
+      },
+    ],
+    connections: [],
+  },
+  {
+    id: 'github-copilot',
+    name: 'GitHub Copilot',
+    methods: [
+      {
+        type: 'oauth',
+        id: 'device',
+        label: 'Login with GitHub',
+        form: [
+          {
+            key: 'deploymentType',
+            type: 'string',
+            title: 'Deployment type',
+            required: true,
+            options: [
+              { value: 'github.com', label: 'GitHub.com' },
+              { value: 'enterprise', label: 'GitHub Enterprise' },
+            ],
+          },
+          {
+            key: 'enterpriseUrl',
+            type: 'string',
+            title: 'Enterprise URL',
+            when: [{ key: 'deploymentType', op: 'eq', value: 'enterprise' }],
+          },
+        ],
+      },
+    ],
+    connections: [],
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    methods: [
+      { type: 'oauth', id: 'chatgpt-browser', label: 'ChatGPT Pro/Plus (browser)' },
+      { type: 'oauth', id: 'chatgpt-headless', label: 'ChatGPT Pro/Plus (headless)' },
+      { type: 'key' },
+    ],
+    connections: [],
+  },
+  {
+    id: 'fakeco',
+    name: 'FakeCo',
+    methods: [{ type: 'oauth', id: 'code', label: 'Paste a code' }],
+    connections: [],
+  },
+  {
+    id: 'amazon-bedrock',
+    name: 'Amazon Bedrock',
+    methods: [
+      {
+        type: 'external',
+        id: 'profile',
+        label: 'AWS profile',
+        form: [
+          {
+            key: 'profile',
+            type: 'string',
+            title: 'Profile',
+            options: [
+              { value: 'default', label: 'default' },
+              { value: 'work', label: 'work' },
+            ],
+          },
+        ],
+      },
+    ],
+    connections: [],
+  },
+];
 
 /** Next synthetic id with a prefix, e.g. `msg_000001`. */
 const nextId = (prefix) => `${prefix}_${String(++seq).padStart(6, '0')}`;
@@ -976,9 +1190,13 @@ function playCompaction(sessionID, inputID) {
  * EDIT_FILES makes the step end with the `files` and `snapshot` of {@link applyEdits} (issue #31).
  * Two triggers are served BEFORE the turn: WIPE_SESSIONS deletes every session and plays NO turn at
  * all; DELETE_TITLED:<needle> deletes the other sessions whose title contains the needle and the
- * turn then plays as usual (both INVENTED, for `test:visual` steps 28 and 29).
+ * turn then plays as usual (both INVENTED, for `test:visual` steps 28 and 29). MCPFLIP (issue #128,
+ * INVENTED) flips an MCP server first (see `flipMcp`) and the turn plays as usual.
  */
 function playTurn(sessionID, inboxID, text, files = []) {
+  // MCPFLIP (E10-config-views, issue #128; INVENTED trigger, see {@link flipMcp}): flips an MCP
+  // server and the turn then plays as usual.
+  if (text.includes('MCPFLIP')) flipMcp();
   // WIPE_SESSIONS (E9-sessions-sidebar, issue #77 E3; INVENTED trigger, `test:visual` step 29 cell
   // V4): deletes EVERY session of the folder, the running one too, publishing `session.deleted`
   // for each, and plays no turn, so the Sessions tree gets its "empty folder" state.
@@ -2172,8 +2390,232 @@ function runCommand(response, session, body, directory) {
   );
 }
 
+/** OAuth attempts in progress, by id; an attempt leaves the map on cancel (then `status` is 404). */
+const oauthAttempts = new Map();
+/** The code `complete` accepts for the `code` mode (SYNTHETIC). */
+const FAKE_OAUTH_CODE = 'FAKE-CODE';
+
 /**
- * Answers the chat routes; returns false when the request is not one of them.
+ * Connects an integration: adds a credential to its connections and publishes the events in the
+ * order the planner's spike saw them for `connect/key` (opencode 2.0.32, Windows 11, 01/11/2026):
+ * `credential.updated`, `provider.updated`, `model.updated`, `credential.switched` and
+ * `integration.updated`. The `data` of each is SYNTHETIC except `credential.switched`
+ * (`{integrationID, credentialID}`, seen in the spike). The fake NEVER logs or stores a key.
+ */
+function connectIntegration(row, method) {
+  const credentialID = nextId('cred_fake');
+  row.connections.push({ type: 'credential', id: credentialID, label: 'default', method });
+  broadcast('credential.updated', { integrationID: row.id, credentialID });
+  broadcast('provider.updated', { integrationID: row.id });
+  broadcast('model.updated', {});
+  broadcast('credential.switched', { integrationID: row.id, credentialID });
+  broadcast('integration.updated', { integrationID: row.id });
+}
+
+/**
+ * Issue #128, phase 2: the AUTH routes of the settings tab. `POST /api/integration/:id/connect/key`
+ * and `/connect/external` answer 204 (the key is read and dropped; an EMPTY key is accepted, like
+ * the real server), `/connect/oauth` starts an attempt (`auto` with a link to this fake's own
+ * approval page, or `code` for the method id `code`), `GET /connect/oauth/:attempt` is its status,
+ * `POST …/complete` finishes a `code` attempt with `FAKE-CODE` (an `auto` one answers 500, as the
+ * spike saw) and `DELETE …/:attempt` cancels it (afterwards `status` is 404). `DELETE
+ * /api/credential/:id` removes a credential. An unknown integration is 404
+ * `IntegrationNotFoundError`; an unknown attempt, `IntegrationAttemptNotFoundError`; a missing
+ * required form field is 400 `InvalidRequestError`. Status codes and `_tag`s follow the spike; the
+ * bodies' other fields are SYNTHETIC. Returns false when the request is not one of these routes.
+ */
+function handleIntegrationWrites(request, response, location) {
+  const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+  const method = request.method;
+  const credential = /^\/api\/credential\/([^/]+)$/.exec(url.pathname);
+  if (method === 'DELETE' && credential !== null) {
+    const id = decodeURIComponent(credential[1] ?? '');
+    const row = integrationRows.find((candidate) =>
+      candidate.connections.some((c) => c.type === 'credential' && c.id === id),
+    );
+    if (row === undefined) {
+      json(response, 404, {
+        _tag: 'CredentialNotFoundError',
+        message: `Credential ${id} not found`,
+      });
+      return true;
+    }
+    row.connections = row.connections.filter((c) => !(c.type === 'credential' && c.id === id));
+    noContent(response);
+    broadcast('credential.updated', { integrationID: row.id, credentialID: id });
+    broadcast('integration.updated', { integrationID: row.id });
+    return true;
+  }
+  const route =
+    /^\/api\/integration\/([^/]+)\/connect\/(key|external|oauth)(?:\/([^/]+)(\/complete)?)?$/.exec(
+      url.pathname,
+    );
+  if (route === null) return false;
+  const integrationID = decodeURIComponent(route[1] ?? '');
+  const kind = route[2];
+  const attemptID = route[3] === undefined ? undefined : decodeURIComponent(route[3]);
+  const isComplete = route[4] !== undefined;
+  const row = integrationRows.find((candidate) => candidate.id === integrationID);
+  if (row === undefined) {
+    json(response, 404, {
+      _tag: 'IntegrationNotFoundError',
+      message: `Integration ${integrationID} not found`,
+    });
+    return true;
+  }
+  if (kind === 'key' && method === 'POST' && attemptID === undefined) {
+    readBody(request).then(() => {
+      noContent(response);
+      connectIntegration(row, 'key');
+    });
+    return true;
+  }
+  if (kind === 'external' && method === 'POST' && attemptID === undefined) {
+    readBody(request).then(() => {
+      noContent(response);
+      connectIntegration(row, 'external');
+    });
+    return true;
+  }
+  if (kind !== 'oauth') return false;
+  if (method === 'POST' && attemptID === undefined) {
+    readBody(request).then((body) => {
+      const methodID = typeof body.methodID === 'string' ? body.methodID : '';
+      const oauth = row.methods.find((m) => m.type === 'oauth' && m.id === methodID);
+      if (oauth === undefined) {
+        json(response, 400, {
+          _tag: 'InvalidRequestError',
+          message: `Unknown method: ${methodID}`,
+        });
+        return;
+      }
+      const answer = typeof body.answer === 'object' && body.answer !== null ? body.answer : {};
+      const form = oauth.form ?? [];
+      const values = new Map(Object.entries(answer));
+      for (const f of form) {
+        const active = (f.when ?? []).every((rule) =>
+          rule.op === 'eq'
+            ? values.get(rule.key) === rule.value
+            : values.get(rule.key) !== rule.value,
+        );
+        if (active && f.required === true && !values.has(f.key)) {
+          json(response, 400, {
+            _tag: 'InvalidRequestError',
+            message: `Missing required form field: ${f.key}`,
+          });
+          return;
+        }
+      }
+      const id = nextId('att');
+      const mode = methodID === 'code' ? 'code' : 'auto';
+      const now = Date.now();
+      oauthAttempts.set(id, { integrationID, mode, approved: false, done: false });
+      json(response, 200, {
+        location,
+        data: {
+          attemptID: id,
+          url:
+            mode === 'code'
+              ? 'https://fake.example.test/code'
+              : `http://${request.headers.host ?? '127.0.0.1'}/fake-oauth/approve?attempt=${id}`,
+          instructions:
+            mode === 'code' ? 'Paste the code shown on the page' : 'Enter code: ABCD-1234',
+          mode,
+          time: { created: now, expires: now + 600_000 },
+        },
+      });
+    });
+    return true;
+  }
+  const attempt = attemptID === undefined ? undefined : oauthAttempts.get(attemptID);
+  if (attemptID === undefined || attempt === undefined || attempt.integrationID !== integrationID) {
+    json(response, 404, {
+      _tag: 'IntegrationAttemptNotFoundError',
+      message: `Attempt ${attemptID ?? ''} not found`,
+    });
+    return true;
+  }
+  if (method === 'GET' && !isComplete) {
+    const now = Date.now();
+    json(response, 200, {
+      location,
+      data: {
+        status: attempt.approved ? 'complete' : 'pending',
+        time: { created: now, expires: now + 600_000 },
+      },
+    });
+    return true;
+  }
+  if (method === 'POST' && isComplete) {
+    readBody(request).then((body) => {
+      if (attempt.mode !== 'code') {
+        json(response, 500, { _tag: 'UnknownError', message: 'Internal error' });
+      } else if (body.code !== FAKE_OAUTH_CODE) {
+        json(response, 400, { _tag: 'InvalidRequestError', message: 'Invalid code' });
+      } else {
+        attempt.approved = true;
+        noContent(response);
+        if (!attempt.done) {
+          attempt.done = true;
+          connectIntegration(row, 'oauth');
+        }
+      }
+    });
+    return true;
+  }
+  if (method === 'DELETE' && !isComplete) {
+    oauthAttempts.delete(attemptID);
+    noContent(response);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * `GET /fake-oauth/approve?attempt=<id>`: the page an `auto` attempt's link points to. It stands for
+ * the provider's consent page and needs no auth (a browser opens it). Approving completes the
+ * attempt once (the credential and its events); an unknown or cancelled one is 404. EXCEPTION: for
+ * `github-copilot` the page only shows a text and approves nothing, so the attempt stays pending
+ * (INVENTED, `test:visual` step 36 needs to see "waiting").
+ */
+function handleFakeOauthApprove(request, response) {
+  const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+  const id = url.searchParams.get('attempt') ?? '';
+  const attempt = oauthAttempts.get(id);
+  const row =
+    attempt === undefined ? undefined : integrationRows.find((r) => r.id === attempt.integrationID);
+  if (attempt === undefined || row === undefined) {
+    response.writeHead(404, { 'content-type': 'text/plain' });
+    response.end('Unknown or cancelled attempt');
+    return;
+  }
+  if (row.id === 'github-copilot') {
+    // INVENTED (E10-config-views, `test:visual` step 36): the device-code page of GitHub Copilot
+    // waits for a human to type the code, so the fake's stand-in browser does NOT approve it and
+    // the attempt stays pending until it is cancelled. Real device flows complete by polling, not
+    // by loading this page (HYPOTHESIS, read in upstream `packages/core/src/plugin/provider/
+    // github-copilot.ts` L151-154, commit 843a6c5; never run against the real service). No
+    // integration case approves a Copilot attempt.
+    response.writeHead(200, { 'content-type': 'text/html' });
+    response.end(
+      '<!doctype html><title>Device code</title><p>Enter the code shown in OpenCode.</p>',
+    );
+    return;
+  }
+  attempt.approved = true;
+  response.writeHead(200, { 'content-type': 'text/html' });
+  response.end(
+    '<!doctype html><title>Approved</title><p>Sign-in approved. You can close this tab.</p>',
+  );
+  if (!attempt.done) {
+    attempt.done = true;
+    connectIntegration(row, 'oauth');
+  }
+}
+
+/**
+ * Answers the chat routes (and, issue #128, the read routes `GET /api/integration[/:id]`, `GET
+ * /api/mcp` and `GET /api/mcp/resource`); returns false when the request is not one of them.
  * Authentication was already checked by the caller.
  */
 function handleChat(request, response) {
@@ -2269,6 +2711,34 @@ function handleChat(request, response) {
       location,
       data: [{ id: 'opencode', name: 'OpenCode', activation: 'auto', package: 'fake' }],
     });
+    return true;
+  }
+  if (method === 'GET' && path === '/api/integration') {
+    json(response, 200, { location, data: integrationRows });
+    return true;
+  }
+  const integrationPath = /^\/api\/integration\/([^/]+)$/.exec(path);
+  if (method === 'GET' && integrationPath !== null) {
+    const id = decodeURIComponent(integrationPath[1] ?? '');
+    const row = integrationRows.find((candidate) => candidate.id === id);
+    if (row === undefined) {
+      // SYNTHETIC body: the tag `IntegrationNotFoundError` was seen in the spike, the fields were not.
+      json(response, 404, {
+        _tag: 'IntegrationNotFoundError',
+        message: `Integration ${id} not found`,
+      });
+    } else {
+      json(response, 200, { location, data: row });
+    }
+    return true;
+  }
+  if (handleIntegrationWrites(request, response, location)) return true;
+  if (method === 'GET' && path === '/api/mcp') {
+    json(response, 200, { location, data: mcpServers });
+    return true;
+  }
+  if (method === 'GET' && path === '/api/mcp/resource') {
+    json(response, 200, { location, data: { resources: mcpResources, templates: mcpTemplates } });
     return true;
   }
   if (method === 'GET' && path === '/api/agent') {
@@ -2564,6 +3034,11 @@ function runServe() {
 
   const expected = `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`;
   const server = createServer((request, response) => {
+    // The consent page of an OAuth attempt is opened by a browser, which has no Basic credentials.
+    if (request.method === 'GET' && (request.url ?? '').startsWith('/fake-oauth/approve?')) {
+      handleFakeOauthApprove(request, response);
+      return;
+    }
     const authorized = !has('always-401') && request.headers.authorization === expected;
     if (!authorized) {
       response.writeHead(401, { 'content-type': 'application/json' });
@@ -2589,6 +3064,8 @@ function runServe() {
 
   server.listen(0, '127.0.0.1', () => {
     const { port } = server.address();
+    // E10-config-views (issue #128): the MCP list stays empty for a moment, then fills.
+    setTimeout(populateMcp, MCP_FILL_DELAY_MS).unref();
     if (has('noise')) {
       process.stdout.write('starting opencode, please wait...\n');
       process.stdout.write('{"hello":"world"}\n');
