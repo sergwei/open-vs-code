@@ -513,7 +513,9 @@ export function contentPartId(messageID: string, index: number): string {
 // Runtime guards
 // ---------------------------------------------------------------------------
 
-type PlainObject = { [key: string]: unknown };
+// `isPlainObject`, `field` and `isNonEmptyString` below are exported (issue #128): the settings
+// protocol (`settingsProtocol.ts`) reuses them instead of keeping a second copy that could drift.
+export type PlainObject = { [key: string]: unknown };
 
 /** Field validator: receives the already-checked object holding the message. */
 type Validator = (value: PlainObject) => boolean;
@@ -525,7 +527,7 @@ type Validator = (value: PlainObject) => boolean;
  * survive a JSON round trip. Whether the VS Code webview-to-host transport is JSON or structured
  * clone is UNVERIFIED (issue #2), so the guard does not rely on the transport to strip them.
  */
-function isPlainObject(value: unknown): value is PlainObject {
+export function isPlainObject(value: unknown): value is PlainObject {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const proto: unknown = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
@@ -535,7 +537,7 @@ function isPlainObject(value: unknown): value is PlainObject {
  * Reads `key` only if it is an OWN property, so inherited fields never validate a message.
  * May throw if the property is a throwing getter; `isWebviewToHost` catches that.
  */
-function field(object: PlainObject, key: string): unknown {
+export function field(object: PlainObject, key: string): unknown {
   return Object.hasOwn(object, key) ? object[key] : undefined;
 }
 
@@ -545,7 +547,7 @@ function isString(value: unknown): value is string {
 }
 
 /** True for a string with at least one character; used for ids, which are never meaningful empty. */
-function isNonEmptyString(value: unknown): value is string {
+export function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 

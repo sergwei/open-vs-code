@@ -14,6 +14,7 @@ import type {
   FormInfo,
   ModelInfo,
   PermissionRequest,
+  ProviderInfo,
   SessionInfo,
   SessionMessageInfo,
 } from '@opencode/client';
@@ -27,6 +28,7 @@ import {
   toModelOption,
   toModelRef,
   toPermissionAsk,
+  toProviderOption,
   toSessionSummary,
   toToolOutput,
 } from './wireMapping';
@@ -529,5 +531,26 @@ describe('error scrubbing', () => {
 
   it('falls back to Unknown for anything else', () => {
     expect(toErrorInfo(42, SECRETS).code).toBe('Unknown');
+  });
+});
+
+// Issue #128 (E10, phase 1): `provider.list` is the one read the chat catalog makes whose objects
+// can carry secrets (`settings.apiKey`, `headers`, `body`). The JSON is FABRICATED from the types
+// of `@opencode/client@2.0.32` with markers planted in those places, as the spike saw `settings.apiKey`
+// in a real answer; it pins that OUR mapping never forwards them, not what a real server sends.
+describe('toProviderOption keeps no secret', () => {
+  it('maps only id and name, however much the provider carries', () => {
+    const info = wire<ProviderInfo>(`{
+      "id": "anthropic", "name": "Anthropic", "activation": "auto", "package": "x",
+      "settings": {"apiKey": "sk-planted-api-key", "timeout": 5},
+      "headers": {"authorization": "Bearer hdr-planted-token"},
+      "body": {"token": "at-planted-access"}
+    }`);
+    const option = toProviderOption(info);
+    expect(option).toEqual({ id: 'anthropic', name: 'Anthropic' });
+    const json = JSON.stringify(option);
+    for (const secret of ['sk-planted-api-key', 'hdr-planted-token', 'at-planted-access']) {
+      expect(json).not.toContain(secret);
+    }
   });
 });
