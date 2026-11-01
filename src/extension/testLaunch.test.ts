@@ -2,6 +2,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { RunningServer, StartServerOptions } from './opencodeServer';
 import {
+  fakeOpenExternal,
   launchCommandFor,
   launchModesOf,
   TEST_NODE_ENV,
@@ -130,5 +131,43 @@ describe('wrapStartServer', () => {
     const given = options('C:\\bin\\opencode.exe');
     await wrapStartServer(start, { nodePath: NODE })(given);
     expect(start.mock.calls[0]?.[0]).toBe(given);
+  });
+});
+
+/**
+ * Protects the browser stand-in of the sign-in flow (issue #128): off in production (the real
+ * `env.openExternal` is used), a loopback link is "clicked" with a `GET`, any other link is
+ * accepted without a request, and a failing request is `false`. The `fetch` is injected and
+ * fabricated: this proves the decision, not that the fake's approval page approves (the
+ * `fake-server` integration suite does).
+ */
+describe('fakeOpenExternal', () => {
+  const ok = vi.fn((_url: string, _init: RequestInit) => Promise.resolve({ status: 200 }));
+
+  it('is undefined when the seam is off', () => {
+    expect(fakeOpenExternal(undefined, ok)).toBeUndefined();
+  });
+
+  it('fetches a loopback link and reports its status', async () => {
+    ok.mockClear();
+    const open = fakeOpenExternal({ nodePath: NODE }, ok);
+    expect(await open?.('http://127.0.0.1:4000/fake-oauth/approve?attempt=att_1')).toBe(true);
+    expect(ok).toHaveBeenCalledTimes(1);
+    expect(ok.mock.calls[0]?.[0]).toBe('http://127.0.0.1:4000/fake-oauth/approve?attempt=att_1');
+    const refused = fakeOpenExternal({ nodePath: NODE }, () => Promise.resolve({ status: 404 }));
+    expect(await refused?.('http://localhost:1/x')).toBe(false);
+  });
+
+  it('accepts a remote link without any request', async () => {
+    ok.mockClear();
+    const open = fakeOpenExternal({ nodePath: NODE }, ok);
+    expect(await open?.('https://fake.example.test/code')).toBe(true);
+    expect(ok).not.toHaveBeenCalled();
+  });
+
+  it('is false for a link that does not parse and for a failing request', async () => {
+    const open = fakeOpenExternal({ nodePath: NODE }, () => Promise.reject(new Error('down')));
+    expect(await open?.('not a url')).toBe(false);
+    expect(await open?.('http://127.0.0.1:9/x')).toBe(false);
   });
 });

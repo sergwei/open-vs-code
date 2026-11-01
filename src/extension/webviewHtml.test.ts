@@ -71,15 +71,21 @@ describe('buildWebviewHtml', () => {
     expect(html).toContain(`href="${o.styleUri}"`);
   });
 
-  it('writes the surface meta for a view and for a tab, and the CSP does not change with it', () => {
-    // Protects issue #77 (E3): the tab webview hides its session picker by reading this meta.
-    // Fabricated input; a real VS Code is covered by test:visual step 29 cell B7.
+  it('writes the surface meta for a view, a tab and the settings tab, and the CSP does not change with it', () => {
+    // Protects issue #77 (E3): the tab webview hides its session picker by reading this meta; and
+    // issue #128 (E10): `settings` is what makes `index.tsx` mount the OpenCode Settings root, with
+    // the same strict CSP as the chat. Fabricated input; a real VS Code is covered by test:visual
+    // step 29 cell B7 (view, tab) and, for `settings`, by the `webview ready` of the panel in the
+    // `fake-server` suite.
     const view = buildWebviewHtml(options({ surface: 'view' }));
     const tab = buildWebviewHtml(options({ surface: 'tab' }));
+    const settings = buildWebviewHtml(options({ surface: 'settings' }));
 
     expect(view).toContain('<meta name="open-vs-code-surface" content="view">');
     expect(tab).toContain('<meta name="open-vs-code-surface" content="tab">');
+    expect(settings).toContain('<meta name="open-vs-code-surface" content="settings">');
     expect(cspOf(tab)).toBe(cspOf(view));
+    expect(cspOf(settings)).toBe(cspOf(view));
   });
 
   it('escapes attribute values so a URI cannot break out of the attribute', () => {

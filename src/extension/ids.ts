@@ -31,8 +31,58 @@ export const SESSIONS_VIEW_ID = 'openVsCode.sessions';
  */
 export const CHAT_PANEL_VIEW_TYPE = 'openVsCode.chatPanel';
 
-/** Command id of "OpenCode: Open Settings" (contributed; issue #77): Settings filtered to this extension. */
+/**
+ * Command id of "OpenCode: Open Extension Settings" (contributed; issue #77): Settings filtered to
+ * this extension. Called "Open Settings" until E10-config-views (issue #128, decision P1=1), when
+ * that name went to {@link OPEN_SERVER_SETTINGS_COMMAND_ID}; the id stays so welcome links and
+ * keybindings keep working. It is the link at the foot of the OpenCode Settings tab.
+ */
 export const OPEN_SETTINGS_COMMAND_ID = 'openVsCode.openSettings';
+
+/**
+ * Command id of "OpenCode: Open Settings…" (contributed; issue #128, E10): opens the OpenCode
+ * Settings tab (providers and MCP servers), or reveals it when it is already open. It is the gear
+ * of the Chat and Sessions view title bars.
+ */
+export const OPEN_SERVER_SETTINGS_COMMAND_ID = 'openVsCode.openServerSettings';
+
+/**
+ * `viewType` of the OpenCode Settings tab (issue #128). Not contributed: a `WebviewPanel` needs no
+ * entry in `contributes`. VS Code may prefix the type it reports in `TabInputWebview.viewType`
+ * (HYPOTHESIS), so tests compare with `endsWith`.
+ */
+export const SETTINGS_PANEL_VIEW_TYPE = 'openVsCode.settingsPanel';
+
+/**
+ * Internal command behind the "Copy code" link of the sign-in notification (issue #128). Takes NO
+ * argument on purpose: it copies the device code of the attempt in progress, so a crafted
+ * `command:` link cannot put arbitrary text on the clipboard. Always registered, NOT contributed.
+ */
+export const COPY_AUTH_CODE_COMMAND_ID = 'openVsCode.internal.copyAuthCode';
+
+/**
+ * Internal command that pre-answers the NEXT dialogs of the provider sign-in (issue #128) without
+ * showing them, because the integration tests cannot type into a masked `showInputBox` or click a
+ * modal. Argument: `{ key?: string | null, code?: string | null, confirm?: boolean, approve?:
+ * boolean }` (`null` dismisses the box; `approve: false` makes the fake/visual browser seam open
+ * nothing, so an OAuth attempt stays pending). Registered ONLY in `ExtensionMode.Test`, NOT
+ * contributed, like {@link TEST_SESSION_ANSWERS_COMMAND_ID}.
+ */
+export const TEST_PROVIDER_ANSWERS_COMMAND_ID = 'openVsCode.test.providerAnswers';
+
+/**
+ * Internal command that hands a raw message to the settings controller as if the OpenCode Settings
+ * webview had sent it (issue #128), because the test API cannot reach into a webview. It goes
+ * through the same guard and revalidation as a real message. Registered ONLY in
+ * `ExtensionMode.Test`, NOT contributed, like {@link INJECT_WEBVIEW_MESSAGE_COMMAND_ID}.
+ */
+export const TEST_SETTINGS_MESSAGE_COMMAND_ID = 'openVsCode.test.settingsMessage';
+
+/**
+ * Internal command that returns the `settings.state` the controller would send now, as plain JSON
+ * (issue #128). Registered ONLY in `ExtensionMode.Test`, NOT contributed.
+ */
+export const TEST_SETTINGS_STATE_COMMAND_ID = 'openVsCode.test.settingsState';
 
 /** Key of the chat-location setting inside {@link CONFIG_SECTION} (issue #77): `sidebar` or `editor`. */
 export const CHAT_LOCATION_KEY = 'chatLocation';

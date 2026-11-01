@@ -117,7 +117,11 @@ export interface OwnServer {
  * It is NOT the extension's server: the test owns the process and must call `stop()` (the external
  * server case and the contract cases of `realOpencode.test.ts` do it in `finally` / `after`). The
  * environment is the test host's, so the redirected XDG dirs of `.vscode-test.mjs` apply and the
- * run does not touch the developer's opencode data. The extracted code is the spawn that the
+ * run does not touch the developer's opencode data. `extraEnv` is applied on top of `process.env`
+ * and `OPENCODE_PASSWORD` always wins over it (the `password` argument is the only source of the
+ * credential, so a stray key in `extraEnv` cannot replace it). Only the MCP contract case of
+ * `realOpencode.test.ts` passes it, to hand the server a config with a fake MCP server through
+ * `OPENCODE_CONFIG_CONTENT`. The extracted code is the spawn that the
  * external-server case used to carry inline; VERIFIED there against a real opencode 2.0.32
  * (Windows 11, 22/10/2026), and by the cases of this suite that use it now (see their headers).
  */
@@ -125,13 +129,14 @@ export async function startOwnServer(
   binary: string,
   folder: string,
   password = 'own-server-pw',
+  extraEnv: Readonly<Record<string, string>> = {},
 ): Promise<OwnServer> {
   const child: ChildProcessWithoutNullStreams = spawn(
     binary,
     ['serve', '--stdio', '--hostname', '127.0.0.1', '--port', '0'],
     {
       cwd: folder,
-      env: { ...process.env, OPENCODE_PASSWORD: password },
+      env: { ...process.env, ...extraEnv, OPENCODE_PASSWORD: password },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       shell: false,

@@ -79,7 +79,7 @@
     "viewsWelcome": [
       {
         "view": "openVsCode.sessions",
-        "contents": "No sessions in this folder yet.\n[New Session](command:openVsCode.newSession)\n[Open Settings](command:openVsCode.openSettings)",
+        "contents": "No sessions in this folder yet.\n[New Session](command:openVsCode.newSession)\n[Open Extension Settings](command:openVsCode.openSettings)",
         "when": "openVsCode.sessionsState == ready"
       },
       {
@@ -218,10 +218,15 @@
         "icon": "$(add)"
       },
       {
-        "command": "openVsCode.openSettings",
-        "title": "Open Settings",
+        "command": "openVsCode.openServerSettings",
+        "title": "Open Settings…",
         "category": "OpenCode",
         "icon": "$(gear)"
+      },
+      {
+        "command": "openVsCode.openSettings",
+        "title": "Open Extension Settings",
+        "category": "OpenCode"
       },
       {
         "command": "openVsCode.stopResponse",
@@ -354,7 +359,7 @@
     "menus": {
       "view/title": [
         {
-          "command": "openVsCode.openSettings",
+          "command": "openVsCode.openServerSettings",
           "group": "navigation",
           "when": "view == openVsCode.chat"
         },
@@ -384,7 +389,7 @@
           "when": "view == openVsCode.sessions && openVsCode.sessionsFiltered"
         },
         {
-          "command": "openVsCode.openSettings",
+          "command": "openVsCode.openServerSettings",
           "group": "navigation@5",
           "when": "view == openVsCode.sessions"
         },

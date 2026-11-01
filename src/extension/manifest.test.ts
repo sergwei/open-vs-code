@@ -428,7 +428,7 @@ describe('chat location (issue #77)', () => {
       'No sessions match the filters.\n[Clear Filters](command:openVsCode.clearFilters)',
     );
     expect(byState('ready')).toBe(
-      'No sessions in this folder yet.\n[New Session](command:openVsCode.newSession)\n[Open Settings](command:openVsCode.openSettings)',
+      'No sessions in this folder yet.\n[New Session](command:openVsCode.newSession)\n[Open Extension Settings](command:openVsCode.openSettings)',
     );
     expect(byState('offline')).toBe(
       'OpenCode is not running for this folder.\n[Open Chat](command:openVsCode.openChat)\n[Show Logs](command:openVsCode.showLogs)',
@@ -499,7 +499,18 @@ describe('chat location (issue #77)', () => {
     expect(order(ids.SEARCH_SESSIONS_COMMAND_ID)).toBe('navigation@2');
     expect(order(ids.FILTER_SESSIONS_COMMAND_ID)).toBe('navigation@3');
     expect(order(ids.CLEAR_FILTERS_COMMAND_ID)).toBe('navigation@4');
-    expect(order(ids.OPEN_SETTINGS_COMMAND_ID)).toBe('navigation@5');
+    expect(order(ids.OPEN_SERVER_SETTINGS_COMMAND_ID)).toBe('navigation@5');
+    // The old gear is no longer a title button (E10-config-views, P1=1): the tab's footer links it.
+    expect(order(ids.OPEN_SETTINGS_COMMAND_ID)).toBeUndefined();
+    for (const id of [
+      ids.TEST_PROVIDER_ANSWERS_COMMAND_ID,
+      ids.TEST_SETTINGS_MESSAGE_COMMAND_ID,
+      ids.TEST_SETTINGS_STATE_COMMAND_ID,
+    ]) {
+      expect(commandIds).not.toContain(id);
+    }
+    // The "Copy code" link target is internal: a contributed one would sit in the palette.
+    expect(commandIds).not.toContain(ids.COPY_AUTH_CODE_COMMAND_ID);
     expect(order(ids.NEW_FOLDER_COMMAND_ID)).toBe('2_organize');
     expect(order(ids.RESTART_SERVER_COMMAND_ID)).toBe('9_server');
   });
@@ -517,7 +528,7 @@ describe('chat location (issue #77)', () => {
     );
     const group = (id: string): string | undefined => title.find((e) => e.command === id)?.group;
     expect(group(ids.NEW_SESSION_COMMAND_ID)).toMatch(/^navigation/);
-    expect(group(ids.OPEN_SETTINGS_COMMAND_ID)).toMatch(/^navigation/);
+    expect(group(ids.OPEN_SERVER_SETTINGS_COMMAND_ID)).toMatch(/^navigation/);
     expect(group(ids.RESTART_SERVER_COMMAND_ID)).not.toMatch(/^navigation/);
     for (const entry of manifest.contributes.menus?.['view/title'] ?? []) {
       expect(commandIds).toContain(entry.command);
@@ -563,14 +574,17 @@ describe('chat location (issue #77)', () => {
     );
   });
 
-  // E9-chat-view-settings (#133): the Chat view title mirrors the Sessions one: Open Settings is a
-  // button, Restart Server moved to the overflow group. Provenance: the REAL package.json.
-  it('puts Open Settings on the Chat view title and Restart Server in its overflow', () => {
+  // E9-chat-view-settings (#133): the Chat view title mirrors the Sessions one: the gear is a
+  // button, Restart Server moved to the overflow group. E10-config-views (P1=1): the gear opens
+  // the OpenCode Settings TAB (Open Settings…), not the VS Code settings page. Provenance: the REAL
+  // package.json.
+  it('puts the Open Settings… gear on the Chat view title and Restart Server in its overflow', () => {
     const title = (manifest.contributes.menus?.['view/title'] ?? []).filter(
       (e) => e.when === `view == ${ids.CHAT_VIEW_ID}`,
     );
     const group = (id: string): string | undefined => title.find((e) => e.command === id)?.group;
-    expect(group(ids.OPEN_SETTINGS_COMMAND_ID)).toBe('navigation');
+    expect(group(ids.OPEN_SERVER_SETTINGS_COMMAND_ID)).toBe('navigation');
+    expect(group(ids.OPEN_SETTINGS_COMMAND_ID)).toBeUndefined();
     expect(group(ids.RESTART_SERVER_COMMAND_ID)).toBe('9_server');
   });
 
@@ -578,8 +592,15 @@ describe('chat location (issue #77)', () => {
     const icon = (id: string): string | undefined =>
       manifest.contributes.commands.find((c) => c.command === id)?.icon;
     expect(icon(ids.NEW_SESSION_COMMAND_ID)).toBe('$(add)');
-    expect(icon(ids.OPEN_SETTINGS_COMMAND_ID)).toBe('$(gear)');
+    expect(icon(ids.OPEN_SERVER_SETTINGS_COMMAND_ID)).toBe('$(gear)');
+    expect(ids.OPEN_SERVER_SETTINGS_COMMAND_ID).toBe('openVsCode.openServerSettings');
+    // E10-config-views (P1=1): the old command keeps its id, loses the gear and is renamed.
+    expect(icon(ids.OPEN_SETTINGS_COMMAND_ID)).toBeUndefined();
     expect(ids.OPEN_SETTINGS_COMMAND_ID).toBe('openVsCode.openSettings');
+    const titleOf = (id: string): string | undefined =>
+      manifest.contributes.commands.find((c) => c.command === id)?.title;
+    expect(titleOf(ids.OPEN_SERVER_SETTINGS_COMMAND_ID)).toBe('Open Settings…');
+    expect(titleOf(ids.OPEN_SETTINGS_COMMAND_ID)).toBe('Open Extension Settings');
   });
 });
 
