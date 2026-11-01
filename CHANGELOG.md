@@ -113,3 +113,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Marketplace packaging: icon, README, changelog and MIT license (issue #42).
 - Release workflow that publishes the same package to the VS Code Marketplace and Open VSX from a
   version tag (issue #43).
+
+### Changed
+
+- Choosing an agent, a model or a reasoning level in the chip panel no longer closes it, so all
+  three can be changed in one opening. The chip, Escape, a click outside and moving the focus away
+  still close it.
