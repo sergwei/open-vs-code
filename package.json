@@ -354,8 +354,13 @@
     "menus": {
       "view/title": [
         {
-          "command": "openVsCode.restartServer",
+          "command": "openVsCode.openSettings",
           "group": "navigation",
+          "when": "view == openVsCode.chat"
+        },
+        {
+          "command": "openVsCode.restartServer",
+          "group": "9_server",
           "when": "view == openVsCode.chat"
         },
         {

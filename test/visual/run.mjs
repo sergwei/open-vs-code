@@ -9006,6 +9006,15 @@ try {
       await waitEmptyView();
       await send(PROMPT_A);
       check(await waitIdle(30_000), 'C10 the turn of the side bar session ends');
+      // E9-chat-view-settings (#133): the title bar of the side bar Chat view. Open Settings is a
+      // button; Restart Server went to the overflow menu, so it is no title button any more.
+      // Provenance: the real DOM of VS Code, the same `.action-label` read as C1.
+      const chatBar = await launcher();
+      check(
+        chatBar.actions.includes('Open Settings') &&
+          !chatBar.actions.some((label) => label.startsWith('Restart Server')),
+        `C10 the side bar Chat view shows the Open Settings title button and no Restart Server button (${JSON.stringify(chatBar.actions)})`,
+      );
       const inSidebar = await view();
       setLocation('editor');
       const opened = await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
