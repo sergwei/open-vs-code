@@ -59,7 +59,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { selectForFiles } from './affected.mjs';
-import { BAIL_BANNER } from './steps.mjs';
+import { BAIL_BANNER, COPILOT_BANNER } from './steps.mjs';
 
 /** Files that are raw-hashed when present. */
 const RAW_FILES = [
@@ -223,9 +223,9 @@ export function parseFingerprintLine(text) {
  * Returns `{ status, ... }`: `'no-line'` (the output has no fingerprint line: a run from before
  * phase 3), `'covers'` (same hash; `partial` is the `PARTIAL RUN` line when the run was filtered,
  * because then it covers the tree only for the steps it ran; `passed` is whether the output
- * contains the final "all visual checks passed"; `bail` is whether it carries the `--bail`
- * banner), or `'stale'` with `files` (the `<kind> <path>` lines that changed, or `undefined` when
- * the manifest is missing) and `selection` (what `selectForFiles` returns for them; `undefined`
+ * contains the final "all visual checks passed"; `bail` and `copilot` are whether it carries the
+ * `--bail` or the `--with-copilot` banner), or `'stale'` with `files` (the `<kind> <path>` lines
+ * that changed, or `undefined` when the manifest is missing) and `selection` (what `selectForFiles` returns for them; `undefined`
  * without the list). Same tree is not enough to be evidence: a run that failed or was cut by
  * `--bail` covers the code and proves nothing, which {@link report} turns into exit 3.
  */
@@ -235,8 +235,12 @@ export function checkRun(root, savedText) {
   const current = fingerprint(root);
   const partial = /^PARTIAL RUN .*$/m.exec(savedText)?.[0];
   const passed = /^all visual checks passed\s*$/m.test(savedText);
-  const bail = savedText.split(/\r?\n/).some((line) => line.trimEnd() === BAIL_BANNER);
-  if (current.hash === saved) return { status: 'covers', hash: saved, partial, passed, bail };
+  const lines = savedText.split(/\r?\n/).map((line) => line.trimEnd());
+  const bail = lines.includes(BAIL_BANNER);
+  const copilot = lines.includes(COPILOT_BANNER);
+  if (current.hash === saved) {
+    return { status: 'covers', hash: saved, partial, passed, bail, copilot };
+  }
   const manifest = loadManifest(root, saved);
   if (manifest === undefined) return { status: 'stale', hash: saved, current: current.hash };
   const diff = diffDigests(manifest, current.digests);
@@ -256,9 +260,10 @@ export function checkRun(root, savedText) {
 
 /**
  * Prints the result of {@link checkRun} and returns the exit code: 0 the run covers the tree and
- * ended "all visual checks passed" (and was not a `--bail` run), 1 stale, 2 no fingerprint line,
- * 3 same tree but not evidence (no "all visual checks passed", i.e. it failed or was cut, or it
- * was a `--bail` run). A filtered run still exits 0 when it passed, with the warning printed.
+ * ended "all visual checks passed" (and was not a `--bail` or `--with-copilot` run), 1 stale, 2 no
+ * fingerprint line, 3 same tree but not evidence (no "all visual checks passed", i.e. it failed or
+ * was cut, or it was a `--bail` or `--with-copilot` run). A filtered run still exits 0 when it
+ * passed, with the warning printed.
  * Exported for the test; the text of the warnings is not part of the contract, the codes are.
  */
 export function report(result) {
@@ -271,12 +276,14 @@ export function report(result) {
     if (result.partial !== undefined) {
       console.log(`but the run was filtered (${result.partial}): only for the steps it ran`);
     }
-    if (result.bail || !result.passed) {
-      console.log(
-        result.bail
-          ? 'but it was a --bail run: not evidence'
-          : 'but the output does not end in "all visual checks passed": the run failed or was cut; not evidence',
-      );
+    if (result.bail || result.copilot || !result.passed) {
+      if (result.bail) console.log('but it was a --bail run: not evidence');
+      else if (result.copilot) console.log('but it was a --with-copilot run: not evidence');
+      else {
+        console.log(
+          'but the output does not end in "all visual checks passed": the run failed or was cut; not evidence',
+        );
+      }
       return 3;
     }
     console.log('and it ended "all visual checks passed": covers the current tree');
