@@ -123,8 +123,12 @@
 // later steps are skipped and the run exits 1 after its cleanup, so a broken state costs seconds
 // instead of every later wait running to its cap. It prints that the run is not evidence and
 // writes to `shots-partial/` and `readme-partial/`, like a filtered run. Combines with `--steps`.
-// Without the flag too, the run stops after a step that left the chat webview stuck (a CDP call
-// timed out): the later steps would only fail in cascade (issue #93, see `step`).
+// Without the flag too, after a FAILED step the run looks for a reason it cannot go on (the chat
+// webview stopped answering and cannot be reopened, the window lost the system focus, a modal
+// dialog is open) and stops with a `STOPPED after step <id>: …` line: the later steps would only
+// fail in cascade (issues #93 and #127, see `step`).
+// `--with-copilot` (issue #98) starts VS Code without the two settings that hide the Chat (Copilot)
+// and turn the AI features off; like `--bail` it is not evidence and writes to `shots-partial/`.
 //
 // Themes (issue #89): every theme change goes through `setTheme`, which waits for the theme to be
 // applied (workbench class, webview kind, two frames) instead of sleeping. The six loops that only
@@ -237,11 +241,12 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createWorkspace, startVSCode, writeSettings } from './vscodeProcess.mjs';
-import { WEBVIEW_STUCK, openWebview } from './webviewCdp.mjs';
+import { WEBVIEW_NO_TARGET, WEBVIEW_STUCK, openWebview } from './webviewCdp.mjs';
 import { parseAffectedArg, selectForFiles } from './affected.mjs';
 import { fingerprint, saveManifest } from './fingerprint.mjs';
 import {
   BAIL_BANNER,
+  COPILOT_BANNER,
   STEP_IDS,
   budgetNote,
   groupsOf,
@@ -250,8 +255,10 @@ import {
   parseGroupArg,
   parseListArg,
   parseStepsArg,
+  parseWithCopilotArg,
   resolveSelection,
   stepIdOf,
+  stopLine,
 } from './steps.mjs';
 
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
@@ -333,6 +340,8 @@ const partial = selection !== undefined;
 const allThemes = parseAllThemesArg(cliArgs);
 /** `--bail`: stop after the first step that fails (for development; see `parseBailArg`). */
 const bail = parseBailArg(cliArgs);
+/** `--with-copilot`: keep the AI features and the secondary side bar of VS Code (see `parseWithCopilotArg`). */
+const withCopilot = parseWithCopilotArg(cliArgs);
 const selectedIds = new Set(selection?.selected ?? STEP_IDS);
 if (affected !== undefined) {
   const shown = affected.reasons.slice(0, 12).map((reason) => `\n  ${reason}`);
@@ -360,6 +369,7 @@ if (partial) {
   console.log(`FULL RUN (all ${String(STEP_IDS.length)} steps)`);
 }
 if (bail) console.log(BAIL_BANNER);
+if (withCopilot) console.log(COPILOT_BANNER);
 // `--list` stops here: it only shows what the flags above resolve to; this file starts no VS Code.
 if (parseListArg(cliArgs)) process.exit(0);
 // The code this run covers (`fingerprint.mjs`, tooling/test-speed phase 3; only valid for
@@ -372,8 +382,8 @@ if (parseListArg(cliArgs)) process.exit(0);
 const codeFingerprint = fingerprint(repoRoot);
 saveManifest(repoRoot, codeFingerprint);
 console.log(`fingerprint ${codeFingerprint.hash}`);
-// A filtered or bailing run never touches the folders of the full run.
-const scratchOutput = partial || bail;
+// A filtered, bailing or `--with-copilot` run never touches the folders of the full run.
+const scratchOutput = partial || bail || withCopilot;
 const shotsDir = path.join(workDir, scratchOutput ? 'shots-partial' : 'shots');
 
 const failures = [];
@@ -1786,6 +1796,202 @@ const timings = [];
  */
 let bailedAt;
 
+/** The `STOPPED after step …` line of a run cut short by {@link diagnoseAfterFailure}, if any. */
+let stoppedLine;
+
+/**
+ * Waits up to `ms` for the caret to be in the prompt box of the chat, proved with the real keyboard;
+ * returns whether it was. Issue #127 (#100, step 22; N5 of step 32).
+ *
+ * The box must be the active element of the chat document AND the chat iframe the active element of
+ * the workbench: only then is a typed letter sure to land in the box and never in the editor
+ * (`src/sample.ts` is read by later steps) or elsewhere in the workbench. It then types `q`, waits
+ * for the box to read its previous value plus `q`, and takes the letter back with Backspace. The
+ * older check (`activeElement` AND `doc.hasFocus()`) reads false in a document that was just
+ * created although the keyboard works (step 22, 28/10/2026), so it is not used. When the wait
+ * expires nothing is typed and a line that is not an ok/FAIL/warn one says what each side held,
+ * which answers "does the key arrive?" without a new loop. The 250 ms and 100 ms polls and the 2 s
+ * wait for the typed letter are margins chosen in plan #1622 of issue #127, not measured
+ * (HYPOTHESIS: a key that reaches the box shows in well under 2 s). HYPOTHESIS: that the workbench active
+ * element is the iframe whenever the box is active in a document the keyboard reaches; it held in
+ * the runs of steps 22 and 32 (see the README).
+ */
+async function caretLandsInBox(ms) {
+  const reached = await waitFor(
+    async () => {
+      const outer = await page.evaluate(
+        (selector) => globalThis.document.activeElement?.matches(selector) === true,
+        CHAT_FRAME,
+      );
+      if (!outer) return undefined;
+      return web.inDoc((doc) => {
+        const field = doc.querySelector('textarea.prompt-text');
+        return field !== null && doc.activeElement === field ? { value: field.value } : undefined;
+      });
+    },
+    ms,
+    250,
+  );
+  if (reached === undefined) {
+    const outer = await page
+      .evaluate(() => {
+        const active = globalThis.document.activeElement;
+        return `${String(active?.tagName)}.${String(active?.className).slice(0, 40)} hasFocus ${String(globalThis.document.hasFocus())}`;
+      })
+      .catch(() => 'unreadable');
+    const inner = await web
+      .inDoc((doc) => `${String(doc.activeElement?.tagName)} hasFocus ${String(doc.hasFocus())}`)
+      .catch(() => 'unreadable');
+    console.log(`  caret not in the prompt box: workbench ${outer}, chat ${inner}`);
+    return false;
+  }
+  await page.keyboard.type('q');
+  const landed = await waitFor(
+    async () =>
+      (await web.inDoc((doc) => doc.querySelector('textarea.prompt-text')?.value)) ===
+      `${reached.value}q`,
+    2_000,
+    100,
+  );
+  if (landed === true) await page.keyboard.press('Backspace');
+  return landed === true;
+}
+
+/**
+ * Longest one probe of the workbench page may take, in ms (a `page.evaluate` has no timeout).
+ * Chosen in plan #1622 of issue #127, not measured: a `page.evaluate` of `document.hasFocus()`
+ * answered in milliseconds in the spike, so 5 s is a wide margin (HYPOTHESIS: a healthy workbench
+ * never takes that long; a run that cuts on `workbench` with a healthy window would refute it).
+ */
+const PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * Whether the workbench document holds the system focus (`document.hasFocus()`), or rejects after
+ * {@link PROBE_TIMEOUT_MS}. VERIFIED on Windows 11, VS Code stable (31/10/2026), spike with
+ * `document.hasFocus()` printed at the start and end of steps 1, 2, 21, 22, 25 and 26: true at the
+ * start of the run (focus in the empty editor group), with the focus in the editor input
+ * (`native-edit-context`), with it inside the chat iframe (`IFRAME#webview` at the end of step 22) and
+ * at the start of step 26, right after step 25 closed two windows. NOT observed: false, because the
+ * window that was opened in front (a Notepad, then a topmost form) never took the foreground from the
+ * hidden Windows session of the agent, so the premise "another window in front gives false" rests on
+ * the earlier observation that a video in front left the suite without keyboard (`ciclo-extension`
+ * §2bis), not on this spike.
+ */
+function workbenchHasFocus() {
+  return withProbeTimeout(page.evaluate(() => globalThis.document.hasFocus()));
+}
+
+/** Rejects with "the workbench page did not answer in 5 s" if `promise` is not settled in time. */
+function withProbeTimeout(promise) {
+  let timer;
+  const limit = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(`the workbench page did not answer in ${String(PROBE_TIMEOUT_MS / 1000)} s`),
+      );
+    }, PROBE_TIMEOUT_MS);
+  });
+  return Promise.race([promise, limit]).finally(() => {
+    clearTimeout(timer);
+  });
+}
+
+/**
+ * Looks for why the run cannot go on after a failed step; returns `{ kind, detail }` for
+ * {@link stopLine}, or `undefined` when nothing stops it (the step failed by itself and the next
+ * ones may still prove something). Issue #127: without it, a webview that stops answering, a window
+ * that lost the system focus or a modal dialog left open made every later step fail in cascade for
+ * 10+ minutes without saying why.
+ *
+ * Only runs after a FAILED step or one that left the chat connection stuck (`step` decides), so a
+ * run with no failed check and no stuck connection pays nothing and cannot be cut by a false
+ * positive. The first cause that holds wins, in this order: (1) the chat webview connection is
+ * stuck or closed (`stuck` is what the step saw; a probe `inDoc(() => true)` finds a socket that
+ * died unnoticed) and, reopening it with `openChat(15_000)`, a target DOES appear but never answers
+ * (decision of Sergio, #1638): that is the cut (`cdp`). If the reopen works, the run goes on with
+ * the new connection and prints `  reopened the chat webview after step <id>: <why>` (not a check;
+ * it also ends the cascade of "socket is closed" of step 24, 31/10/2026). If NO target appears
+ * (a failed step left the chat hidden and VS Code destroyed the webview, which the next step's
+ * `openChat` reopens) it prints `  no chat webview target after step <id>: <why>; the next step
+ * reopens it` and goes on without cutting; (2) `document.hasFocus()` of the workbench stays false
+ * for 3 s; (3) a `.monaco-dialog-box` is visible (decision P1=1 of Sergio, 31/10/2026: the
+ * GitHub/Copilot terms dialog of `--with-copilot`, or one a failed step left open); its text
+ * (`innerText`) goes in the line. A workbench probe that does not answer in 5 s is itself the
+ * cause (`workbench`). The 15 s of the reopen and the 3 s of the focus wait are margins chosen in
+ * plan #1622 of issue #127, not measured (HYPOTHESIS: a webview that exists is found in under 15 s;
+ * the focus returns within 3 s if it is going to).
+ * VERIFIED on Windows 11, VS Code 1.144.0 (01/11/2026) by temporary mutations at the end of step 1,
+ * `--steps 1,2`, all reverted: (a) `Help: About` left open plus a failed check printed "STOPPED
+ * after step 1: a modal dialog of VS Code is open ("Copy OK Visual Studio Code Version: 1.144.0
+ * Commit: 2c33b50b16c472efe58357d1d2a8"); the remaining steps are skipped" (text read by
+ * `innerText`), exit 1; (b) a closed socket plus a failed check, with the reopen made to find a
+ * target that never answers, printed "STOPPED after step 1: the chat webview stopped answering CDP
+ * (the webview CDP socket is closed; reopening it failed: the chat webview stopped answering CDP
+ * (CDP Runtime.enable timed out after 20000 ms)); the remaining steps are skipped", exit 1, step 2
+ * did not run; (c) the same with a reopen that finds no target printed "no chat webview target
+ * after step 1: the webview CDP socket is closed; the next step reopens it" and step 2 ran, with
+ * no STOPPED; (d) the same with a reopen that works printed "reopened the chat webview after step
+ * 1: the webview CDP socket is closed" and step 2 ran; (e) a `Runtime.evaluate` that never
+ * answers (stuck, no failed check) printed "reopened the chat webview after step 1: CDP
+ * Runtime.evaluate timed out after 20000 ms", the run ended with exit 0 and step 2 ran. The
+ * focus cause (2) was verified on 31/10/2026 (issue #127 mutation M2: a focus probe forced to false
+ * printed "STOPPED … does not have the system focus") with the code before the reopen change, and
+ * was not re-run after it. Observed once in a real run, the full `--with-copilot` run of 01/11/2026,
+ * which was cut at step 27 with `STOPPED after step 27: the VS Code window does not have the system
+ * focus (another window is in front); the remaining steps are skipped`, while Sergio was using the
+ * machine. The line is observed; that another window was really in front is HYPOTHESIS, not
+ * confirmed. NOT observed: a really frozen webview, a `workbench` cause (probe timeout).
+ */
+async function diagnoseAfterFailure(id, stuck) {
+  if (page === undefined) return undefined;
+  let webviewProblem = stuck;
+  if (webviewProblem === undefined && web !== undefined) {
+    if (web.isClosed()) webviewProblem = 'the webview CDP socket is closed';
+    else {
+      await web
+        .inDoc(() => true)
+        .catch((error) => {
+          webviewProblem = error instanceof Error ? error.message : String(error);
+        });
+    }
+  }
+  if (webviewProblem !== undefined) {
+    try {
+      await openChat(15_000);
+      console.log(`  reopened the chat webview after step ${id}: ${webviewProblem}`);
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error);
+      if (!why.includes(WEBVIEW_NO_TARGET)) {
+        return { kind: 'cdp', detail: `${webviewProblem}; reopening it failed: ${why}` };
+      }
+      console.log(
+        `  no chat webview target after step ${id}: ${webviewProblem}; the next step reopens it`,
+      );
+    }
+  }
+  try {
+    const end = Date.now() + 3_000;
+    let focused = await workbenchHasFocus();
+    while (!focused && Date.now() < end) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      focused = await workbenchHasFocus();
+    }
+    if (!focused) return { kind: 'focus', detail: '' };
+    const dialog = await withProbeTimeout(
+      page.evaluate(() => {
+        const box = [...globalThis.document.querySelectorAll('.monaco-dialog-box')].find((node) =>
+          node.checkVisibility({ checkVisibilityCSS: true }),
+        );
+        return box === undefined ? undefined : box.innerText;
+      }),
+    );
+    if (dialog !== undefined && dialog !== null) return { kind: 'dialog', detail: dialog };
+  } catch (error) {
+    return { kind: 'workbench', detail: error instanceof Error ? error.message : String(error) };
+  }
+  return undefined;
+}
+
 /**
  * Runs a step; an exception becomes a failure plus a screenshot, and the run continues.
  *
@@ -1800,16 +2006,16 @@ let bailedAt;
  * an exception) takes its FAIL screenshot and stops the run: the later steps return at once, as an
  * unselected one does, and the run goes to its cleanup and summary (exit 1).
  *
- * With or without `--bail`, a step after which the chat webview connection is stuck (one CDP call
- * timed out, `stuckReason` in `webviewCdp.mjs`) stops the run the same way and records why. Issue
- * #93: once the webview stopped answering, nearly every later step failed in cascade and the full
- * run took 707.7 s instead of about 240 (28/10/2026); the later steps prove nothing then. VERIFIED on
- * Windows 11, VS Code 1.143.1 (28/10/2026) by mutation, an `inDoc` that never resolves added to
- * step 1, `--steps 2`: the run printed "the webview is stuck (CDP Runtime.evaluate timed out after
- * 20000 ms): stopping after step 1; the remaining steps are skipped" and ended in 27 s with exit 1.
- * NOT observed: a real stuck webview (the cascade was not reproduced: 300 sash drags, 200 theme
- * switches and 150 rounds with the server down, in isolation, were all clean), nor the path where
- * `openChat` itself gets stuck.
+ * With or without `--bail`, after a step that failed or left the chat webview connection stuck (one
+ * CDP call timed out, `stuckReason` in `webviewCdp.mjs`) the run asks {@link diagnoseAfterFailure}
+ * whether it can go on, and if not stops the same way and prints `STOPPED after step <id>: <why>;
+ * the remaining steps are skipped` (also in `== summary`). Issue #93: once the webview stopped
+ * answering, nearly every later step failed in cascade and the full run took 707.7 s instead of
+ * about 240 (28/10/2026); the later steps prove nothing then. A stuck connection no longer stops the
+ * run by itself: it stops it only when a reopened chat target appears and does not answer (issue
+ * #127); a stuck one that reopens fine only prints a line. NOT observed: a real
+ * stuck webview (the cascade was not reproduced: 300 sash drags, 200 theme switches and 150 rounds
+ * with the server down, in isolation, were all clean).
  */
 async function step(name, body) {
   const id = stepIdOf(name);
@@ -1843,12 +2049,15 @@ async function step(name, body) {
   timings.push({ id, name, seconds });
   console.log(`  time ${seconds.toFixed(1)} s`);
   const stuck = web?.stuckReason() ?? stuckInException;
-  if (stuck !== undefined) {
+  const cause =
+    failures.length > failuresBefore || stuck !== undefined
+      ? await diagnoseAfterFailure(id, stuck)
+      : undefined;
+  if (cause !== undefined) {
     bailedAt = id;
-    failures.push(`${name}: the remaining steps were skipped, the webview is stuck (#93)`);
-    console.log(
-      `  the webview is stuck (${stuck}): stopping after step ${id}; the remaining steps are skipped`,
-    );
+    stoppedLine = stopLine(id, cause);
+    if (failures.length === failuresBefore) failures.push(`${name}: ${stoppedLine}`);
+    console.log(stoppedLine);
   } else if (bail && failures.length > failuresBefore) {
     bailedAt = id;
     console.log(`  --bail: stopping after step ${id}; the remaining steps are skipped`);
@@ -2229,6 +2438,7 @@ try {
     repoRoot,
     workDir,
     workspace,
+    withCopilot,
     ...(withSetupGuide ? { opencodePath: missingBinary, startDown: true } : {}),
   });
   vscodeStartedAt = performance.now();
@@ -2241,6 +2451,19 @@ try {
   console.log(
     `window ${String(startSize.width)}x${String(startSize.height)} CSS px, DPR ${String(startSize.dpr)}, screen work area ${startSize.screen}`,
   );
+  // Data, not a check: whether the window holds the system focus (see `diagnoseAfterFailure`).
+  console.log(`system focus ${String(await workbenchHasFocus().catch(() => 'unknown'))}`);
+  if (withCopilot) {
+    const visible = await page
+      .evaluate(
+        () =>
+          globalThis.document.querySelector('.part.auxiliarybar')?.checkVisibility({
+            checkVisibilityCSS: true,
+          }) ?? false,
+      )
+      .catch(() => 'unknown');
+    console.log(`copilot: secondary side bar visible ${String(visible)}`);
+  }
   started = true;
   // The OpenCode item of the activity bar is what step 0 clicks first; no fixed 3 s any more.
   await page
@@ -6694,6 +6917,17 @@ try {
   // while it holds the focus leaves the key false (a mutation without the reset must fail it).
   // Windows only for the key presses (`Control+Alt`): Playwright's AltGr handling
   // on other systems is not modelled here.
+  // Issue #127 (#100): the four checks of Ctrl+Alt+P towards the prompt box prove the caret with
+  // `caretLandsInBox` (active element in both documents, then a real `q`), never with
+  // `doc.hasFocus()`. VERIFIED on Windows 11, VS Code 1.144.0 (31/10/2026, on the tree of that
+  // day, before later edits to this file): `--steps 22,32` five times in a row, every run ended
+  // "all visual checks passed" with the same `ok` texts as the baseline. The full run of
+  // 01/11/2026 on the final tree also passed steps 22 and 32 (1452 ok, "all visual checks
+  // passed"). Mutations: without the typed letter the four checks and N5 of step 32 FAIL; with the
+  // iframe guard forced to false nothing is typed and each prints "caret not in the prompt box: …".
+  // NOT observed: a failure of the old check (it did not fail in those five runs of 31/10), macOS (`Meta+Alt`),
+  // and whether `src/sample.ts` stayed clean (not dirty) under the "no typed letter" mutation: the
+  // workspace is deleted at the end of the run and the editor tab was not read.
   await step('22 palette commands and keyboard shortcuts (issue #35)', async () => {
     const modifier = process.platform === 'darwin' ? 'Meta+Alt' : 'Control+Alt';
     const promptState = () =>
@@ -6738,7 +6972,7 @@ try {
 
     // --- Focus Prompt from the editor, then the toggle back ------------------------------------
     await page.keyboard.press(`${modifier}+p`);
-    const focusedChat = await waitFor(async () => (await promptState()).focused, 8_000, 250);
+    const focusedChat = await caretLandsInBox(8_000);
     check(focusedChat === true, `${modifier}+P from the editor puts the caret in the prompt box`);
     await shot('22a-focus-prompt');
     await sleep(300); // a gap between two presses of the same key: no signal to wait on
@@ -6756,7 +6990,7 @@ try {
     // still fails when the reset is missing. The editor is clicked first so the focus is outside
     // the chat, as for a user.
     await page.keyboard.press(`${modifier}+p`);
-    const inChatAgain = await waitFor(async () => (await promptState()).focused, 8_000, 250);
+    const inChatAgain = await caretLandsInBox(8_000);
     check(inChatAgain === true, `${modifier}+P brings the focus back into the chat`);
     await page.keyboard.press('Control+b');
     await waitFor(async () => (await sideBarPx()) === 0, 3_000, 100);
@@ -6865,7 +7099,7 @@ try {
     );
     await page.keyboard.press(`${modifier}+p`);
     check(
-      (await waitFor(async () => (await promptState()).focused, 8_000, 250)) === true,
+      (await caretLandsInBox(8_000)) === true,
       `${modifier}+P again brings the focus back to the prompt box`,
     );
     await shot('22c2-plus-menu-shortcuts');
@@ -6888,7 +7122,7 @@ try {
     );
     await page.keyboard.press(`${modifier}+p`);
     check(
-      (await waitFor(async () => (await promptState()).focused, 8_000, 250)) === true,
+      (await caretLandsInBox(8_000)) === true,
       `${modifier}+P again brings the focus back to the prompt box after the chip panel`,
     );
 
@@ -11400,22 +11634,9 @@ try {
         // output only printed the combined boolean. HYPOTHESIS that `hasFocus()` was the false
         // half, as step 22 saw in the same kind of new document. Same remedy as step 22: the box is
         // the active element, and the proof of the caret is the real keyboard, a typed letter must
-        // land in the box. Known gap (issue #127): the letter is typed even if the first wait expired.
-        const active = await waitFor(
-          () =>
-            web.inDoc((doc) => {
-              const field = doc.querySelector('textarea.prompt-text');
-              return field !== null && doc.activeElement === field;
-            }),
-          6_000,
-          200,
-        );
-        const boxValue = () =>
-          web.inDoc((doc) => doc.querySelector('textarea.prompt-text')?.value ?? null);
-        await page.keyboard.type('q');
-        const typed = await waitFor(async () => (await boxValue()) === 'q', 2_000, 100);
-        if (typed === true) await page.keyboard.press('Backspace');
-        const focused = active === true && typed === true;
+        // land in the box. `caretLandsInBox` (issue #127) types the letter only when the box is the
+        // active element and the chat iframe is the active element of the workbench.
+        const focused = await caretLandsInBox(6_000);
         check(
           back === true && focused === true,
           `N5 a click on the status bar item brings the chat back (visible ${String(back === true)}) with the caret in its prompt (${String(focused === true)})`,
@@ -11883,6 +12104,7 @@ console.log(
   `  total ${((performance.now() - vscodeStartedAt) / 1000).toFixed(1)} s since VS Code was started`,
 );
 printWaits();
+if (stoppedLine !== undefined) console.log(`stopped early: ${stoppedLine}`);
 if (warnings.length) {
   console.log(`warnings (${String(warnings.length)}):`);
   for (const message of warnings) console.log(`  - ${message}`);

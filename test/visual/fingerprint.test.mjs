@@ -16,7 +16,7 @@ import {
   report,
   saveManifest,
 } from './fingerprint.mjs';
-import { BAIL_BANNER, compareRuns, extractChecks } from './steps.mjs';
+import { BAIL_BANNER, COPILOT_BANNER, compareRuns, extractChecks } from './steps.mjs';
 
 let root;
 
@@ -183,6 +183,17 @@ describe('checkRun', () => {
     // A saved output with CRLF and a trailing space is still a --bail run.
     expect(
       report(checkRun(root, bail.replace(BAIL_BANNER, `${BAIL_BANNER} `).replace(/\n/g, '\r\n'))),
+    ).toBe(3);
+    // Same for --with-copilot (issue #98): its checks ran on a profile other than the quiet one.
+    const copilot = `${savedRun(`${COPILOT_BANNER}\n`)}all visual checks passed\n`;
+    expect(report(checkRun(root, copilot))).toBe(3);
+    expect(
+      report(
+        checkRun(
+          root,
+          copilot.replace(COPILOT_BANNER, `${COPILOT_BANNER} `).replace(/\n/g, '\r\n'),
+        ),
+      ),
     ).toBe(3);
     put('src/extension/a.ts', 'export const a: number = 7;\n');
     expect(report(checkRun(root, passed))).toBe(1);

@@ -254,6 +254,48 @@ export function parseBailArg(argv) {
 }
 
 /**
+ * The line `run.mjs` prints when `--with-copilot` is on; `fingerprint.mjs` refuses such a run as
+ * evidence (exit 3), the same pairing and for the same reason as {@link BAIL_BANNER}.
+ */
+export const COPILOT_BANNER =
+  '--with-copilot: VS Code keeps its AI features and secondary side bar; not evidence for a commit';
+
+/**
+ * Whether `--with-copilot` is in `argv` (issue #98).
+ *
+ * The profile of the suite turns the AI features of VS Code off (`chat.disableAIFeatures`) and hides
+ * the secondary side bar, so that the Copilot chat and its GitHub terms dialog never get in the
+ * way. With the flag those two settings are not written, to see the extension in the window a
+ * user has before a release. The run is not evidence: the checks were written for the quiet profile.
+ */
+export function parseWithCopilotArg(argv) {
+  return argv.includes('--with-copilot');
+}
+
+/**
+ * The line that ends a run cut short by the diagnosis after a failed step (issue #127).
+ *
+ * `cause` is `{ kind, detail }`: `cdp` (the chat webview stopped answering and could not be
+ * reopened), `workbench` (the page of the workbench stopped answering), `focus` (the VS Code window
+ * does not hold the system focus) or `dialog` (a modal dialog is open; `detail` is its text, cut to
+ * 80 characters). The line starts with neither `ok`, `FAIL`, `warn` nor `== `, so `extractChecks`
+ * and `compare-runs` ignore it, and it is not indented so it is not mistaken for part of the step.
+ * Throws on another `kind`, so a new cause cannot go out without a text.
+ */
+export function stopLine(id, cause) {
+  const detail = cause.detail.replace(/\s+/g, ' ').trim();
+  const reasons = {
+    cdp: `the chat webview stopped answering CDP (${detail})`,
+    workbench: `the workbench stopped answering CDP (${detail})`,
+    focus: 'the VS Code window does not have the system focus (another window is in front)',
+    dialog: `a modal dialog of VS Code is open ("${detail.slice(0, 80)}")`,
+  };
+  const reason = reasons[cause.kind];
+  if (reason === undefined) throw new Error(`unknown stop cause "${String(cause.kind)}"`);
+  return `STOPPED after step ${id}: ${reason}; the remaining steps are skipped`;
+}
+
+/**
  * Whether `--list` is in `argv`: print the resolved selection (steps, groups, `--affected` choice,
  * PARTIAL banner or full) and exit 0 before starting VS Code (`node test/visual/run.mjs --list` builds nothing;
  * `npm run test:visual -- --list` runs the build scripts first), so that

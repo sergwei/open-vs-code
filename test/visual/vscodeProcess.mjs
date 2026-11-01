@@ -196,7 +196,8 @@ function installExtension(repoRoot, extensionsDir) {
  * steps 0-26 judge the chat in the side bar (Q2 = 1 of `E9-default-editor`); `null` writes NO key,
  * which is the profile of someone who just installed the extension (step 25's control window and
  * D0); any other string is written as is. The profile is wiped above, so `null` cannot inherit a
- * key from a previous run.
+ * key from a previous run. `withCopilot: true` does not write the two keys that hide the secondary
+ * side bar and turn the built-in AI features off (issue #98).
  *
  * `openVsCode.opencodePath` is the fixture (see {@link fakeEnv}) unless `opencodePath` overrides it
  * (E2 step 0 passes a path that does not exist); `startDown` starts with the fixture's `.down`
@@ -214,6 +215,7 @@ export async function startVSCode({
   restricted,
   installed,
   chatLocation,
+  withCopilot,
 }) {
   const executable = await downloadAndUnzipVSCode('stable');
   const userDataDir = path.join(workDir, 'user-data');
@@ -262,8 +264,17 @@ export async function startVSCode({
     // 11, VS Code 1.143.1 (28/10/2026): `--steps 1 --bail` ended "all visual checks passed" and its
     // screenshot shows no Chat panel, and two full runs then ended "all visual checks passed" with
     // no differences against the baseline. UNVERIFIED on other VS Code versions.
-    'workbench.secondarySideBar.defaultVisibility': 'hidden',
-    'chat.disableAIFeatures': true,
+    // `withCopilot` (`--with-copilot`, issue #98) leaves both keys out, to run in a profile closer to
+    // a user's; the run prints `copilot: secondary side bar visible <bool>`.
+    // The bar did NOT show with these two keys left out: `--steps 1 --with-copilot` printed
+    // "copilot: secondary side bar visible false" (31/10/2026, Windows 11, VS Code 1.144.0), and so
+    // did the full `--with-copilot` run of 01/11/2026. Why it stays hidden: HYPOTHESIS, not looked into.
+    ...(withCopilot === true
+      ? {}
+      : {
+          'workbench.secondarySideBar.defaultVisibility': 'hidden',
+          'chat.disableAIFeatures': true,
+        }),
   });
   const port = await freePort();
   const detached = process.platform !== 'win32'; // own process group, to kill the tree on POSIX

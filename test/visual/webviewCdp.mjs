@@ -22,9 +22,17 @@ const CALL_TIMEOUT_MS = 20_000;
 
 /**
  * Start of the message every call of a connection rejects with once one of its calls timed out;
- * `run.mjs` reads it to stop the run (issue #93).
+ * `run.mjs` reads it to notice a stuck connection after a step (issue #93) and then diagnoses and
+ * reopens it (issue #127).
  */
 export const WEBVIEW_STUCK = 'the chat webview stopped answering CDP';
+
+/**
+ * Message `webviewTarget` throws when no target of the extension appears in time: the view is
+ * hidden or closed and VS Code destroyed the webview. `run.mjs` tells it apart from a target that
+ * appears and does not answer, which is the only case that cuts the run (decision #1638).
+ */
+export const WEBVIEW_NO_TARGET = 'the chat webview target did not appear';
 
 /**
  * Finds the webview target of the extension, polling the debugging endpoint.
@@ -59,11 +67,11 @@ async function webviewTarget(port, timeoutMs, wantedId) {
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
-  throw new Error('the chat webview target did not appear');
+  throw new Error(WEBVIEW_NO_TARGET);
 }
 
 /**
- * Connects to the webview target and returns `{ inDoc, stuckReason, close }`.
+ * Connects to the webview target and returns `{ inDoc, stuckReason, isClosed, close }`.
  *
  * `inDoc(fn, arg)` evaluates `fn(document, arg)` inside the inner frame and returns its JSON-able
  * result. `fn` is serialized with `toString()`, so it must be self-contained (no closures); `arg`
@@ -132,8 +140,8 @@ export async function openWebview(port, logs, timeoutMs = 30_000, wantedId = und
    * VERIFIED on Windows 11, VS Code 1.143.1 (28/10/2026) by mutation, a call that never answers in
    * step 1 and a second call right after it: the first rejected with "the chat webview stopped
    * answering CDP (CDP Runtime.evaluate timed out after 20000 ms)" and the second with the same
-   * message "after 0 ms". Both were caught inside the step, and the run still stopped through
-   * `stuckReason`. NOT observed: a really frozen webview, a closed socket in a run.
+   * message "after 0 ms". Both were caught inside the step (the run then stopped on it, which it no
+   * longer does: `run.mjs` diagnoses and reopens, see `diagnoseAfterFailure`). NOT observed: a really frozen webview, a closed socket in a run.
    */
   const send = (method, params = {}) =>
     new Promise((resolve, reject) => {
@@ -191,6 +199,8 @@ export async function openWebview(port, logs, timeoutMs = 30_000, wantedId = und
     inDoc,
     /** Why this connection is stuck (a call timed out), or `undefined` while it answers. */
     stuckReason: () => stuck,
+    /** Whether the socket is no longer open: every call then rejects at once with "socket is closed". */
+    isClosed: () => ws.readyState !== WebSocket.OPEN,
     close: () => {
       ws.close();
     },

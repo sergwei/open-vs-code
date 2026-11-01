@@ -3,6 +3,7 @@
 // honours it (that was run by hand: `--steps 1` and `--steps 8`).
 import { describe, expect, it } from 'vitest';
 import {
+  COPILOT_BANNER,
   FINAL_GROUP,
   GROUPS,
   STEPS,
@@ -16,9 +17,11 @@ import {
   parseGroupArg,
   parseListArg,
   parseStepsArg,
+  parseWithCopilotArg,
   restrictToPresent,
   resolveSelection,
   stepIdOf,
+  stopLine,
   volatileBetween,
 } from './steps.mjs';
 
@@ -160,6 +163,64 @@ describe('parseAllThemesArg', () => {
     expect(parseAllThemesArg([])).toBe(false);
     expect(parseAllThemesArg(['--steps', '11'])).toBe(false);
     expect(parseAllThemesArg(['--steps', '11', '--all-themes'])).toBe(true);
+  });
+});
+
+/**
+ * Protects the pure side of the early stop and of `--with-copilot` (issue #127, #98): the text of
+ * the cut line for each cause, that no tool reads it as a check, and the flag. The causes are
+ * fabricated; that `run.mjs` finds them in a real VS Code is covered by its mutations M1-M3.
+ */
+describe('stopLine', () => {
+  const causes = [
+    {
+      kind: 'cdp',
+      detail: 'socket closed',
+      text: 'the chat webview stopped answering CDP (socket closed)',
+    },
+    {
+      kind: 'workbench',
+      detail: 'timed out',
+      text: 'the workbench stopped answering CDP (timed out)',
+    },
+    {
+      kind: 'focus',
+      detail: '',
+      text: 'the VS Code window does not have the system focus (another window is in front)',
+    },
+    {
+      kind: 'dialog',
+      detail: 'By continuing,\n you agree',
+      text: 'a modal dialog of VS Code is open ("By continuing, you agree")',
+    },
+  ];
+
+  it.each(causes)('words the $kind cause and starts with the step id', ({ kind, detail, text }) => {
+    expect(stopLine('22', { kind, detail })).toBe(
+      `STOPPED after step 22: ${text}; the remaining steps are skipped`,
+    );
+  });
+
+  it('cuts the dialog text to 80 characters and rejects an unknown cause', () => {
+    const line = stopLine('1', { kind: 'dialog', detail: 'x'.repeat(200) });
+    expect(line).toContain(`("${'x'.repeat(80)}")`);
+    expect(() => stopLine('1', { kind: 'other', detail: '' })).toThrow(/unknown stop cause/);
+  });
+
+  it('is not a check for extractChecks, with or without indentation', () => {
+    const line = stopLine('3', { kind: 'focus', detail: '' });
+    const base = '== 3 a step\n  ok one\n  FAIL two\n';
+    expect(extractChecks(`${base}${line}\n== summary\n`)).toEqual(
+      extractChecks(`${base}== summary\n`),
+    );
+  });
+});
+
+describe('parseWithCopilotArg', () => {
+  it('is off without the flag and on with it', () => {
+    expect(parseWithCopilotArg(['--steps', '1'])).toBe(false);
+    expect(parseWithCopilotArg(['--steps', '1', '--with-copilot'])).toBe(true);
+    expect(COPILOT_BANNER).toMatch(/^--with-copilot: /);
   });
 });
 
