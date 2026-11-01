@@ -41,7 +41,7 @@ npm run test:visual
   sleeps and the longest gaps between checks); none of its lines starts with `ok`, `FAIL` or `warn`,
   and each run also writes its records to `.vscode-test/visual/trace-full-<stamp>.tsv`
   (`trace-partial-<stamp>.tsv` for a filtered run).
-- **Cost of verifying one area, measured on the final tree (31/10/2026).** Each part is timed with
+- **Cost of verifying one area, measured on the final tree of the test:visual speed-up (31/10/2026).** Each part is timed with
   the wall clock; the webview and host examples are the ones the plan asked for, and the
   transversal row is an estimate, not a measured run:
 
@@ -62,7 +62,7 @@ npm run test:visual
   NOT happen), which cannot be shortened without weakening the check. What can be recovered without losing a
   check is small (about 8-12 s, 2 %; Sergio closed the speed work there on 31/10/2026). So the lever
   is not a faster full run but **running it fewer times**: see "What to run when".
-- **What was measured, and on which code.** The final full run (31/10/2026, the tree of the close:
+- **What was measured, and on which code.** The final full run (31/10/2026, the tree of the close of the test:visual speed-up:
   1382 ok, 6 warn, 0 FAIL, total 545.5 s, wall clock 559 s) ended "all visual checks passed", and
   `compare-runs` against the base below found "no differences". The base is the full run of
   30/10/2026 (with steps up to 31 and D0 in step 25, total 569.0 s), which ended "all visual checks
@@ -74,16 +74,52 @@ npm run test:visual
   below).
 - **Two known intermittent failures**, not explained yet:
   - Step 22 fails some checks that move the focus with `Control+Alt` (for example "Control+Alt+P
-    again brings the focus back to the prompt box after the chip panel"): [#92](https://github.com/sergwei/open-vs-code/issues/92). The cause is a
+    again brings the focus back to the prompt box after the chip panel"): [#92](https://github.com/sergwei/open-vs-code/issues/92), [#100](https://github.com/sergwei/open-vs-code/issues/100). The cause is a
     HYPOTHESIS: a key sent while the focus is still moving between the webview and the editor is
-    lost. It was not reproduced (18 of 18 runs of the step alone passed), so nothing confirms it.
+    lost. It was not reproduced (18 of 18 runs of the step alone passed). Since #127 the four
+    checks of `Control+Alt+P` towards the prompt box prove the caret with the real keyboard (the
+    box is the active element of the chat and the chat iframe of the workbench, then a typed `q`
+    must land), and when it does not arrive the run prints `caret not in the prompt box: …` with
+    what each side held. Step 32 (N5) uses the same helper.
   - The webview stops answering and the failures cascade (the side bar stuck at an unintended
     width, the theme not applied, 20 s timeouts): [#93](https://github.com/sergwei/open-vs-code/issues/93).
-    When it shows as a CDP call that times out, the run now stops by itself after that step,
-    with or without `--bail` (checked by forcing a call that never answers). When it shows as a
-    theme that is not applied, with no CDP timeout, nothing stops it: one such run, with Copilot
-    still on, cascaded from step 0 and showed a GitHub/Copilot modal in step 9. That Copilot
-    played a part is a HYPOTHESIS.
+- **The run stops itself when it cannot go on (#127).** After a step that FAILED, the run looks for
+  a reason and, if it finds one, prints on its own line (not indented, not a check)
+  `STOPPED after step <id>: <reason>; the remaining steps are skipped`, skips the rest, repeats it
+  in `== summary` as `stopped early: …` and exits `1`. The reasons, in this order: the chat webview
+  stopped answering CDP (stuck, or its socket closed) and, reopening it, a target appears but does
+  not answer (if the reopen works the run goes on and prints `  reopened the chat webview after
+  step <id>: <why>`, not a check; if NO target appears, because a failed step left the chat hidden
+  and VS Code destroyed the webview, it prints `  no chat webview target after step <id>: <why>;
+  the next step reopens it` and goes on, decision of Sergio, #1638); the VS Code window does not
+  have the system focus (`document.hasFocus()` false for 3 s: another window is in front); a modal
+  dialog of VS Code is open (its text, cut to 80 characters, goes in the line: the GitHub/Copilot
+  terms dialog of `--with-copilot` shows up here). It only looks after a step that failed or left
+  the chat connection stuck (a CDP call timed out): a run with neither is never cut. A stuck
+  connection that reopens fine does not fail the run, it only prints the `reopened` line.
+  The line `system focus true|false` next to the `window …` line is data, not a check.
+  VERIFIED on Windows 11, VS Code 1.144.0 (01/11/2026) by temporary mutations at the end of step 1,
+  `--steps 1,2`, all reverted: `Help: About` left open plus a failed check printed `STOPPED after
+  step 1: a modal dialog of VS Code is open ("Copy OK Visual Studio Code Version: 1.144.0 Commit:
+  2c33b50b16c472efe58357d1d2a8"); the remaining steps are skipped` (text read by `innerText`); a
+  closed socket plus a failed check, with a reopen whose target never answers, printed `STOPPED
+  after step 1: the chat webview stopped answering CDP (the webview CDP socket is closed; reopening
+  it failed: the chat webview stopped answering CDP (CDP Runtime.enable timed out after 20000
+  ms))`, exit 1, step 2 did not run; with a reopen that finds no target it printed `no chat webview
+  target after step 1: the webview CDP socket is closed; the next step reopens it` and step 2 ran;
+  with a reopen that works, `reopened the chat webview after step 1: the webview CDP socket is
+  closed` and step 2 ran; a `Runtime.evaluate` that never answers (stuck, no failed check) printed
+  `reopened the chat webview after step 1: CDP Runtime.evaluate timed out after 20000 ms` and the run
+  ended with exit 0. The focus cause was verified on 31/10/2026 (a probe forced to false printed
+  `STOPPED … does not have the system focus`) before the reopen change and not re-run after it.
+  OBSERVED once, in a real run (01/11/2026): the full `--with-copilot` run was cut at step 27 by this
+  cause, with the literal line `STOPPED after step 27: the VS Code window does not have the system
+  focus (another window is in front); the remaining steps are skipped`. It came right after
+  `FAIL C7` (see `--with-copilot` below), while Sergio was using the machine. The line is observed;
+  that another window was really in front is HYPOTHESIS, not confirmed. The earlier spike stands as
+  it was: a Notepad and a topmost form opened by the spike did not take the foreground from the
+  session of the agent, `hasFocus()` stayed true.
+  NOT observed: a really frozen webview, the `workbench` cause (a probe that times out).
 - Needs Node 22+ (global `WebSocket`) and a display (a real window opens; on Linux use `xvfb-run`).
 - Exit code `0` when every assertion held, `1` when any failed, `2` when it could not start (the
   build is missing, or the VS Code download, launch or CDP connection failed).
@@ -112,10 +148,28 @@ npm run test:visual -- --steps 11,14,23       # builds first
 - `--bail` is for development: the run stops after the first step that fails and skips the rest,
   instead of letting every later wait expire on a broken state. It exits with `1`, prints its own
   banner, and is **not evidence**: a run without it reports every failure.
+- `--with-copilot` (issue #98) starts VS Code without the two settings that hide the Chat
+  (Copilot) and turn the AI features off (`workbench.secondarySideBar.defaultVisibility`,
+  `chat.disableAIFeatures`), and prints `copilot: secondary side bar visible <bool>`. Use it before
+  a release, to see the extension in a profile closer to a user's. Like `--bail` it prints its own
+  banner, writes to `shots-partial/` and `readme-partial/` and is **not evidence**:
+  `fingerprint.mjs --check` exits `3` on it. Observed on Windows 11, VS Code 1.144.0, in one full
+  run of 01/11/2026:
+  - steps 0-26 with no FAIL;
+  - `copilot: secondary side bar visible false`: the side bar did not show, so the Chat panel was
+    not seen (with `--steps 1` the side bar was NOT visible either, 31/10/2026);
+  - `FAIL C7 Insert at cursor from the tab wrote into src/sample.ts, the last text editor (first line
+    "")` at step 27, just before the focus stop above, while Sergio was using the machine; its cause
+    is not known, and it may be the same loss of focus (HYPOTHESIS);
+  - the run stopped at step 27 by the focus cause, and `fingerprint.mjs --check` exited `3` ("not
+    evidence");
+  - a GitHub/Copilot modal was never seen with this flag, so nothing says that one stops the run.
+  Why the side bar does not show is HYPOTHESIS: the test profile may not load Copilot Chat at all.
+  UNVERIFIED: whether the extension is loaded in that profile.
 - `--all-themes` takes the screenshots that are only screenshots (11g, 12b, 12d, 12f, 14b, 14d) in
   the four themes. By default they are taken once, in dark. It never changes a check, so it never
   changes the `ok` lines; use it when a task touches the CSS of those views.
-- **Only the full run (no `--steps`, no `--group`, no `--affected`, no `--bail`) is evidence for a
+- **Only the full run (no `--steps`, no `--group`, no `--affected`, no `--bail`, no `--with-copilot`) is evidence for a
   commit.** A filtered run answers "does my change to step N still hold" in seconds; it does not
   prove that the other steps do.
 
