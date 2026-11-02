@@ -36,7 +36,40 @@ export function chatTabs(): vscode.Tab[] {
     );
 }
 
-/** Waits until the number of chat tabs is `count`; fails with the tabs it did see. */
+/**
+ * Dumps every editor group and its tabs as one line of text, for failure messages of the cases
+ * that wait on a chat tab (issue #141: a tab whose document never said `ready` on macOS, with
+ * nothing in the CI logs to say where the tabs were).
+ *
+ * Per group: its `viewColumn`, whether it is the active group, and per tab its label, whether it
+ * is the active tab of its group and its kind (`chat` for our webview type, `webview` for another
+ * one, `other` for anything else). Uses only the public `tabGroups` API. The text is for people:
+ * nothing parses it.
+ * VERIFIED (Windows 11, VS Code 1.144.0, 02/11/2026) by a one-off mutation of the case "opens one
+ * tab per New Session, each with a ready document" (waiting for 3 `webview ready`), whose failure
+ * read: `layout: group column=1 (active): ["Untitled session"(chat), "Untitled session"(chat,active)]`.
+ * NOT observed: the layout of a real #141 failure on macOS, nor the `waitForChatTabs` message path.
+ */
+export function describeChatLayout(): string {
+  const groups = vscode.window.tabGroups.all.map((group) => {
+    const tabs = group.tabs.map((tab) => {
+      const kind =
+        tab.input instanceof vscode.TabInputWebview
+          ? tab.input.viewType.endsWith(CHAT_PANEL_VIEW_TYPE)
+            ? 'chat'
+            : 'webview'
+          : 'other';
+      return `${JSON.stringify(tab.label)}(${kind}${tab.isActive ? ',active' : ''})`;
+    });
+    return `group column=${String(group.viewColumn)}${group.isActive ? ' (active)' : ''}: [${tabs.join(', ')}]`;
+  });
+  return groups.join('; ');
+}
+
+/**
+ * Waits until the number of chat tabs is `count`; on timeout fails with the tabs it did see and
+ * the layout of the groups ({@link describeChatLayout}).
+ */
 export async function waitForChatTabs(count: number, timeoutMs = APPLY_WAIT_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -44,7 +77,8 @@ export async function waitForChatTabs(count: number, timeoutMs = APPLY_WAIT_MS):
     if (Date.now() >= deadline) {
       assert.fail(
         `expected ${String(count)} chat tab(s), found ${String(chatTabs().length)}: ` +
-          JSON.stringify(chatTabs().map((tab) => tab.label)),
+          JSON.stringify(chatTabs().map((tab) => tab.label)) +
+          `; layout: ${describeChatLayout()}`,
       );
     }
     await new Promise((resolve) => setTimeout(resolve, 100));

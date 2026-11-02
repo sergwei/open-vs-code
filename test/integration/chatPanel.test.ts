@@ -46,6 +46,7 @@ import {
 import { openLogCursor, type LogCursor } from './support/extensionLog';
 import {
   chatTabs,
+  describeChatLayout,
   restoreChatLocation,
   setChatLocation,
   waitForChatTabs,
@@ -65,14 +66,37 @@ function countOf(log: LogCursor, text: string): number {
   return log.added().split(text).length - 1;
 }
 
-/** Waits until `text` appears at least `times` times in the lines added since the mark. */
+/**
+ * Waits until `text` appears at least `times` times in the lines added since the mark. On timeout
+ * the failure carries the log lines and the layout of the editor groups
+ * ({@link describeChatLayout}), because a tab that never says `ready` (#141) is explained by where
+ * the tabs were, not by the log alone.
+ */
 async function waitForCount(log: LogCursor, text: string, times: number): Promise<void> {
   const deadline = Date.now() + READY_WAIT_MS;
   while (countOf(log, text) < times) {
     if (Date.now() >= deadline) {
-      assert.fail(`expected ${String(times)} x ${text}; log:\n${log.added()}`);
+      assert.fail(
+        `expected ${String(times)} x ${text}; layout: ${describeChatLayout()}; log:\n${log.added()}`,
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+/**
+ * Waits for the next `webview ready` line (see {@link READY_WAIT_MS}) and, if it never comes,
+ * rethrows the failure with the layout of the editor groups appended (#141). `LogCursor.waitFor`
+ * is generic and stays unaware of VS Code, so the layout is added here.
+ * UNVERIFIED: the mutation that exercised the failure path (waiting for 3 `webview ready`) went
+ * through {@link waitForCount}, not through this helper; a failing `waitFor` here is not observed.
+ */
+async function waitForReady(log: LogCursor): Promise<void> {
+  try {
+    await log.waitFor('webview ready', READY_WAIT_MS);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    assert.fail(`${reason}\nlayout: ${describeChatLayout()}`);
   }
 }
 
@@ -103,7 +127,7 @@ async function openOneTab(): Promise<LogCursor> {
   await setChatLocation('editor', log);
   await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
   await waitForChatTabs(1);
-  await log.waitFor('webview ready', READY_WAIT_MS);
+  await waitForReady(log);
   await log.waitForQuiet(); // what the new tab still logs lands before the mark
   log.mark();
   return log;
@@ -130,11 +154,34 @@ describe('chat in editor tabs', function () {
    * Protects the setting reaching the host, `ChatPanels.open`, the HTML of a panel under the CSP
    * and the guard of its messages: each tab must say `webview ready`, and no bundle file may be
    * reported missing nor a message rejected. The label is the empty-session title (decision Q6=1).
+   *
+   * The second New Session is issued only AFTER the first tab said `ready` and the log went quiet
+   * (issue #141, decision of Sergio 02/11/2026: sequence, not a double click). Two calls in the
+   * same tick left a document that never existed on macOS (run 41296463458): both opens resolve
+   * `Beside` against the active group, and VS Code creates a webview's document only when the
+   * editor claims it, which `setInput` skips if another open supersedes it first (VS Code 1.144.0
+   * `webviewEditor.ts` L144-168, `overlayWebview.ts` L132-151 and L242-273, read from the tag; the
+   * pane's column is `undefined` while symbolic, `extHostWebviewPanels.ts` L123-130).
+   * HYPOTHESIS: the quiet wait lets the host learn the real column of the first tab, so the second
+   * goes to the same group (Q5=1); to check it, read the `onDidChangeViewState` handling of the
+   * pane column and the host log between the first `ready` and the second New Session. What is
+   * verified is the effect, not that the quiet wait (and not the `ready` alone) causes it.
+   * VERIFIED (Windows 11, VS Code 1.144.0, 02/11/2026): 5 rounds of `--label main --grep "chat in
+   * editor tabs"` each printed "15 passing" with "✔ opens one tab per New Session, each with a
+   * ready document", so both tabs said `ready` and shared one group (the mutation with 3 expected
+   * `ready` showed both tabs in `group column=1`). The full `npm run test:integration` on the
+   * final code printed "44 passing" (main) with "✔ opens one tab per New Session, each with a
+   * ready document (2345ms)".
+   * NOT covered: a fast double click on New Session. HYPOTHESIS: the mechanism above explains the
+   * macOS failure; it was never reproduced on Windows. UNVERIFIED on macOS until CI reruns its job.
    */
   it('opens one tab per New Session, each with a ready document', async () => {
     const log = await openLogCursor();
     await setChatLocation('editor', log);
     await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
+    await waitForChatTabs(1);
+    await waitForCount(log, 'webview ready', 1);
+    await log.waitForQuiet(); // HYPOTHESIS: the host learns the real column of the first tab
     await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
     await waitForChatTabs(2);
     await waitForCount(log, 'chat tab created (pane', 2);
@@ -145,6 +192,11 @@ describe('chat in editor tabs', function () {
     assert.deepStrictEqual(
       chatTabs().map((tab) => tab.label),
       ['Untitled session', 'Untitled session'],
+    );
+    assert.strictEqual(
+      new Set(chatTabs().map((tab) => tab.group.viewColumn)).size,
+      1,
+      `the two chat tabs must share one group (Q5=1); layout: ${describeChatLayout()}`,
     );
   });
 
@@ -328,7 +380,7 @@ describe('chat in editor tabs', function () {
     const editor = await openTempFile(vscode.ViewColumn.One);
     await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
     await waitForChatTabs(1);
-    await log.waitFor('webview ready', READY_WAIT_MS);
+    await waitForReady(log);
     await log.waitForQuiet(); // what the new tab still logs lands before the mark
     log.mark();
     await vscode.commands.executeCommand(FOCUS_PROMPT_COMMAND_ID, { to: 'editor' });
