@@ -91,8 +91,10 @@ npm run test:visual
   not answer (if the reopen works the run goes on and prints `  reopened the chat webview after
   step <id>: <why>`, not a check; if NO target appears, because a failed step left the chat hidden
   and VS Code destroyed the webview, it prints `  no chat webview target after step <id>: <why>;
-  the next step reopens it` and goes on, decision of Sergio, #1638); the VS Code window does not
-  have the system focus (`document.hasFocus()` false for 3 s: another window is in front); a modal
+  the next step reopens it` and goes on, decision of Sergio, #1638; a later step that FAILS
+  retries that reopen while the connection stays missing, and prints the line again if there is
+  still no target: NOT observed, and the passing steps pay none of the 15 s); the VS Code window
+  does not have the system focus (`document.hasFocus()` false for 3 s: another window is in front); a modal
   dialog of VS Code is open (its text, cut to 80 characters, goes in the line: the GitHub/Copilot
   terms dialog of `--with-copilot` shows up here). It only looks after a step that failed or left
   the chat connection stuck (a CDP call timed out): a run with neither is never cut. A stuck
@@ -114,11 +116,11 @@ npm run test:visual
   `STOPPED … does not have the system focus`) before the reopen change and not re-run after it.
   OBSERVED once, in a real run (01/11/2026): the full `--with-copilot` run was cut at step 27 by this
   cause, with the literal line `STOPPED after step 27: the VS Code window does not have the system
-  focus (another window is in front); the remaining steps are skipped`. It came right after
-  `FAIL C7` (see `--with-copilot` below), while Sergio was using the machine. The line is observed;
-  that another window was really in front is HYPOTHESIS, not confirmed. The earlier spike stands as
-  it was: a Notepad and a topmost form opened by the spike did not take the foreground from the
-  session of the agent, `hasFocus()` stayed true.
+  focus (another window is in front); the remaining steps are skipped`. It came in step 27, the
+  same one it cut, after `FAIL C7` (see `--with-copilot` below), while Sergio was using the
+  machine. The line is observed; that another window was really in front is HYPOTHESIS, not
+  confirmed. The earlier spike stands as it was: a Notepad and a topmost form opened by the
+  spike did not take the foreground from the session of the agent, `hasFocus()` stayed true.
   NOT observed: a really frozen webview, the `workbench` cause (a probe that times out).
 - Needs Node 22+ (global `WebSocket`) and a display (a real window opens; on Linux use `xvfb-run`).
 - Exit code `0` when every assertion held, `1` when any failed, `2` when it could not start (the

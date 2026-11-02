@@ -141,7 +141,8 @@ export async function openWebview(port, logs, timeoutMs = 30_000, wantedId = und
    * step 1 and a second call right after it: the first rejected with "the chat webview stopped
    * answering CDP (CDP Runtime.evaluate timed out after 20000 ms)" and the second with the same
    * message "after 0 ms". Both were caught inside the step (the run then stopped on it, which it no
-   * longer does: `run.mjs` diagnoses and reopens, see `diagnoseAfterFailure`). NOT observed: a really frozen webview, a closed socket in a run.
+   * longer does: `run.mjs` diagnoses and reopens, see `diagnoseAfterFailure`). NOT observed: a
+   * really frozen webview, a closed socket in a run.
    */
   const send = (method, params = {}) =>
     new Promise((resolve, reject) => {
