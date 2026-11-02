@@ -9,6 +9,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- OpenCode Settings tab, follow-up: in a remote window every OAuth method says its sign-in may not
+  work if it sends you back from the browser; a sign-in link whose query VS Code would rewrite
+  (`%26`, `%2B`, `%3D`) is not opened and the notification offers **Copy link**; after you enter
+  or dismiss the API key in the native box, the provider card gets the focus back; an OAuth login
+  whose status cannot be read three times, or whose local deadline passes while the server still
+  says it is pending, is cancelled on the server too (not when the server itself answers expired).
 - **OpenCode Settings** tab (**OpenCode: Open Settings…**, also the gear of the Chat and Sessions views):
   the providers of the opencode server with **Connect** (API key in a masked native box that only
   the extension host sees, OAuth `auto` or with a code, external methods) and **Remove**, and the
