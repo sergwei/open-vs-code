@@ -39,6 +39,8 @@ export interface SettingsHeader {
   /** Basename of the served folder. */
   folder: string;
   serverVersion?: string;
+  /** `vscode.env.remoteName` (`ssh-remote`, `wsl`...); absent in a local window. */
+  remote?: string;
 }
 
 /** Everything the controller is given. */
@@ -121,6 +123,7 @@ export class SettingsController {
       connection: header.connection,
       folder: header.folder,
       ...(header.serverVersion === undefined ? {} : { serverVersion: header.serverVersion }),
+      ...(header.remote === undefined ? {} : { remote: header.remote }),
       providers: {
         loaded: snapshot.integrations.loaded,
         failed: snapshot.integrations.failed,

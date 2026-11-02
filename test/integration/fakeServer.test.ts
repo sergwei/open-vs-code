@@ -68,6 +68,7 @@ import {
 } from '../../src/extension/ids';
 import type { SettingsState } from '../../src/shared/settingsProtocol';
 import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
+import { linkChangesWhenOpened } from '../../src/extension/providerAuth';
 import {
   chatTabs,
   restoreChatLocation,
@@ -2364,6 +2365,109 @@ describe('fake server', function () {
         assert.ok(!log.added().includes('provider connected: github-copilot'), log.added());
       } finally {
         await vscode.env.clipboard.writeText(saved);
+      }
+    });
+
+    /**
+     * A `code` login whose code box is pre-answered: a dismissed box (`null`) cancels the attempt
+     * and connects nothing, and a later attempt answered `FAKE-CODE` connects FakeCo.
+     *
+     * Protects the `code` path (`oauth.complete`, the dismissed-box cancel) of `ProviderAuth`
+     * inside a real VS Code, which no case covered before E10-settings-followup (#143). The box is
+     * pre-answered, so `askCode`'s widget is judged by `test:visual` step 36 (cells K1-K3). The
+     * fake's `FAKE-CODE` is INVENTED (`fake-opencode.mjs`), not a real provider's code.
+     */
+    it('cancels a code login when the box is dismissed and connects it with FAKE-CODE', async function () {
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(TEST_PROVIDER_ANSWERS_COMMAND_ID, { code: null });
+      await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+        type: 'settings.connect',
+        integrationID: 'fakeco',
+        method: 0,
+        answer: {},
+      });
+      await log.waitFor('provider sign-in started: fakeco (code', 10_000);
+      await waitForState((s) => s.attempt === undefined, 'the dismissed code attempt ending');
+      await log.waitForQuiet();
+      assert.deepStrictEqual(credentialsOf(await readState(), 'fakeco'), []);
+      assert.ok(!log.added().includes('provider connected: fakeco'), log.added());
+
+      const second = await openLogCursor();
+      await vscode.commands.executeCommand(TEST_PROVIDER_ANSWERS_COMMAND_ID, { code: 'FAKE-CODE' });
+      await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+        type: 'settings.connect',
+        integrationID: 'fakeco',
+        method: 0,
+        answer: {},
+      });
+      await second.waitFor('provider connected: fakeco (oauth)', 15_000);
+      await waitForState((s) => credentialsOf(s, 'fakeco').length === 1, 'fakeco connected');
+      assert.ok(!second.added().includes('FAKE-CODE'), 'the code is in the log');
+    });
+
+    /**
+     * The fake's second FakeCo method gives a link with `%2B`, `%3D` and `%26` in its query: the
+     * host must NOT open it (log: `opened: false, link kept for Copy link`).
+     *
+     * Protects decision P1=3 of E10-settings-followup (#143) end to end in a real host. The box
+     * is pre-answered (dismissed), so the attempt ends at once: the notification's "Copy link"
+     * button and the clipboard are judged by `test:visual` step 36 (cell "Copy link").
+     */
+    it('does not open a link VS Code would rewrite', async function () {
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(TEST_PROVIDER_ANSWERS_COMMAND_ID, { code: null });
+      await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+        type: 'settings.connect',
+        integrationID: 'fakeco',
+        method: 1,
+        answer: {},
+      });
+      await log.waitFor(
+        'provider sign-in started: fakeco (code, fake.example.test, opened: false, link kept for Copy link)',
+        10_000,
+      );
+      await waitForState((s) => s.attempt === undefined, 'the dismissed code attempt ending');
+    });
+
+    /**
+     * What `vscode.Uri` does to the query of a link before `env.openExternal` hands it to the
+     * browser: `encodeURI(Uri.parse(link).toString(true))`, the transformation `openerService`
+     * applies to a `Uri` (read in VS Code 1.144.0 and 1.105.0). `%26` and `%2B` come out as `&`
+     * and `+` and the parameters `URLSearchParams` reads change; `%3D` comes out as `=`, which
+     * changes the parameters in a key and not in a value; `%3A%2F%2F`, a literal `+`, `%20` and
+     * `%25` change nothing the server reads. `linkChangesWhenOpened` must flag the first three
+     * kinds and none of the rest.
+     *
+     * Protects the reason for `linkChangesWhenOpened` with the REAL `vscode.Uri` class. It does
+     * not call `openExternal` and does not see the browser: the opener of the main process is not
+     * intercepted, so that last step is read in the source, not measured here.
+     */
+    it("measures what vscode.Uri does to %26, %2B and %3D in a link's query", function () {
+      // `params`: the parameters `URLSearchParams` reads change. `flagged`: what
+      // `linkChangesWhenOpened` must answer. They differ for `%3D` in a VALUE (`a=x%3Dy` becomes
+      // `a=x=y`, which `URLSearchParams` still reads as `x=y`) and the function flags it anyway:
+      // the bytes change, and in a key (`a%3Db=c`) the parameters change too.
+      const samples: { query: string; params: boolean; flagged: boolean }[] = [
+        { query: 'a=x%26y', params: true, flagged: true },
+        { query: 'a=x%2By', params: true, flagged: true },
+        { query: 'a%3Db=c', params: true, flagged: true },
+        { query: 'a=x%3Dy', params: false, flagged: true },
+        { query: 'r=http%3A%2F%2Fx', params: false, flagged: false },
+        { query: 'a=x+y', params: false, flagged: false },
+        { query: 'a=x%20y', params: false, flagged: false },
+        { query: 'a=100%25', params: false, flagged: false },
+      ];
+      for (const { query, params, flagged } of samples) {
+        const link = `https://auth.example.test/login?${query}`;
+        const opened = encodeURI(vscode.Uri.parse(link).toString(true));
+        const before = Array.from(new URL(link).searchParams.entries());
+        const after = Array.from(new URL(opened).searchParams.entries());
+        assert.strictEqual(
+          JSON.stringify(after) !== JSON.stringify(before),
+          params,
+          `${query}: before ${JSON.stringify(before)}, after ${JSON.stringify(after)}, opened ${opened}`,
+        );
+        assert.strictEqual(linkChangesWhenOpened(link), flagged, `linkChangesWhenOpened(${query})`);
       }
     });
 

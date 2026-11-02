@@ -24,6 +24,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** Disposes the mounted tab now (a test that mounts a second one, or checks what an unmount leaves). */
+function unmount(): void {
+  mounted?.dispose();
+  mounted = undefined;
+}
+
 function setup(initial?: SettingsState, saved?: PersistedSettingsUi) {
   const store = createSettingsStore();
   const sent: SettingsWebviewToHost[] = [];
@@ -323,6 +329,143 @@ describe('focus when a row changes list', () => {
     must(container, 'li[data-provider="acme"] button.primary').click();
     apply({ type: 'settings.state', state: withAttempt(true) });
     expect(document.activeElement).not.toBe(cardOf(container));
+  });
+
+  // Protects H1 of E10-settings-followup (#143): after Enter (the row stays in Connected, the card
+  // is not rebuilt) and after Escape (the row goes back, the card is rebuilt) the card ends focused
+  // in BOTH orders of the two events: the host's state without the attempt, and the focus coming
+  // back from the native box. Provenance: FABRICATED states, `hasFocus` stubbed and a synthetic
+  // `focus` event on `window`: jsdom proves the logic, not that VS Code delivers that event.
+  const connected: ProviderRow = {
+    ...acme,
+    connections: [{ kind: 'credential', id: 'cred_9', label: 'Acme', method: 'key' }],
+  };
+  // Rows are cloned per state: the store merges into the objects it is given (`reconcile` with
+  // `merge`), so a shared fixture would carry one test's connection into the next.
+  const stateWith = (kind: 'attempt' | 'connected' | 'idle') =>
+    makeState({
+      providers: {
+        loaded: true,
+        failed: false,
+        rows: structuredClone([anthropic, kind === 'connected' ? connected : acme]),
+      },
+      ...(kind === 'attempt'
+        ? { attempt: { integrationID: 'acme', phase: 'starting' as const } }
+        : {}),
+    });
+  const windowFocus = (): void => {
+    window.dispatchEvent(new FocusEvent('focus'));
+  };
+  const pressConnect = (container: HTMLElement): void => {
+    must(cardOf(container) as HTMLElement, 'button.settings-toggle').click();
+    must(container, 'li[data-provider="acme"] button.primary').click();
+  };
+
+  for (const outcome of ['connected', 'idle'] as const) {
+    const how = outcome === 'connected' ? 'Enter' : 'Escape';
+
+    it(`${how}, state first: the card is focused when the focus comes back from the box`, () => {
+      const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+      const { container, apply } = setup(stateWith('idle'));
+      pressConnect(container);
+      apply({ type: 'settings.state', state: stateWith('attempt') });
+      apply({ type: 'settings.state', state: stateWith(outcome) });
+      expect(document.activeElement).not.toBe(cardOf(container));
+      hasFocus.mockReturnValue(true);
+      windowFocus();
+      expect(document.activeElement).toBe(cardOf(container));
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    it(`${how}, focus first: the card is focused when the state without the attempt arrives`, () => {
+      const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+      const { container, apply } = setup(stateWith('idle'));
+      pressConnect(container);
+      apply({ type: 'settings.state', state: stateWith('attempt') });
+      hasFocus.mockReturnValue(true);
+      (document.activeElement as HTMLElement | null)?.blur();
+      windowFocus();
+      apply({ type: 'settings.state', state: stateWith(outcome) });
+      expect(document.activeElement).toBe(cardOf(container));
+    });
+  }
+
+  it('Enter after the card took the focus and then lost it to the box: the end of the attempt parks the request', () => {
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const { container, apply } = setup(stateWith('idle'));
+    pressConnect(container);
+    apply({ type: 'settings.state', state: stateWith('attempt') });
+    expect(document.activeElement).toBe(cardOf(container));
+    // The native box opens and takes the focus; Enter closes it and the state arrives first.
+    hasFocus.mockReturnValue(false);
+    (document.activeElement as HTMLElement).blur();
+    apply({ type: 'settings.state', state: stateWith('connected') });
+    expect(document.activeElement).toBe(document.body);
+    hasFocus.mockReturnValue(true);
+    windowFocus();
+    expect(document.activeElement).toBe(cardOf(container));
+  });
+
+  // Protects the `active === null || active === document.body` guard of `onWindowFocus` against a
+  // focus chosen OUTSIDE `.settings-providers` (the "MCP servers" tab): the section's own `focusin`
+  // handler never sees it, so the parked request is still armed when the window focus arrives.
+  // Provenance: FABRICATED states, `hasFocus` stubbed, synthetic `focus` event on `window`.
+  it('does not move a focus the user put outside the providers section while the request was parked', () => {
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const { container, apply } = setup(stateWith('idle'));
+    pressConnect(container);
+    apply({ type: 'settings.state', state: stateWith('attempt') });
+    apply({ type: 'settings.state', state: stateWith('connected') });
+    const mcpTab = must(container, '#settings-tab-mcp');
+    mcpTab.focus();
+    expect(document.activeElement).toBe(mcpTab);
+    hasFocus.mockReturnValue(true);
+    windowFocus();
+    expect(document.activeElement).toBe(mcpTab);
+    expect(document.activeElement).not.toBe(cardOf(container));
+  });
+
+  it('does not move a focus the user chose in the meantime, nor act while the box has the focus', () => {
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const { container, apply } = setup(stateWith('idle'));
+    pressConnect(container);
+    apply({ type: 'settings.state', state: stateWith('attempt') });
+    apply({ type: 'settings.state', state: stateWith('connected') });
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    windowFocus(); // document.hasFocus() is still false: the native box keeps it.
+    expect(focus).not.toHaveBeenCalled();
+    const search = must(container, 'input[type="search"]');
+    search.focus();
+    hasFocus.mockReturnValue(true);
+    windowFocus();
+    expect(document.activeElement).toBe(search);
+  });
+
+  it('serves the request once: a second focus event does nothing, and none after unmount', () => {
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const { container, apply } = setup(stateWith('idle'));
+    pressConnect(container);
+    apply({ type: 'settings.state', state: stateWith('attempt') });
+    apply({ type: 'settings.state', state: stateWith('connected') });
+    hasFocus.mockReturnValue(true);
+    windowFocus();
+    const card = cardOf(container);
+    expect(document.activeElement).toBe(card);
+    (document.activeElement as HTMLElement).blur();
+    windowFocus();
+    expect(document.activeElement).toBe(document.body);
+
+    // Armed again, then unmounted: the listener is gone with the section.
+    hasFocus.mockReturnValue(false);
+    unmount();
+    const second = setup(stateWith('idle'));
+    pressConnect(second.container);
+    second.apply({ type: 'settings.state', state: stateWith('attempt') });
+    second.apply({ type: 'settings.state', state: stateWith('connected') });
+    unmount();
+    hasFocus.mockReturnValue(true);
+    windowFocus();
+    expect(document.activeElement).toBe(document.body);
   });
 
   it('does not take the focus back on a later refresh once the user is elsewhere', async () => {

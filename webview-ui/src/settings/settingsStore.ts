@@ -17,6 +17,8 @@ export interface SettingsStoreState {
   connection: ConnectionState;
   folder: string;
   serverVersion: string | undefined;
+  /** `vscode.env.remoteName` of the host; `undefined` in a local window (no remote hint then). */
+  remote: string | undefined;
   providers: SettingsState['providers'];
   mcp: SettingsState['mcp'];
   attempt: AuthAttemptView | undefined;
@@ -50,6 +52,7 @@ export function createSettingsStore(): SettingsStore {
     connection: { state: 'not-started' },
     folder: '',
     serverVersion: undefined,
+    remote: undefined,
     providers: { loaded: false, failed: false, rows: [] },
     mcp: { loaded: false, failed: false, pendingFirstRead: true, servers: [] },
     attempt: undefined,
@@ -68,6 +71,7 @@ export function createSettingsStore(): SettingsStore {
         setState('connection', reconcile(next.connection));
         setState('folder', next.folder);
         setState('serverVersion', next.serverVersion);
+        setState('remote', next.remote);
         setState('providers', 'loaded', next.providers.loaded);
         setState('providers', 'failed', next.providers.failed);
         setState('providers', 'rows', reconcile(next.providers.rows, { key: 'id', merge: true }));

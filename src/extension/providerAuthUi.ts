@@ -4,7 +4,7 @@
 // nothing in this module logs what it receives or returns.
 
 import * as vscode from 'vscode';
-import { COPY_AUTH_CODE_COMMAND_ID } from './ids';
+import { COPY_AUTH_CODE_COMMAND_ID, COPY_AUTH_LINK_COMMAND_ID } from './ids';
 import {
   cleanInstructions,
   type AuthProgressHandle,
@@ -44,9 +44,16 @@ export interface ProviderAuthUiOptions {
  */
 const COPY_CODE_LINK = `[Copy code](command:${COPY_AUTH_CODE_COMMAND_ID})`;
 
-/** Text of the notification: the instructions, and the link when there is a code to copy. */
+/** Same for "Copy link": no argument, the command copies the link of the attempt in progress. */
+const COPY_LINK_LINK = `[Copy link](command:${COPY_AUTH_LINK_COMMAND_ID})`;
+
+/** Text of the notification: the instructions, then "Copy code" and/or "Copy link" when they apply. */
 function progressMessage(view: AuthProgressView): string {
-  return view.code === undefined ? view.instructions : `${view.instructions} ${COPY_CODE_LINK}`;
+  const links = [
+    ...(view.code === undefined ? [] : [COPY_CODE_LINK]),
+    ...(view.copyLink === true ? [COPY_LINK_LINK] : []),
+  ];
+  return links.length === 0 ? view.instructions : `${view.instructions} ${links.join(' ')}`;
 }
 
 /**
@@ -56,15 +63,29 @@ function progressMessage(view: AuthProgressView): string {
  * must not lose a pasted key) whose `validateInput` rejects an empty or blank value; the value is
  * returned trimmed. Both `askSecret` and `askCode` close their box when `signal` aborts (the
  * attempt was cancelled from the card or the notification); `askCode` is the same box without the
- * mask, but a separate copy of the code. VERIFIED for `askSecret` only, in a real VS Code 1.144.0
- * on Windows 11 (1/11/2026, `npm run test:visual --
- * --group config`, synthetic server; the dialogs are NOT pre-answered there): "ok   V7 Enter API
- * key… opens a native InputBox titled "API key for Azure" whose input is type=password and has the
- * focus, while the webview holds no password input" and "ok   W1 Cancel in the card closes the
- * native InputBox (closed true) and the card goes back to Add a provider …" (both are Azure, an API
- * key). UNVERIFIED for `askCode` in
- * a real window: no `test:visual` cell drives a `code` attempt, so its close on abort is only
- * covered by the fake-server integration cases. `progress` is a cancellable
+ * mask, but a separate copy of the code. `openExternal` does `env.openExternal(Uri.parse(url))`:
+ * the VS Code opener decodes each `%XX` and re-encodes with `encodeURI(uri.toString(true))`, so a
+ * query with `%26`, `%2B` or `%3D` would reach the browser changed; `providerAuth.ts` therefore
+ * never opens such a link (it offers "Copy link", `linkChangesWhenOpened`, whose header holds the
+ * measurement with the real `vscode.Uri`). The dialogs are NOT pre-answered in `test:visual`.
+ * VERIFIED for `askSecret`, in a real VS Code 1.144.0 on Windows 11 (1/11/2026, `npm run
+ * test:visual -- --group config`, synthetic server): "ok   V7 Enter API key… opens a native
+ * InputBox titled "API key for Azure" whose input is type=password and has the focus, while the
+ * webview holds no password input" and "ok   W1 Cancel in the card closes the native InputBox
+ * (closed true) and the card goes back to Add a provider …" (both are Azure, an API key).
+ * VERIFIED for `askCode` in the same way (2/11/2026, `--group config` and `--steps 36`, FakeCo,
+ * a `code` attempt): "ok   K1 FakeCo Sign in… shows the notification "Paste the code shown on the
+ * page" without a Copy link and a native box titled "Code for FakeCo" (type=text, focused true)
+ * while the webview holds no password input", "ok   K2 Cancel in the card closes the native code
+ * box (true) and FakeCo is back in Add a provider (true)" (the close on abort) and "ok   K3 typing
+ * FAKE-CODE connects FakeCo: "Signed in · saved by opencode for all projects" and the live region
+ * says "Connected to FakeCo."". VERIFIED for the link that is not opened: "ok   Copy link the
+ * notification carries the exact notice and a "Copy link" link, and the card shows the notice too",
+ * "ok   Copy link the host did not open the link (log "opened: false, link kept for Copy link")"
+ * and "ok   Copy link pressing it puts the link on the clipboard INTACT, %2B %3D %26 included".
+ * The same lines, with the same text, passed in the full run of 02/11/2026 on the final tree
+ * (Windows 11, VS Code 1.144.0, "all visual checks passed").
+ * `progress` is a cancellable
  * notification (`withProgress`, which has no buttons of its own: "Copy code" is a `command:` link
  * in its text, so the title and the instructions are stripped of `[ ] ( )` first,
  * `vscode-extension` section 7). `confirm` is a modal warning. `copy` writes to the clipboard.
@@ -152,7 +173,10 @@ export function createProviderAuthUi(options: ProviderAuthUiOptions = {}): AuthU
         if (answers?.approve === false) return Promise.resolve(true);
         return options.openExternalSeam(url);
       }
-      return Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url, true)));
+      // `Uri.parse(url)` decodes `%XX`; `providerAuth.ts` never gets here with a query where that
+      // changes the meaning (`linkChangesWhenOpened`). The `true` (strict) was dropped: it only
+      // throws on a missing scheme, which `openableHost` already refused.
+      return Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url)));
     },
 
     progress: (view, onCancel): AuthProgressHandle => {

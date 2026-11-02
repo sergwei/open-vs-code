@@ -84,6 +84,7 @@ function setup(rows: IntegrationRow[] = ROWS) {
     },
   } satisfies SettingsAuth;
   const runAction = vi.fn();
+  let remote: string | undefined;
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const deps: SettingsControllerDeps = {
     config,
@@ -93,6 +94,7 @@ function setup(rows: IntegrationRow[] = ROWS) {
       connection: { state: 'connected', serverVersion: '2.0.32' },
       folder: 'work',
       serverVersion: '2.0.32',
+      ...(remote === undefined ? {} : { remote }),
     }),
     runAction,
     log,
@@ -105,6 +107,9 @@ function setup(rows: IntegrationRow[] = ROWS) {
     auth,
     runAction,
     log,
+    setRemote: (name: string | undefined) => {
+      remote = name;
+    },
     changeStore: () => storeListeners.forEach((listener) => listener()),
     setAttempt: (view: AuthAttemptView | undefined) => {
       attempt = view;
@@ -141,6 +146,19 @@ describe('SettingsController state', () => {
       },
     });
     expect(JSON.stringify(t.posted)).not.toContain('apiKey');
+  });
+
+  // Protects the remote hint of the card: `remote` travels host to webview only when the window is
+  // remote, and its absence (a local window) must stay absent, not become an empty string.
+  // Provenance: FABRICATED header; the real `vscode.env.remoteName` is read in `chatLifecycle.ts`.
+  it('carries the remote name in the state only when the header has one', async () => {
+    const t = setup();
+    await t.controller.onMessage({ type: 'settings.ready' });
+    expect('remote' in t.controller.buildState()).toBe(false);
+    t.setRemote('ssh-remote');
+    expect(t.controller.buildState().remote).toBe('ssh-remote');
+    t.setRemote(undefined);
+    expect('remote' in t.controller.buildState()).toBe(false);
   });
 
   it('posts nothing before ready, and ONE state for changes of the same tick after it', async () => {

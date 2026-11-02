@@ -33,6 +33,7 @@ import {
   CHAT_VIEW_ID,
   CONFIG_SECTION,
   COPY_AUTH_CODE_COMMAND_ID,
+  COPY_AUTH_LINK_COMMAND_ID,
   DEFAULT_MODEL_KEY,
   DEFAULT_MODEL_SETTING,
   DELETE_SESSION_COMMAND_ID,
@@ -644,6 +645,8 @@ export function registerChat(
         ...(statusConnection.state === 'connected'
           ? { serverVersion: statusConnection.serverVersion }
           : {}),
+        // `remoteName` is undefined in a local window: the tab then shows no remote hint.
+        ...(vscode.env.remoteName === undefined ? {} : { remote: vscode.env.remoteName }),
       };
     },
     runAction: (action) => {
@@ -1258,6 +1261,12 @@ export function registerChat(
     vscode.commands.registerCommand(COPY_AUTH_CODE_COMMAND_ID, async () => {
       const integrationID = providerAuth.attempt()?.integrationID;
       if (integrationID !== undefined) await providerAuth.copyCode(integrationID);
+    }),
+    // The "Copy link" link of the sign-in notification (a link VS Code would rewrite is not opened).
+    // No argument either: it copies the link of the attempt in progress.
+    vscode.commands.registerCommand(COPY_AUTH_LINK_COMMAND_ID, async () => {
+      const integrationID = providerAuth.attempt()?.integrationID;
+      if (integrationID !== undefined) await providerAuth.copyLink(integrationID);
     }),
     settingsPanel,
     { dispose: () => settings.dispose() },

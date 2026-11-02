@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Show, untrack } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js';
 import type { ProviderRow } from '../../../src/shared/settingsProtocol';
 import { ProviderCard, type SendSettings } from './ProviderCard';
 import type { SettingsStoreState } from './settingsStore';
@@ -32,16 +32,29 @@ export function matchesSearch(row: ProviderRow, search: string): boolean {
  * "Connected" while it signs in and back in "Add a provider" if the attempt is cancelled or fails,
  * and only while this document has the focus: a key sign-in opens a native InputBox at the same
  * time, and a card that pulled the focus back would leave that box open but unable to take the key.
- * "Never on the `body`" holds only for Cancel from the card, VERIFIED in a real VS Code 1.144.0 on
- * Windows 11 (1/11/2026, `test:visual` step 36, synthetic server): "ok   W2 after the attempt the
- * focus is on the Copilot card, not on the body (card focused true)", and in jsdom: the "keeps the
- * focus on the card ..." and "leaves the focus alone while another part of the window has it ..."
- * cases of `SettingsApp.test.tsx` (`document.activeElement`, `hasFocus` stubbed, fabricated
- * states). UNVERIFIED on the success path (Enter in the key box): the row stays in "Connected", the
- * store reconciles by id so the card is NOT rebuilt and nobody asks for the focus again; the focus
- * of the webview probably ends on the `body` (a follow-up, no cell measures it). On the Escape path
- * the rebuilt card takes the focus only if the document already has it when `settings.state`
- * arrives: HYPOTHESIS, check by reading `focusedCard` after an Escape in the box in `test:visual`.
+ * When the document has no focus the request is parked and a single `window` `focus` listener
+ * serves it (to the card, and only if the focus is idle on the `body`), so the card ends focused
+ * on the success path (Enter: the row stays in "Connected" and the card is NOT rebuilt) and on the
+ * Escape path, in either order of "the state without the attempt arrives" and "the focus comes
+ * back from the box". The same request is also served when the attempt ends with the document
+ * focused. "Never on the `body`" holds for Cancel from the card, VERIFIED in a real VS Code 1.144.0
+ * on Windows 11 (1/11/2026, `test:visual` step 36, synthetic server): "ok   W2 after the attempt the
+ * focus is on the Copilot card, not on the body (card focused true)". In jsdom (`SettingsApp.test.tsx`,
+ * `document.activeElement`, `hasFocus` stubbed, fabricated states): the "keeps the focus on the
+ * card ..." and "leaves the focus alone while another part of the window has it ..." cases, and
+ * the Enter and Escape cases in both orders. VERIFIED in a real VS Code 1.144.0 on Windows 11
+ * (2/11/2026, `npm run test:visual -- --group config` and `--steps 36`, synthetic server): "ok   F1
+ * after Enter in the key box the Azure card has the focus with the document focused (true) and the
+ * box is closed" and "ok   F2 Escape in the native box closes it (true), Azure is back in Add a
+ * provider (true) and its card has the focus with the document focused (true; document
+ * {"hasFocus":true,"active":"LI","activeProvider":"azure"}), and the host never logged "provider
+ * connected: azure"". The same two lines, with the same text, passed in the full run of 02/11/2026
+ * on the final tree (Windows 11, VS Code 1.144.0, "all visual checks passed"). The first of three runs that had the cell, before the toast of VS
+ * Code was cleared for a later cell, printed F2 as FAIL (focus not back in 3 s; cause unknown,
+ * HYPOTHESIS: the toast of VS Code in that run is not shown to be the cause); it passed in the next
+ * two.
+ * Not observed: which of the two orders VS Code produced in each run, a screen reader, macOS and
+ * Linux.
  */
 export function ProvidersSection(props: {
   state: SettingsStoreState;
@@ -57,19 +70,62 @@ export function ProvidersSection(props: {
 
   // Focus follows the provider the user acted on. Pressing its primary button moves the row to the
   // top list (and back if the attempt is cancelled or fails), which rebuilds the card and drops the
-  // focus to `body`; so the id is remembered and the card rebuilt for it takes the focus. It is
-  // forgotten once the attempt that followed has ended, when the user focuses anything else, or when
-  // a rebuilt card has taken it with no attempt running, so a later refresh cannot steal the focus.
+  // focus to `body`; so the id is remembered and the card rebuilt for it takes the focus. A key
+  // sign-in that succeeds does NOT rebuild the card, and a native box that is still closing holds
+  // the focus, so when this document has no focus the request is parked (`armedID`) and ONE
+  // `window` `focus` listener serves it when the focus comes back. Both orders of the two events
+  // (the host's state without the attempt, and the focus returning from the box) end on the card.
+  // The id is forgotten once it has been served, when the user focuses anything else, or when the
+  // section goes away, so a later refresh cannot steal the focus.
   const [focusID, setFocusID] = createSignal<string | undefined>(undefined);
+  let container: HTMLDivElement | undefined;
+  let armedID: string | undefined;
+  let listening = false;
+  const cardOf = (id: string): HTMLElement | undefined =>
+    Array.from(container?.querySelectorAll<HTMLElement>('[data-provider]') ?? []).find(
+      (element) => element.getAttribute('data-provider') === id,
+    );
+  const disarm = (): void => {
+    armedID = undefined;
+    if (listening) window.removeEventListener('focus', onWindowFocus);
+    listening = false;
+  };
+  function onWindowFocus(): void {
+    const id = armedID;
+    disarm();
+    if (id === undefined || untrack(focusID) !== id || !document.hasFocus()) return;
+    // Only an idle focus (nothing, or the body the destroyed button left) is taken: a field the
+    // user chose in the meantime stays.
+    const active = document.activeElement;
+    if (active === null || active === document.body) cardOf(id)?.focus();
+    // While the attempt still runs the request stays: if the row then goes back to "Add a
+    // provider" (Escape) its card is a new element, and the end of the attempt focuses that one.
+    if (untrack(() => props.state.attempt) === undefined) setFocusID(undefined);
+  }
+  const arm = (id: string): void => {
+    armedID = id;
+    if (listening) return;
+    listening = true;
+    window.addEventListener('focus', onWindowFocus);
+  };
+  onCleanup(disarm);
+  // The attempt that followed the press has ended: the card of that provider exists now (rebuilt or
+  // not) and is asked for the focus. The state arrives as one batch, so the card is in the DOM.
   let sawAttempt = false;
   createEffect(() => {
     if (props.state.attempt !== undefined) {
       sawAttempt = true;
     } else if (sawAttempt) {
       sawAttempt = false;
-      queueMicrotask(() => {
+      const id = untrack(focusID);
+      if (id === undefined) return;
+      if (document.hasFocus()) {
+        cardOf(id)?.focus();
+        disarm();
         setFocusID(undefined);
-      });
+      } else {
+        arm(id);
+      }
     }
   });
   const takeFocus = (id: string): boolean => {
@@ -77,10 +133,13 @@ export function ProvidersSection(props: {
     // A key sign-in opens a native InputBox of the host at the same moment the row moves up. If
     // that box already has the focus, this document does not, and `card.focus()` would pull the
     // focus back into the webview and leave the box open but unable to take the key (found by
-    // `test:visual` step 36, V7, 1/11/2026). Keep `focusID`: after Escape, the card rebuilt when the
-    // box closes asks again (HYPOTHESIS that the document has the focus by then). After a
-    // successful key the card is not rebuilt, so nobody asks again (UNVERIFIED, see the header).
-    if (!document.hasFocus()) return false;
+    // `test:visual` step 36, V7, 1/11/2026). Keep `focusID` and park the request: the focus
+    // returning from the box (Escape or Enter) serves it through `onWindowFocus`.
+    if (!document.hasFocus()) {
+      arm(id);
+      return false;
+    }
+    disarm();
     if (props.state.attempt === undefined) queueMicrotask(() => setFocusID(undefined));
     return true;
   };
@@ -91,9 +150,15 @@ export function ProvidersSection(props: {
   return (
     <div
       class="settings-providers"
+      ref={(element) => {
+        container = element;
+      }}
       onFocusIn={(event) => {
         const owner = event.target.closest('[data-provider]');
-        if (owner?.getAttribute('data-provider') !== untrack(focusID)) setFocusID(undefined);
+        if (owner?.getAttribute('data-provider') !== untrack(focusID)) {
+          setFocusID(undefined);
+          disarm();
+        }
       }}
     >
       <Show when={!props.state.providers.loaded}>
@@ -120,6 +185,7 @@ export function ProvidersSection(props: {
                 <ProviderCard
                   row={row}
                   attempt={row.id === attemptID() ? props.state.attempt : undefined}
+                  remote={props.state.remote}
                   busy={busy()}
                   ui={props.ui}
                   send={send}
@@ -160,6 +226,7 @@ export function ProvidersSection(props: {
                 <ProviderCard
                   row={row}
                   attempt={undefined}
+                  remote={props.state.remote}
                   busy={busy()}
                   ui={props.ui}
                   send={send}

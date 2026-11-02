@@ -61,6 +61,14 @@ export const SETTINGS_PANEL_VIEW_TYPE = 'openVsCode.settingsPanel';
 export const COPY_AUTH_CODE_COMMAND_ID = 'openVsCode.internal.copyAuthCode';
 
 /**
+ * Internal command behind the "Copy link" button of the sign-in notification, shown when the link
+ * is not opened because VS Code would rewrite its query. Takes NO argument, like
+ * {@link COPY_AUTH_CODE_COMMAND_ID}: it copies the link of the attempt in progress. Always
+ * registered, NOT contributed.
+ */
+export const COPY_AUTH_LINK_COMMAND_ID = 'openVsCode.internal.copyAuthLink';
+
+/**
  * Internal command that pre-answers the NEXT dialogs of the provider sign-in (issue #128) without
  * showing them, because the integration tests cannot type into a masked `showInputBox` or click a
  * modal. Argument: `{ key?: string | null, code?: string | null, confirm?: boolean, approve?:
