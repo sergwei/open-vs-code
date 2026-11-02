@@ -99,6 +99,7 @@ import type { V2Event } from '@opencode/client';
 import type { Catalog, ErrorInfo, ModelRef, SessionStatus, SessionSummary } from '../shared/model';
 import {
   dispatch,
+  isComposeInBounds,
   MAX_DROPPED_ITEMS,
   MAX_FILE_SEARCH_LENGTH,
   MAX_SESSION_TITLE_LENGTH,
@@ -130,6 +131,7 @@ import type { ChatApi } from './opencodeClient';
 import { safeLog, type ServerLog } from './opencodeServer';
 import { createPendingRequests, type PendingSummary } from './pendingRequests';
 import { createRequestResolutions } from './requestResolutions';
+import type { ModsSink } from './modEvents';
 import type { ServerConfigSink } from './serverConfig';
 import type { RunningServerInfo, ServerState } from './serverManager';
 import { createSessionBrowser, type SessionPage } from './sessionBrowser';
@@ -460,6 +462,14 @@ export interface ChatControllerDeps {
    * forwards every stream event (`event(type)`), which the sink filters itself.
    */
   serverConfig?: ServerConfigSink;
+  /**
+   * The mods host's door (E10-mods, phase 2): every stream event is handed to it in `onEvent`,
+   * before the early `return`s, and it picks the few that mods can see. Absent in the tests
+   * written before it: then nothing is forwarded. Its optional `chat` half (phase 3) feeds the
+   * `mods.state` message and runs `mod.command.run`; without it the controller sends no
+   * `mods.state` and answers that message as unavailable.
+   */
+  mods?: ModsSink;
   /** The status bar item (issue #124); absent in tests that do not care. */
   serverStatus?: ServerStatusSink;
   /** The QuickPick that picks which saved permissions to revoke; resolves with their ids. */
@@ -826,6 +836,104 @@ export class ChatController {
   constructor(private readonly deps: ChatControllerDeps) {
     this.log = safeLog(deps.log);
     this.runStream = deps.runStream ?? runEventStream;
+    // E10-mods, phase 3: every change of the bands or commands goes to every pane as one whole
+    // `mods.state`; a pane that is hidden loses it and gets the current one at its next `ready`.
+    this.modsSubscription = deps.mods?.chat?.onDidChange(() => {
+      this.publishMods();
+    });
+  }
+
+  /** Listener on the mods UI state, released in {@link dispose}; absent without a mods chat half. */
+  private readonly modsSubscription: { dispose(): void } | undefined;
+
+  /**
+   * Sends the current mods UI state (E10-mods, phase 3) to `only`, or to every pane. Nothing when
+   * the controller has no mods chat half, so a host without mods sends no `mods.state` at all. The
+   * message always carries the WHOLE state (it replaces the webview's), which is why a pane that
+   * missed some changes needs nothing but the latest. A throw from the state builder is caught: a
+   * failing mod must not break the chat.
+   */
+  private publishMods(only?: ChatPane): void {
+    const chat = this.deps.mods?.chat;
+    if (chat === undefined) return;
+    let message: HostToWebview;
+    try {
+      const { bands, commands } = chat.state();
+      message = { type: 'mods.state', bands, commands };
+    } catch (error) {
+      this.log.warn(`mods state failed: ${String(error)}`);
+      return;
+    }
+    if (only !== undefined) only.post(message);
+    else for (const pane of this.panes.values()) pane.post(message);
+  }
+
+  /**
+   * `mod.command.run` (E10-mods, phase 3): runs a command a mod registered, from the "/" menu or
+   * the button of a band, and answers `request.result`. It never creates a session and never
+   * touches the server. The name must be one the host listed (`ModsChat.state().commands`): any
+   * other answers `CommandUnavailable` without reaching a Worker. A failure of the command (it
+   * threw, timed out, the mod stopped) is the error of the result, scrubbed like every error text.
+   * The log line names the qualified command only, never its arguments. VERIFIED by
+   * `chatController.test.ts` "runs a listed command and answers request.result, logging the name
+   * but not the arguments" with a fabricated mods chat half (Windows 11, 02/11/2026). VERIFIED in
+   * VS Code 1.144.0 on Windows 11 (02/11/2026, the final full `test:visual` run): "ok   M5 the
+   * command sent no prompt and made no turn: the log keeps 1 user message(s), no Stop button, no
+   * alert" and "ok   M5 the host logged the command by its qualified name".
+   */
+  private async runModCommand(
+    pane: ChatPane,
+    message: Extract<WebviewToHost, { type: 'mod.command.run' }>,
+  ): Promise<void> {
+    const chat = this.deps.mods?.chat;
+    const { requestId, name, args, sessionID } = message;
+    if (chat?.state().commands.some((command) => command.name === name) !== true) {
+      this.log.warn(`mod command ${requestId} rejected: CommandUnavailable`);
+      return this.result(pane, requestId, {
+        _tag: 'CommandUnavailable',
+        message: `The command /${name} is not available`,
+      });
+    }
+    try {
+      await chat.run(name, args, sessionID);
+      this.log.info(`mod command ${name} ran`);
+      this.result(pane, requestId);
+    } catch (error) {
+      this.log.warn(`mod command ${name} failed`);
+      this.result(pane, requestId, error);
+    }
+  }
+
+  /**
+   * Hands what a mod composed (`station.chat.compose`, E10-mods phase 3) to pane `paneId` as a
+   * `prompt.compose` with no files, to be sent when `send` is true. Same outcome contract as
+   * {@link composeFromEditor}: `rejected` with the error when the text is blank or the pane is
+   * gone (nothing is composed), `composed` otherwise; the VS Code side shows a rejection natively.
+   * A mod can only compose TEXT: it has no file references, so none enters `pickedUris`. Logs the
+   * mod id and whether it sends, never the text. VERIFIED by `chatController.test.ts`
+   * "composeFromMod hands the pane a prompt.compose with no files and refuses a blank text"
+   * (fabricated pane, Windows 11, 02/11/2026). Not observed: a compose from a real
+   * mod reaching a real prompt box (the fixture mod never calls it).
+   */
+  composeFromMod(paneId: number, modId: string, text: string, send: boolean): ComposeOutcome {
+    const pane = this.paneById(paneId);
+    if (pane === undefined) return this.refusedMod(modId, new Error('The chat is not available'));
+    if (!isComposeInBounds({ text, files: [] })) {
+      return this.refusedMod(
+        modId,
+        codedError('ComposeRefused', 'The mod composed an empty prompt'),
+      );
+    }
+    this.log.info(`mod ${modId} composed a prompt (send ${String(send)})`);
+    pane.compose({ type: 'prompt.compose', text, files: [], send });
+    return { status: 'composed' };
+  }
+
+  /** The `rejected` outcome of a mod's compose: sanitized error and a text-free log line. */
+  private refusedMod(modId: string, error: unknown): ComposeOutcome {
+    const info = toErrorInfo(error, this.secrets);
+    this.log.warn(`mod ${modId} compose refused (${info.code})`);
+    return { status: 'rejected', error: info };
   }
 
   /** URL and password of the current server, for scrubbing error texts. */
@@ -1457,6 +1565,10 @@ export class ChatController {
    * built for that but never run with a compaction.
    * Issue #31: {@link watchChangedFiles} looks at the events that go on to the translator (before
    * it) and reloads the "Changed files" list when the open session's files may have changed.
+   * E10-mods: right after the settings sink, every event also goes to the `mods` sink (before the
+   * early returns), inside its own try/catch so a failing sink cannot cost the chat an event.
+   * VERIFIED by `chatController.e2e.test.ts` "a sink that throws does not stop the chat..." and
+   * "receives a whole permission turn in order, with the tool name" (Windows 11, 02/11/2026).
    */
   private onEvent(event: V2Event): void {
     try {
@@ -1464,6 +1576,13 @@ export class ChatController {
       // and `server.connected` / `location.shutdown`), because the branches below return early,
       // and `integration.updated` / `credential.updated` never get past the catalog branch.
       this.deps.serverConfig?.event(event.type);
+      // E10-mods: the mods sink sees EVERY event too, before the branches below return. A throw in
+      // it must not cost the chat the event, so it has its own guard.
+      try {
+        this.deps.mods?.event(event, this.secrets);
+      } catch (error) {
+        this.log.warn(`mods sink failed on ${event.type}: ${String(error)}`);
+      }
       if (event.type === 'server.connected') {
         this.log.info('event stream connected');
         void this.resync();
@@ -1788,7 +1907,9 @@ export class ChatController {
    * The webview of pane `paneId` loaded (it sends `ready` on every document load): publishes to
    * THAT pane the connection state and a fresh snapshot, or an empty one when there is no server
    * yet (except for a pane that already holds a restored session, which gets only the connection
-   * state: see {@link restorePane}); the other panes get nothing. Anything posted earlier was dropped by the provider, so this
+   * state: see {@link restorePane}); the other panes get nothing. E10-mods: right after the
+   * connection state the pane also gets the whole `mods.state` (see {@link publishMods}), with or
+   * without a server. Anything posted earlier was dropped by the provider, so this
    * is the only way a new document gets its state. If a `focusRequest` is waiting (an "Open chat" click that had to load the document first, so its
    * first `ui.focus` went nowhere) it is sent again after the snapshot, as long as it is fresher
    * than {@link FOCUS_REQUEST_TTL_MS}. The cached catalog, if any, is sent right after the snapshot
@@ -1805,6 +1926,9 @@ export class ChatController {
     if (pane === undefined) return;
     this.log.info('webview ready');
     pane.post({ type: 'connection.state', connection: this.connection });
+    // E10-mods: the mods UI state does not depend on the server, so it goes out before the early
+    // return below and a new document gets its bands and commands even with the server down.
+    this.publishMods(pane);
     if (this.client === undefined) {
       // A pane bound to a restored session gets no empty snapshot: its document would persist "no
       // session" and a second Reload with the server down would lose it (decision T3=1). The
@@ -4014,7 +4138,8 @@ export class ChatController {
    * because the request is gone also resyncs, since the snapshot tells the truth);
    * `permissions.manage` runs the saved-permissions manager; `server.restart` and `logs.show` go
    * to `deps.server`. E2 (issue #85): `setup.action` goes to `deps.setup` and `attachments.pick`
-   * passes its `kind` (default `file`) to the picker.
+   * passes its `kind` (default `file`) to the picker. E10-mods: `mod.command.run` runs a mod's
+   * command through {@link runModCommand}.
    */
   handle(paneId: number, message: WebviewToHost): Promise<void> {
     const pane = this.paneById(paneId);
@@ -4058,6 +4183,9 @@ export class ChatController {
       },
       'session.compact': (m) => {
         pending.push(this.compact(pane, m.requestId, m.sessionID));
+      },
+      'mod.command.run': (m) => {
+        pending.push(this.runModCommand(pane, m));
       },
       'permission.reply': (m) => {
         pending.push(this.answerPermission(pane, m));
@@ -4843,6 +4971,7 @@ export class ChatController {
    */
   dispose(): void {
     this.disposed = true;
+    this.modsSubscription?.dispose();
     this.startWaiter?.(false);
     this.startWaiter = undefined;
     this.stopStream();

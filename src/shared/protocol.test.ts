@@ -35,6 +35,7 @@ import {
   MAX_COMMAND_NAME_LENGTH,
   MAX_FILE_SEARCH_LENGTH,
   MAX_IMAGE_BASE64_LENGTH,
+  MAX_MOD_COMMAND_ARGS,
   MAX_SESSION_SEARCH_LENGTH,
   MAX_SESSION_TITLE_LENGTH,
   WEBVIEW_TO_HOST_TYPES,
@@ -232,6 +233,11 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
   },
   notice: { type: 'notice', level: 'warning', error },
   'setup.binary': { type: 'setup.binary', outcome: 'chosen', path: '/opt/opencode' },
+  'mods.state': {
+    type: 'mods.state',
+    bands: [{ modId: 'hello-station', modName: 'Hello Station', text: 'Hi', severity: 'info' }],
+    commands: [{ modId: 'hello-station', name: 'hello-station:hello', description: 'Says hello' }],
+  },
 };
 
 /** One valid sample per webview-to-host type; a missing key is a compile error. */
@@ -258,6 +264,13 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   },
   'session.abort': { type: 'session.abort', requestId: 'r1', sessionID: 's1' },
   'session.compact': { type: 'session.compact', requestId: 'r1', sessionID: 's1' },
+  'mod.command.run': {
+    type: 'mod.command.run',
+    requestId: 'r1',
+    name: 'hello-station:hello',
+    args: 'Ana',
+    sessionID: 's1',
+  },
   'permission.reply': {
     type: 'permission.reply',
     requestId: 'r1',
@@ -424,6 +437,31 @@ describe('isWebviewToHost', () => {
     }
   });
 
+  // E10-mods, phase 3. Fabricated messages pinning the guard of `mod.command.run`: the qualified
+  // name is checked for shape only (that the host lists it is the controller's check), `args` has a
+  // cap and may be empty, and `sessionID` is optional but never empty.
+  it('validates mod.command.run and its bounds', () => {
+    const base = WEBVIEW_SAMPLES['mod.command.run'];
+    const { sessionID: _kept, ...withoutSession } = base;
+    expect(isWebviewToHost(base)).toBe(true);
+    expect(isWebviewToHost(withoutSession)).toBe(true);
+    expect(isWebviewToHost({ ...base, args: '' })).toBe(true);
+    expect(isWebviewToHost({ ...base, args: 'x'.repeat(MAX_MOD_COMMAND_ARGS) })).toBe(true);
+    const bad: unknown[] = [
+      { ...base, args: 'x'.repeat(MAX_MOD_COMMAND_ARGS + 1) },
+      { ...base, args: 3 },
+      { ...base, name: '' },
+      { ...base, name: ' x' },
+      { ...base, name: 'x'.repeat(MAX_COMMAND_NAME_LENGTH + 1) },
+      { ...base, requestId: '' },
+      { ...base, sessionID: '' },
+      { ...withoutSession, args: undefined },
+    ];
+    for (const value of bad) {
+      expect(isWebviewToHost(value), JSON.stringify(value)).toBe(false);
+    }
+  });
+
   it.each([
     ['undefined', undefined],
     ['null', null],
@@ -444,6 +482,7 @@ describe('isWebviewToHost', () => {
     // Optional keys PER TYPE: a global set would hide a required `sessionID` (session.open, ...).
     const optionalByType: { [type: string]: string[] } = {
       'prompt.send': ['sessionID'],
+      'mod.command.run': ['sessionID'],
       'permission.reply': ['message'],
       'form.cancel': ['message'],
       'editor.open': ['line', 'column'],

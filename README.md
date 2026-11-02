@@ -188,6 +188,7 @@ Folder**.
 | `openVsCode.serverUrl` | machine | empty | Address of an opencode **v2** server that is already running on **this machine**, for example `http://127.0.0.1:4096`. Empty lets the extension launch its own server. The extension then does not use `openVsCode.opencodePath`. See [Using a server you started](#using-a-server-you-started). |
 | `openVsCode.defaultModel` | window | empty | Model every **new** chat session starts with, written `provider/model` (for example `opencode/big-pickle`). It wins over the last model you used. A badly written or unavailable value is ignored with a warning. |
 | `openVsCode.autoStart` | window | `true` | Launch the opencode server when the window starts. Turn it off and the chat shows **not started**; **OpenCode: Restart Server**, the Start button or your first prompt starts it. No effect while `openVsCode.serverUrl` is set. |
+| `openVsCode.mods.enabled` | machine | `true` | Load the mods in the OpenCode mods folder. A mod is JavaScript that runs with your user's permissions in its own worker thread; it is **not** sandboxed. Turn it off to load none. A workspace cannot change it. |
 | `openVsCode.chatLocation` | window | `editor` | Where the chat lives: `editor` (one editor tab per session, and the OpenCode view lists the sessions) or `sidebar` (one chat in the OpenCode view). Any other value counts as `editor`. |
 
 ## Commands
@@ -199,6 +200,10 @@ Command Palette (they act on the active editor); the two Explorer entries are no
 | Command | What it does |
 | --- | --- |
 | **OpenCode: Show Logs** | Opens the OpenCode output channel. |
+| **OpenCode: Manage Mods…** | Lists the mods found in the mods folder with their state (active, failed and why), and offers Reload, Open Mods Folder and Show Logs. |
+| **OpenCode: Reload Mods** | Stops every mod and discovers them again. |
+| **OpenCode: Open Mods Folder** | Creates the mods folder if needed and reveals it in the file manager. |
+| **OpenCode: Run Mod Command…** | Picks one of the commands that mods registered and runs it. |
 | **OpenCode: Restart Server** | Restarts the server the extension launched (it also starts it when `openVsCode.autoStart` is off), or reconnects to the server in `openVsCode.serverUrl` when that setting is set. Also an entry in the `...` menu of the title bar of the Chat view (`chatLocation` set to `sidebar`) and of the Sessions view. |
 | **OpenCode: Select Workspace Folder** | Chooses which folder the server runs in (multi-root workspaces only). |
 | **OpenCode: Manage Saved Permissions** | Lists the permissions you chose to always allow and lets you revoke them. |

@@ -11,8 +11,10 @@ import {
   filterCommands,
   findSlash,
   isClientCommand,
+  isModCommand,
   parseCommand,
   withClientCommands,
+  withModCommands,
 } from './slashCommand';
 
 const LIST = [
@@ -129,6 +131,44 @@ describe('client commands', () => {
       args: '',
     });
     expect(parseCommand('/compact', LIST)).toBeUndefined();
+  });
+});
+
+// E10-mods, phase 3. FABRICATED lists. Protects: a mod command that is not offered in the "/" menu,
+// one that shadows a server command of the same name (the server must win), an absent list that
+// turns into a present one (the "Loading…" state), and a mod command that parseCommand cannot find
+// because its name has a `:`.
+describe('mod commands', () => {
+  const HELLO = { modId: 'hello-station', name: 'hello-station:hello', description: 'Says hello' };
+
+  it('appends the mod commands after the others', () => {
+    expect(withModCommands(withClientCommands(LIST), [HELLO])?.map((c) => c.name)).toEqual([
+      ...LIST.map((c) => c.name),
+      'compact',
+      'hello-station:hello',
+    ]);
+  });
+
+  it('lets the server win when it lists the same name', () => {
+    const served = [{ name: 'hello-station:hello', description: 'server' }];
+    expect(withModCommands(served, [HELLO])).toEqual(served);
+    expect(isModCommand('hello-station:hello', served, [HELLO])).toBe(false);
+    expect(isModCommand('hello-station:hello', LIST, [HELLO])).toBe(true);
+    expect(isModCommand('init', LIST, [HELLO])).toBe(false);
+  });
+
+  it('keeps an absent list absent', () => {
+    expect(withModCommands(undefined, [HELLO])).toBeUndefined();
+  });
+
+  it('lets parseCommand find a typed mod command with its arguments', () => {
+    expect(parseCommand('/hello-station:hello Ana', withModCommands(LIST, [HELLO]))).toEqual({
+      name: 'hello-station:hello',
+      args: 'Ana',
+    });
+    expect(filterCommands([...LIST, HELLO], 'hel').map((c) => c.name)).toEqual([
+      'hello-station:hello',
+    ]);
   });
 });
 

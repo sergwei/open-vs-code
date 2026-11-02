@@ -1,7 +1,7 @@
 // Pure text logic of the slash commands (issue #33): where the `/command` being typed starts and
 // ends, how the list is filtered, which command a finished prompt runs, and what the prompt text
 // becomes when a command is chosen. No DOM and no Solid: `slashCommand.test.ts` drives it directly.
-import type { CommandOption } from '../../../src/shared/model';
+import type { CommandOption, ModCommandOption } from '../../../src/shared/model';
 
 /**
  * Slash commands the webview itself carries out (issue #125, decision P1=1 of Sergio, 31/10/2026):
@@ -23,6 +23,37 @@ export function withClientCommands(
 ): readonly CommandOption[] | undefined {
   if (list === undefined) return undefined;
   return [...list, ...CLIENT_COMMANDS.filter((own) => !list.some((it) => it.name === own.name))];
+}
+
+/**
+ * `list` (the server's commands plus the client ones) with the commands of mods appended
+ * (E10-mods, phase 3), so the "/" menu and the popup list them. Same rule as
+ * {@link withClientCommands}: a name the list already has wins, so a server command called
+ * `hello-station:hello` keeps working as the server's and the mod's copy is not listed. An absent
+ * list stays absent. VERIFIED by `slashCommand.test.ts` with fabricated lists (Windows 11,
+ * 02/11/2026).
+ */
+export function withModCommands(
+  list: readonly CommandOption[] | undefined,
+  mods: readonly ModCommandOption[],
+): readonly CommandOption[] | undefined {
+  if (list === undefined) return undefined;
+  return [...list, ...mods.filter((own) => !list.some((it) => it.name === own.name))];
+}
+
+/**
+ * True when `name` is a command of a mod that the webview must send as `mod.command.run`: the host
+ * listed it (`mods`) and the server does not list the same name (the server wins, as in
+ * {@link withModCommands}). `serverList` is the catalog's own list, WITHOUT the client or mod additions.
+ */
+export function isModCommand(
+  name: string,
+  serverList: readonly CommandOption[] | undefined,
+  mods: readonly ModCommandOption[],
+): boolean {
+  return (
+    mods.some((own) => own.name === name) && !(serverList ?? []).some((it) => it.name === name)
+  );
 }
 
 /** True when `name` is carried out by the webview: a client command that the server does not list. */

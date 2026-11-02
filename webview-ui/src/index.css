@@ -841,6 +841,55 @@ button.jump-latest {
   cursor: default;
 }
 
+/* The status bands of mods (E10-mods, phase 3): one row per mod above the request dock. Text uses the
+   foreground colours only; the severity is the LEFT border (never a text colour: error red as text
+   on the sidebar fails contrast, lesson #934). Rows wrap, so at 300 px the name, the text and the
+   button stack instead of overflowing. No inline style anywhere. */
+.mod-bands {
+  flex: none;
+  margin: 4px 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 30%;
+  overflow-y: auto;
+}
+
+.mod-band {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  padding: 3px 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-left: 3px solid var(--vscode-descriptionForeground);
+  border-radius: var(--ovc-radius-md);
+  color: var(--vscode-foreground);
+  overflow-wrap: anywhere;
+}
+
+.mod-band[data-severity='warning'] {
+  border-left-color: var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
+}
+
+.mod-band[data-severity='error'] {
+  border-left-color: var(--vscode-inputValidation-errorBorder, var(--vscode-panel-border));
+}
+
+.mod-band-name {
+  font-weight: 600;
+}
+
+.mod-band-text {
+  flex: 1 1 8em;
+  min-width: 0;
+}
+
+.mod-band-action[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* What the user answered to a permission or a question, under the tool that asked. A Reject is a
    decision, not a failure: the warning colour touches only the border, never the text, and never
    the error red (lesson #934). */
@@ -2340,6 +2389,7 @@ button.agent-model-chip {
 [class*='vscode-high-contrast'] .subagent-sessions,
 [class*='vscode-high-contrast'] .changed-files,
 [class*='vscode-high-contrast'] .revert-banner,
+[class*='vscode-high-contrast'] .mod-band,
 [class*='vscode-high-contrast'] .code-action {
   border-color: var(--vscode-contrastBorder);
 }

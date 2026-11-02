@@ -30,6 +30,7 @@ import { readFileSync } from 'node:fs';
 const REQUIRED = [
   'package.json',
   'dist/extension.js',
+  'dist/modWorker.js',
   'dist/webview/assets/index.js',
   'dist/webview/assets/style.css',
   'media/activity.svg',

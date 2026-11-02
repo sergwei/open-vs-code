@@ -3,6 +3,7 @@ import {
   isComposeInBounds,
   MAX_DROPPED_ITEMS,
   MAX_DROPPED_URI_LENGTH,
+  MAX_MOD_COMMAND_ARGS,
   type AttachmentRef,
 } from '../../src/shared/protocol';
 import { RevertBanner } from './changes/RevertBanner';
@@ -22,10 +23,13 @@ import { createHistory } from './chat/promptHistory';
 import {
   CLIENT_COMMANDS,
   isClientCommand,
+  isModCommand,
   parseCommand,
   withClientCommands,
+  withModCommands,
 } from './chat/slashCommand';
 import { StatusBar } from './chat/StatusBar';
+import { ModBands } from './mods/ModBand';
 import { RequestDock } from './requests/RequestDock';
 import { AgentModelMenu } from './selectors/AgentModelMenu';
 import {
@@ -174,6 +178,19 @@ interface LastRevert {
  * before, because a template cannot be told from a long prompt. Init has no button of its own: it is
  * the `/init` row of the "/" menu (issue #33).
  *
+ * E10-mods (phase 3, plan Engram #1765, decisions #1768): the commands mods registered
+ * (`state.mods.commands`, qualified `<modId>:<command>`) join the "/" menu after the server's and
+ * the client's ({@link withModCommands}; the server wins on a clash). A listed `/mod:command args`
+ * is sent by {@link runModCommand} as `mod.command.run`, never as `prompt.send`: it creates no
+ * session and leaves the attachment chips alone. The bands mods pinned (`state.mods.bands`) are
+ * drawn by {@link ModBands} above the request dock; their button runs the band's command with no
+ * arguments. VERIFIED by `slashCommand.test.ts` ("lets the server win when it lists the same
+ * name"), `ModBand.test.tsx` and `chatStore.test.ts` with fabricated data, and the dispatch itself
+ * by `App.test.tsx` "lists the mod command in the menu and sends mod.command.run, not a prompt".
+ * VERIFIED in VS Code 1.144.0 on Windows 11 (02/11/2026, the final full `test:visual` run, 776.4 s,
+ * synthetic server): "ok   M5 the command received its arguments ("Ana")" and "ok   M6 the band
+ * button ran the command with no arguments".
+ *
  * Issue #31: the header shows the "Changed files" list of the open session, and `openChangedFile`
  * turns a click on a row into `session.diff.open` for the open session (no `requestId`).
  *
@@ -270,8 +287,13 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   const activity = createMemo(() =>
     deriveActivity(state.connection, status(), lastAssistantParts(), compacting()),
   );
-  /** The server's commands plus the ones this webview carries out (`/compact`). */
-  const commands = createMemo(() => withClientCommands(state.catalog?.commands));
+  /**
+   * The server's commands plus the ones this webview carries out (`/compact`) and the ones mods
+   * registered (E10-mods): the server's wins on a clash.
+   */
+  const commands = createMemo(() =>
+    withModCommands(withClientCommands(state.catalog?.commands), state.mods.commands),
+  );
   const lastUser = () => {
     const shown = messages();
     for (let index = shown.length - 1; index >= 0; index--) {
@@ -565,6 +587,18 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       compact();
       return;
     }
+    // A command of a mod is carried out by the host and never becomes a prompt (E10-mods): no
+    // session is created, the attachment chips stay, and the draft goes to the history as typed.
+    if (
+      command !== undefined &&
+      isModCommand(command.name, state.catalog?.commands, state.mods.commands)
+    ) {
+      if (!runModCommand(command.name, command.args)) return;
+      history.push(text);
+      setDraft('');
+      persist();
+      return;
+    }
     const files = props.store.takeDraftFiles();
     history.push(text);
     setDraft('');
@@ -595,6 +629,39 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     props.store.begin(requestId);
     props.send({ type: 'session.compact', requestId, sessionID });
     focusInput?.();
+  };
+
+  /**
+   * Asks the host to run the command `name` (qualified `<modId>:<command>`) of a mod, from the "/"
+   * prompt or from the button of a band (E10-mods, phase 3). Sends `mod.command.run`, never
+   * `prompt.send`, with the open session if any; the answer is the `request.result`, whose error
+   * (a mod that threw, a command that is gone) shows as the usual notice. Returns `false` and sends
+   * nothing when `args` exceeds the host's cap: the message would be dropped without a result and
+   * leave the request pending (`begin` must come after the bounds, skill solid-webview §3), so an
+   * info notice says so instead. It clears `lastCommand`, like {@link compact}: a Retry must not
+   * rerun an older server command after this one.
+   */
+  const runModCommand = (name: string, args: string): boolean => {
+    if (args.length > MAX_MOD_COMMAND_ARGS) {
+      props.store.notify('info', {
+        code: 'ModCommandArgsTooLong',
+        message: `The arguments of /${name} are too long (at most ${String(MAX_MOD_COMMAND_ARGS)} characters)`,
+      });
+      return false;
+    }
+    lastCommand = undefined;
+    const requestId = nextRequestId();
+    props.store.begin(requestId);
+    const sessionID = state.open.sessionID;
+    props.send({
+      type: 'mod.command.run',
+      requestId,
+      name,
+      args,
+      ...(sessionID === undefined ? {} : { sessionID }),
+    });
+    focusInput?.();
+    return true;
   };
 
   /** Interrupts the running turn; the session goes idle when the host relays the event. */
@@ -1035,6 +1102,13 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
               />
             )}
           </Show>
+          <ModBands
+            bands={state.mods.bands}
+            disabled={state.pending.length > 0}
+            onRun={(command) => {
+              runModCommand(command, '');
+            }}
+          />
           <RequestDock
             store={props.store}
             typing={draft().trim() !== ''}

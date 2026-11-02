@@ -67,6 +67,7 @@ import {
 } from './ids';
 import { ProviderAuth } from './providerAuth';
 import { createProviderAuthUi, type ProviderTestAnswers } from './providerAuthUi';
+import type { ModsSink } from './modEvents';
 import { ServerConfig, type ServerConfigSink } from './serverConfig';
 import { SettingsController } from './settingsController';
 import { SettingsPanel } from './settingsPanel';
@@ -455,6 +456,12 @@ function warnSessionFailure(action: string, error: unknown): void {
  * controller a raw settings message and read its state. With the fake/visual seam on, the browser
  * stand-in `fakeOpenExternal` replaces `env.openExternal` and `http://127.0.0.1` links may be opened.
  *
+ * E10-mods (phase 2): the optional `mods` sink (from `registerMods`) is handed to the controller as
+ * its `mods` dependency, which forwards every stream event to it. When absent the controller
+ * forwards nothing, exactly as before. Phase 3: the sink's `chat` half is also given the compose
+ * handler (`ChatController.composeFromMod` on the pane of `targetPane`), and the controller itself
+ * publishes the bands and commands to the webview as `mods.state`.
+ *
  * The two internal commands (`SHOW_REQUEST_COMMAND_ID`, `REPLY_PERMISSION_COMMAND_ID`) are always
  * registered and not contributed: they are the targets of the links of an attention
  * notification. They validate their argument and refuse `always`. A rejected argument logs a
@@ -466,6 +473,7 @@ export function registerChat(
   manager: ServerManager,
   gate?: ChatSurfaceGate,
   redetect?: () => void,
+  mods?: ModsSink,
 ): vscode.Disposable {
   const log = safeLog(channel);
   // Whether the chat webview holds the keyboard focus; the source of truth for the toggle.
@@ -673,6 +681,7 @@ export function registerChat(
 
   const controller = new ChatController({
     serverConfig: configSink,
+    ...(mods === undefined ? {} : { mods }),
     serverStatus: {
       connection: (next) => {
         statusConnection = next;
@@ -1167,7 +1176,20 @@ export function registerChat(
   const targetSession = (raw: unknown): string | undefined =>
     sessionIDOf(raw) ?? sessionsView.selectedSessions()[0]?.sessionID;
 
+  // E10-mods (phase 3): what a mod composes (`station.chat.compose`) goes to the pane every menu
+  // command talks to (`targetPane`) and is closed like a context-menu action: a refusal shows as a
+  // native warning, anything else reveals the chat. The binding is removed on dispose, so a compose
+  // after that is logged by the mods side instead of reaching a dead controller.
+  mods?.chat?.bindCompose((request) => {
+    const target = targetPane(false);
+    void finishContextAction(
+      controller.composeFromMod(target.paneId, request.modId, request.text, request.send),
+      target,
+    );
+  });
+
   const disposables: vscode.Disposable[] = [
+    { dispose: () => mods?.chat?.bindCompose(undefined) },
     view.disposable,
     sessionsView.disposable,
     organize.disposable,

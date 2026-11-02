@@ -21,6 +21,7 @@ import type {
   RequestResolution,
   SessionStatus,
 } from '../../src/shared/model';
+import { MAX_MOD_COMMAND_ARGS } from '../../src/shared/protocol';
 import type { HostToWebview, WebviewToHost } from '../../src/shared/protocol';
 import { App, FILE_SEARCH_DEBOUNCE_MS } from './App';
 import { createChatStore, type ChatStore } from './store/chatStore';
@@ -3205,6 +3206,116 @@ describe('slash commands (issue #33)', () => {
       });
       h.apply(...openSession([user('m1', long)]));
       expect(toggle(h)?.getAttribute('aria-expanded')).toBe('false');
+    });
+  });
+
+  // E10-mods, phase 3. FABRICATED `mods.state` and catalog. Protects: a mod command that is typed
+  // after the "/" but is sent as a prompt (it would reach the model as text and create a session), a
+  // mod command that is missing from the menu, an over-long argument that leaves the request
+  // pending, a server command with the same name losing to the mod, and a band that is not drawn or
+  // whose button does not send `mod.command.run`.
+  describe('mod commands and bands', () => {
+    const HELLO_MOD = {
+      modId: 'hello-station',
+      name: 'hello-station:hello',
+      description: 'Says hello',
+    };
+    const modsState = (extra: Partial<Extract<HostToWebview, { type: 'mods.state' }>> = {}) =>
+      ({
+        type: 'mods.state',
+        bands: [],
+        commands: [HELLO_MOD],
+        ...extra,
+      }) satisfies HostToWebview;
+    const runs = (h: Harness) => h.sent.filter((m) => m.type === 'mod.command.run');
+
+    it('lists the mod command in the menu and sends mod.command.run, not a prompt', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS), modsState());
+      h.type('/hel');
+      expect(
+        [...h.container.querySelectorAll('[role="option"]')].map((o) => o.textContent),
+      ).toEqual(expect.arrayContaining([expect.stringContaining('hello-station:hello')]));
+      h.type('/hello-station:hello Ana');
+      h.button('Send').click();
+      expect(h.sent).toMatchObject([
+        { type: 'mod.command.run', name: 'hello-station:hello', args: 'Ana', sessionID: SES },
+      ]);
+      expect(h.store.state.pending).toHaveLength(1);
+      expect(h.textarea().value).toBe('');
+      expect(h.saved.at(-1)).toMatchObject({ history: ['/hello-station:hello Ana'] });
+    });
+
+    it('creates no session: with none open the message carries no sessionID', () => {
+      const h = start();
+      h.apply(connected, withCommands(COMMANDS), modsState());
+      h.type('/hello-station:hello');
+      h.button('Send').click();
+      expect(runs(h)).toHaveLength(1);
+      expect(runs(h)[0]).not.toHaveProperty('sessionID');
+    });
+
+    it('leaves the chips of the draft alone', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS), modsState());
+      h.apply({
+        type: 'attachments.picked',
+        requestId: 'pick',
+        files: [{ uri: 'file:///x.ts', name: 'x.ts' }],
+      });
+      h.type('/hello-station:hello');
+      h.button('Send').click();
+      expect(runs(h)).toHaveLength(1);
+      expect(h.container.querySelector('.chip')?.textContent).toContain('x.ts');
+    });
+
+    it('sends nothing, and stays unlocked, when the arguments exceed the host cap', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]), withCommands(COMMANDS), modsState());
+      h.type(`/hello-station:hello ${'x'.repeat(MAX_MOD_COMMAND_ARGS + 1)}`);
+      h.button('Send').click();
+      expect(h.sent).toEqual([]);
+      expect(h.store.state.pending).toEqual([]);
+      expect(h.container.textContent).toContain('are too long');
+    });
+
+    it('runs the server command when the server lists the same name', () => {
+      const h = start();
+      h.apply(
+        ...openSession([user('m1', 'hi')]),
+        withCommands([{ name: 'hello-station:hello' }]),
+        modsState(),
+      );
+      h.type('/hello-station:hello Ana');
+      h.button('Send').click();
+      expect(runs(h)).toEqual([]);
+      expect(lastSent(h)).toMatchObject({ command: 'hello-station:hello', text: 'Ana' });
+    });
+
+    it('draws the band as text and its button sends mod.command.run with no arguments', () => {
+      const h = start();
+      h.apply(
+        ...openSession([user('m1', 'hi')]),
+        modsState({
+          bands: [
+            {
+              modId: 'hello-station',
+              modName: 'Hello Station',
+              text: 'Last turn <b>done</b>',
+              severity: 'info',
+              command: 'hello-station:hello',
+            },
+          ],
+        }),
+      );
+      expect(h.container.querySelector('.mod-band-text')?.textContent).toBe(
+        'Last turn <b>done</b>',
+      );
+      expect(h.container.querySelector('.mod-band b')).toBeNull();
+      h.container.querySelector<HTMLButtonElement>('.mod-band-action')?.click();
+      expect(h.sent).toMatchObject([
+        { type: 'mod.command.run', name: 'hello-station:hello', args: '', sessionID: SES },
+      ]);
     });
   });
 

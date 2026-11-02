@@ -36,6 +36,24 @@ describe('selectForFiles', () => {
     expect(selectForFiles(['src/shared/settingsProtocol.ts']).mode).toBe('full');
   });
 
+  // E10-mods: the mods code has its own group (step 38). The fixture mods live under
+  // `test-fixtures/`, which stays cross-cutting, and the shared protocol file too.
+  it('maps the mods files to the mods group, and their fixtures and protocol to a full run', () => {
+    for (const file of [
+      'src/mods/worker.ts',
+      'src/extension/modHost.ts',
+      'src/extension/modsLifecycle.ts',
+      'src/extension/modsChat.ts',
+      'webview-ui/src/mods/ModBand.tsx',
+    ]) {
+      expect(selectForFiles([file]), file).toMatchObject({ mode: 'groups', groups: ['mods'] });
+    }
+    expect(selectForFiles(['src/extension/test-fixtures/mods/hello-station/index.mjs']).mode).toBe(
+      'full',
+    );
+    expect(selectForFiles(['src/extension/modsChat.test.ts']).mode).toBe('none');
+  });
+
   it('unites the groups of several files, without repeating one', () => {
     const result = selectForFiles([
       'src/extension/chatTabs.ts',

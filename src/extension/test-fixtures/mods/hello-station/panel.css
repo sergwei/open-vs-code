@@ -1,0 +1,21 @@
+/* Test fixture (E10-mods phase 4): colours only from the VS Code theme variables. */
+body {
+  margin: 0;
+  padding: 0;
+}
+
+#root {
+  min-height: 100vh;
+  padding: 16px;
+  box-sizing: border-box;
+  background: var(--vscode-editor-background);
+  color: var(--vscode-editor-foreground);
+  font-family: var(--vscode-font-family);
+}
+
+#ping {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: 1px solid var(--vscode-button-border, transparent);
+  padding: 4px 12px;
+}

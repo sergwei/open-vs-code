@@ -68,6 +68,8 @@ import type {
   ErrorInfo,
   FormAsk,
   MessageInfo,
+  ModBand,
+  ModCommandOption,
   ModelRef,
   Part,
   PermissionAsk,
@@ -224,6 +226,12 @@ export interface ChatState {
   binaryCheck: BinaryChoice;
   /** Models, providers and selectable agents of the server; `undefined` until the host sends it. */
   catalog: Catalog | undefined;
+  /**
+   * The mods UI (E10-mods, phase 3): the status bands and the commands mods registered, replaced
+   * whole by each `mods.state` (empty until the first one arrives, which is also what a host
+   * without mods leaves it as).
+   */
+  mods: { bands: ModBand[]; commands: ModCommandOption[] };
   /** The unsent model/agent choice. See {@link SelectionDraft}. */
   selection: SelectionDraft;
   sessions: { [sessionID: string]: SessionSummary };
@@ -397,6 +405,7 @@ export function createChatStore(): ChatStore {
     synced: false,
     binaryCheck: { kind: 'idle' },
     catalog: undefined,
+    mods: { bands: [], commands: [] },
     selection: { sessionID: undefined, model: undefined, agent: undefined },
     sessions: {},
     statuses: {},
@@ -509,6 +518,15 @@ export function createChatStore(): ChatStore {
   const handlers: Handlers<HostToWebview> = {
     catalog: (m) => {
       setState('catalog', m.catalog);
+    },
+
+    // E10-mods: the message is the WHOLE state, so both lists are replaced, matched by their key
+    // (`reconcile`) so a band whose text did not change keeps its DOM node, and its button its focus.
+    'mods.state': (m) => {
+      batch(() => {
+        setState('mods', 'bands', reconcile(m.bands, { key: 'modId' }));
+        setState('mods', 'commands', reconcile(m.commands, { key: 'name' }));
+      });
     },
 
     'connection.state': (m) => {

@@ -310,6 +310,42 @@ export const AUTO_START_KEY = 'autoStart';
  */
 export const AUTO_START_SETTING = `${CONFIG_SECTION}.${AUTO_START_KEY}`;
 
+/** Key of the mods switch inside {@link CONFIG_SECTION} (E10-mods). */
+export const MODS_ENABLED_KEY = 'mods.enabled';
+
+/**
+ * Full id of the setting that turns mods on or off (`contributes.configuration.properties`,
+ * scope `machine`: a `.vscode/settings.json` of a cloned repository must not be able to switch on
+ * code that runs with the user's permissions).
+ */
+export const MODS_ENABLED_SETTING = `${CONFIG_SECTION}.${MODS_ENABLED_KEY}`;
+
+/** Command id of "OpenCode: Manage Mods…" (contributed; E10-mods): lists the mods and their state. */
+export const MANAGE_MODS_COMMAND_ID = 'openVsCode.manageMods';
+
+/** Command id of "OpenCode: Reload Mods" (contributed; E10-mods): stops every mod and discovers again. */
+export const RELOAD_MODS_COMMAND_ID = 'openVsCode.reloadMods';
+
+/** Command id of "OpenCode: Open Mods Folder" (contributed; E10-mods): creates the root if needed and reveals it. */
+export const OPEN_MODS_FOLDER_COMMAND_ID = 'openVsCode.openModsFolder';
+
+/** Command id of "OpenCode: Run Mod Command…" (contributed; E10-mods): QuickPick of the commands of the mods. */
+export const RUN_MOD_COMMAND_ID = 'openVsCode.runModCommand';
+
+/**
+ * Internal command that returns the mods state (`{ root, mods, commands, problems }`) so the
+ * integration tests can read it. Registered ONLY in `ExtensionMode.Test`, NOT contributed, like
+ * {@link TEST_SETTINGS_STATE_COMMAND_ID}.
+ */
+export const TEST_MODS_STATE_COMMAND_ID = 'openVsCode.test.modsState';
+
+/**
+ * Name of the output channel that shows what mods log (E10-mods). The lifecycle lines of a mod
+ * (`mod x loaded`, `mod x failed: …`) go to the main {@link LOG_CHANNEL_NAME} channel, the tests'
+ * source of truth.
+ */
+export const MODS_LOG_CHANNEL_NAME = 'OpenCode Mods';
+
 /** Id of the server status item of the status bar (issue #124). */
 export const SERVER_STATUS_ITEM_ID = 'openVsCode.serverStatus';
 

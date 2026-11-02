@@ -47,14 +47,37 @@ export function freePort() {
  * fixture writes no database, so today they are only a safety net in case the extension launches
  * something else. POSIX UNVERIFIED. `fake` is `{stateFile}`, see {@link fakeEnv}.
  */
-function cleanEnv(xdgRoot, fake) {
+function cleanEnv(xdgRoot, fake, modsHome) {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   for (const key of Object.keys(env)) if (key.startsWith('VSCODE_')) delete env[key];
   env.XDG_DATA_HOME = path.join(xdgRoot, 'data');
   env.XDG_STATE_HOME = path.join(xdgRoot, 'state');
   env.XDG_CACHE_HOME = path.join(xdgRoot, 'cache');
+  // E10-mods: the mods root is ours and starts EMPTY, so the run never loads the developer's real
+  // mods and the steps before 38 see no band. See {@link installModFixture}.
+  env.OPEN_VS_CODE_MODS_HOME = modsHome;
   return { ...env, ...fakeEnv(fake) };
+}
+
+/**
+ * Copies the fixture mod `<repo>/src/extension/test-fixtures/mods/<id>` into the seeded mods root
+ * (`modsHome` of {@link startVSCode}) and returns the folder it created. Step 38 calls it and then
+ * runs "OpenCode: Reload Mods": the mod is NOT in the root when VS Code starts, so no earlier step
+ * sees its band, and the step removes the folder again at its end with {@link removeModFixture}.
+ */
+export function installModFixture(repoRoot, modsHome, id) {
+  const target = path.join(modsHome, id);
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.cpSync(path.join(repoRoot, 'src', 'extension', 'test-fixtures', 'mods', id), target, {
+    recursive: true,
+  });
+  return target;
+}
+
+/** Removes a fixture mod installed by {@link installModFixture}; a missing folder is fine. */
+export function removeModFixture(modsHome, id) {
+  fs.rmSync(path.join(modsHome, id), { recursive: true, force: true });
 }
 
 /**
@@ -202,8 +225,10 @@ function installExtension(repoRoot, extensionsDir) {
  * `openVsCode.opencodePath` is the fixture (see {@link fakeEnv}) unless `opencodePath` overrides it
  * (E2 step 0 passes a path that does not exist); `startDown` starts with the fixture's `.down`
  * marker in place; the fixture's state file lives in
- * `workDir` and is deleted at start like the profile. Returns `{ port, pid, stop, userDataDir,
- * xdgRoot, exited, stateFile }`; `stop()` kills the whole process tree (the server child of the
+ * `workDir` and is deleted at start like the profile. E10-mods: `OPEN_VS_CODE_MODS_HOME` points to
+ * `<workDir>/mods-home`, created empty at every start (see {@link cleanEnv}). Returns `{ port, pid,
+ * stop, userDataDir, xdgRoot, exited, stateFile, downMarker, modsHome }`; `stop()` kills the whole
+ * process tree (the server child of the
  * extension host included) and waits until the main process is gone.
  */
 export async function startVSCode({
@@ -227,6 +252,12 @@ export async function startVSCode({
   fs.rmSync(xdgRoot, { recursive: true, force: true });
   const stateFile = path.join(workDir, 'fake-opencode-state.json');
   fs.rmSync(stateFile, { force: true });
+  // E10-mods: an empty mods root of this run (and the sentinel folder the fixture mod writes next
+  // to it), wiped like the profile so every run starts from the same state.
+  const modsHome = path.join(workDir, 'mods-home');
+  fs.rmSync(modsHome, { recursive: true, force: true });
+  fs.rmSync(path.join(workDir, 'mods-sentinel'), { recursive: true, force: true });
+  fs.mkdirSync(modsHome, { recursive: true });
   // The marker a CRASH turn of the fixture leaves (`<state file>.down`): while it exists every
   // start of the fixture fails. `startDown` creates it up front (E2 step 0: a server that cannot
   // start even once the binary is found); the run deletes it to let the server come back.
@@ -294,7 +325,7 @@ export async function startVSCode({
       '--skip-welcome',
       `--remote-debugging-port=${String(port)}`,
     ],
-    { env: cleanEnv(xdgRoot, { stateFile }), stdio: 'ignore', detached, shell: false },
+    { env: cleanEnv(xdgRoot, { stateFile }, modsHome), stdio: 'ignore', detached, shell: false },
   );
   const exited = new Promise((resolve) => child.once('exit', resolve));
   const pid = child.pid;
@@ -318,5 +349,5 @@ export async function startVSCode({
     }
     await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 10_000))]);
   };
-  return { port, pid, stop, userDataDir, xdgRoot, exited, stateFile, downMarker };
+  return { port, pid, stop, userDataDir, xdgRoot, exited, stateFile, downMarker, modsHome };
 }

@@ -12,6 +12,7 @@
 #   npx -y @resvg/resvg-js-cli@2.6.2-beta.1 --fit-width 256 media/icon.svg media/icon.png
 **
 !dist/extension.js
+!dist/modWorker.js
 !dist/webview/**
 !media/activity.svg
 !media/chat-tab-light.svg

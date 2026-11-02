@@ -25,6 +25,7 @@ const REAL_LISTING = [
   'extension/media/activity.svg',
   'extension/media/icon.png',
   'extension/dist/extension.js',
+  'extension/dist/modWorker.js',
   'extension/dist/webview/assets/index.js',
   'extension/dist/webview/assets/style.css',
 ];

@@ -80,7 +80,8 @@ export type MessageRoute = 'session' | 'all' | 'origin' | 'request';
  * session's requests and its subagents', the side-bar view shows every one). Their `*.resolved`
  * stay `all`: the store ignores a resolution it does not know, so sending it to a pane that never
  * got the ask is harmless and a pane that changed session meanwhile still clears the card.
- * Everything else (`connection.state`, `catalog`, `session.upserted|removed|status`,
+ * Everything else (`connection.state`, `catalog`, `mods.state` (E10-mods: the whole state of the
+ * mods UI, the same for every pane), `session.upserted|removed|status`,
  * `permission.resolved`, `form.resolved`, `notice`) belongs to the location and goes to all of
  * them. A `notice` caused by one pane's request is posted to that pane directly and never goes
  * through here.
@@ -106,6 +107,7 @@ export function routeOf(message: HostToWebview): MessageRoute {
       return 'origin';
     case 'connection.state':
     case 'catalog':
+    case 'mods.state':
     case 'session.upserted':
     case 'session.removed':
     case 'session.status':

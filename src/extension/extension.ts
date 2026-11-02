@@ -3,11 +3,15 @@ import { registerBinaryDetection } from './binaryDetection';
 import { registerChat } from './chatLifecycle';
 import { createChatSurfaceGate } from './chatSurfaceGate';
 import { LOG_CHANNEL_NAME, SHOW_LOGS_COMMAND_ID } from './ids';
+import { registerMods, type ModsRegistration } from './modsLifecycle';
 import { registerServerLifecycle } from './serverLifecycle';
 import type { ServerManager } from './serverManager';
 
 /** The window's server manager, kept at module level so `deactivate` can stop it. */
 let serverManager: ServerManager | undefined;
+
+/** The mods registration, kept at module level so `deactivate` can stop the Workers. */
+let modsRegistration: ModsRegistration | undefined;
 
 /**
  * The log channel, also at module level and deliberately NOT in `context.subscriptions`: VS Code
@@ -38,6 +42,10 @@ let logChannel: vscode.LogOutputChannel | undefined;
  * shows `open-vs-code 0.0.1 activated`, in light and dark themes.
  * macOS/Linux UNVERIFIED.
  *
+ * E10-mods: `registerMods` runs before the chat (its sink is a parameter of `registerChat`); its
+ * first load runs behind activation, and `deactivate` stops the Workers (UNVERIFIED in a real
+ * extension host until `test/integration/mods.test.ts` runs).
+ *
  * Issue #86: the chat is registered before the binary detection, so `registerChat` receives a lazy
  * `redetect` closure that is filled with the `redetect` the detection returns (HYPOTHESIS that it
  * is always set before a user can press "Choose binary…": it is assigned synchronously in this
@@ -65,6 +73,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
+  // E10-mods: mods are registered before the chat, which receives their event sink. Loading runs
+  // behind activation; `deactivate` stops the Workers.
+  const mods = registerMods(context, channel);
+  modsRegistration = mods;
+
   // Closed until the chat attaches (P3=2): the lifecycle and the detection are registered first.
   const gate = createChatSurfaceGate();
   const lifecycle = registerServerLifecycle(context, channel, gate);
@@ -72,9 +85,16 @@ export function activate(context: vscode.ExtensionContext): void {
   // Issue #86: the chat is registered BEFORE the detection, so it reads `redetect` lazily.
   let redetect: () => void = () => undefined;
   context.subscriptions.push(
-    registerChat(context, channel, lifecycle.manager, gate, () => {
-      redetect();
-    }),
+    registerChat(
+      context,
+      channel,
+      lifecycle.manager,
+      gate,
+      () => {
+        redetect();
+      },
+      mods.sink,
+    ),
   );
   redetect = registerBinaryDetection(context, channel, lifecycle.onDetection, {
     gate,
@@ -86,8 +106,9 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 /**
- * Extension shutdown hook: returns the Promise that stops `opencode serve` (issue #8) and then
- * disposes the log channel.
+ * Extension shutdown hook: returns the Promise that stops `opencode serve` (issue #8) and the mod
+ * Workers (E10-mods, in parallel; UNVERIFIED in a real extension host) and then disposes the log
+ * channel.
  *
  * `context.subscriptions` disposables are not awaited, only the Promise returned from here is
  * (vscode-extension skill, §5), and VS Code disposes the subscriptions right after calling this
@@ -108,11 +129,21 @@ export function activate(context: vscode.ExtensionContext): void {
  * that far) it only disposes the channel and returns `undefined`.
  */
 export function deactivate(): Promise<void> | undefined {
+  // E10-mods: the Workers stop in parallel with the server (their grace is 250 ms, inside the
+  // server's 2 s). `dispose` never rejects: `ModHost` swallows terminate errors.
+  const modsStop = modsRegistration?.dispose();
   if (serverManager === undefined) {
-    logChannel?.dispose();
-    return undefined;
+    if (modsStop === undefined) {
+      logChannel?.dispose();
+      return undefined;
+    }
+    return modsStop.finally(() => {
+      logChannel?.dispose();
+    });
   }
-  return serverManager.stop().finally(() => {
-    logChannel?.dispose();
-  });
+  return Promise.all([serverManager.stop(), modsStop])
+    .then(() => undefined)
+    .finally(() => {
+      logChannel?.dispose();
+    });
 }

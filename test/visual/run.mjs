@@ -241,7 +241,13 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createWorkspace, startVSCode, writeSettings } from './vscodeProcess.mjs';
+import {
+  createWorkspace,
+  installModFixture,
+  removeModFixture,
+  startVSCode,
+  writeSettings,
+} from './vscodeProcess.mjs';
 import { WEBVIEW_NO_TARGET, WEBVIEW_STUCK, openWebview } from './webviewCdp.mjs';
 import { parseAffectedArg, selectForFiles } from './affected.mjs';
 import { fingerprint, saveManifest } from './fingerprint.mjs';
@@ -13090,7 +13096,10 @@ try {
       const offered = [];
       for (const word of ['Folder', 'Pin', 'Archive', 'Filter']) {
         for (const row of await paletteRows(`OpenCode: ${word}`)) {
-          if (/Folder|Pin|Archive|Filter/.test(row)) offered.push(row);
+          // "OpenCode: Open Mods Folder" (E10-mods) contains the word but is not an organizing command.
+          if (/Folder|Pin|Archive|Filter/.test(row) && !/Open Mods Folder/.test(row)) {
+            offered.push(row);
+          }
         }
       }
       const kept = await paletteRows('OpenCode: New Session');
@@ -14977,6 +14986,597 @@ try {
       // Leave the workspace as the step found it: no chat tab or file tab, the setting at `sidebar`.
       setLocation('sidebar');
       await closeAllEditors().catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+    }
+  });
+
+  // E10-mods, phase 3 (plan Engram #1765, decisions #1768). The mod is NOT in the seeded mods root
+  // when VS Code starts: this step installs the `hello-station` fixture, runs "OpenCode: Reload
+  // Mods" and removes it again at the end, so no other step sees a band.
+  await step('38 mods: band, "/" entry, toast and palette (E10-mods)', async () => {
+    const MOD = 'hello-station';
+    const QUALIFIED = 'hello-station:hello';
+    const DARK = 'Default Dark Modern';
+    // The fixture writes `<mods root>/../mods-sentinel/hello.ran` when its command runs.
+    const sentinel = path.join(vscode.modsHome, '..', 'mods-sentinel', 'hello.ran');
+    // The text the host logged, from every OpenCode.log of the isolated profile of this run.
+    const hostLog = () => {
+      const files = [];
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'OpenCode.log') files.push(full);
+        }
+      };
+      try {
+        walk(path.join(vscode.userDataDir, 'logs'));
+      } catch {
+        return '';
+      }
+      return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+    };
+    // Boxes and texts of the band, the composer and the "/" popup, in CSS px of the webview.
+    const bandState = () =>
+      web.inDoc((doc) => {
+        const box = (element) => {
+          if (!element) return null;
+          const r = element.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width };
+        };
+        const one = (selector) => doc.querySelector(selector);
+        const band = one('.mod-band');
+        const text = one('.mod-band .mod-band-text');
+        const action = one('.mod-band .mod-band-action');
+        return {
+          view: { width: doc.defaultView.innerWidth, height: doc.defaultView.innerHeight },
+          overflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+          present: band !== null,
+          count: doc.querySelectorAll('.mod-band').length,
+          inLog: doc.querySelector('[role="log"] .mod-band') !== null,
+          band: box(band),
+          name: box(one('.mod-band .mod-band-name')),
+          text: box(text),
+          action: box(action),
+          prompt: box(one('form.prompt')),
+          modName: one('.mod-band .mod-band-name')?.textContent ?? '',
+          bandText: text?.textContent ?? '',
+          textClipped: text === null ? false : text.scrollWidth > text.clientWidth + 1,
+          markup: band?.querySelector('b, i, img, a') !== null,
+          title: band?.getAttribute('title') ?? '',
+          severity: band?.getAttribute('data-severity') ?? '',
+          actionLabel: action?.getAttribute('aria-label') ?? '',
+          actionText: action?.textContent ?? '',
+          rows: [...doc.querySelectorAll('.command-popup [role="option"]')].map((row) => ({
+            name: row.querySelector('.command-name')?.textContent ?? '',
+            description: row.querySelector('.command-description')?.textContent ?? '',
+          })),
+          popup: box(one('.command-popup')),
+          users: [...doc.querySelectorAll('[role="log"] .message-user .part-text')].map((m) =>
+            (m.textContent ?? '').trim(),
+          ),
+          assistants: doc.querySelectorAll('[role="log"] .message-assistant').length,
+          alerts: [...doc.querySelectorAll('.status-bar .alert .alert-text')].map((n) =>
+            (n.textContent ?? '').replace(/\s+/g, ' ').trim(),
+          ),
+          busy: [...doc.querySelectorAll('button')].some(
+            (b) => b.getAttribute('aria-label') === 'Stop',
+          ),
+        };
+      });
+    const inside = (inner, outer) =>
+      inner !== null &&
+      outer !== null &&
+      inner.left >= outer.left - 0.5 &&
+      inner.right <= outer.right + 0.5 &&
+      inner.top >= outer.top - 0.5 &&
+      inner.bottom <= outer.bottom + 0.5;
+    const overlap = (a, b) =>
+      a !== null &&
+      b !== null &&
+      a.left < b.right - 0.5 &&
+      b.left < a.right - 0.5 &&
+      a.top < b.bottom - 0.5 &&
+      b.top < a.bottom - 0.5;
+    const inView = (box, view) =>
+      box !== null &&
+      box.left >= -0.5 &&
+      box.top >= -0.5 &&
+      box.right <= view.width + 0.5 &&
+      box.bottom <= view.height + 0.5;
+
+    // Step 37 ends with the chat back in the side bar, but `web` still points at the webview of the
+    // editor tab it closed ("the webview CDP socket is closed" in the first full run, 02/11/2026):
+    // connect to the chat that is on screen before touching it.
+    await waitFor(
+      async () => (await visibleChatId().catch(() => undefined)) !== undefined,
+      15_000,
+      300,
+    );
+    await openChat(30_000);
+    await waitConnected();
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    check(await clickButton('New session'), 'New session is pressed');
+    await waitEmptyView();
+    assertNoWebviewErrors('before the mods step');
+
+    try {
+      // --- M0: the seeded root is the one in use, and it starts empty (H8) ---------------------------
+      check(
+        fs.existsSync(vscode.modsHome) && fs.readdirSync(vscode.modsHome).length === 0,
+        'M0 the mods root of this run is the seeded one and starts empty',
+      );
+      check(!(await bandState()).present, 'M0 no band is shown before a mod is installed');
+
+      // --- M1: install the fixture and reload the mods ----------------------------------------------
+      installModFixture(repoRoot, vscode.modsHome, MOD);
+      await command('OpenCode: Reload Mods');
+      const loaded = await waitFor(() => hostLog().includes(`mod ${MOD} loaded`), 20_000, 200);
+      check(loaded === true, `M1 the host logs "mod ${MOD} loaded" after Reload Mods`);
+      check(
+        !(await bandState()).present,
+        'M1 a mod that pinned nothing yet has no band (the band follows the turn)',
+      );
+
+      // --- M2: the band appears after a turn, printed as TEXT ----------------------------------------
+      await send('Reply with exactly: ONE. Do not use any tools.');
+      check(await waitIdle(), 'M2 the turn ends');
+      const shown = await waitFor(async () => (await bandState()).present, 10_000, 200);
+      check(shown === true, 'M2 the band of the mod appears after the turn');
+      const first = await bandState();
+      check(
+        first.bandText === 'Last turn: succeeded <b>plain</b>' &&
+          first.modName === 'Hello Station' &&
+          first.count === 1 &&
+          !first.markup &&
+          first.title === 'Set by <i>Hello Station</i>' &&
+          first.severity === 'info',
+        `M2 the band prints the HTML of the mod as text (no b, i, img or a element), the tooltip is a title and the severity is info (${JSON.stringify([first.bandText, first.modName, first.count, first.markup, first.title, first.severity])})`,
+      );
+      check(
+        first.actionLabel === 'Run hello (Hello Station)' && first.actionText === 'hello',
+        `M2 the band button is named "Run hello (Hello Station)" and reads "hello" (${JSON.stringify([first.actionLabel, first.actionText])})`,
+      );
+      check(!first.inLog, 'M2 the band is outside the conversation log');
+
+      // --- M3: the band in four themes at 300 px and wide (H6) ---------------------------------------
+      const WIDTHS = [
+        ['300', 300],
+        ['wide', 900],
+      ];
+      for (const [name, wanted] of WIDTHS) {
+        let barPx;
+        try {
+          barPx = await setSideBarWidth(wanted);
+        } catch (error) {
+          barPx = await sideBarPx();
+          warn(
+            `mods: the side bar did not go to ${String(wanted)} px (it is ${String(barPx)} px): ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        const reached = name === '300' ? Math.abs(barPx - 300) <= SIZE_TOLERANCE : barPx >= 600;
+        if (!reached) {
+          warn(`mods: width "${name}" not reached (side bar ${String(barPx)} px): not judged`);
+          continue;
+        }
+        for (const [themeName, theme] of PROBLEM_THEMES) {
+          await setTheme(theme);
+          const where = `at ${name} (bar ${String(Math.round(barPx))} px), ${themeName}`;
+          await waitFor(async () => (await bandState()).present, 60_000, 500);
+          const s = await bandState();
+          check(
+            s.present && s.overflow <= 1 && s.styled === 0,
+            `${where}: M3 the band is shown, the view does not scroll sideways (${String(s.overflow)} px) and has no style attribute`,
+          );
+          check(
+            inView(s.band, s.view) &&
+              inside(s.name, s.band) &&
+              inside(s.text, s.band) &&
+              inside(s.action, s.band) &&
+              !overlap(s.text, s.action) &&
+              !overlap(s.name, s.action) &&
+              !s.textClipped,
+            `${where}: M3 the name, the text and the button are inside the band and the view, do not overlap and the text is not cut (${JSON.stringify([s.band, s.text, s.action])})`,
+          );
+          check(
+            s.band !== null && s.prompt !== null && s.band.bottom <= s.prompt.top + 1,
+            `${where}: M3 the band sits above the composer`,
+          );
+          const look = await web.inDoc(measureText, {
+            name: '.mod-band .mod-band-name',
+            text: '.mod-band .mod-band-text',
+            action: '.mod-band .mod-band-action',
+          });
+          const ratio = (part) => (part ? part.ratio.toFixed(2) : 'not found');
+          check(
+            look.name != null &&
+              look.name.ratio >= 4.5 &&
+              look.text != null &&
+              look.text.ratio >= 4.5 &&
+              look.action != null &&
+              look.action.ratio >= 4.5,
+            `${where}: M3 the name, the text and the button of the band have contrast >= 4.5 (name ${ratio(look.name)}, text ${ratio(look.text)}, button ${ratio(look.action)})`,
+          );
+          if (allThemes || themeName === 'dark') await shot(`38-band-${name}-${themeName}`);
+
+          // --- M4: the "/" menu lists the command of the mod (300 px, Dark Modern only) ----------------
+          if (name === '300' && themeName === 'dark') {
+            await clearPromptBox(150);
+            await page.keyboard.type('/hel');
+            await waitPresent('.command-popup [role="option"]');
+            const menu = await bandState();
+            const row = menu.rows.find((r) => r.name === `/${QUALIFIED}`);
+            check(
+              row !== undefined &&
+                row.description === 'Says hello' &&
+                menu.rows.some((r) => r.name === '/hello') &&
+                inView(menu.popup, menu.view),
+              `M4 typing "/hel" lists /${QUALIFIED} with its description next to the project /hello, inside the view (${JSON.stringify(menu.rows)})`,
+            );
+            await shot('38-slash-300-dark');
+            await clearPromptBox(150);
+            await waitPresent('.command-popup', false);
+          }
+        }
+      }
+      await setSideBarWidth(300).catch(() => undefined);
+      await setTheme(DARK);
+      await waitFor(async () => (await bandState()).present, 10_000, 200);
+
+      // --- M5: running the command from the prompt: no prompt, no session, a native toast -----------
+      const before = await bandState();
+      await send(`/${QUALIFIED} Ana`);
+      const ran = await waitFor(() => fs.existsSync(sentinel), 15_000, 200);
+      check(
+        ran === true,
+        'M5 the command of the mod ran inside its Worker (the sentinel file exists)',
+      );
+      check(
+        ran === true && fs.readFileSync(sentinel, 'utf8').trim() === 'args=Ana',
+        'M5 the command received its arguments ("Ana")',
+      );
+      const toast = page
+        .locator('.notifications-toasts .notification-toast', { hasText: 'Hello Station: ' })
+        .first();
+      const toasted = await toast
+        .waitFor({ state: 'visible', timeout: 10_000 })
+        .then(() => true)
+        .catch(() => false);
+      check(toasted, 'M5 the native toast of the mod is shown');
+      const toastText = toasted ? (await toast.innerText()).replace(/\s+/g, ' ') : '';
+      const toastLinks = toasted
+        ? await toast.locator('.notification-list-item-message a').count()
+        : -1;
+      check(
+        toastText.includes(
+          'Hello Station: Hello Stationcommand:workbench.action.showCommands says hi',
+        ) &&
+          !/[[\]()]/.test(toastText.slice(Math.max(toastText.indexOf('Hello Station: '), 0))) &&
+          toastLinks === 0,
+        `M5 the toast text is "<mod>: <message>" with the brackets and parentheses of the mod's message removed and no link in it (${JSON.stringify(toastText)}, links ${String(toastLinks)})`,
+      );
+      await sleep(600); // the toast slides in: the capture of the first run caught it half drawn
+      await shot('38-toast');
+      await command('Notifications: Clear All Notifications').catch(() => undefined);
+      const after = await bandState();
+      check(
+        after.users.length === before.users.length &&
+          after.assistants === before.assistants &&
+          !after.users.some((text) => text.includes(MOD)) &&
+          !after.busy &&
+          after.alerts.length === 0,
+        `M5 the command sent no prompt and made no turn: the log keeps ${String(before.users.length)} user message(s), no Stop button, no alert (${JSON.stringify([after.users, after.assistants, after.busy, after.alerts])})`,
+      );
+      check(
+        (await hostLog()).includes(`mod command ${QUALIFIED} ran`),
+        'M5 the host logged the command by its qualified name',
+      );
+
+      // --- M6: the button of the band runs the same command ------------------------------------------
+      fs.rmSync(sentinel, { force: true });
+      check(
+        await clickButton('Run hello (Hello Station)'),
+        'M6 the band button is pressed with the real mouse',
+      );
+      const ranFromBand = await waitFor(() => fs.existsSync(sentinel), 15_000, 200);
+      check(
+        ranFromBand === true && fs.readFileSync(sentinel, 'utf8').trim() === 'args=',
+        'M6 the band button ran the command with no arguments',
+      );
+      await command('Notifications: Clear All Notifications').catch(() => undefined);
+
+      // --- M7: the palette lists it under "Run Mod Command…" ----------------------------------------
+      await command('OpenCode: Run Mod Command…');
+      const listed = await waitFor(
+        async () =>
+          (await page.locator('.quick-input-list .monaco-list-row').allInnerTexts()).some((text) =>
+            text.includes(QUALIFIED),
+          ),
+        5_000,
+        100,
+      );
+      check(listed === true, `M7 "OpenCode: Run Mod Command…" lists ${QUALIFIED}`);
+      await shot('38-palette');
+      await page.keyboard.press('Escape');
+      await waitFor(quickInputHidden, 2_000, 50);
+
+      assertNoWebviewErrors('step 38');
+    } finally {
+      // Leave the run as the step found it: no mod, no band, the dark theme, 300 px.
+      removeModFixture(vscode.modsHome, MOD);
+      await command('OpenCode: Reload Mods').catch(() => undefined);
+      await setSideBarWidth(300).catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+    }
+    const gone = await waitFor(async () => !(await bandState()).present, 10_000, 200);
+    check(gone === true, 'M8 removing the mod and reloading takes its band away');
+  });
+
+  // E10-mods, phase 4 (plan Engram #1765 section 3.3 option B, decision P1=2). The panel of the
+  // `hello-station` fixture: a WebviewPanel of its own, built by the host, in the editor area beside
+  // the chat. Like step 38 it installs the fixture, reloads the mods and removes it at the end.
+  await step('39 mods: panel beside the chat (E10-mods)', async () => {
+    const MOD = 'hello-station';
+    const DARK = 'Default Dark Modern';
+    const TITLE = 'Hello Station panel';
+    // The fixture writes `<mods root>/../mods-sentinel/panel.closed` when the mod hears the tab close.
+    const closedFile = path.join(vscode.modsHome, '..', 'mods-sentinel', 'panel.closed');
+    const panelLogs = [];
+    let panelWeb;
+    // The text the host logged, from every OpenCode.log of the isolated profile of this run.
+    const hostLogText = () => {
+      const files = [];
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'OpenCode.log') files.push(full);
+        }
+      };
+      try {
+        walk(path.join(vscode.userDataDir, 'logs'));
+      } catch {
+        return '';
+      }
+      return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+    };
+    const tab = () => page.locator('.tabs-container .tab', { hasText: TITLE });
+    // `name` of the visible iframe of this extension that is not the chat being driven: the panel.
+    const panelFrameId = () =>
+      page.evaluate(
+        ({ selector, chat }) =>
+          [...globalThis.document.querySelectorAll(selector)]
+            .filter(
+              (frame) =>
+                frame.name !== chat &&
+                frame.checkVisibility({ checkVisibilityCSS: true }) &&
+                frame.getBoundingClientRect().width > 0,
+            )
+            .map((frame) => frame.name)[0],
+        { selector: CHAT_FRAME, chat: drivenChatId ?? '' },
+      );
+    // Opens the panel with the mod command typed in the chat, and connects to its page.
+    const openPanel = async () => {
+      await send(`/${MOD}:panel`);
+      const id = await waitFor(async () => (await panelFrameId()) ?? undefined, 15_000, 200);
+      if (id === undefined) return false;
+      panelWeb?.close();
+      panelLogs.length = 0;
+      panelWeb = await openWebview(vscode.port, panelLogs, 30_000, id);
+      return true;
+    };
+    const panelState = (theme) =>
+      panelWeb.inDoc((doc, wanted) => {
+        const win = doc.defaultView;
+        // A probe element resolves a `var(--vscode-*)` the way the page's own CSS does. It is set
+        // through the CSSOM, which `style-src` without 'unsafe-inline' still allows.
+        const probe = (property, value) => {
+          const element = doc.createElement('span');
+          element.style[property] = value;
+          doc.body.appendChild(element);
+          const out = win.getComputedStyle(element)[property];
+          element.remove();
+          return out;
+        };
+        const root = doc.getElementById('root');
+        const own = root ? win.getComputedStyle(root) : null;
+        const button = doc.getElementById('ping');
+        const buttonStyle = button ? win.getComputedStyle(button) : null;
+        return {
+          themeClass: doc.body.classList.contains(wanted),
+          bg: own?.backgroundColor ?? '',
+          wantBg: probe('backgroundColor', 'var(--vscode-editor-background)'),
+          fg: own?.color ?? '',
+          wantFg: probe('color', 'var(--vscode-editor-foreground)'),
+          buttonBg: buttonStyle?.backgroundColor ?? '',
+          wantButtonBg: probe('backgroundColor', 'var(--vscode-button-background)'),
+          reply: doc.getElementById('reply')?.textContent ?? '',
+          // `<html>` carries the `style` VS Code writes the theme variables into; the page's own
+          // elements must carry none.
+          inline: doc.querySelectorAll('body [style], body[style]').length,
+        };
+      }, THEME_KINDS[theme].webview);
+
+    // The step before may have left `web` on a closed tab, as step 38 did: reconnect to the chat.
+    await waitFor(
+      async () => (await visibleChatId().catch(() => undefined)) !== undefined,
+      15_000,
+      300,
+    );
+    await openChat(30_000);
+    await waitConnected();
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    assertNoWebviewErrors('before the panel step');
+
+    try {
+      // --- P0: install the fixture and reload the mods ------------------------------------------------
+      fs.rmSync(closedFile, { force: true });
+      installModFixture(repoRoot, vscode.modsHome, MOD);
+      await command('OpenCode: Reload Mods');
+      check(
+        (await waitFor(() => hostLogText().includes(`mod ${MOD} loaded`), 20_000, 200)) === true,
+        `P0 the host logs "mod ${MOD} loaded" after Reload Mods`,
+      );
+
+      // --- P1: the command opens the panel beside the chat --------------------------------------------
+      check((await tab().count()) === 0, 'P1 no panel tab before the command');
+      const chatBox = await chatFrameBox();
+      check(await openPanel(), 'P1 the command of the mod opens a panel (its iframe appears)');
+      check(
+        (await waitFor(async () => (await tab().count()) === 1, 10_000, 200)) === true,
+        `P1 the editor area has one tab titled "${TITLE}"`,
+      );
+      const groups = await page.locator('.editor-group-container').count();
+      const frameBox = await page
+        .locator(`${CHAT_FRAME}[name="${await panelFrameId()}"]`)
+        .first()
+        .boundingBox();
+      check(
+        groups >= 1 &&
+          frameBox !== null &&
+          chatBox !== null &&
+          frameBox.x >= chatBox.x + chatBox.width - 1,
+        `P1 the panel opened Beside the chat, in the editor area to the right of the side bar (the area has ${String(groups)} group(s); panel x ${String(frameBox?.x)}, chat right edge ${String((chatBox?.x ?? 0) + (chatBox?.width ?? 0))}). With the active group empty VS Code reuses it instead of splitting`,
+      );
+      check(
+        (await page.locator(`${CHAT_FRAME}[name="${drivenChatId}"]`).first().isVisible()) &&
+          (await visibleChatId()) !== undefined,
+        'P1 opening the panel did not hide the chat (preserveFocus: the chat stays in front)',
+      );
+
+      // --- P2: the round trip of postMessage ----------------------------------------------------------
+      const first = await waitFor(
+        async () => ((await panelState(DARK)).reply === 'pong 0 from mod' ? true : undefined),
+        10_000,
+        200,
+      );
+      check(
+        first === true,
+        'P2 the page told the mod it loaded and the mod answered: "pong 0 from mod" (page -> mod -> page)',
+      );
+      await panelWeb.inDoc((doc) => {
+        doc.getElementById('ping')?.click();
+      });
+      const second = await waitFor(
+        async () => ((await panelState(DARK)).reply === 'pong 1 from mod' ? true : undefined),
+        10_000,
+        200,
+      );
+      check(
+        second === true,
+        'P2 a click on the button reaches the mod and its answer comes back: "pong 1 from mod"',
+      );
+
+      // --- P3: the CSP is live, and the page broke none of it by itself -------------------------------
+      check(
+        panelLogs.filter((line) => /Refused to|Content Security Policy|^\[exception\]/i.test(line))
+          .length === 0,
+        `P3 the panel page loaded its script and stylesheet with no CSP violation (${JSON.stringify(panelLogs.slice(0, 3))})`,
+      );
+      const probes = await panelWeb.inDoc(async (doc) => {
+        const win = doc.defaultView;
+        const out = {};
+        try {
+          await win.fetch('https://example.com/');
+          out.fetch = 'allowed';
+        } catch (error) {
+          out.fetch = `blocked: ${String(error)}`;
+        }
+        const script = doc.createElement('script');
+        script.textContent = 'window.__inline = true';
+        doc.body.appendChild(script);
+        out.inline = win.__inline === true ? 'ran' : 'blocked';
+        script.remove();
+        return out;
+      });
+      await sleep(500); // CSP reports come through the Log domain a moment after the attempt
+      const violations = panelLogs.filter((line) =>
+        /Refused to|Content Security Policy/i.test(line),
+      );
+      check(
+        String(probes.fetch).startsWith('blocked') &&
+          probes.inline === 'blocked' &&
+          violations.length >= 2,
+        `P3 the CSP is enforced in the panel: a fetch to another origin and an inline script are blocked and reported (${JSON.stringify(probes)}, ${String(violations.length)} reports)`,
+      );
+      panelLogs.length = 0;
+
+      // --- P4: the page takes its colours from the theme, in four themes -----------------------------
+      const seenBackgrounds = new Set();
+      for (const [themeName, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        const settled = await waitFor(
+          async () => ((await panelState(theme)).themeClass ? true : undefined),
+          10_000,
+          200,
+        );
+        const s = await panelState(theme);
+        seenBackgrounds.add(s.wantBg);
+        check(
+          settled === true &&
+            s.bg !== '' &&
+            s.bg === s.wantBg &&
+            s.fg === s.wantFg &&
+            s.buttonBg === s.wantButtonBg &&
+            s.inline === 0,
+          `${themeName}: P4 the panel background, text and button are --vscode-editor-background, --vscode-editor-foreground and --vscode-button-background, with no style attribute (${JSON.stringify([s.bg, s.wantBg, s.fg, s.wantFg, s.buttonBg, s.wantButtonBg, s.inline])})`,
+        );
+        const look = await panelWeb.inDoc(measureText, {
+          __base: '--vscode-editor-background',
+          title: '#title',
+          reply: '#reply',
+          button: '#ping',
+        });
+        const ratio = (part) => (part ? part.ratio.toFixed(2) : 'not found');
+        check(
+          look.title != null &&
+            look.title.ratio >= 4.5 &&
+            look.reply != null &&
+            look.reply.ratio >= 4.5 &&
+            look.button != null &&
+            look.button.ratio >= 4.5,
+          `${themeName}: P4 the title, the text and the button of the panel have contrast >= 4.5 (title ${ratio(look.title)}, text ${ratio(look.reply)}, button ${ratio(look.button)})`,
+        );
+        if (allThemes || themeName === 'dark') await shot(`39-panel-${themeName}`);
+      }
+      check(
+        seenBackgrounds.size >= 2,
+        `P4 the panel background changed with the theme (${JSON.stringify([...seenBackgrounds])})`,
+      );
+      await setTheme(DARK);
+      check(
+        panelLogs.filter((line) => /Refused to|Content Security Policy|^\[exception\]/i.test(line))
+          .length === 0,
+        'P4 no CSP violation or exception in the panel while the themes changed',
+      );
+
+      // --- P5: the user closes the tab and the mod hears it -------------------------------------------
+      await tab().first().click({ button: 'middle' });
+      check(
+        (await waitFor(async () => (await tab().count()) === 0, 10_000, 200)) === true,
+        'P5 a middle click closes the panel tab',
+      );
+      check(
+        (await waitFor(() => fs.existsSync(closedFile), 10_000, 200)) === true,
+        'P5 the mod heard onDidClose (its sentinel panel.closed exists)',
+      );
+
+      // --- P6: reloading the mods closes a panel that is open -----------------------------------------
+      check(await openPanel(), 'P6 the panel opens again');
+      await command('OpenCode: Reload Mods');
+      check(
+        (await waitFor(async () => (await tab().count()) === 0, 10_000, 200)) === true,
+        'P6 Reload Mods closed the open panel (its tab is gone)',
+      );
+      assertNoWebviewErrors('step 39');
+    } finally {
+      panelWeb?.close();
+      removeModFixture(vscode.modsHome, MOD);
+      await closeAllEditors().catch(() => undefined);
+      await command('OpenCode: Reload Mods').catch(() => undefined);
       await setTheme(DARK).catch(() => undefined);
     }
   });

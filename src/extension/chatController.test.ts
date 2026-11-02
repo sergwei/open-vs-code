@@ -70,6 +70,7 @@ import {
 } from './chatController';
 import type { DroppedFiles } from './chatController';
 import type { EventStreamOptions } from './eventStream';
+import type { ModsChat, ModsSink, ModsState } from './modEvents';
 import type { ChatApi } from './opencodeClient';
 import type { PendingSummary } from './pendingRequests';
 import type { ServerConfigSink } from './serverConfig';
@@ -700,7 +701,8 @@ function fakeEditor(
  * Builds a controller with a fake api, a fake stream runner, a recording memory and recording
  * fakes for the attention feature, the saved-permissions picker and the server commands.
  * `remembered` is the session remembered for the folder of `SERVER` (`C:\work`). The eighth
- * argument is the optional `deps.serverConfig` sink (issue #128).
+ * argument is the optional `deps.serverConfig` sink (issue #128), the ninth the optional
+ * `deps.mods` sink (E10-mods, phase 3).
  */
 function setup(
   api: ChatApi,
@@ -712,6 +714,7 @@ function setup(
   confirmRevertDiscard: () => Promise<boolean> = () => Promise.resolve(true),
   sessionList?: SessionListSink,
   serverConfig?: ServerConfigSink,
+  mods?: ModsSink,
 ) {
   const confirmations: Array<{ title: string; running: boolean }> = [];
   let discardAsked = 0;
@@ -777,6 +780,7 @@ function setup(
     editor,
     ...(sessionList === undefined ? {} : { sessionList }),
     ...(serverConfig === undefined ? {} : { serverConfig }),
+    ...(mods === undefined ? {} : { mods }),
     log: {
       info: (m) => logs.push(`info: ${m}`),
       warn: (m) => logs.push(`warn: ${m}`),
@@ -947,6 +951,223 @@ describe('ready', () => {
     expect(snapshots()[0]?.sessions.map((s) => s.id)).toEqual(['ses_a', 'ses_b']);
     expect(logs).toContain('info: webview ready');
     expect(logs).toContain('info: snapshot sent (2 sessions, open none)');
+  });
+});
+
+// E10-mods, phase 3. Protects against: a `mods.state` that is not re-sent after a `ready` (a
+// reloaded chat document would lose its bands and commands, skill vscode-extension §4), a state
+// message sent to a host that has no mods, a `mod.command.run` that reaches a mod without being
+// listed or is left without a `request.result` (the prompt would stay locked), and a mod's compose
+// that bypasses `isComposeInBounds`. The mods half is a FAKE (`fakeModsChat`): the real one is
+// covered by `modsChat.test.ts` and the step-38 checks of `test:visual`.
+describe('mods (E10-mods phase 3)', () => {
+  const HELLO_STATE: ModsState = {
+    bands: [{ modId: 'hello-station', modName: 'Hello Station', text: 'Hi', severity: 'info' }],
+    commands: [{ modId: 'hello-station', name: 'hello-station:hello' }],
+  };
+
+  /** A recording `ModsChat`; `change()` fires its listeners with the state the test set. */
+  function fakeModsChat(initial: ModsState = HELLO_STATE) {
+    let current = initial;
+    const listeners = new Set<() => void>();
+    const runs: Array<{ command: string; args: string; sessionID?: string }> = [];
+    const composeBound: Array<unknown> = [];
+    const chat: ModsChat = {
+      state: () => current,
+      onDidChange: (listener) => {
+        listeners.add(listener);
+        return { dispose: () => listeners.delete(listener) };
+      },
+      run: (command, args, sessionID) => {
+        runs.push({ command, args, ...(sessionID === undefined ? {} : { sessionID }) });
+        return args === 'boom' ? Promise.reject(new Error('it broke')) : Promise.resolve();
+      },
+      bindCompose: (handler) => {
+        composeBound.push(handler);
+      },
+    };
+    const sink: ModsSink = { event: () => undefined, chat };
+    return {
+      sink,
+      runs,
+      listeners,
+      change: (next: ModsState) => {
+        current = next;
+        for (const listener of [...listeners]) listener();
+      },
+    };
+  }
+
+  const modsMessages = (posted: HostToWebview[]) => posted.filter((m) => m.type === 'mods.state');
+
+  it('sends the whole state after every ready, with or without a server', async () => {
+    const mods = fakeModsChat();
+    const { controller, posted } = setup(
+      fakeApi().api,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      mods.sink,
+    );
+    await controller.onWebviewReady();
+    await controller.onWebviewReady();
+    expect(modsMessages(posted)).toEqual([
+      { type: 'mods.state', ...HELLO_STATE },
+      { type: 'mods.state', ...HELLO_STATE },
+    ]);
+    // It comes right after the connection state, before the snapshot.
+    expect(posted.map((m) => m.type).slice(0, 3)).toEqual([
+      'connection.state',
+      'mods.state',
+      'snapshot',
+    ]);
+  });
+
+  it('republishes on each change, and stops after dispose', () => {
+    const mods = fakeModsChat();
+    const { controller, posted } = setup(
+      fakeApi().api,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      mods.sink,
+    );
+    mods.change({ bands: [], commands: [] });
+    expect(modsMessages(posted)).toEqual([{ type: 'mods.state', bands: [], commands: [] }]);
+    controller.dispose();
+    mods.change(HELLO_STATE);
+    expect(modsMessages(posted)).toHaveLength(1);
+    expect(mods.listeners.size).toBe(0);
+  });
+
+  it('sends no mods.state when the host has no mods', async () => {
+    const { controller, posted } = setup(fakeApi().api);
+    await controller.onWebviewReady();
+    expect(modsMessages(posted)).toEqual([]);
+  });
+
+  it('runs a listed command and answers request.result, logging the name but not the arguments', async () => {
+    const mods = fakeModsChat();
+    const { controller, posted, logs } = setup(
+      fakeApi().api,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      mods.sink,
+    );
+    await controller.handle({
+      type: 'mod.command.run',
+      requestId: 'r1',
+      name: 'hello-station:hello',
+      args: 'secret-args',
+      sessionID: 'ses_1',
+    });
+    expect(mods.runs).toEqual([
+      { command: 'hello-station:hello', args: 'secret-args', sessionID: 'ses_1' },
+    ]);
+    expect(posted.at(-1)).toEqual({ type: 'request.result', requestId: 'r1' });
+    expect(logs).toContain('info: mod command hello-station:hello ran');
+    expect(logs.join(' | ')).not.toContain('secret-args');
+  });
+
+  it('answers the failure of a command as an error result', async () => {
+    const mods = fakeModsChat();
+    const { controller, posted } = setup(
+      fakeApi().api,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      mods.sink,
+    );
+    await controller.handle({
+      type: 'mod.command.run',
+      requestId: 'r1',
+      name: 'hello-station:hello',
+      args: 'boom',
+    });
+    expect(posted.at(-1)).toMatchObject({
+      type: 'request.result',
+      requestId: 'r1',
+      error: { message: 'it broke' },
+    });
+  });
+
+  it('answers CommandUnavailable for a name the host did not list, and without a mods half', async () => {
+    const mods = fakeModsChat();
+    const withMods = setup(
+      fakeApi().api,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      mods.sink,
+    );
+    await withMods.controller.handle({
+      type: 'mod.command.run',
+      requestId: 'r1',
+      name: 'hello-station:nope',
+      args: '',
+    });
+    expect(mods.runs).toEqual([]);
+    expect(withMods.posted.at(-1)).toMatchObject({
+      type: 'request.result',
+      requestId: 'r1',
+      error: { code: 'CommandUnavailable' },
+    });
+    const without = setup(fakeApi().api);
+    await without.controller.handle({
+      type: 'mod.command.run',
+      requestId: 'r2',
+      name: 'hello-station:hello',
+      args: '',
+    });
+    expect(without.posted.at(-1)).toMatchObject({
+      requestId: 'r2',
+      error: { code: 'CommandUnavailable' },
+    });
+  });
+
+  it('composeFromMod hands the pane a prompt.compose with no files and refuses a blank text', () => {
+    const { controller, posted, logs } = setup(fakeApi().api);
+    expect(controller.composeFromMod(controller.pane.id, 'hello-station', 'Say hi', true)).toEqual({
+      status: 'composed',
+    });
+    expect(posted).toContainEqual({
+      type: 'prompt.compose',
+      text: 'Say hi',
+      files: [],
+      send: true,
+    });
+    expect(logs).toContain('info: mod hello-station composed a prompt (send true)');
+    expect(logs.join(' | ')).not.toContain('Say hi');
+    expect(
+      controller.composeFromMod(controller.pane.id, 'hello-station', '   ', true),
+    ).toMatchObject({
+      status: 'rejected',
+      error: { code: 'ComposeRefused' },
+    });
+    expect(controller.composeFromMod(999, 'hello-station', 'x', false)).toMatchObject({
+      status: 'rejected',
+    });
   });
 });
 
