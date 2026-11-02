@@ -14113,9 +14113,14 @@ try {
         // --- F1: after Enter the card is not rebuilt and the button that had the focus is gone, so
         // the focus has to come back to the card from the box (H1 of E10-settings-followup, #143).
         const enterFocused = await waitFor(() => cardHasFocus('azure'), 3_000, 100);
+        const enterDiag = await settingsWeb.inDoc((doc) => ({
+          hasFocus: doc.hasFocus(),
+          active: doc.activeElement?.tagName ?? null,
+          activeProvider: doc.activeElement?.getAttribute('data-provider') ?? null,
+        }));
         check(
           enterFocused === true && !(await quick()).visible,
-          `F1 after Enter in the key box the Azure card has the focus with the document focused (${String(enterFocused)}) and the box is closed`,
+          `F1 after Enter in the key box the Azure card has the focus with the document focused (${String(enterFocused)}; document ${JSON.stringify(enterDiag)}) and the box is closed`,
         );
 
         // --- V9: Remove asks in a native modal; declining keeps it; confirming removes it -------
