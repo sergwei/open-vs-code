@@ -1964,7 +1964,7 @@ describe('fake server', function () {
      * the switch to `sidebar`, BEFORE Open chat, and the case asserts that. HYPOTHESIS for why: the
      * side bar view the switch shows lists every request (it is not `ownRequestsOnly`) and counts
      * as seen while visible; the log line does not say which surface closed the toast. Whether a
-     * tab counts as seen in `sidebar` mode with the side bar hidden is not covered.
+     * tab counts as seen in `sidebar` mode with the side bar hidden is the next case.
      */
     it('reveals the leftover tab that owns the request when Open chat runs in sidebar mode', async function () {
       const cursor = await openLogCursor();
@@ -2010,6 +2010,81 @@ describe('fake server', function () {
       assert.notStrictEqual(activeChatLabel(), labelA, 'Open chat left tab A in front');
       assert.strictEqual(chatTabs().length, 2, 'Open chat opened another tab');
       log.assertAbsent('Chat view resolved');
+
+      await vscode.commands.executeCommand(REPLY_PERMISSION_COMMAND_ID, {
+        sessionID: sessionB,
+        permissionID,
+        decision: 'reject',
+      });
+      await log.waitFor('turn finished:', TURN_WAIT_MS);
+    });
+
+    /**
+     * Measures the open question of #120 in `sidebar` mode: with the side bar HIDDEN when the
+     * location switches, nobody sees the request, so the toast must stay open until Open chat
+     * reveals the leftover tab that owns it, and only then close as `visible`. The case above
+     * cannot tell, because its switch shows the side bar view first. Provenance: SYNTHETIC
+     * server, same SLOW ask; the side bar is closed with `workbench.action.closeSidebar` and
+     * shown again with `workbench.action.focusSideBar` in the `finally`. VERIFIED by this case
+     * (fake-server suite, Windows 11, VS Code 1.144.0, 02/11/2026; the line "✔ keeps the toast
+     * open in sidebar mode with the side bar hidden until Open chat reveals the tab" in the suite
+     * alone and again in the complete run): "keeps the toast open in sidebar mode with the side
+     * bar hidden until Open chat reveals the tab" passed, so after the switch no
+     * `Chat view resolved` and no `attention: closed … (visible)` were logged, and after Open chat
+     * both `chat tab revealed (pane` and `attention: closed … (visible)` were. The #120 hypothesis
+     * (a tab does not count as seen in `sidebar` mode) is refuted, with no product fix.
+     * Not observed: that the side bar stayed closed (the case does not read its visibility), and
+     * macOS/Linux. Mutation not tried: the case was not run against a build where the switch
+     * reveals the side bar, so the first assertion after the switch is unproven as a guard.
+     */
+    it('keeps the toast open in sidebar mode with the side bar hidden until Open chat reveals the tab', async function () {
+      const cursor = await openLogCursor();
+      await toEditorWithoutTabs(cursor);
+      const sessionA = await tabWithAnsweredSession('H4 hidden A first', 1);
+      await tabWithAnsweredSession('H4 hidden B first', 2);
+      const labelA = chatTabs().find((tab) => tab.label.includes('H4 hidden A'))?.label;
+      assert.ok(labelA, `tab A has no title: ${JSON.stringify(chatTabs().map((t) => t.label))}`);
+
+      const log = await openLogCursor();
+      await sendPrompt(log, 'ASK_PERMISSION SLOW H4 hidden B');
+      const sessionB = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+      assert.ok(sessionB && sessionB !== sessionA, `wrong session for tab B:\n${log.added()}`);
+      await vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, sessionA);
+      const asked = await matchInLog(
+        log,
+        /permission asked (per_\S+) for (ses_\S+) \(read\)/,
+        TURN_WAIT_MS,
+        'permission asked',
+      );
+      const permissionID = asked[1];
+      assert.ok(permissionID && asked[2] === sessionB, `the ask is not B's:\n${log.added()}`);
+      await log.waitFor(`attention: notified ${permissionID}`, 5_000);
+
+      try {
+        await vscode.commands.executeCommand('workbench.action.closeSidebar');
+        await sleep(SETTLE_MS);
+        log.mark();
+        await setChatLocation('sidebar', log);
+        await log.waitForQuiet();
+        await sleep(SETTLE_MS);
+        log.assertAbsent('Chat view resolved');
+        log.assertAbsent(`attention: closed ${permissionID} (visible)`);
+        assert.strictEqual(chatTabs().length, 2, 'the switch to sidebar closed a tab');
+        assert.strictEqual(activeChatLabel(), labelA, 'tab A must still be the active one');
+
+        log.mark();
+        await vscode.commands.executeCommand(SHOW_REQUEST_COMMAND_ID, {
+          sessionID: sessionB,
+          id: permissionID,
+          kind: 'permission',
+        });
+        await log.waitFor('chat tab revealed (pane', 8_000);
+        await log.waitFor(`attention: closed ${permissionID} (visible)`, 8_000);
+        assert.notStrictEqual(activeChatLabel(), labelA, 'Open chat left tab A in front');
+        log.assertAbsent('Chat view resolved');
+      } finally {
+        await vscode.commands.executeCommand('workbench.action.focusSideBar');
+      }
 
       await vscode.commands.executeCommand(REPLY_PERMISSION_COMMAND_ID, {
         sessionID: sessionB,
