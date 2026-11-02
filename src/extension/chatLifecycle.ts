@@ -362,13 +362,14 @@ function warnSessionFailure(action: string, error: unknown): void {
  * session of the side bar opens in a tab on the change to `editor`, `session.open` of it from a
  * second tab logs `chat tab revealed` and no third tab, a prompt injected while a tab is the target
  * is accepted). Then in a real window, `npm run test:visual` step 27 (Windows 11, VS Code 1.144.0,
- * 29/10/2026, all visual checks passed): "ok C11 with every chat tab hidden a request raises a
- * native notification ("Source: OpenCode GUI | Cancel | OpenCode: Permission requested: read:
- * .env — Ope") and a badge on the OpenCode icon ("1")", "ok C11 "Open chat" of the notification
- * reveals the tab of the session and its permission card is there (tab true, card true)", "ok C9
- * Explain with every tab hidden reveals the most recent tab and sends there" and, for the iframe of
- * a tab, "ok C4 coming back to A shows the whole reply once: 400 numbers, from 1 to 400, in order,
- * no repeats". Focus Prompt to the chat and to the editor, Stop Response, the two Add to OpenCode
+ * 02/11/2026, all visual checks passed, after the display name became "OpenCode Station"): "ok
+ * C11 with every chat tab hidden a request raises a native notification ("Source: OpenCode
+ * Station | Cancel | OpenCode · Tab27A: Reply with exactly: alpha") and the badge of the Sessions
+ * view shows on the OpenCode icon ("1")", "ok C11 "Open chat" of the notification reveals the tab
+ * of the session and its permission card is there (tab true, card true)", "ok C9 Explain with
+ * every tab hidden reveals the most recent tab and sends there" and, for the iframe of a tab, "ok
+ * C4 coming back to A shows the whole reply once: 400 numbers, from 1 to 400, in order, no
+ * repeats". Focus Prompt to the chat and to the editor, Stop Response, the two Add to OpenCode
  * Chat entries and Manage Saved Permissions in `editor` mode are run by the cases of
  * `test/integration/chatPanel.test.ts` (log only). UNVERIFIED: macOS and Linux locally (the CI
  * runs the integration suite there), the chips the Add entries give with a folder served (the
