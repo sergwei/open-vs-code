@@ -238,6 +238,7 @@
 // Linux.
 import { chromium } from 'playwright-core';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createWorkspace, startVSCode, writeSettings } from './vscodeProcess.mjs';
@@ -849,15 +850,22 @@ async function shot(name) {
 
 // --- README image crops (issue #42) -----------------------------------------------------------
 
-/** Shots that also get a webview-only crop in `readmeDir`: candidates for `docs/images/`. */
+/**
+ * Shots that also get a webview-only crop in `readmeDir`: candidates for `docs/images/`.
+ *
+ * The Markdown reply, the fork and the agent/model panel are the three taken by step 37 with the
+ * chat in an editor tab (the default mode, issue #126); the side bar versions of them
+ * (`02b-markdown`, `11c-fork-dark`, `12b-chip-panel-dark`) are still shot for judgement but no
+ * longer cropped, so that nobody copies a side bar picture into the docs by mistake.
+ */
 const README_CROPS = new Set([
-  '02b-markdown',
   '05b-card',
   '07a-question',
   '10a-sessions-dark',
-  '11c-fork-dark',
-  '12b-chip-panel-dark',
   '12f-reply-meta-dark',
+  '37a-tab-markdown',
+  '37b-tab-fork',
+  '37c-tab-chip-panel',
   '15a-tool-cards-folded',
   '15b-tool-edit-open',
   '15c-diff-dark',
@@ -885,9 +893,12 @@ fs.rmSync(readmeDir, { recursive: true, force: true });
  * (`boundingBox` goes through `_withElement` with a timeout), not run without a frame; to check
  * it, call `cropWebview` while no chat view is open and expect the warning, not a failed step.
  * VERIFIED on Windows 11 with VS Code stable (2026-10-22): after a full run that ended with
- * "all visual checks passed", the 12 crops were opened one by one and show the chat content
- * (Markdown, cards, model list), not an empty frame, so the clip does include the out-of-process
- * iframe. Not observed: other operating systems, or a frame that is partly off-screen.
+ * "all visual checks passed", the 12 crops of that run's set were opened one by one and show the
+ * chat content (Markdown, cards, model list), not an empty frame, so the clip does include the
+ * out-of-process iframe; on 02/11/2026 (VS Code 1.144.0) the three crops of step 37, which replaced
+ * three of those names, were opened too and show the chat tab. A crop is NOT free of what sits on
+ * top of the iframe: a workbench tooltip over its corner is in the picture (step 37 checks for it).
+ * Not observed: other operating systems, or a frame that is partly off-screen.
  */
 async function cropWebview(name) {
   const frame = await chatFrameBox({ timeout: 5_000 }).catch(() => null);
@@ -2082,6 +2093,117 @@ async function waitConnected(ms = 60_000) {
     'the webview is connected (the app root says data-connection="connected")',
   );
 }
+
+// --- Helpers shared by steps 10, 27 and 37 ------------------------------------------------------
+// They were closures of step 10 (`tagUser`, `hover`) and of step 27 (the rest). They only read
+// module variables (`page`, `web`, `vscode`, `writeSettings`), so they moved here with their bodies
+// unchanged, and step 37 (README crops in a chat tab) uses them without a copy. Steps 22, 26 and
+// 28 and later keep their own local copies, which shadow these.
+// VERIFIED by the full `npm run test:visual` of 02/11/2026 (Windows 11, VS Code 1.144.0, "all visual
+// checks passed") after the move: step 10 still printed "ok   Tab reaches "Fork from here"" and
+// "ok   the fork opened and the header says where from", and step 27 still printed "ok   C10
+// editor -> sidebar leaves the 4 tabs open" and "ok   C10 and a tab left open still works after
+// the switch". Not observed: any other OS.
+
+/** Writes `openVsCode.chatLocation` into the live profile (`sidebar` or `editor`). */
+const setLocation = (value) => {
+  writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
+};
+
+/**
+ * Every editor tab of the workbench as `{ label, text, active, group }`, read from the DOM of VS
+ * Code (`group` is the index of its `.editor-group-container`).
+ */
+const tabsNow = () =>
+  page.evaluate(() => {
+    const groups = [...globalThis.document.querySelectorAll('.editor-group-container')];
+    return [...globalThis.document.querySelectorAll('.tab')].map((tab) => ({
+      label: tab.getAttribute('aria-label') ?? '',
+      text: (tab.innerText ?? '').trim(),
+      active: tab.classList.contains('active'),
+      group: groups.indexOf(tab.closest('.editor-group-container')),
+    }));
+  });
+
+/**
+ * Whether a tab of {@link tabsNow} is a chat tab: any tab that is not a TypeScript file or a diff
+ * of one (no chat title in the suite has ".ts"), so a step that opens another `.ts` file must not
+ * name a chat after one.
+ */
+const isChatTab = (tab) => !/\.ts\b/.test(`${tab.label} ${tab.text}`);
+
+/** The chat tabs among {@link tabsNow}. */
+const chatTabs = async () => (await tabsNow()).filter(isChatTab);
+
+/**
+ * Waits for a chat other than `previous` to be on screen (a new tab) and connects `web` to it.
+ * Waits up to 10 s for the new chat and throws when none appears; `openChat` then connects.
+ */
+const connectToNew = async (previous) => {
+  await waitFor(
+    async () => {
+      const id = await visibleChatId();
+      return id !== undefined && id !== previous ? id : undefined;
+    },
+    10_000,
+    100,
+  );
+  await openChat(30_000);
+};
+
+/** Whether the keyboard focus is inside a Monaco text editor. */
+const editorHasFocus = () =>
+  page.evaluate(() => globalThis.document.activeElement?.closest('.monaco-editor') != null);
+
+/**
+ * Opens the file `spec` through Quick Open (Ctrl+P) and waits for its tab `tabName` to be active
+ * and for the editor to hold the focus. Quick Open lists the file as the focused row before Enter
+ * is pressed; the waits are the caps of VS Code's own latency, taken from step 27.
+ */
+const quickOpen = async (spec, tabName) => {
+  await page.keyboard.press('ControlOrMeta+p');
+  await waitFor(async () => !(await quickInputHidden()), 2_000, 50);
+  await page.keyboard.type(spec);
+  await waitFor(
+    () =>
+      page.evaluate(
+        (name) =>
+          (
+            globalThis.document.querySelector('.quick-input-list .monaco-list-row.focused')
+              ?.textContent ?? ''
+          ).includes(name),
+        tabName,
+      ),
+    3_000,
+    50,
+  );
+  await page.keyboard.press('Enter');
+  await waitFor(
+    async () => (await page.locator(`.tab.active[aria-label*="${tabName}"]`).count()) > 0,
+    5_000,
+    100,
+  );
+  await waitFor(editorHasFocus, 3_000, 100);
+};
+
+/** Tags the Nth (1-based) user message of the log so the real mouse can find it. */
+const tagUser = (nth) =>
+  web.inDoc((doc, n) => {
+    for (const old of doc.querySelectorAll('[data-visual-msg]')) {
+      old.removeAttribute('data-visual-msg');
+    }
+    const users = [...doc.querySelectorAll('[role="log"] .message-user')];
+    users[n - 1]?.setAttribute('data-visual-msg', 'true');
+    return users.length;
+  }, nth);
+
+/** Moves the real mouse to the centre of the first element matching `selector`. */
+const hover = async (selector) => {
+  const point = await centreOf(selector);
+  if (point) await page.mouse.move(point.x, point.y);
+  await sleep(300); // hover styles and tooltips appear after a delay of their own
+  return point !== null;
+};
 
 /** The four themes the layout rounds of steps 0 and 7b run in. */
 const PROBLEM_THEMES = [
@@ -3761,23 +3883,7 @@ try {
           alerts: doc.querySelectorAll('[role="alert"]').length,
         };
       });
-    /** Tags the Nth (1-based) user message of the log so the real mouse can find it. */
-    const tagUser = (nth) =>
-      web.inDoc((doc, n) => {
-        for (const old of doc.querySelectorAll('[data-visual-msg]')) {
-          old.removeAttribute('data-visual-msg');
-        }
-        const users = [...doc.querySelectorAll('[role="log"] .message-user')];
-        users[n - 1]?.setAttribute('data-visual-msg', 'true');
-        return users.length;
-      }, nth);
-    /** Moves the real mouse to the centre of the first element matching `selector`. */
-    const hover = async (selector) => {
-      const point = await centreOf(selector);
-      if (point) await page.mouse.move(point.x, point.y);
-      await sleep(300); // hover styles and tooltips appear after a delay of their own
-      return point !== null;
-    };
+    // tagUser and hover live at module scope (step 37 uses them too); their bodies are unchanged.
 
     // --- Fork from the second user message ---------------------------------------------------
     // Step 9 left the view empty (its session was deleted): the first prompt creates a session.
@@ -8727,22 +8833,8 @@ try {
     const titleOf = (prompt) => prompt.slice(0, 40).trim(); // the fixture titles a session so
     const TITLE_A = titleOf(PROMPT_A);
     const srcDir = path.join(workspace, 'src');
-    const setLocation = (value) => {
-      writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
-    };
-    const tabsNow = () =>
-      page.evaluate(() => {
-        const groups = [...globalThis.document.querySelectorAll('.editor-group-container')];
-        return [...globalThis.document.querySelectorAll('.tab')].map((tab) => ({
-          label: tab.getAttribute('aria-label') ?? '',
-          text: (tab.innerText ?? '').trim(),
-          active: tab.classList.contains('active'),
-          group: groups.indexOf(tab.closest('.editor-group-container')),
-        }));
-      });
-    // A chat tab is any tab that is not a TypeScript file or a diff of one (no title here has ".ts").
-    const isChatTab = (tab) => !/\.ts\b/.test(`${tab.label} ${tab.text}`);
-    const chatTabs = async () => (await tabsNow()).filter(isChatTab);
+    // setLocation, tabsNow, isChatTab, chatTabs, connectToNew, editorHasFocus and quickOpen live at
+    // module scope (step 37 uses them too); their bodies are unchanged.
     const groupCount = () => page.locator('.editor-group-container').count();
     const hostLog = () => {
       const files = [];
@@ -8802,45 +8894,6 @@ try {
         );
       }
       await openChat(30_000);
-    };
-    // Waits for a chat other than `previous` to be on screen (a new tab) and connects to it.
-    const connectToNew = async (previous) => {
-      await waitFor(
-        async () => {
-          const id = await visibleChatId();
-          return id !== undefined && id !== previous ? id : undefined;
-        },
-        10_000,
-        100,
-      );
-      await openChat(30_000);
-    };
-    const editorHasFocus = () =>
-      page.evaluate(() => globalThis.document.activeElement?.closest('.monaco-editor') != null);
-    const quickOpen = async (spec, tabName) => {
-      await page.keyboard.press('ControlOrMeta+p');
-      await waitFor(async () => !(await quickInputHidden()), 2_000, 50);
-      await page.keyboard.type(spec);
-      await waitFor(
-        () =>
-          page.evaluate(
-            (name) =>
-              (
-                globalThis.document.querySelector('.quick-input-list .monaco-list-row.focused')
-                  ?.textContent ?? ''
-              ).includes(name),
-            tabName,
-          ),
-        3_000,
-        50,
-      );
-      await page.keyboard.press('Enter');
-      await waitFor(
-        async () => (await page.locator(`.tab.active[aria-label*="${tabName}"]`).count()) > 0,
-        5_000,
-        100,
-      );
-      await waitFor(editorHasFocus, 3_000, 100);
     };
     const editorSelection = () =>
       page
@@ -14354,6 +14407,334 @@ try {
       }
     }),
   );
+
+  // Step 37 (issue #126): the three README crops that show the chat, taken with the chat in an
+  // editor tab (the default mode) instead of the side bar. Cells: R1 the tab sits beside the code
+  // and is 400-900 px wide (printed); R2 the Markdown reply of the tab has highlighted code, a table
+  // and Copy buttons; R3 the agent/model panel of the tab has Agent and Model side by side and,
+  // when the free GLM model could be chosen, Reasoning under the model list; R4 the fork opened in
+  // the same tab says "Forked from" and holds only the first exchange; R5 the three crops exist in
+  // the crops directory and differ from each other (`cropWebview` only warns when it has no frame).
+  // Not a step of the user's flow: it exists so that `--steps 37` regenerates the docs images alone.
+  // T1-T3 (added after the first full run): no hover card of the workbench is visible when each crop
+  // is taken, and for 37b the keyboard focus is still on "Fork from here". They measure it (the
+  // cards that `restMouse` finds visible are printed); they exist because the command center
+  // tooltip left by the Quick Open that opens `src/sample.ts` sat in the top left corner of the
+  // three crops (seen 02/11/2026): the mouse that goes from the command center straight into the
+  // webview iframe sends the workbench no `mouseleave`, so `restMouse` first leaves through the
+  // code editor. The first `--steps 37` with T1-T3 FAILED with that tooltip in the card list
+  // ("Search open-vs-code-visual-… — [Extension Development H…").
+  // VERIFIED in the full run of 02/11/2026 (Windows 11, VS Code 1.144.0, "all visual checks
+  // passed", step 37 after step 36, 30.2 s) for R1-R5 and T1-T3, with these lines of its log:
+  // "ok   R1 the chat is in a tab beside the code (different group) and 400-900 px wide (groups 0/1)",
+  // "ok   R2 the reply of the tab has highlighted code, a table and Copy buttons
+  // ({"hljs":12,"tables":1,"copyButtons":2})",
+  // "ok   R3 the panel of the tab has the Agent and Model columns side by side (Agent
+  // {"left":18.80000114440918,"right":245.99999809265137,"top":392.3999938964844,"bottom":708},
+  // Model {"left":258,"right":485.1999969482422,"top":392.3999938964844,"bottom":708})",
+  // "ok   R3 with opencode/glm-5.3-flash-free chosen (true) Reasoning is under the model list,
+  // inside the Model column (Reasoning {"left":258,"right":485.1999969482422,
+  // "top":599.4000244140625,"bottom":708.0000228881836})",
+  // "ok   R4 the fork opened in the tab says "Forked from" and holds only the first exchange
+  // ({"users":["Reply with exactly: ONE. Do not use any tools."],"path":"Forked from Reply with
+  // exactly: ONE. Do not use any"})",
+  // "ok   R5 the three README crops of the tab exist and are three different pictures",
+  // "ok   T1 no hover card is visible when 37a is taken ([])",
+  // "ok   T3 no hover card is visible and the panel is still open when 37c is taken ([])",
+  // "ok   T2 no hover card is visible and the keyboard focus is still on "Fork from here" when
+  // 37b is taken (cards [], focus "Fork from here: Reply with exactly: ONE. Do not use any
+  // tools.")".
+  // The three images of `docs/images/` (chat-markdown, fork-session, agent-model-chip) are crops
+  // of that run: their md5 is the one the log prints in "crops md5". Found by T2: with the mouse
+  // over the message the crop had no "Fork from here" button, so the fork crop is taken with the
+  // keyboard focus on it. The crops are copied by hand to `docs/images/` only after looking at
+  // them (`cropWebview`).
+  await step('37 README crops in a chat tab (issue #126)', async () => {
+    const DARK = 'Default Dark Modern';
+    const GLM = 'opencode/glm-5.3-flash-free';
+    const CROPS = ['37a-tab-markdown', '37b-tab-fork', '37c-tab-chip-panel'];
+    // The text of step 2, so that the reply is the same one the docs showed before.
+    const MARKDOWN_PROMPT =
+      'Reply with: a short TypeScript function in a ts code block, a bash command in a bash code block, ' +
+      'a markdown table with 2 columns and 2 rows, a bullet list of 2 items, the inline code path `src/sample.ts:20`, ' +
+      'and a link to https://code.visualstudio.com . Do not use any tools. MARKDOWN';
+    const ONE = 'Reply with exactly: ONE. Do not use any tools.';
+    const TWO = 'Reply with exactly: TWO. Do not use any tools.';
+    // Boxes of the agent/model panel, as `chipPanelState` of step 23 reads them.
+    const panelState = () =>
+      web.inDoc((doc) => {
+        const box = (element) => {
+          if (!element) return null;
+          const r = element.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
+        };
+        const panel = doc.querySelector('.agent-model-panel');
+        const agent = panel?.querySelector('[data-group="agent"]') ?? null;
+        const model = panel?.querySelector('[data-group="model"]') ?? null;
+        const reasoning = panel?.querySelector('.menu-reasoning') ?? null;
+        const lastModel = [...(panel?.querySelectorAll('button[data-model]') ?? [])].at(-1) ?? null;
+        return {
+          open: panel !== null,
+          agent: box(agent),
+          model: box(model),
+          reasoning: box(reasoning),
+          lastModel: box(lastModel),
+        };
+      });
+    const forkState = () =>
+      web.inDoc((doc) => ({
+        users: [...doc.querySelectorAll('[role="log"] .message-user .part-text')].map((m) =>
+          (m.textContent ?? '').trim(),
+        ),
+        path: doc.querySelector('nav[aria-label="Session path"]')?.textContent ?? '',
+      }));
+
+    // Hover cards of the workbench that are on screen now (the command center tooltip, a tab or a
+    // status bar one): a node of `.workbench-hover-container` or `.monaco-hover` with a box and text.
+    const visibleHovers = () =>
+      page
+        .evaluate(() =>
+          [...globalThis.document.querySelectorAll('.workbench-hover-container, .monaco-hover')]
+            .filter((node) => {
+              const r = node.getBoundingClientRect();
+              const style = globalThis.getComputedStyle(node);
+              return (
+                r.width > 0 &&
+                r.height > 0 &&
+                style.visibility !== 'hidden' &&
+                style.display !== 'none' &&
+                (node.textContent ?? '').trim() !== ''
+              );
+            })
+            .map((node) => (node.textContent ?? '').trim().slice(0, 60)),
+        )
+        .catch(() => ['<evaluate failed>']);
+    // Parks the real mouse on the left edge of the chat frame (padding, no element with a hover
+    // style) and waits until no hover card is visible, nudging the mouse each round, so that the
+    // command center tooltip left by the Quick Open does not sit on the corner of a crop. Returns the
+    // texts still visible when the wait ends ([] when it is clean). The keyboard focus is untouched.
+    const restMouse = async () => {
+      const frame = await chatFrameBox({ timeout: 5_000 }).catch(() => null);
+      const x = (frame?.x ?? 700) + 4;
+      const y = (frame?.y ?? 400) + (frame?.height ?? 200) / 2;
+      // A mouse that goes straight from the command center into the webview iframe sends the
+      // workbench no `mouseleave`, so its tooltip stays (seen 02/11/2026: it sat in the corner of
+      // all three crops). First leave through the empty part of the code editor, in the workbench.
+      await page.mouse.move(
+        Math.max(40, (frame?.x ?? 700) / 2),
+        y + (frame?.height ?? 200) / 2 - 80,
+      );
+      await sleep(400);
+      let nudge = 0;
+      let left = await visibleHovers();
+      for (let round = 0; round < 25 && left.length > 0; round += 1) {
+        nudge += 1;
+        await page.mouse.move(x + (nudge % 2), y);
+        await sleep(200);
+        left = await visibleHovers();
+      }
+      await page.mouse.move(x, y);
+      await sleep(300); // a card that would still come up after the hover delay
+      return [...left, ...(await visibleHovers())];
+    };
+
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    await closeAllEditors();
+    try {
+      await setTheme(DARK);
+      // A toast sat over the prompt box in the first run of step 27 and swallowed the click on it.
+      await command('Notifications: Clear All Notifications');
+      await quickOpen('src/sample.ts', 'sample.ts');
+      // A filtered run finds the side bar chat that step 1 opened; a second press on the activity
+      // bar item would hide the side bar (same guard as C10 of step 27).
+      if ((await visibleChatId()) === undefined) {
+        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+      }
+      await openChat(30_000);
+      // A new tab with an empty session: the side bar session of an earlier step may hold whatever
+      // that step left, and an empty one (a run of `--steps 37`) does not move to a tab at all.
+      const sideBarChat = drivenChatId;
+      setLocation('editor');
+      await sleep(1_000); // the host reads the setting asynchronously
+      await command('OpenCode: New Session');
+      await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
+      await connectToNew(sideBarChat);
+      await waitConnected();
+      const fresh = await snapshotOfChat();
+      check(
+        fresh.messages === 0,
+        `the tab of the crops starts with an empty session (${JSON.stringify(fresh)})`,
+      );
+
+      // --- R1: the tab is beside the code -----------------------------------------------------
+      const open = await tabsNow();
+      const sampleTab = open.find((tab) => !isChatTab(tab));
+      const chatTab = open.find((tab) => isChatTab(tab) && tab.active);
+      const tabWidth = Math.round((await chatFrameBox())?.width ?? 0);
+      console.log(`  crops tab ${String(tabWidth)} px wide beside the code`);
+      check(
+        sampleTab !== undefined &&
+          chatTab !== undefined &&
+          sampleTab.group !== chatTab.group &&
+          tabWidth >= 400 &&
+          tabWidth <= 900,
+        `R1 the chat is in a tab beside the code (different group) and 400-900 px wide (groups ${String(sampleTab?.group)}/${String(chatTab?.group)})`,
+      );
+
+      // --- 37a + R2: the Markdown reply ---------------------------------------------------------
+      await send(MARKDOWN_PROMPT);
+      check(await waitIdle(30_000), 'R2 the Markdown turn of the tab ended');
+      await waitFor(
+        () => web.inDoc((doc) => doc.querySelectorAll('[class*="hljs-"]').length > 0),
+        3_000,
+        100,
+      );
+      const cards37a = await restMouse();
+      check(
+        cards37a.length === 0,
+        `T1 no hover card is visible when 37a is taken (${JSON.stringify(cards37a)})`,
+      );
+      await shot('37a-tab-markdown');
+      const markdown = await web.inDoc((doc) => ({
+        hljs: doc.querySelectorAll('[class*="hljs-"]').length,
+        tables: doc.querySelectorAll('[role="log"] table').length,
+        copyButtons: doc.querySelectorAll('button[aria-label="Copy code"]').length,
+      }));
+      check(
+        markdown.hljs > 0 && markdown.tables >= 1 && markdown.copyButtons >= 1,
+        `R2 the reply of the tab has highlighted code, a table and Copy buttons (${JSON.stringify(markdown)})`,
+      );
+      assertNoWebviewErrors('step 37 markdown');
+
+      // --- 37c + R3: the agent/model panel of the same tab ---------------------------------------
+      check(await clickIn('button.agent-model-chip'), 'R3 the chip is pressed with the real mouse');
+      await waitPresent('.agent-model-panel');
+      // The free GLM model lists variants, so the panel shows Reasoning; a choice leaves it open.
+      const chose = await clickIn(`.agent-model-panel button.model-option[data-model="${GLM}"]`);
+      await waitPresent('.agent-model-panel');
+      // The panel lays out two columns after opening: read it once two reads of its boxes agree.
+      let lastBoxes = '';
+      await waitFor(
+        async () => {
+          const now = await panelState();
+          const boxes = JSON.stringify([now.agent, now.model, now.reasoning]);
+          const stable = boxes === lastBoxes;
+          lastBoxes = boxes;
+          return stable;
+        },
+        2_000,
+        100,
+      );
+      const panel = await panelState();
+      check(
+        panel.agent !== null &&
+          panel.model !== null &&
+          panel.model.left >= panel.agent.right - 1 &&
+          Math.abs(panel.model.top - panel.agent.top) <= 2,
+        `R3 the panel of the tab has the Agent and Model columns side by side (Agent ${JSON.stringify(panel.agent)}, Model ${JSON.stringify(panel.model)})`,
+      );
+      check(
+        !chose ||
+          (panel.reasoning !== null &&
+            panel.lastModel !== null &&
+            panel.model !== null &&
+            panel.reasoning.top >= panel.lastModel.bottom - 1 &&
+            panel.reasoning.left >= panel.model.left - 1 &&
+            panel.reasoning.right <= panel.model.right + 1),
+        `R3 with ${GLM} chosen (${String(chose)}) Reasoning is under the model list, inside the Model column (Reasoning ${JSON.stringify(panel.reasoning)})`,
+      );
+      const cards37c = await restMouse();
+      check(
+        cards37c.length === 0 && (await panelState()).open,
+        `T3 no hover card is visible and the panel is still open when 37c is taken (${JSON.stringify(cards37c)})`,
+      );
+      await shot('37c-tab-chip-panel');
+      await page.keyboard.press('Escape');
+      await sleep(250); // the key reaches the webview asynchronously
+      check(!(await panelState()).open, 'R3 Escape closes the panel of the tab');
+
+      // --- 37b + R4: the fork, in a new tab with two turns ---------------------------------------
+      const beforeFork = drivenChatId;
+      await command('OpenCode: New Session');
+      await connectToNew(beforeFork);
+      await send(ONE);
+      check(await waitIdle(30_000), 'R4 the first turn of the fork run ended');
+      await send(TWO);
+      check(await waitIdle(30_000), 'R4 the second turn of the fork run ended');
+      await tagUser(2);
+      check(
+        await hover('[data-visual-msg="true"]'),
+        'R4 the mouse is over the second user message',
+      );
+      await web.inDoc((doc) => {
+        doc
+          .querySelector('[data-visual-msg="true"] .message-action')
+          ?.setAttribute('data-visual-fork', 'true');
+      });
+      check(await clickIn('[data-visual-fork="true"]'), 'R4 "Fork from here" is pressed');
+      const forked = await waitFor(
+        async () => (await forkState()).path.startsWith('Forked from'),
+        20_000,
+      );
+      const afterFork = await forkState();
+      check(
+        forked === true && afterFork.users.length === 1 && afterFork.users[0].includes('ONE'),
+        `R4 the fork opened in the tab says "Forked from" and holds only the first exchange (${JSON.stringify(afterFork)})`,
+      );
+      // The action bar is shown by KEYBOARD FOCUS, not by hover: with the mouse over the message
+      // the full-window screenshot had "Fork from here" but the crop taken right after it had no
+      // button (seen 02/11/2026, three runs; the hover does not reach the clipped capture), while
+      // a focus stays. Same way as 11b of step 10: click the text, Tab to the button.
+      await tagUser(1);
+      await hover('textarea');
+      check(
+        await clickIn('[data-visual-msg="true"] .part-text'),
+        'R4 the text of the first message of the fork is clicked',
+      );
+      await page.keyboard.press('Tab');
+      const forkFocus = await web.inDoc((doc) => {
+        const bar = doc.querySelector('[data-visual-msg="true"] .message-actions');
+        return {
+          cls: doc.activeElement?.className ?? '',
+          bar: bar ? doc.defaultView.getComputedStyle(bar).opacity : 'none',
+        };
+      });
+      check(
+        forkFocus.cls.includes('message-action') && forkFocus.bar === '1',
+        `R4 Tab reaches "Fork from here" of the first message and its action bar shows when the crop is taken (${JSON.stringify(forkFocus)})`,
+      );
+      const cards37b = await restMouse(); // the mouse rests away from the message; the focus stays
+      const focusAfter = await web.inDoc(
+        (doc) =>
+          doc.activeElement?.getAttribute('aria-label') ?? doc.activeElement?.textContent ?? '',
+      );
+      check(
+        cards37b.length === 0 && /Fork from here/.test(focusAfter),
+        `T2 no hover card is visible and the keyboard focus is still on "Fork from here" when 37b is taken (cards ${JSON.stringify(cards37b)}, focus ${JSON.stringify(focusAfter)})`,
+      );
+      await shot('37b-tab-fork');
+      assertNoWebviewErrors('step 37 fork');
+
+      // --- R5: the crops exist and are three different pictures ------------------------------------
+      const hashes = CROPS.map((name) => {
+        const file = path.join(readmeDir, `${name}.png`);
+        return fs.existsSync(file)
+          ? createHash('md5').update(fs.readFileSync(file)).digest('hex')
+          : undefined;
+      });
+      console.log(`  crops md5 ${JSON.stringify(hashes)}`);
+      check(
+        hashes.every((hash) => hash !== undefined) && new Set(hashes).size === CROPS.length,
+        'R5 the three README crops of the tab exist and are three different pictures',
+      );
+    } finally {
+      // Leave the workspace as the step found it: no chat tab or file tab, the setting at `sidebar`.
+      setLocation('sidebar');
+      await closeAllEditors().catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+    }
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
