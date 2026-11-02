@@ -24,7 +24,12 @@ afterEach(() => {
 
 function setup(
   row: ProviderRow,
-  options: { attempt?: AuthAttemptView; open?: boolean; draft?: Record<string, string> } = {},
+  options: {
+    attempt?: AuthAttemptView;
+    open?: boolean;
+    draft?: Record<string, string>;
+    remote?: string;
+  } = {},
 ) {
   const sent: SettingsWebviewToHost[] = [];
   const ui = createSettingsUi({ getState: () => undefined, setState: () => undefined });
@@ -37,6 +42,7 @@ function setup(
       <ProviderCard
         row={row}
         attempt={attempt()}
+        remote={options.remote}
         busy={busy()}
         ui={ui}
         send={(message) => {
@@ -57,6 +63,35 @@ function type(input: HTMLInputElement, value: string): void {
 function buttons(container: HTMLElement): string[] {
   return Array.from(container.querySelectorAll('button')).map((b) => b.textContent.trim());
 }
+
+// Protects H2 of E10-settings-followup (#143, decision P2=1): in a remote window every `oauth`
+// method says its browser sign-in may not work, with the exact sentence of the decision; a local
+// window and the `key`/`external` methods say nothing. Provenance: FABRICATED rows and a made-up
+// `remote`; no real remote window was opened.
+describe('remote window hint', () => {
+  const HINT =
+    'In a remote window this sign-in may not work if it sends you back from the browser: opencode waits for it on the remote machine.';
+  const hints = (container: HTMLElement): string[] =>
+    Array.from(container.querySelectorAll('.settings-hint'))
+      .map((p) => p.textContent)
+      .filter((text) => text.includes('remote window'));
+
+  it('shows the exact sentence under each oauth method when the window is remote', () => {
+    const { container } = setup(openai, { open: true, remote: 'ssh-remote' });
+    expect(hints(container)).toEqual([HINT, HINT]);
+    const button = must(container, '[data-method="oauth"] button.primary');
+    const hint = must(container, '[data-method="oauth"] .settings-hint');
+    expect(button.getAttribute('aria-describedby')).toBe(hint.id);
+  });
+
+  it('shows nothing without remote, nor for key and external methods', () => {
+    expect(hints(setup(openai, { open: true }).container)).toEqual([]);
+    mounted?.dispose();
+    expect(hints(setup(azure, { open: true, remote: 'wsl' }).container)).toEqual([]);
+    mounted?.dispose();
+    expect(hints(setup(bedrock, { open: true, remote: 'wsl' }).container)).toEqual([]);
+  });
+});
 
 describe('not connected', () => {
   it('is collapsed with the way to connect as its description', () => {

@@ -15,6 +15,14 @@ import type { SettingsUi } from './settingsUiState';
 /** Sends one typed message to the host. */
 export type SendSettings = (message: SettingsWebviewToHost) => void;
 
+/**
+ * The hint under every `oauth` method in a remote window (decision P2=1 of Sergio, 02/11/2026). It
+ * says "may not work" because it is not known whether `remote.autoForwardPorts` saves the callback
+ * (HYPOTHESIS), and it also shows on device-code methods, which do work remotely.
+ */
+export const REMOTE_OAUTH_HINT =
+  'In a remote window this sign-in may not work if it sends you back from the browser: opencode waits for it on the remote machine.';
+
 /** The label of the primary button of a method: what pressing it starts, by method type. */
 export function primaryLabel(type: SettingsMethodRow['type']): string {
   if (type === 'key') return 'Enter API key…';
@@ -54,11 +62,17 @@ function credentialOf(
  * the host is busy with an attempt, the button is `aria-disabled` and ignores the press, never
  * `disabled`, so a focus it holds is not thrown to the body (solid-webview section 7). The typed
  * values live in a local store and are copied to `ui` for `setState`; the drafts of the several
- * methods of one provider are kept apart by the method index.
+ * methods of one provider are kept apart by the method index. In a remote window (`remote` set)
+ * an `oauth` method carries {@link REMOTE_OAUTH_HINT} before its actions, described by the button;
+ * `key` and `external` methods and a local window show none. VERIFIED by `ProviderCard.test.tsx`
+ * (jsdom, fabricated rows and a made-up `remote`): the hint is there for `oauth` with `remote`, and
+ * absent without `remote` and for `key`/`external`. UNVERIFIED in a real remote window.
  */
 function MethodPanel(props: {
   row: ProviderRow;
   method: SettingsMethodRow;
+  /** `vscode.env.remoteName` of the host, if the window is remote. */
+  remote: string | undefined;
   /** Show the method's label (a provider with several methods needs it to tell them apart). */
   showLabel: boolean;
   busy: boolean;
@@ -79,6 +93,12 @@ function MethodPanel(props: {
   const missing = () => missingRequired(props.method.fields, values);
   const blocked = () => props.busy || missing().length > 0;
   const hintId = `hint-${props.row.id}-${String(props.method.index)}`;
+  const remoteHintId = `remote-${props.row.id}-${String(props.method.index)}`;
+  const remoteHint = () => props.method.type === 'oauth' && props.remote !== undefined;
+  const describedBy = () =>
+    [missing().length > 0 ? hintId : undefined, remoteHint() ? remoteHintId : undefined]
+      .filter((id) => id !== undefined)
+      .join(' ') || undefined;
   return (
     <div class="settings-method" data-method={props.method.type}>
       <Show when={props.showLabel}>
@@ -108,12 +128,17 @@ function MethodPanel(props: {
               .join(', ')} to continue.`}
           </p>
         </Show>
+        <Show when={remoteHint()}>
+          <p class="settings-hint" id={remoteHintId}>
+            {REMOTE_OAUTH_HINT}
+          </p>
+        </Show>
         <div class="step-actions">
           <button
             type="button"
             class="primary"
             aria-disabled={blocked() ? 'true' : undefined}
-            aria-describedby={missing().length > 0 ? hintId : undefined}
+            aria-describedby={describedBy()}
             onClick={() => {
               if (blocked()) return;
               props.send({
@@ -157,7 +182,9 @@ function MethodPanel(props: {
  * focus to the toggle. When the user presses the primary button the row changes list (it moves to
  * "Connected" while it signs in, and back if the attempt is cancelled or fails), so the card is
  * rebuilt and the button that had the focus is gone; the new card asks `takeFocus` on mount and,
- * when `ProvidersSection` says so, takes the focus itself (never the `body`, on that path). While
+ * when `ProvidersSection` says so, takes the focus itself (never the `body`, on that path); when
+ * the document has no focus yet, `ProvidersSection` parks the request and focuses the card (by its
+ * `data-provider`) when the focus returns. While
  * the host works (`busy`) every action button is `aria-disabled`, not `disabled`. All texts of the
  * server are rendered as text. VERIFIED by `ProviderCard.test.tsx`
  * (jsdom, fabricated rows): the three faces, the primary label per method type, the focus on
@@ -171,6 +198,8 @@ function MethodPanel(props: {
 export function ProviderCard(props: {
   row: ProviderRow;
   attempt: AuthAttemptView | undefined;
+  /** `vscode.env.remoteName` of the host when the window is remote; `undefined` when local. */
+  remote?: string | undefined;
   /** True while the host runs an attempt (of any provider): action buttons are aria-disabled. */
   busy: boolean;
   ui: SettingsUi;
@@ -356,6 +385,7 @@ export function ProviderCard(props: {
                   <MethodPanel
                     row={props.row}
                     method={method}
+                    remote={props.remote}
                     showLabel={props.row.methods.length > 1}
                     busy={props.busy}
                     ui={props.ui}

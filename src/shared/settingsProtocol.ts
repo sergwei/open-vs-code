@@ -86,6 +86,11 @@ export interface SettingsState {
   /** Basename of the served folder. */
   folder: string;
   serverVersion?: string;
+  /**
+   * `vscode.env.remoteName` when the window is remote (`ssh-remote`, `wsl`...). ABSENT means a
+   * local window, and the card shows no remote hint then.
+   */
+  remote?: string;
   providers: { loaded: boolean; failed: boolean; rows: ProviderRow[] };
   mcp: {
     loaded: boolean;

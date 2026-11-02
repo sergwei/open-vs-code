@@ -511,6 +511,7 @@ describe('chat location (issue #77)', () => {
     }
     // The "Copy code" link target is internal: a contributed one would sit in the palette.
     expect(commandIds).not.toContain(ids.COPY_AUTH_CODE_COMMAND_ID);
+    expect(commandIds).not.toContain(ids.COPY_AUTH_LINK_COMMAND_ID);
     expect(order(ids.NEW_FOLDER_COMMAND_ID)).toBe('2_organize');
     expect(order(ids.RESTART_SERVER_COMMAND_ID)).toBe('9_server');
   });

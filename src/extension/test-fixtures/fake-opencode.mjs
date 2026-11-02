@@ -406,7 +406,10 @@ const integrationRows = [
   {
     id: 'fakeco',
     name: 'FakeCo',
-    methods: [{ type: 'oauth', id: 'code', label: 'Paste a code' }],
+    methods: [
+      { type: 'oauth', id: 'code', label: 'Paste a code' },
+      { type: 'oauth', id: 'code-encoded', label: 'Paste a code (link with an encoded query)' },
+    ],
     connections: [],
   },
   {
@@ -2394,6 +2397,8 @@ function runCommand(response, session, body, directory) {
 const oauthAttempts = new Map();
 /** The code `complete` accepts for the `code` mode (SYNTHETIC). */
 const FAKE_OAUTH_CODE = 'FAKE-CODE';
+/** The https link of the `code-encoded` method: `%2B`, `%3D` and `%26` that `Uri.parse` would decode. */
+const ENCODED_LINK = 'https://fake.example.test/code?scope=a%2Bb&state=s%3D1&redirect=x%26y';
 
 /**
  * Connects an integration: adds a credential to its connections and publishes the events in the
@@ -2507,7 +2512,10 @@ function handleIntegrationWrites(request, response, location) {
         }
       }
       const id = nextId('att');
-      const mode = methodID === 'code' ? 'code' : 'auto';
+      // `code` and `code-encoded` are the two `code` methods; the second one's link carries
+      // `%2B`, `%3D` and `%26` in its query (INVENTED trigger, E10-settings-followup #143), so
+      // the host must offer "Copy link" instead of opening it.
+      const mode = methodID === 'code' || methodID === 'code-encoded' ? 'code' : 'auto';
       const now = Date.now();
       oauthAttempts.set(id, { integrationID, mode, approved: false, done: false });
       json(response, 200, {
@@ -2515,9 +2523,11 @@ function handleIntegrationWrites(request, response, location) {
         data: {
           attemptID: id,
           url:
-            mode === 'code'
-              ? 'https://fake.example.test/code'
-              : `http://${request.headers.host ?? '127.0.0.1'}/fake-oauth/approve?attempt=${id}`,
+            methodID === 'code-encoded'
+              ? ENCODED_LINK
+              : mode === 'code'
+                ? 'https://fake.example.test/code'
+                : `http://${request.headers.host ?? '127.0.0.1'}/fake-oauth/approve?attempt=${id}`,
           instructions:
             mode === 'code' ? 'Paste the code shown on the page' : 'Enter code: ABCD-1234',
           mode,

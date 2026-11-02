@@ -13,6 +13,8 @@ import {
   buildAnswer,
   cleanInstructions,
   extractDeviceCode,
+  linkChangesWhenOpened,
+  LINK_NOT_OPENED_NOTICE,
   type AuthProgressView,
   type AuthUi,
   type ProviderAuthApi,
@@ -223,6 +225,42 @@ describe('buildAnswer', () => {
       ok: true,
       answer: { region: 'eu', extra: 'v' },
     });
+  });
+});
+
+// Protects the table of section 2.4 of the E10-settings-followup plan: which queries change when
+// `Uri.parse` decodes them. Provenance: FABRICATED urls shaped like the ones upstream 2.0.32 builds
+// with `URLSearchParams` (`chatgpt.ts` authorizeURL, read at @843a6c51); no real provider was run.
+describe('linkChangesWhenOpened', () => {
+  it('flags %26, %2B and %3D in the query, in any case', () => {
+    for (const q of ['a=%26', 'a=%2B', 'a=%2b', 'a=%3D', 'a=%3d', 'x=1&y=a%26b']) {
+      expect(linkChangesWhenOpened(`https://h.test/p?${q}`), q).toBe(true);
+    }
+  });
+
+  it('lets through what survives: %3A%2F%2F, a literal +, %20, %25 and a URLSearchParams link', () => {
+    const upstream = new URL('https://auth.openai.example/oauth/authorize');
+    upstream.search = new URLSearchParams({
+      redirect_uri: 'http://127.0.0.1:1455/auth/callback',
+      scope: 'openid profile offline_access',
+      state: 'abc_-123',
+    }).toString();
+    expect(upstream.search).toContain('%3A%2F%2F');
+    for (const url of [
+      'https://h.test/p?r=http%3A%2F%2Fx',
+      'https://h.test/p?s=a+b',
+      'https://h.test/p?s=a%20b',
+      'https://h.test/p?s=100%25',
+      'https://h.test/p',
+      upstream.toString(),
+    ]) {
+      expect(linkChangesWhenOpened(url), url).toBe(false);
+    }
+  });
+
+  it('looks only at the query, and answers false for a string that is not a URL', () => {
+    expect(linkChangesWhenOpened('https://h.test/a%26b#x%3D1')).toBe(false);
+    expect(linkChangesWhenOpened('not a url %26')).toBe(false);
   });
 });
 
@@ -441,13 +479,69 @@ describe('connect: OAuth auto', () => {
     expect(await done).toEqual({ kind: 'expired' });
   });
 
-  it('fails after three consecutive unreadable statuses', async () => {
+  // Protects H5 of E10-settings-followup (#143): the attempt must not outlive a login declared
+  // failed, because it stays alive on the server for its 10 minutes. Provenance: FABRICATED client;
+  // the server-side no-op of a cancel on a finished attempt is only read in upstream.
+  it('fails after three consecutive unreadable statuses and cancels the attempt once', async () => {
     const t = setup();
     t.mocks.status.mockRejectedValue(new Error('network down'));
     const done = t.auth.connect(row([OAUTH_AUTO]), 0, {});
     await vi.advanceTimersByTimeAsync(3000);
     expect((await done).kind).toBe('failed');
     expect(t.mocks.status).toHaveBeenCalledTimes(3);
+    expect(t.mocks.cancel).toHaveBeenCalledOnce();
+    expect(t.mocks.cancel).toHaveBeenCalledWith({ integrationID: 'acme', attemptID: 'att_1' });
+    expect(t.handle.dispose).toHaveBeenCalled();
+    expect(t.auth.attempt()).toBeUndefined();
+  });
+
+  it('keeps the result failed when the cancel after three unreadable statuses fails', async () => {
+    const t = setup();
+    t.mocks.status.mockRejectedValue(new Error('network down'));
+    t.state.cancelError = Object.assign(new Error('server down'), { name: 'TransportError' });
+    const done = t.auth.connect(row([OAUTH_AUTO]), 0, {});
+    await vi.advanceTimersByTimeAsync(3000);
+    expect((await done).kind).toBe('failed');
+    expect(t.mocks.cancel).toHaveBeenCalledOnce();
+    expect(t.lines.some((line) => line.includes('provider sign-in cancel ignored'))).toBe(true);
+    expect(t.lines.join('\n')).not.toContain('server down');
+  });
+
+  it('does not cancel when an unreadable status is followed by a readable one', async () => {
+    const t = setup();
+    t.mocks.status
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockResolvedValueOnce({ location: LOCATION, data: { status: 'pending' } })
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockResolvedValueOnce({ location: LOCATION, data: { status: 'complete' } });
+    const done = t.auth.connect(row([OAUTH_AUTO]), 0, {});
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(await done).toEqual({ kind: 'connected' });
+    expect(t.mocks.cancel).not.toHaveBeenCalled();
+  });
+
+  it('cancels the attempt once when the local expiry passes with the server still pending', async () => {
+    const t = setup();
+    t.state.attempt = attemptData();
+    t.state.attempt.time.expires = Date.now() + 2000;
+    const done = t.auth.connect(row([OAUTH_AUTO]), 0, {});
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(await done).toEqual({ kind: 'expired' });
+    expect(t.mocks.cancel).toHaveBeenCalledOnce();
+    expect(t.mocks.cancel).toHaveBeenCalledWith({ integrationID: 'acme', attemptID: 'att_1' });
+  });
+
+  it('does not cancel an attempt the server itself reports expired or failed', async () => {
+    for (const status of [{ status: 'expired' }, { status: 'failed', message: 'no' }] as const) {
+      const t = setup();
+      t.state.statuses = [status];
+      const done = t.auth.connect(row([OAUTH_AUTO]), 0, {});
+      await vi.advanceTimersByTimeAsync(1000);
+      await done;
+      expect(t.mocks.cancel).not.toHaveBeenCalled();
+    }
   });
 
   it('does not open a link that is not https, and cancels the attempt on the server', async () => {
@@ -518,6 +612,48 @@ describe('connect: OAuth auto', () => {
     expect(await done).toEqual({ kind: 'cancelled' });
     expect(t.mocks.cancel).toHaveBeenCalledOnce();
     expect(t.ui.openExternal).not.toHaveBeenCalled();
+  });
+
+  // Protects P1=3 (decision of Sergio, 02/11/2026): a link whose query VS Code would rewrite
+  // (`%26`, `%2B`, `%3D`) is not opened; the notification says so and offers "Copy link", and the
+  // link never reaches the webview view or the log. Provenance: FABRICATED link and fake UI.
+  it('does not open a link that VS Code would rewrite: it shows the notice and keeps the link for Copy link', async () => {
+    const t = setup();
+    const link = 'https://auth.example.test/login?scope=a%2Bb&state=s%3D1&redirect=x%26y';
+    t.state.attempt = attemptData({ url: link });
+    const done = t.auth.connect(row([OAUTH_AUTO]), 0, {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.ui.openExternal).not.toHaveBeenCalled();
+    expect(t.views[0]).toEqual({
+      title: 'Sign in to Acme',
+      instructions: `Enter code: ABCD-1234 ${LINK_NOT_OPENED_NOTICE}`,
+      code: 'ABCD-1234',
+      copyLink: true,
+    });
+    expect(LINK_NOT_OPENED_NOTICE).toBe(
+      'This sign-in link would change if opened from VS Code. Copy it and open it in your browser.',
+    );
+    expect(JSON.stringify(t.auth.attempt())).not.toContain('scope=');
+    expect(await t.auth.copyLink('other')).toBe(false);
+    expect(await t.auth.copyLink('acme')).toBe(true);
+    expect(t.ui.copy).toHaveBeenCalledWith(link);
+    expect(t.lines.join('\n')).not.toContain('state=');
+    expect(t.lines.join('\n')).toContain('opened: false');
+    await t.auth.cancel();
+    expect(await t.auth.copyLink('acme')).toBe(false);
+    await done;
+  });
+
+  it('opens a link that survives the round trip and offers no Copy link', async () => {
+    const t = setup();
+    t.state.statuses = [{ status: 'complete' }];
+    t.state.attempt = attemptData({ url: 'https://auth.example.test/login?scope=a+b&u=x%20y' });
+    const done = t.auth.connect(row([OAUTH_AUTO]), 0, {});
+    await vi.advanceTimersByTimeAsync(1000);
+    await done;
+    expect(t.ui.openExternal).toHaveBeenCalledOnce();
+    expect(t.views[0]?.copyLink).toBeUndefined();
+    expect(await t.auth.copyLink('acme')).toBe(false);
   });
 
   it('copyCode copies only the code of the matching sign-in in progress', async () => {

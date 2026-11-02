@@ -30,6 +30,8 @@ export interface AuthProgressView {
   instructions: string;
   /** The device code found in the instructions, if any (for "Copy code"). */
   code?: string;
+  /** True when the link was NOT opened (see {@link linkChangesWhenOpened}): offer "Copy link". */
+  copyLink?: boolean;
 }
 
 /** The notification handle: `dispose` closes it, `update` changes its text. */
@@ -58,7 +60,10 @@ export interface AuthUi {
     placeholder?: string;
     signal: AbortSignal;
   }): Promise<string | undefined>;
-  /** Opens `url` in the browser; false when it could not. Only ever called with an allowed URL. */
+  /**
+   * Opens `url` in the browser; false when it could not. Only ever called with an allowed URL
+   * that {@link linkChangesWhenOpened} does not flag (those are copied, not opened).
+   */
   openExternal(url: string): Promise<boolean>;
   /** Shows the cancellable notification; `onCancel` is its Cancel button. */
   progress(view: AuthProgressView, onCancel: () => void): AuthProgressHandle;
@@ -101,6 +106,41 @@ const MAX_STATUS_ERRORS = 3;
 const MAX_INSTRUCTIONS = 500;
 const DEVICE_CODE = /code:\s*([A-Z0-9-]{4,})/i;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+/** Percent-escapes of `&`, `+` and `=` in a query: the ones VS Code decodes (see {@link linkChangesWhenOpened}). */
+const QUERY_ESCAPES_THAT_CHANGE = /%(?:26|2b|3d)/i;
+/** Shown with the "Copy link" button when the link is not opened (decision P1=3 of Sergio, 02/11/2026). */
+export const LINK_NOT_OPENED_NOTICE =
+  'This sign-in link would change if opened from VS Code. Copy it and open it in your browser.';
+
+/**
+ * True when handing `url` to `vscode.env.openExternal(Uri.parse(url))` would change what the
+ * browser receives in a way that can change what the provider's server reads: its query carries
+ * `%26`, `%2B` or `%3D` (any case). Only the query is looked at; `%3A`, `%2F`, `%20`, `%25`, `%23`
+ * and `%3F` survive the round trip, and a literal `+` is untouched.
+ *
+ * Why: `Uri.parse` decodes every `%XX` of each component, and `openExternal` re-encodes with
+ * `encodeURI(uri.toString(true))`, whose query encoding only rewrites `?` and `#`, so `%26` becomes
+ * `&` (splits the parameter), `%2B` becomes `+` (read as a space) and `%3D` becomes `=`. The
+ * `true` of `Uri.parse(url, true)` is `strict` (it only throws without a scheme) and does not
+ * affect encoding. VERIFIED with the real `vscode.Uri` in VS Code 1.144.0 on Windows 11
+ * (2/11/2026, `npm run test:integration`, 58 passing in `fake-server`): "✔ measures what vscode.Uri
+ * does to %26, %2B and %3D in a link's query" computes `encodeURI(Uri.parse(link).toString(true))`
+ * and finds that `%26` and `%2B` change the parameters `URLSearchParams` reads, that `%3D` changes
+ * them in a key (`a%3Db=c`) but not in a value (`a=x%3Dy` reads the same, and is flagged anyway),
+ * and that `%3A%2F%2F`, a literal `+`, `%20` and `%25` change nothing the server reads. Not
+ * observed: the browser's bytes (the opener of the main process is not intercepted; that step is
+ * read in `openerService.ts`), and any real provider's link. A string that is not a URL answers
+ * false (the caller refuses it before asking).
+ */
+export function linkChangesWhenOpened(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return QUERY_ESCAPES_THAT_CHANGE.test(parsed.search);
+}
 
 /** The message for a method the tab cannot drive: upstream's terminal login covers it. */
 export function unsupportedMessage(name: string): string {
@@ -172,6 +212,8 @@ interface ActiveAttempt {
   integrationID: string;
   view: AuthAttemptView;
   attemptID?: string;
+  /** The sign-in link, kept ONLY when it was not opened, for "Copy link". Never in `view`. */
+  link?: string;
   abort: AbortController;
   handle?: AuthProgressHandle;
   api: ProviderAuthApi;
@@ -309,6 +351,19 @@ export class ProviderAuth {
   }
 
   /**
+   * Copies the sign-in link of the attempt in progress, if it is for `integrationID` and was not
+   * opened (see {@link linkChangesWhenOpened}); false otherwise. The link carries the attempt's
+   * state, so it only ever goes to the clipboard on this explicit action, never to the log or the
+   * webview.
+   */
+  async copyLink(integrationID: string): Promise<boolean> {
+    const attempt = this.active;
+    if (attempt?.integrationID !== integrationID || attempt.link === undefined) return false;
+    await this.ui.copy(attempt.link);
+    return true;
+  }
+
+  /**
    * Removes one stored credential of `row` after a native confirmation. `credentialID` must be one
    * of `row.connections`: anything else is refused without calling the server (a broken webview
    * must not delete credentials it does not know). Never throws.
@@ -390,7 +445,9 @@ export class ProviderAuth {
   /**
    * OAuth flow. `oauth.connect` returns the link, the instructions and the mode. The link is opened
    * at once (only `https:`, or loopback `http:` when allowed) and the cancellable notification
-   * shows the instructions. `auto` polls `oauth.status` every `pollMs`; `code` asks the code in a
+   * shows the instructions, EXCEPT a link whose query {@link linkChangesWhenOpened} flags: that one
+   * is not opened, the notification adds {@link LINK_NOT_OPENED_NOTICE} with a "Copy link" button
+   * and the link stays in the attempt for {@link ProviderAuth.copyLink}. `auto` polls `oauth.status` every `pollMs`; `code` asks the code in a
    * native input and sends it with `oauth.complete`.
    */
   private async connectOauth(
@@ -431,8 +488,12 @@ export class ProviderAuth {
         message: 'The sign-in link is not a secure (https) address; it was not opened',
       };
     }
-    const instructions = cleanInstructions(started.instructions);
-    const code = extractDeviceCode(instructions);
+    const cleaned = cleanInstructions(started.instructions);
+    const code = extractDeviceCode(cleaned);
+    // A link VS Code would rewrite is not opened: the notice tells the user and "Copy link" offers it.
+    const keepLink = linkChangesWhenOpened(started.url);
+    const instructions = keepLink ? `${cleaned} ${LINK_NOT_OPENED_NOTICE}`.trim() : cleaned;
+    if (keepLink) attempt.link = started.url;
     attempt.view = {
       integrationID: row.id,
       phase: 'waiting',
@@ -443,12 +504,13 @@ export class ProviderAuth {
       title: `Sign in to ${row.name}`,
       instructions,
       ...(code === undefined ? {} : { code }),
+      ...(keepLink ? { copyLink: true } : {}),
     };
     attempt.handle = this.ui.progress(view, () => void this.cancel());
     this.publish();
-    const opened = await this.ui.openExternal(started.url);
+    const opened = keepLink ? false : await this.ui.openExternal(started.url);
     this.log.info(
-      `provider sign-in started: ${row.id} (${started.mode}, ${host}, opened: ${String(opened)})`,
+      `provider sign-in started: ${row.id} (${started.mode}, ${host}, opened: ${String(opened)}${keepLink ? ', link kept for Copy link' : ''})`,
     );
     if (this.active !== attempt) return { kind: 'cancelled' };
 
@@ -492,7 +554,18 @@ export class ProviderAuth {
     return { kind: 'connected' };
   }
 
-  /** `auto` mode: polls `oauth.status` until it is no longer pending, or the attempt is replaced. */
+  /**
+   * `auto` mode: polls `oauth.status` until it is no longer pending, or the attempt is replaced.
+   *
+   * Three consecutive unreadable reads (`MAX_STATUS_ERRORS`) end it `failed`, and the local expiry
+   * (`expires` plus {@link EXPIRY_GRACE_MS}) while the server still says `pending` ends it
+   * `expired`: both close the notification and call `oauth.cancel` once, because the attempt
+   * would otherwise live on the server for its 10 minutes (and with a loopback callback keep the
+   * port taken). A server-side `expired` or `failed` is terminal there and is not cancelled. The
+   * cancel is best effort: its failure does not change the result. HYPOTHESIS, read in upstream
+   * `packages/core/src/integration.ts` @843a6c51 (cancel of a finished attempt is a no-op, 204):
+   * the Vitest cases only prove OUR calls with a fake client.
+   */
   private async pollStatus(
     attempt: ActiveAttempt,
     row: IntegrationRow,
@@ -510,7 +583,12 @@ export class ProviderAuth {
       } catch (error) {
         if (this.active !== attempt) return { kind: 'cancelled' };
         errors++;
-        if (errors >= MAX_STATUS_ERRORS) return this.failure(row, 'oauth', error, []);
+        if (errors >= MAX_STATUS_ERRORS) {
+          const result = this.failure(row, 'oauth', error, []);
+          this.finish(attempt);
+          await this.serverCancel(attempt, attemptID);
+          return result;
+        }
         continue;
       }
       if (this.active !== attempt) return { kind: 'cancelled' };
@@ -526,8 +604,14 @@ export class ProviderAuth {
           message: firstLine(sanitizeText(status.message, this.secrets), MAX_TEXT),
         };
       }
-      if (status.status === 'expired' || this.now() > expires + EXPIRY_GRACE_MS) {
+      if (status.status === 'expired') {
         this.log.info(`provider sign-in expired: ${row.id}`);
+        return { kind: 'expired' };
+      }
+      if (this.now() > expires + EXPIRY_GRACE_MS) {
+        this.log.info(`provider sign-in expired: ${row.id}`);
+        this.finish(attempt);
+        await this.serverCancel(attempt, attemptID);
         return { kind: 'expired' };
       }
     }
