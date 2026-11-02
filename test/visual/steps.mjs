@@ -75,6 +75,19 @@
  * final full run; times 1.25 is 48.4, rounded up to 50). Two partial
  * runs of the same day gave 38.6 s (`--steps 36`) and 38.2 s (`--group config`); the 80 it replaces
  * came from the 34.2 s of a run before those cells.
+ * The step 38 (mods in the chat: the band, the "/" menu entry, the native toast and the palette
+ * entry of a mod, E10-mods phase 3) came after it too: it needs the 1 (it starts from the side bar
+ * chat), loads the `hello-station` fixture mod from the seeded mods root and sends one prompt. Its
+ * `budgetS` of 25 is the criterion above applied to the two full runs that passed (02/11/2026,
+ * Windows 11, VS Code 1.144.0: 16.8 s and 16.3 s; times 1.25 is 21.0, rounded up to 25). It
+ * replaces the plan's estimate of 60. The first full run (62.2 s) failed the step because `web`
+ * still pointed at the closed tab of step 37, so it is not a measurement. It also needs to
+ * reconnect to the side bar chat: the step does `openChat` first.
+ * The step 39 (the panel a mod opens beside the chat, E10-mods phase 4) came after it too: it needs
+ * the 1, installs the same fixture mod as the 38 on its own and sends no prompt (it types one
+ * mod command, which never reaches the model). Its `budgetS` of 15 is the criterion above applied
+ * to the full run that passed it (02/11/2026, Windows 11, VS Code 1.144.0: 9.5 s, times 1.25 is
+ * 11.9, rounded up to 15); it replaces the plan's estimate of 45.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -127,6 +140,8 @@ export const STEPS = [
   { id: '35', needs: ['1'], sendsPrompt: true, groups: ['config'], budgetS: 120 },
   { id: '36', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 50 },
   { id: '37', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 40 },
+  { id: '38', needs: ['1'], sendsPrompt: true, groups: ['mods'], budgetS: 25 },
+  { id: '39', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
 ];
 
 /** Every valid id, in canonical order. */
