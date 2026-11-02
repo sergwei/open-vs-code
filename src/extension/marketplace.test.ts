@@ -124,6 +124,14 @@ function tableKeys(markdown: string, row: RegExp): string[] {
  * publishes. Mutations tried by hand on 2026-11-02 (Windows 11, `npx vitest run` of this file),
  * each turning the license test red, then reverted: `license` back to `MIT`, and the README link
  * back to `[MIT](LICENSE)`. Not tried: a LICENSE without the `Required Notice:` line.
+ *
+ * The `Licensor Line of Business:` line is what keeps Shield's "Discontinued Products" clause
+ * from letting anyone compete with the extension once it stops being provided (decision of
+ * 2026-11-02). HYPOTHESIS, a legal reading of the official 1.0.0 text (Discontinued Products
+ * section, read on 2026-11-02) that no test can check and that is not legal advice. The line
+ * names the line of business and the repository, not the display name, which issue #126 is about
+ * to change. Mutation tried by hand on 2026-11-02 (Windows 11, `npx vitest run` of this file): the
+ * line removed from LICENSE turned the license test red, then reverted.
  */
 describe('Marketplace metadata (package.json)', () => {
   it('declares the PolyForm Shield license, with the notice and terms in LICENSE and the README', () => {
@@ -131,6 +139,9 @@ describe('Marketplace metadata (package.json)', () => {
     const license = readText('LICENSE').replace(/\s+/g, ' ');
     expect(license.startsWith('Required Notice: Copyright (c) 2026 Sergio González Carbajal')).toBe(
       true,
+    );
+    expect(license).toContain(
+      'Licensor Line of Business: Graphical user interfaces for opencode in code editors',
     );
     expect(license).toContain('# PolyForm Shield License 1.0.0');
     expect(license).toContain(

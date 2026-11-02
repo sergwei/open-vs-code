@@ -349,9 +349,9 @@ not pass through the webview or the log, and opencode stores it.
 [PolyForm Shield License 1.0.0](LICENSE). You may use, change and share this extension for any
 purpose, at work too, except providing a product that competes with it (or with a product its
 author provides using it): publishing a copy or a renamed fork as an alternative to this extension
-is not allowed, even for free. Whoever gets a copy from you must also get the license terms (or
-their URL) and its `Required Notice:` line. This makes it source-available, not open source as the
-OSI defines it. Commits made before this license was adopted were published under the MIT license.
+is not allowed, even for free, and that stays so if the author stops providing it. Whoever gets a
+copy from you must also get the license terms (or their URL) and its `Required Notice:` line. This
+makes it source-available, not open source as the OSI defines it. Commits made before this license was adopted were published under the MIT license.
 
 opencode itself is a separate project by [anomalyco](https://github.com/anomalyco/opencode) under
 its own license.
