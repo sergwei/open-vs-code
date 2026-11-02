@@ -4361,6 +4361,69 @@ describe('catalog and selection (issues #23/#24)', () => {
     expect(catalogs(posted).length).toBe(loads);
   });
 
+  /**
+   * Protects against the lost reload of issue #139: a request that lands after the load loop has
+   * decided not to repeat, but before the run is cleared, must still get a read that starts after
+   * it. SYNTHETIC: the fake answers at once, and the second request is made `offset` microtasks
+   * after the first one for every offset that spans a whole load, so one of them falls in that gap
+   * if it exists. A request counts as served when `model.list` was called again before its promise
+   * resolved.
+   */
+  it('serves a load requested at any microtask of the previous one, the end included (#139)', async () => {
+    const lost: number[] = [];
+    for (let offset = 0; offset < 60; offset++) {
+      const { api, calls } = fakeApi();
+      const { controller } = setup(api);
+      controller.onServerState(RUNNING);
+      const reads = () => calls.filter((c) => c === 'model.list').length;
+      const first = controller.loadCatalog();
+      for (let tick = 0; tick < offset; tick++) await Promise.resolve();
+      const before = reads();
+      await controller.loadCatalog();
+      if (reads() <= before) lost.push(offset);
+      await first;
+    }
+    expect(lost).toEqual([]);
+  });
+
+  /**
+   * Protects the epoch check of `repeatCatalogLoads` (issue #139): the loop of a load that started
+   * for the server that left must not clear the load in flight for the new one when it ends, or
+   * the next request would start a second load in parallel instead of joining it. SYNTHETIC: each
+   * `model.list` waits until the test releases it, oldest first.
+   */
+  it('a load of the server that left does not clear the load of the new one (#139)', async () => {
+    const fake = fakeApi();
+    const pending: (() => void)[] = [];
+    const api: ChatApi = {
+      ...fake.api,
+      model: {
+        ...fake.api.model,
+        list: () =>
+          new Promise((resolve) => {
+            pending.push(() => resolve({ location: LOCATION, data: DEFAULT_MODELS }));
+          }),
+      },
+    };
+    const { controller } = setup(api);
+    controller.onServerState(RUNNING);
+    const old = controller.loadCatalog();
+    await flush();
+    controller.onServerState({ kind: 'stopped' });
+    controller.onServerState(RUNNING);
+    const current = controller.loadCatalog();
+    await flush();
+    expect(pending).toHaveLength(2);
+    pending.shift()?.(); // the read of the server that left ends
+    await old;
+    expect(controller.loadCatalog()).toBe(current);
+    while (pending.length > 0) {
+      pending.shift()?.();
+      await flush();
+    }
+    await current;
+  });
+
   it('keeps the previous catalog, warns and shows no notice when a reload fails', async () => {
     const good = fakeApi();
     let failNext = false;

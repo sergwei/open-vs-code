@@ -524,12 +524,29 @@ export function createSessionDiffs(deps: SessionDiffsDeps): SessionDiffs {
     }
   };
 
-  /** Loads, and once more per `dirty` raised meanwhile, while the server of `at` holds. */
+  /**
+   * Loads, and once more per `dirty` raised meanwhile, while the server of `at` holds.
+   *
+   * `run` is cleared in the same synchronous step that decides not to repeat, as in
+   * `ChatController.repeatCatalogLoads` (issue #139): a `.finally` on the returned promise cleared
+   * it a few microtasks later, and a `request` in between (for another session, too) marked an
+   * ended loop dirty and got no load. `reset` bumps `epoch` when it forgets a run, so an old loop
+   * leaves the new run alone. VERIFIED on Windows 11 (2026-11-02, `npx vitest run` of
+   * `sessionDiff.test.ts`): with the `.finally`, the case "loads a request made at any microtask of
+   * the previous load, the end included (#139)" lost the request made 7 microtasks after the first;
+   * with this code it loses none. Without the epoch check, the case "a load cut off by reset does
+   * not clear the load that started after it (#139)" fails (the next request starts a second
+   * load). Not observed: the lost load in a real window.
+   */
   const repeat = async (at: number): Promise<void> => {
-    do {
-      dirty = false;
-      await load(wanted, at);
-    } while (dirty && at === epoch);
+    try {
+      do {
+        dirty = false;
+        await load(wanted, at);
+      } while (dirty && at === epoch);
+    } finally {
+      if (at === epoch) run = undefined;
+    }
   };
 
   /** Complete patches of the listing's range, once per generation; shared by concurrent opens. */
@@ -585,10 +602,7 @@ export function createSessionDiffs(deps: SessionDiffsDeps): SessionDiffs {
         dirty = true;
         return run;
       }
-      const at = epoch;
-      const mine: Promise<void> = repeat(at).finally(() => {
-        if (run === mine) run = undefined;
-      });
+      const mine = repeat(epoch);
       run = mine;
       return mine;
     },
