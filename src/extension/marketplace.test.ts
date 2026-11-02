@@ -108,13 +108,35 @@ function tableKeys(markdown: string, row: RegExp): string[] {
  * `openVsCode.serverUrl` row renamed to `openVsCode.serverUrlX` (Settings test red), the same row
  * stripped of its backticks, which makes it a non-row (Settings test red), and an extra
  * "OpenCode: Ghost Command" row (Commands test red).
+ *
+ * The license is PolyForm Shield 1.0.0 (decision of 2026-11-02: forbid published copies that
+ * compete with the extension, renamed or free, while use at work stays allowed). It has no SPDX
+ * id (checked on 2026-11-02 in spdx/license-list-data `licenses.json`: only PolyForm-Noncommercial
+ * and PolyForm-Small-Business are listed), so the manifest uses the npm form
+ * `SEE LICENSE IN LICENSE`. VERIFIED on Windows 11 (2026-11-02) by running vsce 4.0.0
+ * `LicenseProcessor` from `out/package.js` with this manifest under Node: `extension/LICENSE` came
+ * out as `extension/LICENSE.txt`, also as `vsix.license` and the License asset, which is the name
+ * `vsixCheck.test.ts` expects. Not packaged (the "never build" rule). On the Open VSX side, ovsx
+ * 1.3.0 runs its `checkLicense` only when it packages itself (the release workflow hands it a built
+ * `.vsix`), and its `isLicenseOk` accepts any non-empty `license` (read in `publish.js`, not run).
+ * HYPOTHESIS: the Open VSX server takes the package too, since its FAQ only asks for a license in
+ * the manifest and accepts non-OSI ones; it is checked the first time the release workflow
+ * publishes. Mutations tried by hand on 2026-11-02 (Windows 11, `npx vitest run` of this file),
+ * each turning the license test red, then reverted: `license` back to `MIT`, and the README link
+ * back to `[MIT](LICENSE)`. Not tried: a LICENSE without the `Required Notice:` line.
  */
 describe('Marketplace metadata (package.json)', () => {
-  it('declares the MIT license and a LICENSE file that says so', () => {
-    expect(manifest.license).toBe('MIT');
-    const license = readText('LICENSE');
-    expect(license.startsWith('MIT License')).toBe(true);
-    expect(license).toContain('Copyright (c) 2026 Sergio González Carbajal');
+  it('declares the PolyForm Shield license, with the notice and terms in LICENSE and the README', () => {
+    expect(manifest.license).toBe('SEE LICENSE IN LICENSE');
+    const license = readText('LICENSE').replace(/\s+/g, ' ');
+    expect(license.startsWith('Required Notice: Copyright (c) 2026 Sergio González Carbajal')).toBe(
+      true,
+    );
+    expect(license).toContain('# PolyForm Shield License 1.0.0');
+    expect(license).toContain(
+      'Any purpose is a permitted purpose, except for providing any product that competes with the software',
+    );
+    expect(readText('README.md')).toContain('[PolyForm Shield License 1.0.0](LICENSE)');
   });
 
   it('points at a square PNG icon of at least 128 px', () => {
