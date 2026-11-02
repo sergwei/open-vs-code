@@ -14010,25 +14010,65 @@ try {
           !hostLog().includes('provider connected: azure'),
           'W1 the host never logged "provider connected: azure" after the cancelled key box',
         );
-        // Second try: the key is typed and entered.
-        await expand('azure');
-        const resourceKept = await settingsWeb.inDoc(
-          (doc) =>
-            doc.querySelector('[data-provider="azure"] [data-field="resourceName"] input')?.value ??
-            null,
-        );
-        if (resourceKept === null || resourceKept === '') {
-          check(
-            await settingsClick('[data-provider="azure"] [data-field="resourceName"] input'),
-            'V7 the Resource name field is clicked again',
+        // Opens Azure and presses Enter API key… again (the Resource name draft is kept by the tab).
+        const openAzureKeyBox = async (label) => {
+          await expand('azure');
+          const resourceKept = await settingsWeb.inDoc(
+            (doc) =>
+              doc.querySelector('[data-provider="azure"] [data-field="resourceName"] input')
+                ?.value ?? null,
           );
-          await page.keyboard.type('my-resource');
-        }
-        check(
-          await settingsClick('[data-provider="azure"] button.primary', 'Enter API key…'),
-          'V7 Enter API key… is pressed again',
+          if (resourceKept === null || resourceKept === '') {
+            check(
+              await settingsClick('[data-provider="azure"] [data-field="resourceName"] input'),
+              `${label} the Resource name field is clicked again`,
+            );
+            await page.keyboard.type('my-resource');
+          }
+          check(
+            await settingsClick('[data-provider="azure"] button.primary', 'Enter API key…'),
+            `${label} Enter API key… is pressed again`,
+          );
+          return waitFor(async () => (await quick()).visible, 8_000, 100);
+        };
+        // The webview document has the focus AND the card of `id` is the active element.
+        const cardHasFocus = async (id) =>
+          (await cardState(id)).focusedCard && (await settingsWeb.inDoc((doc) => doc.hasFocus()));
+
+        // --- F2: Escape in the native box. The box closes, Azure goes back to Add a provider and
+        // the rebuilt card gets the focus back from the box (H1 of E10-settings-followup, #143).
+        check((await openAzureKeyBox('F2')) === true, 'F2 the native key box is shown');
+        await page.keyboard.press('Escape');
+        const escClosed = await waitFor(async () => !(await quick()).visible, 5_000, 100);
+        const escBack = await settingsWait(
+          (doc) => {
+            const card = doc.querySelector('[data-provider="azure"]');
+            const first = doc.querySelector('.settings-providers > ul');
+            return (
+              card !== null &&
+              card.querySelector('.settings-attempt') === null &&
+              first?.contains(card) !== true
+            );
+          },
+          null,
+          10_000,
         );
-        const boxAgain = await waitFor(async () => (await quick()).visible, 8_000, 100);
+        const escFocused = await waitFor(() => cardHasFocus('azure'), 3_000, 100);
+        const escDiag = await settingsWeb.inDoc((doc) => ({
+          hasFocus: doc.hasFocus(),
+          active: doc.activeElement?.tagName ?? null,
+          activeProvider: doc.activeElement?.getAttribute('data-provider') ?? null,
+        }));
+        await shot('36d2-key-escaped');
+        check(
+          escClosed === true &&
+            escBack === true &&
+            escFocused === true &&
+            !hostLog().includes('provider connected: azure'),
+          `F2 Escape in the native box closes it (${String(escClosed)}), Azure is back in Add a provider (${String(escBack)}) and its card has the focus with the document focused (${String(escFocused)}; document ${JSON.stringify(escDiag)}), and the host never logged "provider connected: azure"`,
+        );
+        // Second try: the key is typed and entered.
+        const boxAgain = await openAzureKeyBox('V7');
         check(boxAgain === true, 'V7 the native box is shown again');
         check(
           await typeInQuickInput(
@@ -14069,6 +14109,13 @@ try {
             azure.removeLabels.some((label) => label.startsWith('Remove Azure')) &&
             announced.includes('Connected to Azure'),
           `V7 pressing Enter connects Azure: it moves to Connected with "API key · saved by opencode for all projects" and a Remove button, and the live region says ${JSON.stringify(announced.trim())}`,
+        );
+        // --- F1: after Enter the card is not rebuilt and the button that had the focus is gone, so
+        // the focus has to come back to the card from the box (H1 of E10-settings-followup, #143).
+        const enterFocused = await waitFor(() => cardHasFocus('azure'), 3_000, 100);
+        check(
+          enterFocused === true && !(await quick()).visible,
+          `F1 after Enter in the key box the Azure card has the focus with the document focused (${String(enterFocused)}) and the box is closed`,
         );
 
         // --- V9: Remove asks in a native modal; declining keeps it; confirming removes it -------
@@ -14320,6 +14367,166 @@ try {
           openaiConnected === true && announcedOpenai.includes('Connected to OpenAI'),
           `V8 an approved OAuth login ends in Connected: OpenAI shows "Signed in · saved by opencode…" and the live region says ${JSON.stringify(announcedOpenai.trim())}`,
         );
+        // --- K1-K3 + Copy link: a `code` login (FakeCo), driven with the native box NOT pre-answered.
+        // Method 1 is "Paste a code"; method 2 has a link whose query carries %2B, %3D and %26.
+        const fakecoSignIn = async (n) => {
+          await expand('fakeco');
+          return settingsClick(
+            `[data-provider="fakeco"] .settings-methods > div:nth-of-type(${String(n)}) button.primary`,
+            'Sign in…',
+          );
+        };
+        const fakecoBackInAdd = () =>
+          settingsWait(
+            (doc) => {
+              const card = doc.querySelector('[data-provider="fakeco"]');
+              const first = doc.querySelector('.settings-providers > ul');
+              return (
+                card !== null &&
+                card.querySelector('.settings-attempt') === null &&
+                first?.contains(card) !== true
+              );
+            },
+            null,
+            10_000,
+          );
+        const toastOf = async (needle) => {
+          const toast = page.locator('.notifications-toasts .notification-toast', {
+            hasText: needle,
+          });
+          const text = await waitFor(
+            async () => (await toastTexts()).find((entry) => entry.includes(needle)),
+            10_000,
+            200,
+          );
+          if (text === undefined) return { toast, text: '', links: [], buttons: [] };
+          const parts = await toast
+            .first()
+            .evaluate((node) => ({
+              text: node.innerText.replace(/\s+/g, ' ').trim(),
+              links: [...node.querySelectorAll('a')].map((a) => a.textContent.trim()),
+              buttons: [...node.querySelectorAll('.monaco-button, .monaco-text-button')].map((b) =>
+                b.textContent.trim(),
+              ),
+            }))
+            .catch(() => ({ text: '', links: [], buttons: [] }));
+          return { toast, ...parts };
+        };
+        const noPassword = () =>
+          settingsWeb.inDoc((doc) => doc.querySelectorAll('input[type="password"]').length === 0);
+
+        check(await fakecoSignIn(1), 'K1 Sign in… is pressed on the FakeCo "Paste a code" method');
+        const codeBoxUp = await waitFor(async () => (await quick()).visible, 8_000, 100);
+        const codeFocus = await waitFor(async () => (await quick()).focused, 3_000, 50);
+        const codeBox = await quick();
+        const codeToast = await toastOf('Paste the code shown on the page');
+        await shot('36k-code-box');
+        check(
+          codeBoxUp === true &&
+            codeFocus === true &&
+            codeBox.title.includes('Code for FakeCo') &&
+            codeBox.type !== 'password' &&
+            (await noPassword()) === true &&
+            codeToast.text.includes('Paste the code shown on the page') &&
+            !codeToast.links.includes('Copy code') &&
+            !codeToast.links.includes('Copy link'),
+          `K1 FakeCo Sign in… shows the notification "Paste the code shown on the page" without a Copy link and a native box titled ${JSON.stringify(codeBox.title)} (type=${String(codeBox.type)}, focused ${String(codeFocus)}) while the webview holds no password input (${JSON.stringify(codeToast)})`,
+        );
+        check(
+          await settingsClick('[data-provider="fakeco"] .settings-attempt button', 'Cancel'),
+          'K2 Cancel is pressed in the FakeCo card while the code box is open',
+        );
+        const codeClosed = await waitFor(async () => !(await quick()).visible, 5_000, 100);
+        const codeAdd = await fakecoBackInAdd();
+        check(
+          codeClosed === true && codeAdd === true,
+          `K2 Cancel in the card closes the native code box (${String(codeClosed)}) and FakeCo is back in Add a provider (${String(codeAdd)})`,
+        );
+
+        // Copy link: the link would change if VS Code opened it, so it is not opened.
+        const ENCODED_LINK =
+          'https://fake.example.test/code?scope=a%2Bb&state=s%3D1&redirect=x%26y';
+        const NOTICE =
+          'This sign-in link would change if opened from VS Code. Copy it and open it in your browser.';
+        // A standing VS Code toast ("All installed extensions are temporarily disabled") covers the
+        // lower buttons of the card; the click is by coordinates, so clear it first.
+        await command('Notifications: Clear All Notifications');
+        check(await fakecoSignIn(2), 'Copy link: Sign in… is pressed on the encoded-link method');
+        const linkToast = await toastOf('would change if opened from VS Code');
+        const linkCard = await settingsWait(
+          (doc) =>
+            doc.querySelector('[data-provider="fakeco"] .settings-attempt') !== null &&
+            doc.querySelector('[data-provider="fakeco"]').textContent.includes('would change'),
+          null,
+          10_000,
+        );
+        await shot('36l-copy-link');
+        check(
+          linkToast.text.includes(NOTICE) &&
+            linkToast.links.includes('Copy link') &&
+            linkCard === true,
+          `Copy link the notification carries the exact notice and a "Copy link" link, and the card shows the notice too (${JSON.stringify(linkToast)})`,
+        );
+        check(
+          hostLog().includes(
+            'provider sign-in started: fakeco (code, fake.example.test, opened: false, link kept for Copy link)',
+          ),
+          'Copy link the host did not open the link (log "opened: false, link kept for Copy link")',
+        );
+        setClipboard('sentinel-before-link');
+        await linkToast.toast
+          .first()
+          .locator('a', { hasText: 'Copy link' })
+          .first()
+          .click({ timeout: 5_000 });
+        const linkCopied = await waitFor(async () => readClipboard() === ENCODED_LINK, 5_000, 200);
+        check(
+          linkCopied === true,
+          `Copy link pressing it puts the link on the clipboard INTACT, %2B %3D %26 included (clipboard ${JSON.stringify(readClipboard())})`,
+        );
+        check(
+          await settingsClick('[data-provider="fakeco"] .settings-attempt button', 'Cancel'),
+          'Copy link Cancel is pressed in the card',
+        );
+        check(
+          (await waitFor(async () => !(await quick()).visible, 5_000, 100)) === true &&
+            (await fakecoBackInAdd()) === true,
+          'Copy link Cancel closes the code box and FakeCo is back in Add a provider',
+        );
+
+        check(await fakecoSignIn(1), 'K3 Sign in… is pressed again on "Paste a code"');
+        check(
+          (await waitFor(async () => (await quick()).visible, 8_000, 100)) === true,
+          'K3 the native code box is shown again',
+        );
+        check(
+          await typeInQuickInput(page.locator('.quick-input-widget input').first(), 'FAKE-CODE'),
+          'K3 FAKE-CODE is typed into the native box',
+        );
+        await page.keyboard.press('Enter');
+        const fakecoConnected = await settingsWait(
+          (doc) => {
+            const card = doc.querySelector('[data-provider="fakeco"]');
+            const first = doc.querySelector('.settings-providers > ul');
+            return (
+              card !== null &&
+              first?.contains(card) === true &&
+              card.querySelector('.settings-attempt') === null &&
+              card.textContent.includes('Signed in')
+            );
+          },
+          null,
+          15_000,
+        );
+        const announcedFakeco = await live();
+        const fakecoCard = await cardState('fakeco');
+        await shot('36m-fakeco-connected');
+        check(
+          fakecoConnected === true &&
+            fakecoCard.lines.includes('Signed in · saved by opencode for all projects') &&
+            announcedFakeco.includes('Connected to FakeCo'),
+          `K3 typing FAKE-CODE connects FakeCo: "Signed in · saved by opencode for all projects" and the live region says ${JSON.stringify(announcedFakeco.trim())}`,
+        );
         assertNoSettingsErrors('step 36 flows');
 
         // --- V10: the fake key is nowhere ---------------------------------------------------------
@@ -14387,7 +14594,7 @@ try {
             !scanned.some((entry) => entry.endsWith('unreadable')) &&
             hits.length === 0 &&
             !workbenchHas,
-          `V10 the fake key is in no webview target (scanned ${JSON.stringify(scanned)}, hits ${JSON.stringify(hits)}; the control marker typed in the search box was found: ${String(controlSeen)}) and not in the workbench DOM`,
+          `V10 the fake key is in no webview target (scanned ${JSON.stringify(scanned)}, hits ${JSON.stringify(hits)}; the control marker typed in the search box was found: ${String(controlSeen)}) and not in the outerHTML of the workbench (the values of its inputs are not read)`,
         );
         check(
           log.includes('provider connected: azure (key)') &&
