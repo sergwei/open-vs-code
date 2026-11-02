@@ -681,13 +681,34 @@ describe('real opencode', function () {
      * listing the message while the revert is staged (nothing filters it, the clients hide it);
      * `clear` publishes `cleared` and empties the revert; `commit` publishes `committed { to }` and
      * the message is GONE from `message.list`; after a commit `clear` resolves, emits nothing and
-     * the message does not come back (a committed revert cannot be undone). A call right after a
-     * `clear` can be `SessionBusyError` for a moment (the server wakes the session), so the calls
-     * after one retry on that error; its body is `{ _tag, sessionID, name }` with no `message`.
+     * the message does not come back (a committed revert cannot be undone).
      * `message.get` with the id of a message of ANOTHER session (a second `shell` session, removed
      * at once) must not return that message under this session (review S1 of the host's check).
      * The files of a revert from a real turn, and `files: false`, are NOT checked here (they need a
      * model and a git repository). The session is removed at the end.
+     *
+     * Issue #144, why the case cancels an inbox item first: `session.shell` admits its result as a
+     * `synthetic` inbox item with `resume: false` (opencode 2.0.32 `session.ts` L213-216, tag
+     * 843a6c51), pending and with no turn; `revert.clear` ends with `execution.wake` (L331-339),
+     * and the runner PROMOTES a pending item and calls the model. Before the fix the case ran a
+     * model turn on every execution, and only passed because `whenIdle` retried `SessionBusyError`
+     * until the turn ended. So the case now waits for that one `synthetic` in `inbox.list`, cancels
+     * it (`session.inbox.cancelled`), and after each `clear` waits for the run it woke to emit
+     * `session.execution.succeeded` (`untilSettled`); a `SessionBusyError` is now a failure.
+     * HYPOTHESIS: that event means the session is idle again; see the comment in `untilSettled`
+     * (the emitter runs before the coordinator drops the execution).
+     * Finally it asserts that its session saw no `session.step.started` and no
+     * `session.inbox.delivered`, and no `execution.failed|interrupted`.
+     * VERIFIED (Windows 11, opencode 2.0.32, 02/11/2026): before the fix the case failed with
+     * "AssertionError [ERR_ASSERTION]: a model turn ran in a case that must not run one" and a
+     * `seen` of `session.inbox.enqueued,session.revert.staged,session.revert.cleared,session.execution.started,session.inbox.delivered,session.step.started,…,session.execution.succeeded`;
+     * after it, three runs of `--label real-opencode --grep "commits a revert"` printed
+     * "✔ stages, clears and commits a revert on a shell message". The same day, on the final code,
+     * the full `--label real-opencode` printed "19 passing" with
+     * "✔ stages, clears and commits a revert on a shell message (1700ms)".
+     * Observed: the `clear` after a commit also publishes `execution.started` and
+     * `execution.succeeded` with nothing to run, which is why `untilSettled(2)` follows it.
+     * NOT observed: macOS/Linux, a model that is slow (the point of the fix is that it is not called).
      */
     it('stages, clears and commits a revert on a shell message', async function () {
       this.timeout(60_000);
@@ -701,7 +722,15 @@ describe('real opencode', function () {
             if (
               event.type === 'session.revert.staged' ||
               event.type === 'session.revert.cleared' ||
-              event.type === 'session.revert.committed'
+              event.type === 'session.revert.committed' ||
+              event.type === 'session.execution.started' ||
+              event.type === 'session.execution.succeeded' ||
+              event.type === 'session.execution.failed' ||
+              event.type === 'session.execution.interrupted' ||
+              event.type === 'session.step.started' ||
+              event.type === 'session.inbox.enqueued' ||
+              event.type === 'session.inbox.delivered' ||
+              event.type === 'session.inbox.cancelled'
             ) {
               if (event.data.sessionID !== sessionID) continue;
               seen.push(event.type);
@@ -726,16 +755,35 @@ describe('real opencode', function () {
           `no ${type}: ${seen.join()}`,
         );
       };
-      const whenIdle = async <T>(call: () => Promise<T>): Promise<T> => {
-        for (let attempt = 0; ; attempt += 1) {
-          try {
-            return await call();
-          } catch (error) {
-            const busy = (error as { _tag?: string })._tag === 'SessionBusyError';
-            if (!busy || attempt >= 40) throw error;
-            await sleep(250);
-          }
+      // Waits (10 s) for `count` runs of the session to have SUCCEEDED, and fails if one failed or
+      // was interrupted. A `clear` wakes the session (`execution.wake`), so the next call must wait
+      // for that run to end instead of retrying on `SessionBusyError`.
+      // HYPOTHESIS: after `session.execution.succeeded` the session is no longer active. Read in the
+      // tag 843a6c51, the order points the other way: `settled` (which publishes `succeeded`,
+      // `packages/core/src/session/execution.ts` L119-126) runs in the first `onExit` of
+      // `packages/core/src/session/run-coordinator.ts` (L101-105), BEFORE the second one (L106)
+      // calls `settle`, whose `executions.delete` (L118) is what `isActive` (L122) reads. So a window
+      // with the event seen and the session still active exists, but it is a few synchronous steps
+      // on the server against an SSE delivery plus two HTTP round trips (`session.get`, then
+      // `revert.stage`) on this side; after the second `clear` nothing here can be busy. Not
+      // observed in 4 runs on Windows (three of this case alone and the full real suite); if a
+      // `SessionBusyError` ever shows up right after this helper, poll `session.active()` instead.
+      const untilSettled = async (count: number): Promise<void> => {
+        const total = (type: string): number => seen.filter((item) => item === type).length;
+        const deadline = Date.now() + 10_000;
+        while (total('session.execution.succeeded') < count && Date.now() < deadline) {
+          await sleep(100);
         }
+        assert.ok(
+          total('session.execution.succeeded') >= count,
+          `session.execution.succeeded x${String(count)} not seen: ${seen.join()}`,
+        );
+        assert.strictEqual(total('session.execution.failed'), 0, `a run failed: ${seen.join()}`);
+        assert.strictEqual(
+          total('session.execution.interrupted'),
+          0,
+          `a run was interrupted: ${seen.join()}`,
+        );
       };
       try {
         await own.client.session.shell({ sessionID, command: 'echo revert-contract' });
@@ -747,6 +795,23 @@ describe('real opencode', function () {
           if (shellID === undefined) await sleep(250);
         }
         assert.ok(shellID, 'session.shell left no shell message in the history');
+
+        // `shell` leaves its result as a pending `synthetic` inbox item (`resume: false`); a `clear`
+        // would wake the session and run a MODEL turn on it (#144). Cancel it first.
+        let synthetic = [] as Awaited<ReturnType<typeof own.client.session.inbox.list>>;
+        const inboxDeadline = Date.now() + 10_000;
+        while (synthetic.length === 0 && Date.now() < inboxDeadline) {
+          synthetic = (await own.client.session.inbox.list({ sessionID })).filter(
+            (item) => item.type === 'synthetic',
+          );
+          if (synthetic.length === 0) await sleep(100);
+        }
+        assert.strictEqual(synthetic.length, 1, `expected one pending synthetic: ${seen.join()}`);
+        const [pending] = synthetic;
+        assert.ok(pending, 'no pending synthetic');
+        await own.client.session.inbox.cancel({ sessionID, inboxID: pending.id });
+        assert.deepStrictEqual(await own.client.session.inbox.list({ sessionID }), []);
+        await untilSeen('session.inbox.cancelled', 1);
 
         // The host trusts `message.get({ sessionID, messageID })` to be scoped to the session before
         // it stages (`stageRevert`): a message of ANOTHER session must not come back under this one.
@@ -780,18 +845,14 @@ describe('real opencode', function () {
         }
 
         await assert.rejects(
-          whenIdle(() =>
-            own.client.session.revert.stage({ sessionID, messageID: 'msg_does_not_exist' }),
-          ),
+          own.client.session.revert.stage({ sessionID, messageID: 'msg_does_not_exist' }),
           (error: unknown) => {
             assert.strictEqual((error as { _tag?: string })._tag, 'MessageNotFoundError');
             return true;
           },
         );
 
-        const staged = await whenIdle(() =>
-          own.client.session.revert.stage({ sessionID, messageID: shellID }),
-        );
+        const staged = await own.client.session.revert.stage({ sessionID, messageID: shellID });
         assert.deepStrictEqual(staged, { messageID: shellID, files: [] });
         await untilSeen('session.revert.staged', 1);
         assert.strictEqual(
@@ -804,24 +865,33 @@ describe('real opencode', function () {
           'a staged revert must not hide the message',
         );
 
-        await whenIdle(() => own.client.session.revert.clear({ sessionID }));
+        await own.client.session.revert.clear({ sessionID });
         await untilSeen('session.revert.cleared', 1);
+        await untilSettled(1);
         assert.strictEqual((await own.client.session.get({ sessionID })).revert, undefined);
 
-        await whenIdle(() => own.client.session.revert.stage({ sessionID, messageID: shellID }));
+        await own.client.session.revert.stage({ sessionID, messageID: shellID });
         await untilSeen('session.revert.staged', 2);
-        await whenIdle(() => own.client.session.revert.commit({ sessionID }));
+        await own.client.session.revert.commit({ sessionID });
         await untilSeen('session.revert.committed', 1);
         assert.strictEqual(committedTo, shellID);
         assert.ok(!(await kinds()).includes('shell'), 'a committed revert must delete the message');
 
         // A committed revert cannot be undone: `clear` resolves, says nothing, brings nothing back.
-        await whenIdle(() => own.client.session.revert.clear({ sessionID }));
+        await own.client.session.revert.clear({ sessionID });
+        await untilSettled(2);
         await sleep(1_000);
         assert.strictEqual(seen.filter((item) => item === 'session.revert.cleared').length, 1);
         assert.ok(
           !(await kinds()).includes('shell'),
           'clear after commit brought the message back',
+        );
+
+        // The case spends no model quota: no step started and no inbox item was delivered.
+        assert.deepStrictEqual(
+          seen.filter((t) => t === 'session.step.started' || t === 'session.inbox.delivered'),
+          [],
+          `a model turn ran in a case that must not run one; seen: ${seen.join()}`,
         );
       } finally {
         stream.abort();
