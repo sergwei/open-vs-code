@@ -225,9 +225,10 @@ export function parseFingerprintLine(text) {
  * because then it covers the tree only for the steps it ran; `passed` is whether the output
  * contains the final "all visual checks passed"; `bail` and `copilot` are whether it carries the
  * `--bail` or the `--with-copilot` banner), or `'stale'` with `files` (the `<kind> <path>` lines
- * that changed, or `undefined` when the manifest is missing) and `selection` (what `selectForFiles` returns for them; `undefined`
- * without the list). Same tree is not enough to be evidence: a run that failed or was cut by
- * `--bail` covers the code and proves nothing, which {@link report} turns into exit 3.
+ * that changed, or `undefined` when the manifest is missing) and `selection` (what
+ * `selectForFiles` returns for them; `undefined` without the list). Same tree is not enough to
+ * be evidence: a run that failed or was cut by `--bail` covers the code and proves nothing, which
+ * {@link report} turns into exit 3.
  */
 export function checkRun(root, savedText) {
   const saved = parseFingerprintLine(savedText);

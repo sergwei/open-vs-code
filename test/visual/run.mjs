@@ -1811,8 +1811,8 @@ let bailedAt;
 let stoppedLine;
 
 /**
- * Waits up to `ms` for the caret to be in the prompt box of the chat, proved with the real keyboard;
- * returns whether it was. Issue #127 (#100, step 22; N5 of step 32).
+ * Waits up to `ms` for the caret to be in the prompt box of the chat, proved with the real
+ * keyboard; returns whether it was. Issue #127 (#100, step 22; N5 of step 32).
  *
  * The box must be the active element of the chat document AND the chat iframe the active element of
  * the workbench: only then is a typed letter sure to land in the box and never in the editor
@@ -1823,9 +1823,9 @@ let stoppedLine;
  * expires nothing is typed and a line that is not an ok/FAIL/warn one says what each side held,
  * which answers "does the key arrive?" without a new loop. The 250 ms and 100 ms polls and the 2 s
  * wait for the typed letter are margins chosen in plan #1622 of issue #127, not measured
- * (HYPOTHESIS: a key that reaches the box shows in well under 2 s). HYPOTHESIS: that the workbench active
- * element is the iframe whenever the box is active in a document the keyboard reaches; it held in
- * the runs of steps 22 and 32 (see the README).
+ * (HYPOTHESIS: a key that reaches the box shows in well under 2 s). HYPOTHESIS: that the
+ * workbench active element is the iframe whenever the box is active in a document the keyboard
+ * reaches; it held in the runs of steps 22 and 32 (see the README).
  */
 async function caretLandsInBox(ms) {
   const reached = await waitFor(
@@ -1924,13 +1924,15 @@ function withProbeTimeout(promise) {
  * it also ends the cascade of "socket is closed" of step 24, 31/10/2026). If NO target appears
  * (a failed step left the chat hidden and VS Code destroyed the webview, which the next step's
  * `openChat` reopens) it prints `  no chat webview target after step <id>: <why>; the next step
- * reopens it` and goes on without cutting; (2) `document.hasFocus()` of the workbench stays false
- * for 3 s; (3) a `.monaco-dialog-box` is visible (decision P1=1 of Sergio, 31/10/2026: the
- * GitHub/Copilot terms dialog of `--with-copilot`, or one a failed step left open); its text
- * (`innerText`) goes in the line. A workbench probe that does not answer in 5 s is itself the
- * cause (`workbench`). The 15 s of the reopen and the 3 s of the focus wait are margins chosen in
- * plan #1622 of issue #127, not measured (HYPOTHESIS: a webview that exists is found in under 15 s;
- * the focus returns within 3 s if it is going to).
+ * reopens it`, sets `web` to `undefined` (so the passing steps do not diagnose the old
+ * connection nor repeat that line; a later step that FAILS retries the reopen, see below) and
+ * goes on without cutting; (2) `document.hasFocus()` of the
+ * workbench stays false for 3 s; (3) a `.monaco-dialog-box` is visible (decision P1=1 of
+ * Sergio, 31/10/2026: the GitHub/Copilot terms dialog of `--with-copilot`, or one a failed step
+ * left open); its text (`innerText`) goes in the line. A workbench probe that does not answer
+ * in 5 s is itself the cause (`workbench`). The 15 s of the reopen and the 3 s of the focus wait
+ * are margins chosen in plan #1622 of issue #127, not measured (HYPOTHESIS: a webview that
+ * exists is found in under 15 s; the focus returns within 3 s if it is going to).
  * VERIFIED on Windows 11, VS Code 1.144.0 (01/11/2026) by temporary mutations at the end of step 1,
  * `--steps 1,2`, all reverted: (a) `Help: About` left open plus a failed check printed "STOPPED
  * after step 1: a modal dialog of VS Code is open ("Copy OK Visual Studio Code Version: 1.144.0
@@ -1945,17 +1947,31 @@ function withProbeTimeout(promise) {
  * 1: the webview CDP socket is closed" and step 2 ran; (e) a `Runtime.evaluate` that never
  * answers (stuck, no failed check) printed "reopened the chat webview after step 1: CDP
  * Runtime.evaluate timed out after 20000 ms", the run ended with exit 0 and step 2 ran. The
- * focus cause (2) was verified on 31/10/2026 (issue #127 mutation M2: a focus probe forced to false
- * printed "STOPPED … does not have the system focus") with the code before the reopen change, and
- * was not re-run after it. Observed once in a real run, the full `--with-copilot` run of 01/11/2026,
- * which was cut at step 27 with `STOPPED after step 27: the VS Code window does not have the system
- * focus (another window is in front); the remaining steps are skipped`, while Sergio was using the
- * machine. The line is observed; that another window was really in front is HYPOTHESIS, not
- * confirmed. NOT observed: a really frozen webview, a `workbench` cause (probe timeout).
+ * focus cause (2) was verified on 31/10/2026 (issue #127 mutation M2: a focus probe forced to
+ * false printed "STOPPED … does not have the system focus") with the code before the reopen
+ * change, and was not re-run after it. Observed once in a real run, the full `--with-copilot`
+ * run of 01/11/2026, which was cut at step 27 with `STOPPED after step 27: the VS Code window
+ * does not have the system focus (another window is in front); the remaining steps are skipped`,
+ * while Sergio was using the machine. The line is observed; that another window was really in
+ * front is HYPOTHESIS, not confirmed. NOT observed: a really frozen webview, a `workbench`
+ * cause (probe timeout).
+ * Not observed: the `web = undefined` of the no-target branch (issue #136) and the retry that
+ * goes with it: while `web` is `undefined`, each later step that FAILS tries the 15 s reopen
+ * again (reason "there is no chat webview connection"; decision of Sergio), so steps that never
+ * call `openChat` do not cascade into "undefined.inDoc" errors and passing steps pay nothing.
+ * Neither ran in the final full run of 02/11/2026 (Windows 11, VS Code 1.144.0, "all visual
+ * checks passed": no step got stuck); there is no test without VS Code, and mutation (c) above
+ * plus a second failing step would exercise them.
  */
 async function diagnoseAfterFailure(id, stuck) {
   if (page === undefined) return undefined;
   let webviewProblem = stuck;
+  // A failed step with no connection (the previous diagnosis found no target, or no step has
+  // opened it yet) tries the reopen again, so steps that never call `openChat` do not cascade
+  // into "undefined.inDoc" errors.
+  if (webviewProblem === undefined && web === undefined) {
+    webviewProblem = 'there is no chat webview connection';
+  }
   if (webviewProblem === undefined && web !== undefined) {
     if (web.isClosed()) webviewProblem = 'the webview CDP socket is closed';
     else {
@@ -1975,6 +1991,9 @@ async function diagnoseAfterFailure(id, stuck) {
       if (!why.includes(WEBVIEW_NO_TARGET)) {
         return { kind: 'cdp', detail: `${webviewProblem}; reopening it failed: ${why}` };
       }
+      // Drops the old connection and its `stuckReason`: only a later step that FAILS diagnoses
+      // again (the retry at the top of this function).
+      web = undefined;
       console.log(
         `  no chat webview target after step ${id}: ${webviewProblem}; the next step reopens it`,
       );
@@ -10284,13 +10303,27 @@ try {
           }).length,
         };
       }, CHAT_FRAME);
+    // The OpenCode activity bar item TOGGLES the side bar: it is pressed only when the side bar
+    // really has no width, and otherwise the view gets up to 15 s to draw its title actions (same
+    // hardening as step 34, commit aaf31ae, where a Reload Window restores the side bar open before
+    // the actions exist). This step has no reload: here it avoids pressing the item with the side
+    // bar open and no actions yet; with the side bar open on another container it waits the 15 s
+    // before pressing. VERIFIED on Windows 11, VS Code 1.144.0 (02/11/2026), final full run: checks
+    // that open the view through it passed, "V1 light: the tree reads Needs attention first and
+    // Today after it" (and the dark, hc-dark and hc-light ones) and "V2 Default Dark Modern: the
+    // row shows [...] on hover"; not observed: the side bar open without actions in this step.
     const showSessions = async () => {
       const shows = async () =>
         (await sideState()).actions.some((label) => label.startsWith('New Session'));
-      if (!(await shows())) {
-        await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
-        await waitFor(shows, 5_000, 100);
-      }
+      const sideBarOpen = () =>
+        page.evaluate(() => {
+          const side = globalThis.document.querySelector('.part.sidebar');
+          return side !== null && side.getBoundingClientRect().width > 0 && side.checkVisibility();
+        });
+      if (await shows()) return;
+      if ((await sideBarOpen()) && (await waitFor(shows, 15_000, 100))) return;
+      await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+      await waitFor(shows, 5_000, 100);
     };
     const menuRows = async () =>
       (await page.locator('.monaco-menu .action-label').allInnerTexts())
