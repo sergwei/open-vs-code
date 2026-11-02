@@ -69,6 +69,12 @@
  * `budgetS` of 40 is the criterion above applied to the full run that the README cites
  * (02/11/2026, Windows 11, VS Code 1.144.0: 30.2 s, times 1.25 is 37.75, rounded up to 40; the
  * estimate it replaces was 35).
+ * The step 36 gained the cells F1, F2, K1-K3 and "Copy link" in E10-settings-followup (#143). Its
+ * `budgetS` of 50 is the criterion above applied to the full run of 02/11/2026 on the final tree
+ * (Windows 11, VS Code 1.144.0, "all visual checks passed", no check FAIL: 38.7 s in the
+ * final full run; times 1.25 is 48.4, rounded up to 50). Two partial
+ * runs of the same day gave 38.6 s (`--steps 36`) and 38.2 s (`--group config`); the 80 it replaces
+ * came from the 34.2 s of a run before those cells.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -119,7 +125,7 @@ export const STEPS = [
   { id: '33', needs: ['1'], sendsPrompt: true, groups: ['composer', 'render'], budgetS: 40 },
   { id: '34', needs: ['1'], sendsPrompt: true, groups: ['sessions'], budgetS: 120 },
   { id: '35', needs: ['1'], sendsPrompt: true, groups: ['config'], budgetS: 120 },
-  { id: '36', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 80 },
+  { id: '36', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 50 },
   { id: '37', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 40 },
 ];
 
