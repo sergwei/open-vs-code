@@ -9,6 +9,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Mods**: JavaScript you write yourself, loaded only from `~/.config/opencode-station/mods`
+  (never from a project), each in its own Worker. A mod can show a status band in the chat, add
+  commands to the `/` menu and to **OpenCode: Run Mod Command…**, show a toast, compose a prompt,
+  open its own panel beside the chat and observe the turns, tools and permissions of a session. A
+  mod that throws or hangs is stopped without affecting the chat. Mods are not a sandbox: they run
+  with your permissions. Turn them off with `openVsCode.mods.enabled`. See `docs/mods.md`.
 - OpenCode Settings tab, follow-up: in a remote window every OAuth method says its sign-in may not
   work if it sends you back from the browser; a sign-in link whose query VS Code would rewrite
   (`%26`, `%2B`, `%3D`) is not opened and the notification offers **Copy link**; after you enter
