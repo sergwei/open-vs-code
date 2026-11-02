@@ -323,7 +323,11 @@ always `opencode`.
 - OpenCode Settings tab: opencode does not check an API key when you connect it, so the tab says
   "Connected" even with a wrong key and the failure shows on your first prompt. Browser OAuth
   methods probably fail in a remote window (SSH, WSL, Codespaces), because opencode listens for the
-  callback on the remote machine; device-code methods work, and the tab does not warn about it yet.
+  callback on the remote machine; device-code methods work. In a remote window the tab says under
+  every OAuth method that the sign-in "may not work if it sends you back from the browser" (it also
+  says it for device-code methods, which do work). When the sign-in link carries `%26`, `%2B` or
+  `%3D` in its query, VS Code would change it on its way to the browser, so the tab does not open
+  it: the notification offers **Copy link** and you open the link in your browser yourself.
   "Sign in with ChatGPT" uses the fixed port 1455, which another process may already hold.
   opencode saves the credentials for all your projects, not only this one. The tab does not come
   back after Reload Window.
