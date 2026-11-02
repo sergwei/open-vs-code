@@ -24,8 +24,11 @@
  * the board; buttons and inner boxes 6px; small marks (inline code, error words) 4px, and the 18px
  * image thumbnail keeps 2px. Buttons and tool cards go past the board, which kept them at 2px and
  * 4px: Sergio asked for rounder buttons and boxes (01/11/2026). Rows that mark their state with a
- * left bar stay square, or the bar would bend. Radii are not colours, so they are plain values and
- * not --vscode-* variables.
+ * left bar stay square, or the bar would bend (`.message-assistant` zeroes the 4px of `.message`
+ * for that reason). Markdown tables and blockquotes, diff lines and the buttons without a box
+ * (`.link-button`) set no radius and stay square on purpose; checked by grep of their rules in
+ * this file (02/11/2026). Radii are not colours, so they are plain values and not --vscode-*
+ * variables.
  */
 :root {
   --ovc-radius-sm: 4px;
@@ -442,6 +445,7 @@ button.jump-latest {
 
 .message-assistant {
   border-left: 2px solid var(--vscode-textBlockQuote-border);
+  border-radius: 0;
 }
 
 .message-files {
