@@ -34,6 +34,8 @@ import {
   type SessionListSink,
 } from './chatController';
 import { createOpencodeClient } from './opencodeClient';
+import type { ModEvent } from '../mods/api';
+import { createModsSink, type ModsSink } from './modEvents';
 import { startServer, stopServer, type RunningServer, type ServerLog } from './opencodeServer';
 import type { PendingSummary } from './pendingRequests';
 import type { ServerState } from './serverManager';
@@ -70,13 +72,17 @@ async function waitUntil(check: () => boolean, label: string, timeoutMs = 8_000)
   }
 }
 
-/** Starts the fixture and a controller wired to it with the real client. */
+/**
+ * Starts the fixture and a controller wired to it with the real client. The last parameter is the
+ * optional mods sink (E10-mods) handed to the controller as its `mods` dependency.
+ */
 async function boot(
   mode: string,
   confirmDelete: (info: { title: string; running: boolean }) => Promise<boolean> = () =>
     Promise.resolve(true),
   extraEnv: Record<string, string> = {},
   sessionList?: SessionListSink,
+  mods?: ModsSink,
 ) {
   const folder = await mkdtemp(path.join(os.tmpdir(), 'ovsc-chat-'));
   folders.push(folder);
@@ -96,6 +102,7 @@ async function boot(
   const core = new ChatController({
     createClient: createOpencodeClient,
     ...(sessionList === undefined ? {} : { sessionList }),
+    ...(mods === undefined ? {} : { mods }),
     editor: {
       open: () => Promise.resolve(),
       editorContext: () => Promise.resolve({ refs: [], ranged: 0, unsaved: false }),
@@ -1994,5 +2001,93 @@ describe('two panes over HTTP and SSE against the synthetic server', () => {
         { type: 'request.result', requestId: 'r1' },
       ]);
     }
+  }, 30_000);
+});
+
+// E10-mods (phase 2). Protects the wiring that the unit tests of `modEvents.ts` cannot see: that
+// `ChatController.onEvent` hands the real stream to the mods sink BEFORE its early returns, so a
+// whole permission turn reaches mods in order, with the tool name taken from `tool.input.started`
+// (lesson `tool-called-sin-nombre`). The server is the SYNTHETIC fake (ids and timings invented,
+// event order copied from a real 2.0.32 per the fixture header): it proves our wiring, not the
+// real server's emissions.
+describe('the mods sink against the synthetic server', () => {
+  it('receives a whole permission turn in order, with the tool name', async () => {
+    const received: ModEvent[] = [];
+    const sink = createModsSink((event) => received.push(event));
+    const booted = await boot('ok', undefined, undefined, undefined, sink);
+    const { controller, posted, state } = booted;
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'r1',
+      text: 'ASK_PERMISSION read .env',
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(() => posted.some((m) => m.type === 'permission.asked'), 'permission.asked');
+    const asked = posted.find((m) => m.type === 'permission.asked');
+    if (asked?.type !== 'permission.asked') throw new Error('no permission.asked');
+    await controller.handle({
+      type: 'permission.reply',
+      requestId: 'p1',
+      sessionID: asked.permission.sessionID,
+      permissionID: asked.permission.id,
+      decision: 'once',
+    });
+    await waitUntil(() => received.some((e) => e.type === 'turn.finished'), 'turn.finished');
+
+    const types = received.map((e) => e.type);
+    expect(types[0]).toBe('turn.started');
+    expect(types).toEqual(
+      expect.arrayContaining([
+        'tool.called',
+        'permission.asked',
+        'permission.replied',
+        'tool.finished',
+        'turn.finished',
+      ]),
+    );
+    expect(types.indexOf('permission.asked')).toBeLessThan(types.indexOf('permission.replied'));
+    expect(types.indexOf('permission.replied')).toBeLessThan(types.indexOf('turn.finished'));
+    expect(received.find((e) => e.type === 'tool.called')).toMatchObject({ tool: 'read' });
+    expect(received.find((e) => e.type === 'permission.asked')).toMatchObject({
+      action: 'read',
+      resources: ['.env'],
+    });
+    expect(received.find((e) => e.type === 'turn.finished')).toMatchObject({
+      outcome: 'succeeded',
+    });
+    // Nothing the mods got carries the server URL or the password.
+    const everything = JSON.stringify(received);
+    expect(everything).not.toContain(state.kind === 'running' ? state.server.password : 'x');
+  }, 30_000);
+
+  it('a sink that throws does not stop the chat from handling the stream', async () => {
+    const throwing: ModsSink = {
+      event: () => {
+        throw new Error('sink bug');
+      },
+    };
+    const { controller, posted, state } = await boot(
+      'ok',
+      undefined,
+      undefined,
+      undefined,
+      throwing,
+    );
+    controller.onServerState(state);
+    await waitUntil(() => posted.some((m) => m.type === 'snapshot'), 'first snapshot');
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'r1',
+      text: 'Reply with exactly: hi',
+      delivery: 'queue',
+      files: [],
+    });
+    await waitUntil(
+      () => posted.some((m) => m.type === 'session.status' && m.status.type === 'idle'),
+      'the turn to finish',
+    );
   }, 30_000);
 });

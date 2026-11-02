@@ -47,7 +47,8 @@ const problemMatcherPlugin = {
 };
 
 /**
- * Bundles the extension host into `dist/extension.js`, optionally watching.
+ * Bundles the extension host into `dist/extension.js` and the mod Worker bootstrap
+ * (`src/mods/worker.ts`) into `dist/modWorker.js`, optionally watching.
  *
  * `vscode` is external (provided by the host at runtime). Format is cjs
  * because VS Code loads extensions with `require`; never add `"type": "module"`
@@ -56,11 +57,13 @@ const problemMatcherPlugin = {
  * (read from microsoft/vscode release/1.105 `.npmrc`, not executed here).
  * VERIFIED in watch mode: the F5 preLaunchTask on Windows 11 (2026-10-19)
  * produced a `dist/extension.js` that VS Code loaded and activated.
- * UNVERIFIED: the one-shot `ctx.rebuild()` path and `--production`.
+ * VERIFIED (02/11/2026, Windows 11): the one-shot `ctx.rebuild()` path, because `build:host` inside
+ * `npm run test:integration` left both `dist/extension.js` and `dist/modWorker.js` and the mods
+ * suite started a Worker from the latter. UNVERIFIED: `--production`.
  */
 async function main() {
-  const ctx = await esbuild.context({
-    entryPoints: ['src/extension/extension.ts'],
+  // Same options for both bundles; only the entry and the output differ.
+  const common = {
     bundle: true,
     format: 'cjs',
     minify: production,
@@ -68,16 +71,30 @@ async function main() {
     sourcesContent: false,
     platform: 'node',
     target: 'node22',
-    outfile: 'dist/extension.js',
-    external: ['vscode'],
     logLevel: 'silent',
     plugins: [problemMatcherPlugin],
+  };
+  const ctx = await esbuild.context({
+    ...common,
+    entryPoints: ['src/extension/extension.ts'],
+    outfile: 'dist/extension.js',
+    external: ['vscode'],
+  });
+  // E10-mods: the bootstrap each mod's Worker runs. A separate file because `new Worker(file)`
+  // needs a path; it imports no `vscode` (ESLint forbids it) and has nothing external. The
+  // `[watch] build started/finished` lines print once per context, which the F5 problem matcher
+  // tolerates (it only waits for the last `finished` of the background task: HYPOTHESIS, check
+  // in the next F5 that the preLaunchTask still completes).
+  const workerCtx = await esbuild.context({
+    ...common,
+    entryPoints: ['src/mods/worker.ts'],
+    outfile: 'dist/modWorker.js',
   });
   if (watch) {
-    await ctx.watch();
+    await Promise.all([ctx.watch(), workerCtx.watch()]);
   } else {
-    await ctx.rebuild();
-    await ctx.dispose();
+    await Promise.all([ctx.rebuild(), workerCtx.rebuild()]);
+    await Promise.all([ctx.dispose(), workerCtx.dispose()]);
   }
 }
 

@@ -367,6 +367,30 @@ describe('autoStart (issue #124)', () => {
   });
 });
 
+// E10-mods (phase 2). The switch is scope `machine` on purpose: a mod is code that runs with the
+// user's permissions, so a repository's `.vscode/settings.json` must not be able to turn it on.
+// The four commands are palette commands (no arguments), so all four are contributed. The data is
+// the REAL package.json.
+describe('mods (E10-mods)', () => {
+  it('declares the enabled switch with scope machine, default true and its constant', () => {
+    const setting = manifest.contributes.configuration.properties[ids.MODS_ENABLED_SETTING];
+    expect(ids.MODS_ENABLED_SETTING).toBe(`${ids.CONFIG_SECTION}.${ids.MODS_ENABLED_KEY}`);
+    expect(setting).toMatchObject({ type: 'boolean', default: true, scope: 'machine' });
+  });
+
+  it('contributes the four mod commands under the OpenCode category', () => {
+    for (const id of [
+      ids.MANAGE_MODS_COMMAND_ID,
+      ids.RELOAD_MODS_COMMAND_ID,
+      ids.OPEN_MODS_FOLDER_COMMAND_ID,
+      ids.RUN_MOD_COMMAND_ID,
+    ]) {
+      const command = manifest.contributes.commands.find((c) => c.command === id);
+      expect(command?.category, id).toBe('OpenCode');
+    }
+  });
+});
+
 describe('chat location (issue #77)', () => {
   const views = manifest.contributes.views[ids.VIEW_CONTAINER_ID] ?? [];
   const commandIds = manifest.contributes.commands.map((c) => c.command);

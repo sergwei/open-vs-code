@@ -145,10 +145,37 @@
           "scope": "window",
           "order": 5,
           "markdownDescription": "Launch the opencode server when the window starts. Turn it off to keep the window from launching a server by itself: the chat shows **not started**, and **OpenCode: Restart Server**, the Start button or your first prompt starts it. Has no effect while `#openVsCode.serverUrl#` is set. Turning it back on starts the server at once."
+        },
+        "openVsCode.mods.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "order": 6,
+          "markdownDescription": "Load the **mods** found in the OpenCode mods folder (**OpenCode: Open Mods Folder**). A mod is JavaScript that runs with your user's permissions, in its own worker thread: it is **not** sandboxed. Turn this off to load none. Only you can change it: a workspace cannot. Takes effect at once, without reloading the window."
         }
       }
     },
     "commands": [
+      {
+        "command": "openVsCode.manageMods",
+        "title": "Manage Mods…",
+        "category": "OpenCode"
+      },
+      {
+        "command": "openVsCode.reloadMods",
+        "title": "Reload Mods",
+        "category": "OpenCode"
+      },
+      {
+        "command": "openVsCode.openModsFolder",
+        "title": "Open Mods Folder",
+        "category": "OpenCode"
+      },
+      {
+        "command": "openVsCode.runModCommand",
+        "title": "Run Mod Command…",
+        "category": "OpenCode"
+      },
       {
         "command": "openVsCode.showLogs",
         "title": "Show Logs",

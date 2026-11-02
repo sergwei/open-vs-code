@@ -49,6 +49,13 @@ const TRANSVERSAL = [
  * the chosen groups means the rule is too narrow, so widen it or make the file cross-cutting.
  */
 export const AFFECTED_RULES = [
+  // E10-mods: the mods code, its host half and the band component (step 38). `src/shared/`,
+  // `chatController.ts` and `test-fixtures/` (where the mod fixtures live) are cross-cutting already.
+  {
+    pattern:
+      /^src\/mods\/|^src\/extension\/(modDiscovery|modHost|modEvents|modsLifecycle|modsChat|modPanel\w*)\.ts$|^webview-ui\/src\/mods\//,
+    groups: ['mods'],
+  },
   { pattern: /^webview-ui\/src\/sessions\//, groups: ['sessions'] },
   {
     pattern:

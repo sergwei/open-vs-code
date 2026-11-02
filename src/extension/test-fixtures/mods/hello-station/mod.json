@@ -1,0 +1,8 @@
+{
+  "id": "hello-station",
+  "name": "Hello Station",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "main": "index.mjs",
+  "description": "Test fixture: registers the command hello and writes a sentinel file when it runs."
+}

@@ -82,6 +82,30 @@ export type AgentOption = { id: string; name: string; description?: string };
 export type CommandOption = { name: string; description?: string };
 
 /**
+ * A command a mod registered (E10-mods, phase 3), as the "/" menu lists it. `name` is the QUALIFIED
+ * `<modId>:<command>` the user types and `mod.command.run` carries; `modId` says which mod owns it
+ * so the menu can show it. It is a {@link CommandOption}, so the same filter and popup list it next
+ * to the server's commands, which win when a name clashes.
+ */
+export type ModCommandOption = CommandOption & { modId: string };
+
+/**
+ * The status line one mod pinned above the composer (E10-mods, phase 3). Everything is plain text
+ * the webview prints as text, never as markup: `text` (at most 120 characters, capped by the mods
+ * wire), `tooltip` (at most 500) and `modName`. `command` is the QUALIFIED name of a command of the
+ * same mod (`<modId>:<command>`) that the band's button runs, and is present only when that command
+ * exists. `severity` is always set (`info` when the mod gave none).
+ */
+export type ModBand = {
+  modId: string;
+  modName: string;
+  text: string;
+  tooltip?: string;
+  severity: 'info' | 'warning' | 'error';
+  command?: string;
+};
+
+/**
  * What the host knows about the server's models, agents and commands (issues #23/#24/#33), pushed
  * to the webview in the `catalog` message and replaced whole whenever it reloads.
  *

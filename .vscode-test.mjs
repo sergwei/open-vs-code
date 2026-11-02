@@ -71,6 +71,11 @@ const env = {
   ),
   OPEN_VS_CODE_TEST_USER_DATA_DIR: userDataDir,
   OPEN_VS_CODE_TEST_NODE: process.execPath,
+  // E10-mods: the mods root of EVERY label. Without it the extension would load the developer's
+  // real mods from `~/.config/opencode-station/mods` (and one of them could compose a prompt in
+  // the real-opencode suite). The folder does not exist until `mods.test.ts` seeds it: a missing
+  // root means no mods.
+  OPEN_VS_CODE_MODS_HOME: path.join(import.meta.dirname, '.vscode-test', 'mods-home'),
   // Opt-in suite `realOpencode.test.ts`: absolute path to a real opencode v2 executable. Passed
   // through only when set; the suite and its configuration below exist only in that case.
   OPEN_VS_CODE_REAL_OPENCODE: process.env.OPEN_VS_CODE_REAL_OPENCODE,

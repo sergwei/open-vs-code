@@ -1055,6 +1055,43 @@ describe('the session list (issue #20)', () => {
   });
 });
 
+// E10-mods, phase 3. FABRICATED `mods.state` messages. Protects: a state that merges with the old one
+// instead of replacing it (a stopped mod's band, or a removed command, would stay on screen), and a
+// band whose text did not change being re-created (its button would lose the focus).
+describe('mods state (E10-mods)', () => {
+  const band = (text: string) => ({
+    modId: 'hello-station',
+    modName: 'Hello Station',
+    text,
+    severity: 'info' as const,
+  });
+
+  it('starts empty and REPLACES bands and commands whole on every mods.state', () => {
+    withStore((store) => {
+      expect(store.state.mods).toEqual({ bands: [], commands: [] });
+      store.apply({
+        type: 'mods.state',
+        bands: [band('one')],
+        commands: [{ modId: 'hello-station', name: 'hello-station:hello' }],
+      });
+      expect(store.state.mods.bands.map((b) => b.text)).toEqual(['one']);
+      expect(store.state.mods.commands.map((c) => c.name)).toEqual(['hello-station:hello']);
+      store.apply({ type: 'mods.state', bands: [], commands: [] });
+      expect(store.state.mods).toEqual({ bands: [], commands: [] });
+    });
+  });
+
+  it('keeps the band object of the same mod and updates it in place', () => {
+    withStore((store) => {
+      store.apply({ type: 'mods.state', bands: [band('one')], commands: [] });
+      const before = store.state.mods.bands[0];
+      store.apply({ type: 'mods.state', bands: [band('two')], commands: [] });
+      expect(store.state.mods.bands[0]).toBe(before);
+      expect(before?.text).toBe('two');
+    });
+  });
+});
+
 // E5 / issues #23 and #24. FABRICATED catalog and snapshots. Protects: a catalog that merges with the
 // old one instead of replacing it (a model that left would stay pickable); a draft that leaks into
 // another session (the next prompt would switch THAT session to the model chosen for this one) or
