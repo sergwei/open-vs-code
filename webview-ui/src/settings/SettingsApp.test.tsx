@@ -406,6 +406,25 @@ describe('focus when a row changes list', () => {
     expect(document.activeElement).toBe(cardOf(container));
   });
 
+  // Protects F2 of `test:visual` step 36 (full run of 02/11/2026: Escape ended with hasFocus true
+  // and the `body` active): the `focus` event of `window` can arrive while `document.hasFocus()` is
+  // still false and no second event follows, so that event must not use the parked request up.
+  // Provenance: FABRICATED order (HYPOTHESIS that VS Code produces it), `hasFocus` stubbed.
+  for (const outcome of ['connected', 'idle'] as const) {
+    it(`${outcome === 'connected' ? 'Enter' : 'Escape'}: a focus event before the document has the focus does not consume the request`, async () => {
+      const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+      const { container, apply } = setup(stateWith('idle'));
+      pressConnect(container);
+      apply({ type: 'settings.state', state: stateWith('attempt') });
+      apply({ type: 'settings.state', state: stateWith(outcome) });
+      windowFocus(); // hasFocus is still false here
+      expect(document.activeElement).not.toBe(cardOf(container));
+      hasFocus.mockReturnValue(true); // and no other focus event comes
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(document.activeElement).toBe(cardOf(container));
+    });
+  }
+
   // Protects the `active === null || active === document.body` guard of `onWindowFocus` against a
   // focus chosen OUTSIDE `.settings-providers` (the "MCP servers" tab): the section's own `focusin`
   // handler never sees it, so the parked request is still armed when the window focus arrives.

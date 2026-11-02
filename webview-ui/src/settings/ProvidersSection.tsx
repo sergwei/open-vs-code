@@ -4,6 +4,15 @@ import { ProviderCard, type SendSettings } from './ProviderCard';
 import type { SettingsStoreState } from './settingsStore';
 import type { SettingsUi } from './settingsUiState';
 
+/**
+ * After a `focus` event that finds the document still unfocused, the parked request is retried
+ * every 50 ms, 20 times (1 s). Values picked by hand: the gap between the event and
+ * `document.hasFocus()` has never been measured (HYPOTHESIS that it exists), and the cap only keeps
+ * the interval from running forever when the focus went somewhere else.
+ */
+const POLL_MS = 50;
+const POLL_TICKS = 20;
+
 /** True when `row` matches the search text (name or id, ignoring case and surrounding spaces). */
 export function matchesSearch(row: ProviderRow, search: string): boolean {
   const needle = search.trim().toLowerCase();
@@ -48,13 +57,17 @@ export function matchesSearch(row: ProviderRow, search: string): boolean {
  * box is closed" and "ok   F2 Escape in the native box closes it (true), Azure is back in Add a
  * provider (true) and its card has the focus with the document focused (true; document
  * {"hasFocus":true,"active":"LI","activeProvider":"azure"}), and the host never logged "provider
- * connected: azure"". The same two lines, with the same text, passed in the full run of 02/11/2026
- * on the final tree (Windows 11, VS Code 1.144.0, "all visual checks passed"). The first of three runs that had the cell, before the toast of VS
- * Code was cleared for a later cell, printed F2 as FAIL (focus not back in 3 s; cause unknown,
- * HYPOTHESIS: the toast of VS Code in that run is not shown to be the cause); it passed in the next
- * two.
- * Not observed: which of the two orders VS Code produced in each run, a screen reader, macOS and
- * Linux.
+ * connected: azure"". F2 also FAILED in two runs on idle or loaded machines (the first run that had
+ * the cell, and a full run of the final tree: document {"hasFocus":true,"active":"BODY",
+ * "activeProvider":null}): the card ended unfocused, but that diagnostic does not say whether the
+ * request had been used up or was still parked and never served. HYPOTHESIS for the cause, not
+ * observed: a `focus` event of `window` that arrives while `document.hasFocus()` is
+ * still false, with no second event after it; the request now stays parked in that case and is
+ * retried every 50 ms for 1 s (`serve`, `onWindowFocus`), and the jsdom cases "a focus event before
+ * the document has the focus does not consume the request" (Enter and Escape) went red without it.
+ * With it, F1 and F2 passed in five `--steps 36` runs and in the final full run (2/11/2026, the
+ * same texts as above). Not observed: which order VS Code produced in each run, the gap between the event and
+ * `hasFocus()` in a real run, a screen reader, macOS and Linux.
  */
 export function ProvidersSection(props: {
   state: SettingsStoreState;
@@ -85,22 +98,55 @@ export function ProvidersSection(props: {
     Array.from(container?.querySelectorAll<HTMLElement>('[data-provider]') ?? []).find(
       (element) => element.getAttribute('data-provider') === id,
     );
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  const stopPolling = (): void => {
+    if (pollTimer !== undefined) clearInterval(pollTimer);
+    pollTimer = undefined;
+  };
   const disarm = (): void => {
     armedID = undefined;
+    stopPolling();
     if (listening) window.removeEventListener('focus', onWindowFocus);
     listening = false;
   };
-  function onWindowFocus(): void {
+  /**
+   * Serves the parked request if it can be served now. True when it is over: nothing is armed,
+   * it was served (which includes the guard leaving a focus the user chose where it is), or its id
+   * is no longer the one the user acted on; false when it stays parked: the document has no focus
+   * yet (the native box, or the host page around the webview, still holds it), or the card is not
+   * in the DOM yet. Nothing is consumed in the false cases: a `focus` event that arrives while
+   * `document.hasFocus()` is still false must not use the request up (E10-settings-followup, F2).
+   */
+  const serve = (): boolean => {
     const id = armedID;
-    disarm();
-    if (id === undefined || untrack(focusID) !== id || !document.hasFocus()) return;
+    if (id === undefined) return true;
+    if (untrack(focusID) !== id) {
+      disarm();
+      return true;
+    }
+    if (!document.hasFocus()) return false;
+    const card = cardOf(id);
+    if (card === undefined) return false;
     // Only an idle focus (nothing, or the body the destroyed button left) is taken: a field the
     // user chose in the meantime stays.
     const active = document.activeElement;
-    if (active === null || active === document.body) cardOf(id)?.focus();
+    if (active === null || active === document.body) card.focus();
     // While the attempt still runs the request stays: if the row then goes back to "Add a
     // provider" (Escape) its card is a new element, and the end of the attempt focuses that one.
     if (untrack(() => props.state.attempt) === undefined) setFocusID(undefined);
+    disarm();
+    return true;
+  };
+  function onWindowFocus(): void {
+    if (serve()) return;
+    // The event can come before `document.hasFocus()` says true, and no second event follows: look
+    // again every POLL_MS for up to POLL_TICKS, then give up polling (the listener stays armed).
+    stopPolling();
+    let ticks = 0;
+    pollTimer = setInterval(() => {
+      ticks++;
+      if (serve() || ticks >= POLL_TICKS) stopPolling();
+    }, POLL_MS);
   }
   const arm = (id: string): void => {
     armedID = id;
