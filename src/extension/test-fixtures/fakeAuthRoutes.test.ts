@@ -33,7 +33,20 @@ afterEach(async () => {
   for (const server of servers.splice(0)) await stopServer(server.child, quiet);
 });
 
-/** Starts the fake and returns a real client for it, the base URL and a recorder of event types. */
+/**
+ * Starts the fake and returns a real client for it, the base URL and a recorder of event types.
+ *
+ * The recorder leaves out `mcp.*` events: the fake fills its MCP list on its own timer
+ * (`MCP_FILL_DELAY_MS`, 300 ms after start) and announces it with `mcp.status.changed` and
+ * `mcp.resources.changed`, which have nothing to do with the auth routes. Recording them made the
+ * order checks depend on how fast the runner was: VERIFIED on the macOS CI job 125405021576 of PR
+ * #152 (02/11/2026), where "connects with a key (204, even an empty one), adds the connection and
+ * publishes the spike order" received the five auth events plus four `mcp.status.changed` and one
+ * `mcp.resources.changed`. Reproduced on Windows 11 the same day by stretching the 200 ms wait
+ * below to 450 ms (so the fill lands inside the recording): without the filter that case, "runs an
+ * auto attempt: pending, then complete once the approval page is opened" and "removes a credential
+ * (204) and 404s an unknown one" failed; with it all 8 cases passed. Both edits were reverted.
+ */
 async function start() {
   const folder = await mkdtemp(path.join(os.tmpdir(), 'ovsc-auth-'));
   const server = await startServer({
@@ -60,7 +73,9 @@ async function start() {
   void (async () => {
     try {
       for await (const event of api.event.subscribe({ signal: stop.signal })) {
-        if (event.type !== 'server.connected') events.push(event.type);
+        if (event.type !== 'server.connected' && !event.type.startsWith('mcp.')) {
+          events.push(event.type);
+        }
       }
     } catch {
       // The stream ends with the server or the abort.
