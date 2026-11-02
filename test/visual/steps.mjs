@@ -63,6 +63,12 @@
  * #125) came after it too: it needs the 1 (it drives the chat), makes its own sessions and sends
  * six turns. Its `budgetS` of 40 is an ESTIMATE (the 24, with 36 cells, has 50): recalibrate it
  * from its first full run with the criterion above.
+ * The step 37 (the README crops with the chat in an editor tab, issue #126) came after it too: it
+ * needs the 1 (it starts from the side bar chat), sends three prompts (the Markdown one and the two
+ * "Reply with exactly" turns of the fork) and ends with `chatLocation` back at `sidebar`. Its
+ * `budgetS` of 40 is the criterion above applied to the full run that the README cites
+ * (02/11/2026, Windows 11, VS Code 1.144.0: 30.2 s, times 1.25 is 37.75, rounded up to 40; the
+ * estimate it replaces was 35).
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -114,6 +120,7 @@ export const STEPS = [
   { id: '34', needs: ['1'], sendsPrompt: true, groups: ['sessions'], budgetS: 120 },
   { id: '35', needs: ['1'], sendsPrompt: true, groups: ['config'], budgetS: 120 },
   { id: '36', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 80 },
+  { id: '37', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 40 },
 ];
 
 /** Every valid id, in canonical order. */
