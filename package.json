@@ -1,7 +1,7 @@
 {
   "name": "open-vs-code",
-  "displayName": "OpenCode GUI",
-  "description": "A mouse-friendly chat interface for opencode, an unofficial client of its local server.",
+  "displayName": "OpenCode Station",
+  "description": "Unofficial GUI for opencode in Visual Studio Code",
   "version": "0.0.1",
   "publisher": "sergwei",
   "license": "SEE LICENSE IN LICENSE",

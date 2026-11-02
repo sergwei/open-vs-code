@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 interface Manifest {
+  displayName: string;
+  description: string;
   version: string;
   license?: string;
   icon?: string;
@@ -129,9 +131,19 @@ function tableKeys(markdown: string, row: RegExp): string[] {
  * from letting anyone compete with the extension once it stops being provided (decision of
  * 2026-11-02). HYPOTHESIS, a legal reading of the official 1.0.0 text (Discontinued Products
  * section, read on 2026-11-02) that no test can check and that is not legal advice. The line
- * names the line of business and the repository, not the display name, which issue #126 is about
- * to change. Mutation tried by hand on 2026-11-02 (Windows 11, `npx vitest run` of this file): the
- * line removed from LICENSE turned the license test red, then reverted.
+ * names the line of business and the repository, not the display name, which issue #126 changed.
+ * Mutation tried by hand on 2026-11-02 (Windows 11, `npx vitest run` of this file): the line
+ * removed from LICENSE turned the license test red, then reverted.
+ *
+ * The name test (#79, #126) guards the display name and description chosen on 2026-10-31 and
+ * 2026-11-02: "OpenCode GUI" is the name of another extension (`TanishqKancharla.opencode-vscode`),
+ * and the Marketplace brand guidelines keep the product name free of "VS Code", so that mention
+ * lives in the description. Provenance: the REAL package.json and README. Mutations tried by hand
+ * on 2026-11-02 (Windows 11, `npx vitest run` of this file), each turning that test red, then
+ * reverted: `displayName` set to "OpenCode GUI" and then to "OpenCode for VS Code" (both fail on
+ * the exact-name assertion, so the "VS Code" assertion itself was never reached alone), and the
+ * README title set to "# OpenCode GUI" (fails on the title assertion). Not tried: a description
+ * that differs only in the README, and the JSON-wide "OpenCode GUI" search on its own.
  */
 describe('Marketplace metadata (package.json)', () => {
   it('declares the PolyForm Shield license, with the notice and terms in LICENSE and the README', () => {
@@ -148,6 +160,16 @@ describe('Marketplace metadata (package.json)', () => {
       'Any purpose is a permitted purpose, except for providing any product that competes with the software',
     );
     expect(readText('README.md')).toContain('[PolyForm Shield License 1.0.0](LICENSE)');
+  });
+
+  it('names the extension OpenCode Station, with the brand mention in the description only', () => {
+    expect(manifest.displayName).toBe('OpenCode Station');
+    expect(manifest.description).toBe('Unofficial GUI for opencode in Visual Studio Code');
+    expect(manifest.displayName).not.toMatch(/VS Code|Visual Studio Code/i);
+    expect(readme.split(/\r?\n/)[0]).toBe(`# ${manifest.displayName}`);
+    expect(readme).toContain(`${manifest.description}.`);
+    expect(readme).not.toContain('OpenCode GUI');
+    expect(JSON.stringify(manifest)).not.toContain('OpenCode GUI');
   });
 
   it('points at a square PNG icon of at least 128 px', () => {

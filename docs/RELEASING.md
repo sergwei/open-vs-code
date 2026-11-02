@@ -1,6 +1,6 @@
 # Releasing
 
-How a version of OpenCode GUI reaches the VS Code Marketplace and Open VSX (issue #43). Nothing
+How a version of OpenCode Station reaches the VS Code Marketplace and Open VSX (issue #43). Nothing
 here is run by an agent: the one-time setup, the tag and the approval are done by hand by the
 maintainer.
 
@@ -41,10 +41,12 @@ Do all of this **before the first tag**.
 
 ### 1. The display name
 
-The package's `displayName` is "OpenCode GUI", and the Marketplace already lists
-`TanishqKancharla.opencode-vscode` under that name. Whether the Marketplace rejects a duplicate
-display name is unverified. **Choose another `displayName` before the first tag** (a separate
-issue, not part of the release workflow); the first Marketplace publish is the real test.
+The package's `displayName` is "OpenCode Station". It was chosen because "OpenCode GUI" is taken
+(the Marketplace lists `TanishqKancharla.opencode-vscode` under that name), and it was checked
+free on 2026-10-31 by exact display name, ignoring case, in the Marketplace (gallery
+`extensionquery`) and in Open VSX (`api/-/search`). Whether the Marketplace would reject a
+duplicate display name no longer matters; the first Marketplace publish is still the real test of
+the name.
 
 ### 2. VS Code Marketplace
 

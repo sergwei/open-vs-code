@@ -1,4 +1,6 @@
-# OpenCode GUI
+# OpenCode Station
+
+Unofficial GUI for opencode in Visual Studio Code.
 
 A mouse-friendly chat interface for [opencode](https://github.com/anomalyco/opencode), inside
 VS Code. It gives opencode the kind of graphical interface the Claude Code extension has, so you
@@ -17,7 +19,7 @@ affiliated with opencode or with Microsoft.
 - **Streaming chat** with Markdown, syntax highlighting and code actions: copy, insert at the
   cursor, open in a new file, and open `path:line` references in the editor.
 
-  ![The chat view showing a reply with TypeScript and bash code blocks, a table and a list, each code block with Copy, Insert and New file buttons](docs/images/chat-markdown.png)
+  ![A chat tab showing a reply with a TypeScript and a bash code block (each with Copy, Insert and New file buttons), a table, a bullet list and inline code](docs/images/chat-markdown.png)
 
 - **Permission and question cards.** When opencode asks, you answer with a click. With the chat
   hidden, or (with chat tabs) when the request belongs to a tab that is not in front, you get a
@@ -28,7 +30,7 @@ affiliated with opencode or with Microsoft.
 - **Sessions:** a list with groups and search, rename, delete, fork from any of your messages and
   jump into subagent sessions. The open session is remembered per workspace.
 
-  ![A forked session with a "Forked from" crumb above the first exchange and the Fork from here button on the message](docs/images/fork-session.png)
+  ![A forked session in a chat tab: a "Forked from" crumb at the top, the first exchange only, the Fork from here and Revert from here buttons on the user message, and the next message ("Reply with exactly: TWO") waiting in the prompt box](docs/images/fork-session.png)
 
 - **Organize the Sessions tree** (with `chatLocation` set to `editor`). Put sessions in **folders**
   (and folders inside folders) by dragging the rows or with **Move to Folder…**, **Pin** the ones
@@ -63,7 +65,7 @@ affiliated with opencode or with Microsoft.
   and a connection dot); it opens a panel where you choose the agent (Build, Plan…), the model and,
   when the model offers them, a reasoning variant.
 
-  ![The model picker open above the prompt box, with a search field and a list of models grouped by provider](docs/images/model-picker.png)
+  ![The agent and model panel open above the prompt box of a chat tab: the agents (Build, Plan, Docs) on the left, a model search and the models by provider on the right, and the reasoning levels under them](docs/images/agent-model-chip.png)
 
 - **Slash commands (issue #33):** type `/` at the start of the prompt, or press the **/** button
   next to the "+", to list opencode's commands (the built-in `init` and `review`, the ones in your
