@@ -2471,20 +2471,36 @@ export class ChatController {
       this.catalogDirty = true;
       return this.catalogRun;
     }
-    const epoch = this.catalogEpoch;
-    const run: Promise<void> = this.repeatCatalogLoads(epoch).finally(() => {
-      if (this.catalogRun === run) this.catalogRun = undefined;
-    });
+    const run = this.repeatCatalogLoads(this.catalogEpoch);
     this.catalogRun = run;
     return run;
   }
 
-  /** Loads the catalog, and once more per `catalogDirty` raised meanwhile, while `epoch` holds. */
+  /**
+   * Loads the catalog, and once more per `catalogDirty` raised meanwhile, while `epoch` holds.
+   *
+   * `catalogRun` is cleared in the same synchronous step that decides not to repeat, not in a
+   * `.finally` callback on the returned promise: that callback ran a few microtasks later, and a
+   * request landing in between marked an ended loop dirty and got no read (issue #139). VERIFIED
+   * on Windows 11 (2026-11-02, `npx vitest run` of `chatController.test.ts`): with the `.finally`,
+   * the case "serves a load requested at any microtask of the previous one, the end included
+   * (#139)" lost the request made 4 microtasks after the first; with this code it loses none. The
+   * check is the epoch, not the identity of the run: `onServerState` bumps `catalogEpoch` when it
+   * forgets a run, so an old loop must not clear the run of the new server. VERIFIED the same
+   * day: without the epoch check, the case "a load of the server that left does not clear the load
+   * of the new one (#139)" fails (the next request starts a second load). The first `await`
+   * always yields, so `loadCatalog` has stored `catalogRun` before this `finally` can run. Not
+   * observed: the lost reload in a real window (the issue was found by reading the code).
+   */
   private async repeatCatalogLoads(epoch: number): Promise<void> {
-    do {
-      this.catalogDirty = false;
-      await this.readCatalog(epoch);
-    } while (this.catalogDirty && epoch === this.catalogEpoch && !this.disposed);
+    try {
+      do {
+        this.catalogDirty = false;
+        await this.readCatalog(epoch);
+      } while (this.catalogDirty && epoch === this.catalogEpoch && !this.disposed);
+    } finally {
+      if (epoch === this.catalogEpoch) this.catalogRun = undefined;
+    }
   }
 
   /** One catalog read for the server of `epoch`; see {@link loadCatalog}. Never throws. */

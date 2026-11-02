@@ -395,6 +395,27 @@ describe('createSessionDiffs: loading the list', () => {
     expect(logs).toContain('info: session diff: 1 files for ses_1');
   });
 
+  /**
+   * Protects against the lost load of issue #139 (the coalescing copied from `loadCatalog`): a
+   * request that lands after the loop decided not to repeat, but before the run is cleared, must
+   * still get a list read that starts after it. SYNTHETIC: the fake answers at once, and the second
+   * request is made `offset` microtasks after the first for every offset that spans a whole load.
+   */
+  it('loads a request made at any microtask of the previous load, the end included (#139)', async () => {
+    const lost: number[] = [];
+    for (let offset = 0; offset < 60; offset++) {
+      const { module, diffs } = build();
+      const loads = () => diffs.filter((input) => input.context === 0).length;
+      const first = module.request('ses_1');
+      for (let tick = 0; tick < offset; tick++) await Promise.resolve();
+      const before = loads();
+      await module.request('ses_1');
+      if (loads() <= before) lost.push(offset);
+      await first;
+    }
+    expect(lost).toEqual([]);
+  });
+
   // Issue #32: while a revert is prepared the range stops at the turn BEFORE its boundary, so the
   // list matches the history and the disk the user sees. FABRICATED ids that ascend like the real
   // ones (`schema/src/session-message.ts` @843a6c51, read).
@@ -565,6 +586,41 @@ describe('createSessionDiffs: loading the list', () => {
     release();
     await run;
     expect(posted).toEqual([]);
+  });
+
+  /**
+   * Protects the epoch check of `repeat` (issue #139): the loop of a load cut off by `reset` must
+   * not clear the load in flight for the new server when it ends, or the next request would start
+   * a second load in parallel instead of joining it. SYNTHETIC: each list read waits on the gate in
+   * place when it started, and the test opens them one at a time.
+   */
+  it('a load cut off by reset does not clear the load that started after it (#139)', async () => {
+    const gate = () => {
+      let release: () => void = () => undefined;
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { promise, release };
+    };
+    const first = gate();
+    const { module, scenario, diffs } = build({ gate: first.promise });
+    /** Waits (up to 100 microtasks) until `n` list reads have reached their gate. */
+    const reached = async (n: number) => {
+      for (let tick = 0; tick < 100 && diffs.length < n; tick++) await Promise.resolve();
+      expect(diffs).toHaveLength(n);
+    };
+    const old = module.request('ses_1');
+    await reached(1);
+    module.reset();
+    const second = gate();
+    scenario.gate = second.promise;
+    const current = module.request('ses_1');
+    await reached(2);
+    first.release();
+    await old;
+    expect(module.request('ses_1')).toBe(current);
+    second.release();
+    await current;
   });
 
   it('does not publish a load for a session that is no longer open', async () => {
