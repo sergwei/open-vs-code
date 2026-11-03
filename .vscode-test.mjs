@@ -111,10 +111,33 @@ const common = {
  * Its profile (shared with `real-opencode`) gets `settings.json` rewritten here with the
  * `sidebar` baseline of {@link TEST_CHAT_LOCATION} and nothing else: no suite of `main` writes
  * other settings that must survive a start (they restore their own).
+ *
+ * `launchArgs` adds `--log trace --log sergwei.open-vs-code:info` (#141 reopened, run 41485490446):
+ * on the macOS runner the document of a chat tab sometimes never says `ready` and the host log
+ * cannot tell why; `chatPanel.test.ts` prints the webview lines of the window's `renderer.log` in
+ * that failure, and VS Code writes them (`Webview(<id>): webview ready`) only at TRACE. The second
+ * `--log` keeps OpenCode.log at info, because the suites match its text. Only `main`: it is where
+ * the flake lives. Syntax read in VS Code 1.144.0 (`argv.ts`: `log` is a `string[]` accepting
+ * `publisher.name:level`). RISK: trace may change timings (a heisenbug either way).
+ * PUBLIC OUTPUT (Sergio's decision, #141): the test host mirrors the window's renderer.log to the
+ * job's stdout, so with the renderer at trace the WHOLE renderer.log of every `main` run goes to
+ * the public CI log, pass or fail (about 5000 lines against about 170 without the flags), and the
+ * main process log goes along (1301 `[main` lines against 10): runner paths, command ids, settings
+ * keys and the crash-reporter id. `main` starts no server and holds no password, so none of those
+ * is a secret; the configs that do (`real-opencode`, `external-server`, `fake-server`) do not carry
+ * the flag. The excerpt of `chatPanel.test.ts` is only a summary placed next to the failure.
+ * VERIFIED (Windows 11, VS Code 1.144.1, 03/11/2026, `--label main`): with `--log trace` alone, a
+ * run printed "47 passing (43s)" and its OpenCode.log held 2 `[debug]` lines (e.g. "post-ready
+ * focus of pane 15 dropped: another surface was revealed"); with the second `--log` too, a run
+ * printed "47 passing (42s)" and OpenCode.log held 0 lines with `[trace]` or `[debug]`; the newest
+ * session's renderer.log had 139 lines with `Webview(`. Without any `--log`, "47 passing (41s)"
+ * and 172 lines of output against 5092 with trace alone (one run of each of those two, so the
+ * 1-2 s of difference is within noise). UNVERIFIED: macOS.
  */
 const main = {
   ...common,
   label: 'main',
+  launchArgs: [...common.launchArgs, '--log', 'trace', '--log', 'sergwei.open-vs-code:info'],
   // Relative to this file. Compiled by `npm run compile:integration`, not by Vitest.
   files:
     'out/test/integration/**/!(realOpencode|externalServer|fakeServer|defaultLocation|projectPlugins).test.js',
