@@ -3295,6 +3295,127 @@ describe('slash commands (issue #33)', () => {
       expect(lastSent(h)).toMatchObject({ command: 'hello-station:hello', text: 'Ana' });
     });
 
+    // Issue #155 (decision `E10-mods-slash-menu/decisions/menu-sin-catalogo`, option 1). FABRICATED
+    // connection states and `mods.state`, no host behind them. Protects: mod commands missing from
+    // the "/" menu and the popup while there is no catalog, the "/" button and Send blocked without a
+    // connection, and a mod command typed in `not-started` going out as a prompt (it would start
+    // the server and reach the model).
+    describe('without a server (issue #155)', () => {
+      const trigger = (h: Harness) =>
+        must<HTMLButtonElement>(h.container, 'button[aria-label="Commands"]');
+      const menuItems = (h: Harness) => [
+        ...h.container.querySelectorAll<HTMLButtonElement>('.command-menu [role="menuitem"]'),
+      ];
+      const NOT_STARTED = {
+        type: 'connection.state',
+        connection: { state: 'not-started', reason: 'auto-start-off' },
+      } satisfies HostToWebview;
+      const STARTING = {
+        type: 'connection.state',
+        connection: { state: 'starting' },
+      } satisfies HostToWebview;
+      const RECONNECTING = {
+        type: 'connection.state',
+        connection: { state: 'reconnecting', attempt: 1 },
+      } satisfies HostToWebview;
+
+      it('not-started: the menu and the popup list the mod command and Send runs it, no prompt', () => {
+        const h = start();
+        h.apply(NOT_STARTED, modsState());
+        expect(trigger(h).getAttribute('aria-disabled')).toBeNull();
+        trigger(h).click();
+        expect(menuItems(h).map((i) => i.textContent)).toEqual(['/hello-station:helloSays hello']);
+        expect(menuItems(h)[0]?.getAttribute('aria-disabled')).toBeNull();
+        trigger(h).click();
+        h.type('/hel');
+        expect(
+          [...h.container.querySelectorAll('[role="option"]')].map((o) => o.textContent),
+        ).toEqual([expect.stringContaining('hello-station:hello')]);
+        h.type('/hello-station:hello Ana');
+        h.button('Send').click();
+        expect(h.sent).toMatchObject([
+          { type: 'mod.command.run', name: 'hello-station:hello', args: 'Ana' },
+        ]);
+        expect(h.sent.some((m) => m.type === 'prompt.send')).toBe(false);
+      });
+
+      const UNAVAILABLE = {
+        type: 'connection.state',
+        connection: {
+          state: 'unavailable',
+          reason: 'exited',
+          error: { code: 'exited', message: 'The server exited' },
+        },
+      } satisfies HostToWebview;
+
+      // `unavailable` runs inside an open conversation: with none, the setup guide replaces the
+      // prompt box (see "shows the guide, and not the header or the prompt box").
+      it.each([
+        ['starting', [STARTING]],
+        ['reconnecting', [RECONNECTING]],
+        ['unavailable', [...openSession([user('m1', 'hi')]), UNAVAILABLE]],
+      ])('%s: Send is active for the mod command and runs it', (_name, connection) => {
+        const h = start();
+        h.apply(...connection, modsState());
+        expect(trigger(h).getAttribute('aria-disabled')).toBeNull();
+        h.type('/hello-station:hello Bea');
+        expect(h.button('Send').disabled).toBe(false);
+        h.button('Send').click();
+        expect(h.sent).toMatchObject([
+          { type: 'mod.command.run', name: 'hello-station:hello', args: 'Bea' },
+        ]);
+      });
+
+      it('reconnecting with a cached catalog: opencode items aria-disabled, the mod one active', () => {
+        const h = start();
+        h.apply(withCommands(COMMANDS), RECONNECTING, modsState());
+        trigger(h).click();
+        const byName = (name: string) =>
+          menuItems(h).find((i) => i.textContent?.startsWith(`/${name}`));
+        expect(byName('init')?.getAttribute('aria-disabled')).toBe('true');
+        expect(byName('hello-station:hello')?.getAttribute('aria-disabled')).toBeNull();
+      });
+
+      it('not-started: /compact stays a client command and sends no prompt', () => {
+        const h = start();
+        h.apply(NOT_STARTED, modsState());
+        h.type('/compact');
+        h.button('Send').click();
+        expect(h.sent).toEqual([]);
+        expect(h.container.textContent).toContain('There is nothing to compact yet');
+      });
+
+      // Protects: the blocked button's menu cannot open, so the "Loading commands…" state is read
+      // from the popup that typing "/" opens.
+      it('without mods and without a catalog the button is blocked and the popup says "Loading commands…"', () => {
+        const h = start();
+        h.apply(RECONNECTING, modsState({ commands: [] }));
+        expect(trigger(h).getAttribute('aria-disabled')).toBe('true');
+        h.type('/');
+        expect(h.container.textContent).toContain('Loading commands…');
+      });
+
+      // Protects: a mod whose name the cached catalog also lists is the server's command, so Send
+      // (blocked by the connection) must run nothing instead of a `mod.command.run`.
+      it('reconnecting with a cached catalog and a command named like the mod: Send runs nothing', () => {
+        const h = start();
+        h.apply(withCommands([{ name: 'hello-station:hello' }]), RECONNECTING, modsState());
+        h.type('/hello-station:hello Ana');
+        expect(h.button('Send').disabled).toBe(true);
+        h.button('Send').click();
+        expect(h.sent).toEqual([]);
+      });
+
+      it('starting with a normal text: Send stays disabled', () => {
+        const h = start();
+        h.apply(STARTING, modsState());
+        h.type('hello');
+        expect(h.button('Send').disabled).toBe(true);
+        h.button('Send').click();
+        expect(h.sent).toEqual([]);
+      });
+    });
+
     it('draws the band as text and its button sends mod.command.run with no arguments', () => {
       const h = start();
       h.apply(

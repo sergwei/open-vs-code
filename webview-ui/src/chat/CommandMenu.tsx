@@ -21,7 +21,14 @@ const TRIGGER_SELECTOR = '[data-command-trigger]';
  * (the prompt box stops the turn on Escape while busy) and gives the focus back to the trigger; Tab
  * closes and lets the focus move on; a pointer-down outside, the focus leaving or the window
  * blurring close without moving the focus. Without a connection the trigger and the items are
- * `aria-disabled`, never `disabled` (lesson #981). There is no search box (decision P6=1): a long
+ * `aria-disabled`, never `disabled` (lesson #981), EXCEPT the items `runnable` accepts (mod
+ * commands, which the host runs without a server, issue #155): those stay active, and the trigger
+ * (click and arrows included) is active while at least one is listed. VERIFIED for that exception
+ * in jsdom by `CommandMenu.test.tsx` "keeps a runnable item and the button active without a
+ * connection, the rest aria-disabled" and "opens from the closed trigger with the arrows when a
+ * runnable command is listed", with fabricated props, and in VS Code 1.144.1 on Windows 11
+ * (03/11/2026, `--steps 41`, synthetic server) by the `test:visual` check "S1 without a server the
+ * "/" button is not aria-disabled". There is no search box (decision P6=1): a long
  * list scrolls (`max-height`) and typing `/` filters.
  * Each row is `/name` and the description (ellipsis, whole in `title`). Choosing one closes the
  * menu and calls `onPick(name)`; the parent writes `/name ` into the draft and moves the focus to
@@ -42,8 +49,13 @@ export function CommandMenu(props: {
   commands: readonly CommandOption[] | undefined;
   /** True while the catalog has not arrived: an absent list then means "loading", not "failed". */
   loading?: boolean;
-  /** True when there is no connection: the button and the items stay focusable but do nothing. */
+  /**
+   * True when there is no connection: the button and the items stay focusable but do nothing,
+   * except the items `runnable` accepts and the button while one of them is listed.
+   */
   disabled: boolean;
+  /** Says an item works even while `disabled` (it needs no server); absent means none does. */
+  runnable?: (name: string) => boolean;
   onPick(name: string): void;
   /** Hands the parent a function that closes the menu without touching the focus. */
   onCloseReady?(close: () => void): void;
@@ -74,8 +86,15 @@ export function CommandMenu(props: {
     (last ? list[list.length - 1] : list[0])?.focus();
   };
 
+  /** True when the item `name` ignores clicks: no connection and not a `runnable` one. */
+  const itemDisabled = (name: string): boolean => props.disabled && props.runnable?.(name) !== true;
+  /** True when the "/" button is inert: no connection and no listed command can run without it. */
+  const triggerDisabled = (): boolean =>
+    props.disabled &&
+    !(props.commands ?? []).some((command) => props.runnable?.(command.name) === true);
+
   const run = (name: string): void => {
-    if (props.disabled) return;
+    if (itemDisabled(name)) return;
     close(false);
     props.onPick(name);
   };
@@ -87,7 +106,7 @@ export function CommandMenu(props: {
       close(true);
     } else if (event.key === 'Tab' && open()) {
       close(false);
-    } else if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && !props.disabled) {
+    } else if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && !triggerDisabled()) {
       event.preventDefault();
       if (open()) {
         const list = items();
@@ -160,7 +179,7 @@ export function CommandMenu(props: {
         aria-haspopup="menu"
         aria-expanded={open()}
         aria-controls={MENU_ID}
-        aria-disabled={props.disabled ? 'true' : undefined}
+        aria-disabled={triggerDisabled() ? 'true' : undefined}
         aria-label="Commands"
         title="Run a slash command"
         ref={(element) => {
@@ -169,7 +188,7 @@ export function CommandMenu(props: {
         onKeyDown={onTriggerKeyDown}
         onClick={() => {
           // `aria-disabled`, not `disabled` (see the header): the click is simply ignored.
-          if (props.disabled) return;
+          if (triggerDisabled()) return;
           if (open()) close(false);
           else openMenu(false);
         }}
@@ -216,7 +235,7 @@ export function CommandMenu(props: {
                     role="menuitem"
                     class="plus-item command-item"
                     tabIndex={index() === 0 ? 0 : -1}
-                    aria-disabled={props.disabled ? 'true' : undefined}
+                    aria-disabled={itemDisabled(command.name) ? 'true' : undefined}
                     title={command.description}
                     onClick={() => {
                       run(command.name);

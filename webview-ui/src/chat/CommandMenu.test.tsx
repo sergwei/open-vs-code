@@ -30,10 +30,19 @@ const COMMANDS: readonly CommandOption[] = [
 ];
 
 /** `null` stands for an ABSENT list (the host could not read it). */
-function setup(commands: readonly CommandOption[] | null = COMMANDS, disabled = false) {
+function setup(
+  commands: readonly CommandOption[] | null = COMMANDS,
+  disabled = false,
+  runnable?: (name: string) => boolean,
+) {
   const onPick = vi.fn<(name: string) => void>();
   mounted = mount(() => (
-    <CommandMenu commands={commands ?? undefined} disabled={disabled} onPick={onPick} />
+    <CommandMenu
+      commands={commands ?? undefined}
+      disabled={disabled}
+      runnable={runnable}
+      onPick={onPick}
+    />
   ));
   const trigger = must<HTMLButtonElement>(mounted.container, 'button[aria-haspopup="menu"]');
   const items = (): HTMLButtonElement[] => [
@@ -141,6 +150,35 @@ describe('CommandMenu', () => {
     press(trigger, 'ArrowDown');
     expect(mounted?.container.querySelector('[role="menu"]')).toBeNull();
     expect(onPick).not.toHaveBeenCalled();
+  });
+
+  // Issue #155. Protects: mod commands (which the host runs without a server) being blocked with
+  // the rest when there is no connection. FABRICATED props; `runnable` accepts only `review`.
+  it('keeps a runnable item and the button active without a connection, the rest aria-disabled', () => {
+    const { trigger, items, onPick } = setup(COMMANDS, true, (name) => name === 'review');
+    expect(trigger.getAttribute('aria-disabled')).toBeNull();
+    trigger.click();
+    expect(items()).toHaveLength(3);
+    expect(items()[0]?.getAttribute('aria-disabled')).toBe('true');
+    expect(items()[1]?.getAttribute('aria-disabled')).toBeNull();
+    items()[0]?.click();
+    expect(onPick).not.toHaveBeenCalled();
+    items()[1]?.click();
+    expect(onPick).toHaveBeenCalledWith('review');
+  });
+
+  // Issue #155. Protects: the closed trigger's arrow branch, which opens the menu with
+  // `disabled` when a runnable command is listed. FABRICATED props.
+  it('opens from the closed trigger with the arrows when a runnable command is listed', () => {
+    const { trigger, items, press } = setup(COMMANDS, true, (name) => name === 'review');
+    press(trigger, 'ArrowUp');
+    expect(items()).toHaveLength(3);
+    expect(document.activeElement).toBe(items()[2]);
+  });
+
+  it('stays aria-disabled without a connection when no listed command is runnable', () => {
+    const { trigger } = setup(COMMANDS, true, (name) => name === 'not-listed');
+    expect(trigger.getAttribute('aria-disabled')).toBe('true');
   });
 
   // Decision of Sergio, 28/10/2026 (Engram #1425): three different states, each as the ONLY

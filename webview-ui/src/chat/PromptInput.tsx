@@ -167,8 +167,13 @@ export function PromptInput(props: {
   commands?: readonly CommandOption[];
   /** True while the catalog has not arrived, so an absent `commands` reads "loading", not "failed". */
   commandsLoading?: boolean;
-  /** The "/" button is blocked (`aria-disabled`) while there is no server to run a command on. */
+  /**
+   * The "/" button and the server's commands are blocked (`aria-disabled`) while there is no
+   * server to run them on; `commandRunnable` commands and the button, while one is listed, are not.
+   */
   commandsDisabled: boolean;
+  /** True for a command that works with `commandsDisabled` (a mod's: the host needs no server). */
+  commandRunnable?: (name: string) => boolean;
   /** The `@` popup's results, from the store. */
   fileSearch: FileSearchView;
   /** The text to search after an `@`, or `undefined` when the popup closed. Parent debounces. */
@@ -720,6 +725,7 @@ export function PromptInput(props: {
           commands={props.commands}
           loading={props.commandsLoading}
           disabled={props.commandsDisabled}
+          runnable={props.commandRunnable}
           onPick={pickCommand}
           onCloseReady={(close) => {
             closeCommandMenu = close;

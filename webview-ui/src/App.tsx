@@ -24,6 +24,7 @@ import {
   CLIENT_COMMANDS,
   isClientCommand,
   isModCommand,
+  modCommandOf,
   parseCommand,
   withClientCommands,
   withModCommands,
@@ -184,7 +185,22 @@ interface LastRevert {
  * is sent by {@link runModCommand} as `mod.command.run`, never as `prompt.send`: it creates no
  * session and leaves the attachment chips alone. The bands mods pinned (`state.mods.bands`) are
  * drawn by {@link ModBands} above the request dock; their button runs the band's command with no
- * arguments. VERIFIED by `slashCommand.test.ts` ("lets the server win when it lists the same
+ * arguments. Issue #155 (decision `E10-mods-slash-menu/decisions/menu-sin-catalogo`, option 1): mod
+ * commands need no server, so they are listed and run with no catalog and no connection
+ * (not-started, starting, reconnecting, unavailable with a conversation open: with none the setup
+ * guide replaces the prompt box): the "/" button and their items stay active,
+ * Send is enabled for them and they go out as `mod.command.run`, never `prompt.send`. While there
+ * is no catalog the menu lists ONLY them (the server's appear when the catalog arrives; with no mods
+ * the menu still says "Loading commands…"); with a cached catalog and no connection the server's
+ * items stay `aria-disabled`. VERIFIED in jsdom by `App.test.tsx` "not-started: the menu and the
+ * popup list the mod command and Send runs it, no prompt", "not-started: /compact stays a
+ * client command and sends no prompt", "%s: Send is active for the mod command and runs it" (for
+ * starting, reconnecting and unavailable) and "reconnecting with a cached catalog and a command
+ * named like the mod: Send runs nothing", and in VS Code 1.144.1 on Windows 11 (`--steps 41` on
+ * 03/11/2026 and the full run of 04/11/2026, synthetic server) by "ok   S3 the command ran
+ * inside its Worker with its arguments ("Bea")" in `not-started`. UNVERIFIED: starting,
+ * reconnecting and unavailable in a real window (jsdom only), macOS and Linux.
+ * Earlier: VERIFIED by `slashCommand.test.ts` ("lets the server win when it lists the same
  * name"), `ModBand.test.tsx` and `chatStore.test.ts` with fabricated data, and the dispatch itself
  * by `App.test.tsx` "lists the mod command in the menu and sends mod.command.run, not a prompt".
  * VERIFIED in VS Code 1.144.0 on Windows 11 (02/11/2026, the final full `test:visual` run, 776.4 s,
@@ -322,6 +338,16 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   // Issue #124: with autoStart off the first prompt starts the server (the host waits for it).
   const notStarted = () => state.connection.state === 'not-started';
   const canSend = () => (connected() || notStarted()) && !busy() && state.pending.length === 0;
+  /**
+   * True when the draft is a mod command that can run now: no turn in progress, nothing pending,
+   * and NO condition on the connection (issue #155). Keeps Send active in starting/reconnecting.
+   * VERIFIED in jsdom (fabricated state) by `App.test.tsx` "%s: Send is active for the mod command
+   * and runs it" and "starting with a normal text: Send stays disabled".
+   */
+  const canRunModDraft = (): boolean =>
+    !busy() &&
+    state.pending.length === 0 &&
+    modCommandOf(draft().trim(), state.catalog?.commands, state.mods.commands) !== undefined;
   /** What the selectors and the next `prompt.send` read: catalog, open session row and draft. */
   const selectionInput = (): SelectionInput => ({
     catalog: state.catalog,
@@ -574,29 +600,40 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   /**
    * Sends the draft (and pending attachments) if sending is allowed; blank drafts are ignored. A
    * draft that starts with a listed `/command` runs it (issue #33, see the header of {@link App}).
+   * A mod command is decided BEFORE the connection gate ({@link canRunModDraft}): the host runs it
+   * without a server (issue #155), so it goes out in starting, reconnecting and unavailable (with a
+   * conversation open) too, and never as a prompt, which in `not-started` would have started the
+   * server. Only a turn in
+   * progress or a pending request holds it back, like the band's button.
    */
   const submit = (): void => {
     const text = draft().trim();
-    if (!canSend() || (text === '' && state.draftFiles.length === 0)) return;
-    // Without a catalog only the client commands are known, so "/compact" never goes out as a prompt.
-    const command = parseCommand(text, commands() ?? CLIENT_COMMANDS);
+    if (text === '' && state.draftFiles.length === 0) return;
+    // A command of a mod is carried out by the host and never becomes a prompt (E10-mods): no
+    // session is created, the attachment chips stay, and the draft goes to the history as typed.
+    const mod = modCommandOf(text, state.catalog?.commands, state.mods.commands);
+    if (mod !== undefined && !busy() && state.pending.length === 0) {
+      if (!runModCommand(mod.name, mod.args)) return;
+      history.push(text);
+      setDraft('');
+      persist();
+      return;
+    }
+    if (!canSend()) return;
+    // Without a catalog the list holds at most the mods' commands (issue #155), so the client
+    // commands are added back here: "/compact" never goes out as a prompt.
+    const command = parseCommand(
+      text,
+      withModCommands(
+        withClientCommands(state.catalog?.commands) ?? CLIENT_COMMANDS,
+        state.mods.commands,
+      ),
+    );
     if (command !== undefined && isClientCommand(command.name, state.catalog?.commands)) {
       history.push(text);
       setDraft('');
       persist();
       compact();
-      return;
-    }
-    // A command of a mod is carried out by the host and never becomes a prompt (E10-mods): no
-    // session is created, the attachment chips stay, and the draft goes to the history as typed.
-    if (
-      command !== undefined &&
-      isModCommand(command.name, state.catalog?.commands, state.mods.commands)
-    ) {
-      if (!runModCommand(command.name, command.args)) return;
-      history.push(text);
-      setDraft('');
-      persist();
       return;
     }
     const files = props.store.takeDraftFiles();
@@ -1133,11 +1170,14 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
             files={state.draftFiles}
             busy={busy()}
             waiting={!connected() && !notStarted()}
-            sendDisabled={!canSend()}
+            sendDisabled={!canSend() && !canRunModDraft()}
             attachDisabled={!connected()}
             commands={commands()}
             commandsLoading={state.catalog === undefined}
             commandsDisabled={!connected()}
+            commandRunnable={(name) =>
+              isModCommand(name, state.catalog?.commands, state.mods.commands)
+            }
             fileSearch={state.fileSearch}
             onMentionQuery={searchFiles}
             onMentionPick={(file) => {
