@@ -242,10 +242,18 @@ Since issue #153 the extension asks before it starts opencode in such a folder: 
 **Start anyway** and **Don't start** (the answer is kept per folder, on this machine, and asked
 again when the list of plugins changes), or a modal when you press Start, run **OpenCode: Restart
 Server** or send your first prompt. **OpenCode: Forget Plugin Decision for This Folder** clears it.
-What it does not cover: a plugin added while opencode is already running is hot-reloaded by
-opencode with no warning; a server you connect to with `openVsCode.serverUrl` is not started by the
-extension, so there is nothing to ask; and other project code that opencode runs (local MCP
-servers, formatters) is not checked. The detection replicates what opencode 2.0.32 reads. Checked
+While opencode runs: opencode 2.0.32 imports a new plugin in 223 to 446 ms with no request (real
+opencode, Windows 11), so the extension starts it with its file watcher off
+(`OPENCODE_FILEWATCHER_DISABLE=1`; the same plugin was then not loaded in 17 s) and watches the
+served folder (`opencode.json(c)` and `.opencode/`) itself. A change to a list of plugins you have
+not approved stops the server and asks as above. The cost: config, `AGENTS.md`, skills and
+commands changed while it runs need **OpenCode: Restart Server**. What it does not cover: folders
+above the served one (opencode's own 24-hour rescan and the one it runs when its own config is
+updated, both read in its source and not executed),
+`files.watcherExclude`, symlinks, and a plugin written while the server is still `starting`; a
+server you connect to with `openVsCode.serverUrl` is not started by the extension, so there is
+nothing to ask or watch; and other project code that opencode runs (local MCP servers,
+formatters) is not checked. The detection replicates what opencode 2.0.32 reads. Checked
 once against a real opencode 2.0.32 on Windows 11: a plugin file in `.opencode/plugins/` was
 imported by the first request that loads the folder's models (`GET /api/model`), not when the
 server started and not by the other requests tried (`GET /api/info`, `/api/session`,

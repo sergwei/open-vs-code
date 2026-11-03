@@ -269,7 +269,7 @@ always `opencode`.
   opencode, so the opencode TUI and other clients do not see them. VS Code ties that storage to the
   folder's path and to when it was created: **moving or renaming the project folder, cloning it
   again, or opening it by itself instead of through its `.code-workspace` file starts with an empty
-  organization and loses the one you had**, without a warning. In that case opencode also stops
+  organization and loses the one you had**, and nothing tells you so. In that case opencode also stops
   listing the old sessions in this window, because it keeps each session under the exact folder
   path it was created in; so the organization is the smaller loss. There is no export or import of
   the organization yet.
@@ -357,16 +357,40 @@ folder above it**. Before the extension starts opencode in such a folder it show
 folder has opencode plugins that will run with your permissions", with **Start anyway** and
 **Don't start**; the answer is remembered per folder on this machine and the question comes back if
 the list of plugins changes. Start, **OpenCode: Restart Server** or your first prompt ask in a modal
-instead. **OpenCode: Forget Plugin Decision for This Folder** clears the answer. Limits: this does not
-apply when you connect to a server with `openVsCode.serverUrl` (the extension starts nothing);
-a plugin added while opencode is already running is loaded by opencode without a warning; and it
-does not cover the other code a project config can run (for example local MCP servers). The check
-replicates what opencode 2.0.32 reads. Checked once against a real opencode 2.0.32 on Windows 11: a
-plugin file in `.opencode/plugins/` was imported by the first request that loads the folder's
-models (`GET /api/model`), not when the server started and not by the other requests tried
-(`GET /api/info`, `/api/session`, `/api/agent` and `/api/command`); the extension makes the
-`GET /api/model` request as soon as it connects, so asking before the start is still the right
-moment. Plugins declared in `opencode.json` (npm packages) were not part of that check.
+instead. **OpenCode: Forget Plugin Decision for This Folder** clears the answer.
+
+*While opencode runs.* opencode 2.0.32 imports a plugin that appears in the folder it serves within
+a fraction of a second, with no request at all (checked against a real opencode 2.0.32 on Windows
+11: 223 to 446 ms for a file in `.opencode/plugins/`, one in `.opencode/plugin/` and an entry in
+`opencode.json`). So the extension starts opencode with its file watcher off
+(`OPENCODE_FILEWATCHER_DISABLE=1`; with it, the same plugin was not loaded in 17 s) and watches
+the served folder itself: `opencode.json(c)` and `.opencode/` (which holds `.opencode/plugin(s)/`
+and `.opencode/opencode.json(c)`). If a change makes the list of plugins one you have not
+approved, the extension stops the server and asks as above, before the plugin has run. That
+restart also cuts a turn that is in progress. A change
+that leaves the list approved or empty (a new command, a deleted plugin, an edit to a plugin you
+allowed) restarts nothing.
+
+*The cost.* With opencode's watcher off, opencode no longer picks up by itself changes to its
+config, `AGENTS.md`, skills or commands while it runs: run **OpenCode: Restart Server** to apply
+them.
+
+*What this does not cover.* It does not apply when you connect to a server with
+`openVsCode.serverUrl` (the extension starts nothing and does not watch). Plugins in folders
+**above** the one you opened are not watched; opencode also rescans every 24 hours
+(`supervisor.ts`, read in the source and not executed), and that rescan is not covered; nor is
+the one opencode runs when its own config is updated (for example when you connect a provider),
+read in the same file and not executed. A
+`files.watcherExclude` setting that hides `.opencode` from VS Code, and symlinks, may stop the
+events from arriving. A plugin written while the server is still starting (`starting`) can run
+once before the check made when it becomes ready stops the server. And it does not cover the
+other code a project config can run (for example local MCP servers). The detection replicates
+what opencode 2.0.32 reads. Checked once against a real opencode 2.0.32 on Windows 11: a plugin
+file in `.opencode/plugins/` was imported by the first request that loads the folder's models
+(`GET /api/model`), not when the server started and not by the other requests tried (`GET
+/api/info`, `/api/session`, `/api/agent` and `/api/command`); the extension makes the `GET
+/api/model` request as soon as it connects, so asking before the start is still the right moment.
+The hot-reload check is only on Windows; macOS and Linux are covered by CI alone.
 
 The chat view never talks to the opencode server. The port and the password live only in the
 extension host, and the server password you set is kept in VS Code's SecretStorage. The extension
