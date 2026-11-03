@@ -346,6 +346,15 @@ export const TEST_MODS_STATE_COMMAND_ID = 'openVsCode.test.modsState';
  */
 export const MODS_LOG_CHANNEL_NAME = 'OpenCode Mods';
 
+/** Command id of "OpenCode: Forget Plugin Decision for This Folder" (contributed; issue #153). */
+export const FORGET_PLUGIN_DECISION_COMMAND_ID = 'openVsCode.forgetPluginDecision';
+
+/**
+ * `globalState` key of the plugin decisions (issue #153): `{ [folderKey]: { decision, fingerprint,
+ * at } }`. Machine-local and never synced: the keys are paths of this machine.
+ */
+export const PROJECT_PLUGIN_DECISIONS_KEY = 'openVsCode.projectPluginDecisions';
+
 /** Id of the server status item of the status bar (issue #124). */
 export const SERVER_STATUS_ITEM_ID = 'openVsCode.serverStatus';
 

@@ -222,7 +222,13 @@ export function guideSteps(
  * there is no conversation but the guide does not apply), or `undefined` when there is none.
  * `reconnecting` is a neutral `status` with only Show logs (the host is already retrying).
  * `no-workspace` is the simple "Open a folder to start" card (P15=2). `not-started` (issue #124)
- * is the "opencode is not running" status card with a Start button.
+ * is the "opencode is not running" status card with a Start button; its cause depends on the
+ * `reason` (`auto-start-off`, or `project-plugins` of issue #153: the plugins of the folder were
+ * not allowed yet and Start opens a confirmation). The `project-plugins` card is covered by a
+ * SYNTHETIC unit test and VERIFIED in a real window (Windows 11, VS Code 1.144.0, 03/11/2026,
+ * the full `npm run test:visual` on the final tree, step 40 all ok): "ok   P2 the chat card says opencode is not running
+ * because of the plugins" and "ok   P4 Start is pressed on the card with the real mouse".
+ * Not observed: other OSes and themes.
  */
 export function describeProblem(connection: ConnectionState): ProblemView | undefined {
   if (connection.state === 'reconnecting') {
@@ -235,7 +241,10 @@ export function describeProblem(connection: ConnectionState): ProblemView | unde
   if (connection.state === 'not-started') {
     return {
       title: 'opencode is not running',
-      cause: 'openVsCode.autoStart is off. Send a prompt or press Start.',
+      cause:
+        connection.reason === 'project-plugins'
+          ? 'This folder has opencode plugins that would run with your permissions. Press Start to review them.'
+          : 'openVsCode.autoStart is off. Send a prompt or press Start.',
       actions: [restart('Start')],
       role: 'status',
     };

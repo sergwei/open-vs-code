@@ -144,15 +144,24 @@ export type BinaryCheck = {
 export type BinaryDiagnosis = { settingPath?: string; checks: BinaryCheck[] };
 
 /**
+ * Why the host holds the server back in a `not-started` state: `auto-start-off` (issue #124) or
+ * `project-plugins` (issue #153). The host's `ServerState` uses the same two names.
+ */
+export type NotStartedReason = 'auto-start-off' | 'project-plugins';
+
+/**
  * Lifecycle of the opencode server as the host sees it. `binary` is only present on an
  * `unavailable` that came from the binary detection (`binary-missing`, or `unsupported-version`
  * of a binary that answered `--version`); the `unsupported-version` found through `/api/info`
  * after the server started has none, which is how the webview tells step 1 from step 2.
- * `not-started` (issue #124) means `openVsCode.autoStart` is off and nobody asked for a server
- * yet: the chat shows a Start button and the first prompt launches it.
+ * `not-started` means the host holds the launch and the chat shows a Start button; the first
+ * prompt starts it too. `reason` says why and is mandatory so no producer can leave the card
+ * guessing: `auto-start-off` (issue #124) is `openVsCode.autoStart` being off with nobody having
+ * asked for a server yet; `project-plugins` (issue #153) is a folder whose opencode config brings
+ * plugins the user has not allowed, so Start opens a confirmation instead of launching at once.
  */
 export type ConnectionState =
-  | { state: 'not-started' }
+  | { state: 'not-started'; reason: NotStartedReason }
   | { state: 'starting' }
   | { state: 'connected'; serverVersion: string }
   | { state: 'reconnecting'; attempt: number; error?: ErrorInfo }

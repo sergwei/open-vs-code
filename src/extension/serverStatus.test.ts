@@ -69,7 +69,16 @@ describe('describeServerStatus', () => {
   it.each([
     [{ state: 'starting' }, '$(loading~spin) OpenCode', false],
     [{ state: 'reconnecting', attempt: 1 }, '$(loading~spin) OpenCode', false],
-    [{ state: 'not-started' }, '$(circle-outline) OpenCode: not started', false],
+    [
+      { state: 'not-started', reason: 'auto-start-off' },
+      '$(circle-outline) OpenCode: not started',
+      false,
+    ],
+    [
+      { state: 'not-started', reason: 'project-plugins' },
+      '$(circle-outline) OpenCode: not started',
+      false,
+    ],
     [{ state: 'stopped' }, '$(circle-slash) OpenCode: stopped', false],
     [
       {
@@ -88,5 +97,17 @@ describe('describeServerStatus', () => {
     // Neither a URL nor a raw error text ever reaches the tooltip.
     expect(shown.tooltip).not.toContain('127.0.0.1');
     expect(shown.tooltip).not.toContain('Model');
+  });
+
+  // Issue #153. SYNTHETIC: fabricated connection states.
+  it('the tooltip of not-started says whether autoStart or the project plugins hold it', () => {
+    const off = describeServerStatus({ state: 'not-started', reason: 'auto-start-off' }, undefined);
+    const plugins = describeServerStatus(
+      { state: 'not-started', reason: 'project-plugins' },
+      undefined,
+    );
+    expect(off.tooltip).toContain('openVsCode.autoStart is off');
+    expect(plugins.tooltip).toContain('opencode plugins');
+    expect(plugins.tooltip).not.toContain('autoStart');
   });
 });

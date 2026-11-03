@@ -31,7 +31,7 @@ describe('deriveActivity', () => {
   it('is offline while the server is not usable', () => {
     for (const connection of [
       { state: 'starting' },
-      { state: 'not-started' },
+      { state: 'not-started', reason: 'auto-start-off' },
       { state: 'stopped' },
       {
         state: 'unavailable',

@@ -22,7 +22,7 @@ import {
   sameTarget,
   type ServerTarget,
 } from './externalServer';
-import type { BinaryDiagnosis } from '../shared/protocol';
+import type { BinaryDiagnosis, NotStartedReason } from '../shared/protocol';
 import { describeDetection, diagnoseDetection, type DetectionResult } from './opencodeBinary';
 import {
   checkServerVersion,
@@ -85,9 +85,12 @@ export type RestartReason =
   'command' | 'binary-changed' | 'folder-changed' | 'crash' | 'target-changed';
 
 /**
- * Lifecycle of the single server. `not-started` (issue #124) means a binary and a folder are known
- * but `openVsCode.autoStart` is off and nothing asked for a server yet; Restart Server, the Start
- * button or the first prompt launch it. `stopped` is final. `restarting` covers the stop of the old
+ * Lifecycle of the single server. `not-started` means a binary and a folder are known but the
+ * manager holds the launch, and `reason` says why: `auto-start-off` (issue #124) is
+ * `openVsCode.autoStart` off with nothing asked for a server yet; `project-plugins` (issue #153)
+ * is the launch guard refusing a folder whose opencode config brings plugins nobody allowed.
+ * Restart Server, the Start button or the first prompt launch it (and the guard may ask again,
+ * with `userAsked`). `stopped` is final. `restarting` covers the stop of the old
  * process and the wait for its start attempt to settle; the new attempt then goes through
  * `starting` (own process) or `connecting` (external server, issue #11). An `unavailable/exited`
  * with `retryInMs` is NOT final: a restart is scheduled (`attempt` is 1-based); without it the
@@ -95,7 +98,7 @@ export type RestartReason =
  */
 export type ServerState =
   | { kind: 'idle' }
-  | { kind: 'not-started' }
+  | { kind: 'not-started'; reason: NotStartedReason }
   | { kind: 'starting'; folder: string; binaryPath: string }
   | { kind: 'connecting'; folder: string; url: string }
   | { kind: 'running'; server: RunningServerInfo }
@@ -122,7 +125,9 @@ export type FolderChoice =
 /**
  * How {@link ServerManager.restart} ended; only `attempted` means a new start was tried.
  * `not-started` means the autoStart gate held a launch that no user action asked for (a
- * `command` restart opens the gate first, so it never ends this way).
+ * `command` restart opens the gate first, so it never ends this way). A launch that the launch
+ * guard holds (issue #153) is still `attempted`: the attempt happened and its outcome is the
+ * published state, `not-started/project-plugins`.
  */
 export type RestartResult = 'attempted' | 'no-workspace' | 'no-binary' | 'disposed' | 'not-started';
 
@@ -130,6 +135,20 @@ export type RestartResult = 'attempted' | 'no-workspace' | 'no-binary' | 'dispos
 export interface ScheduledTimer {
   cancel(): void;
 }
+
+/**
+ * What the launch guard is asked before an own-process server starts (issue #153): the folder to
+ * serve, whether a user action (Start, Restart Server, the first prompt) asked for this launch,
+ * and the attempt's signal, aborted by `stop()` or `restart()`.
+ */
+export interface LaunchGuardRequest {
+  folder: string;
+  userAsked: boolean;
+  signal: AbortSignal;
+}
+
+/** `go` launches; `hold` publishes `not-started/project-plugins` and launches nothing. */
+export type LaunchGuardVerdict = 'go' | 'hold';
 
 /** External effects of the manager, injected so tests need no processes, network or `vscode`. */
 export interface ServerManagerDeps {
@@ -142,6 +161,13 @@ export interface ServerManagerDeps {
   schedule?: (ms: number, fn: () => void) => ScheduledTimer;
   /** Milliseconds clock. Defaults to `Date.now`; tests inject a manual one. */
   now?: () => number;
+  /**
+   * Consulted by every launch of an OWN process, after `starting` is published and before
+   * anything is spawned (issue #153). Never consulted for an external target (nothing is launched)
+   * nor for the retry with a binary detected meanwhile (that folder already passed). Absent means
+   * `go`. A rejection counts as `hold` (fails closed).
+   */
+  launchGuard?: (request: LaunchGuardRequest) => Promise<LaunchGuardVerdict>;
 }
 
 /** Default timer: a plain `setTimeout`. */
@@ -201,8 +227,12 @@ export function pickWorkspaceFolder(
  * pin them (same idea as `describeDetection`). The ready line carries url, version and pid and
  * never the password. The restart lines are STABLE: the opt-in integration test waits for
  * `restarting the server (<reason>)` and `server exited unexpectedly; restarting in <s> s
- * (attempt <i> of 3)`. VERIFIED by unit tests; the lines in a real VS Code were seen by the
- * opt-in `realOpencode.test.ts` (see its header for the run).
+ * (attempt <i> of 3)`; the two `not-started` lines are stable too (`test:visual` step 32 looks for
+ * the autoStart one, issue #153 adds the project-plugins one). VERIFIED by unit tests. The restart
+ * lines were seen in a real VS Code only by the opt-in `realOpencode.test.ts`; the project-plugins
+ * line was seen there by the `project-plugins` integration suite and by a `test:visual` check
+ * ("the log has the block line", Windows 11, VS Code 1.144.0, 03/11/2026), not by
+ * `realOpencode.test.ts`.
  *
  * The external-server lines (issue #11) are `connecting to the external server at <url> for
  * <folder>` and `connected to the external server at <url> (opencode <v>)`. The second is NOT
@@ -222,7 +252,9 @@ export function describeServerState(state: ServerState): {
       return {
         level: 'info',
         message:
-          'server not started: openVsCode.autoStart is off (send a prompt or run Restart Server)',
+          state.reason === 'project-plugins'
+            ? 'server not started: this folder has opencode plugins that have not been allowed (send a prompt or run Restart Server to review them)'
+            : 'server not started: openVsCode.autoStart is off (send a prompt or run Restart Server)',
       };
     case 'starting':
       return {
@@ -351,7 +383,14 @@ export function describeServerFailure(
  * autoStart (issue #124, {@link setAutoStart}): with it off and an own-process target the manager
  * never launches by itself until a launch happened or the user asked (`restart('command')`); a
  * usable detection, a folder change or a return from an external target publish `not-started`
- * instead. After the first launch everything above behaves as before. VERIFIED with fakes (unit
+ * instead (`not-started/auto-start-off`). After the first launch everything above behaves as
+ * before.
+ *
+ * Launch guard (issue #153, `ServerManagerDeps.launchGuard`): every launch of an OWN process asks
+ * it first and a `hold` publishes `not-started/project-plugins` without spawning; the external
+ * target never asks (nothing is launched). See {@link ServerManager.launch}.
+ *
+ * autoStart, continued. VERIFIED with fakes (unit
  * test "Restart Server (a command restart) launches from not-started") and in a real VS Code
  * (Windows 11, 31/10/2026): the gate holds with "ok   N1 the log has "server not started" and no
  * "starting the server for" follows (noted true, launched false)", and Start opens it with "ok   N3
@@ -472,8 +511,8 @@ export class ServerManager {
     const canLaunch = this.lastUsablePath !== undefined || this.target.kind !== 'spawn';
     if (this.holdsLaunch()) {
       // Gate closed: no restart (it would flash `restarting`), just keep the state honest.
-      if (!unchanged && this.lastUsablePath !== undefined && kind !== 'not-started') {
-        this.setState({ kind: 'not-started' });
+      if (!unchanged && this.lastUsablePath !== undefined && !this.heldByAutoStart()) {
+        this.setState({ kind: 'not-started', reason: 'auto-start-off' });
       }
       return;
     }
@@ -485,7 +524,8 @@ export class ServerManager {
   /**
    * Mirrors `openVsCode.autoStart` (issue #124). Call it right after constructing the manager,
    * before the first detection, and whenever the setting changes. Turning it on while the state
-   * is `not-started` launches the held server; turning it off never stops a server that was
+   * is `not-started/auto-start-off` launches the held server (a `not-started/project-plugins` is
+   * held by the launch guard, not by the setting, and stays); turning it off never stops a server that was
    * already launched. It has no effect on an external target (nothing is launched). VERIFIED with
    * fakes (unit tests only).
    */
@@ -495,7 +535,7 @@ export class ServerManager {
     if (
       on &&
       !this.disposed &&
-      this.current.kind === 'not-started' &&
+      this.heldByAutoStart() &&
       this.lastUsablePath !== undefined &&
       choice !== undefined &&
       'folder' in choice
@@ -507,6 +547,15 @@ export class ServerManager {
   /** True when the autoStart gate must hold a launch nobody asked for: own server, never launched. */
   private holdsLaunch(): boolean {
     return !this.autoStart && !this.launchedOnce && this.target.kind === 'spawn';
+  }
+
+  /**
+   * True when the published state is `not-started` because of the autoStart gate. A
+   * `not-started/project-plugins` is NOT this: turning autoStart on does not release it and a
+   * gate publication must replace it (the guard, not the setting, is what holds that folder).
+   */
+  private heldByAutoStart(): boolean {
+    return this.current.kind === 'not-started' && this.current.reason === 'auto-start-off';
   }
 
   /**
@@ -561,7 +610,8 @@ export class ServerManager {
         this.cancelRetryTimer();
         this.crashAttempts = 0;
         if (this.holdsLaunch()) {
-          if (kind !== 'not-started') this.setState({ kind: 'not-started' });
+          if (!this.heldByAutoStart())
+            this.setState({ kind: 'not-started', reason: 'auto-start-off' });
         } else {
           this.launching = this.launch(binaryPath, this.folderChoice.folder);
         }
@@ -713,11 +763,13 @@ export class ServerManager {
     }
     if (this.holdsLaunch()) {
       // `folder-changed` / `target-changed` back to spawn with autoStart off and nothing launched.
-      this.setState({ kind: 'not-started' });
+      this.setState({ kind: 'not-started', reason: 'auto-start-off' });
       return 'not-started';
     }
     this.lastLaunch = { target, binaryPath, folder: choice.folder };
-    this.launching = this.launch(binaryPath, choice.folder);
+    // A `command` restart is the user asking (Start, Restart Server, the first prompt); every
+    // other reason is the extension acting by itself, which the launch guard treats differently.
+    this.launching = this.launch(binaryPath, choice.folder, reason === 'command' ? 'user' : 'auto');
     await this.launching;
     return 'attempted';
   }
@@ -727,8 +779,9 @@ export class ServerManager {
    * Promise. Cancels the backoff timer, aborts a start in progress and waits for it to settle
    * (it kills its own child), asks the injected `stop` to end a running one, waits for a restart
    * in flight and always resolves, ending in `stopped`. The abort also cancels an in-flight
-   * `/api/info` request, so the wait is bounded by the process stop (about 3 s with the defaults
-   * of `stopServer`), not by the request timeout.
+   * `/api/info` request, and the abort also releases a launch guard that is still pending (an
+   * open confirmation does not hold `stop()`), so the wait is bounded by the process stop (about
+   * 3 s with the defaults of `stopServer`), not by the request timeout nor by the user.
    */
   stop(): Promise<void> {
     this.stopPromise ??= this.doStop();
@@ -770,15 +823,48 @@ export class ServerManager {
    * An attempt aborted by `stop()` or by `restart()` is cleaned up silently: it stops its own
    * child and publishes nothing, otherwise a restart would flash a spurious `start-failed` (and
    * its error notification) between `restarting` and `starting`.
+   *
+   * Launch guard (issue #153). `guard` says how the injected `launchGuard` is consulted: `auto`
+   * (the extension acts by itself), `user` (a `command` restart: somebody just asked) or `skip`
+   * (the retry with a binary detected meanwhile; that folder already passed). `starting` is
+   * published BEFORE the guard is awaited on purpose: it reuses the race handling that already
+   * exists (a detection during `starting` goes to `pendingPath`, `restart()` aborts, `stop()`
+   * waits for `launching`) and the chat shows "Starting…" while a confirmation is open. A `hold`
+   * (or a guard that rejects: fails closed) publishes `not-started/project-plugins`, spawns
+   * nothing and does not set `launchedOnce` itself, so a hold from an automatic launch leaves
+   * the autoStart gate as it was (a `command` restart opens it earlier, in `doRestart`, and the
+   * guard still covers every later launch); an aborted or disposed attempt leaves silently, like
+   * every other aborted path. The guard is awaited only when one is injected, so without it
+   * `start` is still called in the same synchronous turn. VERIFIED with fakes by the unit tests
+   * of the describe "launch guard (issue #153)" in `serverManager.test.ts`. VERIFIED with the
+   * real prompt of `pluginConsentUi.ts` in a real VS Code (Windows 11, VS Code 1.144.0,
+   * 03/11/2026, `test:visual` step 40): "ok   P1 the toast … offers Start anyway and Don't
+   * start" (hold from an automatic launch), "ok   P4 Start anyway connects and the card is gone"
+   * (allowed launch) and "ok   P7 Cancel leaves the chat not started" (hold from a user launch).
+   * Not observed there: macOS and Linux, a stop while a modal is open.
    */
-  private async launch(binaryPath: string, folder: string): Promise<void> {
+  private async launch(
+    binaryPath: string,
+    folder: string,
+    guard: 'auto' | 'user' | 'skip' = 'auto',
+  ): Promise<void> {
     const controller = new AbortController();
     this.abort = controller;
     this.pendingPath = undefined;
-    this.launchedOnce = true;
     this.setState({ kind: 'starting', folder, binaryPath });
     let started: RunningServer | undefined;
     try {
+      // Awaited only when there is a guard: without one `start` must still be called in the same
+      // synchronous turn as before (several tests and the first-state publication rely on it).
+      if (
+        guard !== 'skip' &&
+        this.deps.launchGuard !== undefined &&
+        !(await this.guardAllows(folder, guard === 'user', controller.signal))
+      ) {
+        this.pendingPath = undefined; // the held folder is not retried with another binary
+        return;
+      }
+      this.launchedOnce = true;
       started = await this.startWithPlanB(binaryPath, folder, controller.signal);
       if (this.disposed || controller.signal.aborted) return await this.stopQuietly(started);
       const info = await this.deps.fetchInfo(started.url, started.password, controller.signal);
@@ -848,8 +934,55 @@ export class ServerManager {
       retry !== binaryPath
     ) {
       this.deps.log.info(`retrying with the binary detected meanwhile: ${retry}`);
-      await this.launch(retry, folder);
+      await this.launch(retry, folder, 'skip');
     }
+  }
+
+  /**
+   * Asks the injected launch guard (issue #153) whether this attempt may spawn. Resolves `false`
+   * when it must not: a `hold` verdict or a rejection (logged as an error, fails closed) publish
+   * `not-started/project-plugins`; an attempt aborted or disposed while the guard was pending
+   * publishes nothing, because the restart or stop that aborted it owns the state now. It does
+   * NOT wait for a guard that is still pending once the signal aborts (it resolves `false` at
+   * once; the guard's own work, such as an open modal, is left to finish by itself). Without a
+   * guard it resolves `true`. VERIFIED (fake guard that never resolves, Vitest, Windows 11,
+   * 03/11/2026): "stop() with a guard that never resolves still ends stopped" and "a restart
+   * with a first guard that never resolves still starts once"; it says nothing about the real
+   * modal.
+   */
+  private async guardAllows(
+    folder: string,
+    userAsked: boolean,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const guard = this.deps.launchGuard;
+    if (guard === undefined) return true;
+    let verdict: LaunchGuardVerdict;
+    let onAbort: (() => void) | undefined;
+    try {
+      // Raced against the abort: a modal cannot be cancelled from code, so without the race
+      // `stop()` and a restart would wait for the user to answer it. The late answer of the
+      // guard is ignored here (it may still record a decision, which is harmless).
+      const aborted = new Promise<'hold'>((resolve) => {
+        onAbort = () => {
+          resolve('hold');
+        };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      });
+      verdict = await Promise.race([guard({ folder, userAsked, signal }), aborted]);
+    } catch (error) {
+      this.deps.log.error(
+        `the launch guard failed; not starting the server: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      verdict = 'hold';
+    } finally {
+      if (onAbort !== undefined) signal.removeEventListener('abort', onAbort);
+    }
+    if (this.disposed || signal.aborted) return false;
+    if (verdict === 'go') return true;
+    this.setState({ kind: 'not-started', reason: 'project-plugins' });
+    return false;
   }
 
   /**

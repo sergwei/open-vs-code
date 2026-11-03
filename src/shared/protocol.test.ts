@@ -824,6 +824,18 @@ describe('isHostToWebview', () => {
     }
   });
 
+  // Issue #153. SYNTHETIC: literals, no host behind them. The guard is shallow, so this pins that
+  // both reasons of `not-started` pass and, through the type, that `reason` is mandatory there.
+  it('accepts a not-started connection with each reason', () => {
+    for (const reason of ['auto-start-off', 'project-plugins'] as const) {
+      const message: HostToWebview = {
+        type: 'connection.state',
+        connection: { state: 'not-started', reason },
+      };
+      expect(isHostToWebview(message)).toBe(true);
+    }
+  });
+
   it('is deliberately shallow: accepts a part.delta without delta', () => {
     // Documents the trade-off recorded in the guard header; change it only as a decision.
     expect(isHostToWebview({ type: 'part.delta' })).toBe(true);

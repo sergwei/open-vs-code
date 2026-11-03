@@ -6643,10 +6643,10 @@ describe('autoStart off: not-started and the prompt that starts the server (issu
   it('shows not-started to the panes and the status sink, and the status sink hears the catalog', async () => {
     const { api } = fakeApi();
     const { controller, posted, statusCalls, streams } = setup(api);
-    controller.onServerState({ kind: 'not-started' });
+    controller.onServerState({ kind: 'not-started', reason: 'auto-start-off' });
     expect(posted).toContainEqual({
       type: 'connection.state',
-      connection: { state: 'not-started' },
+      connection: { state: 'not-started', reason: 'auto-start-off' },
     });
     expect(statusCalls.connections).toEqual(['not-started']);
     controller.onServerState(RUNNING);
@@ -6662,7 +6662,7 @@ describe('autoStart off: not-started and the prompt that starts the server (issu
     const { api, calls, prompts } = fakeApi();
     // The pane shows no session, but the first server will hand it the remembered one (P3=1).
     const { controller, posted, serverCalls, restartHook, streams } = setup(api, 'ses_old');
-    controller.onServerState({ kind: 'not-started' });
+    controller.onServerState({ kind: 'not-started', reason: 'auto-start-off' });
     restartHook.run = () => {
       controller.onServerState(STARTING);
     };
@@ -6684,7 +6684,7 @@ describe('autoStart off: not-started and the prompt that starts the server (issu
   it('answers ServerUnavailable when the start ends unavailable', async () => {
     const { api, prompts } = fakeApi();
     const { controller, posted, restartHook } = setup(api);
-    controller.onServerState({ kind: 'not-started' });
+    controller.onServerState({ kind: 'not-started', reason: 'auto-start-off' });
     restartHook.run = () => {
       controller.onServerState(STARTING);
     };
@@ -6696,12 +6696,34 @@ describe('autoStart off: not-started and the prompt that starts the server (issu
     expect(results(posted)[0]).toMatchObject({ error: { code: 'ServerUnavailable' } });
   });
 
+  // Issue #153. SYNTHETIC: the manager is a fake that replays the states the real one publishes
+  // when the plugin confirmation is cancelled (`restarting` -> `starting` -> `not-started`).
+  it('passes the project-plugins reason on and answers ServerUnavailable when the start falls back to it', async () => {
+    const { api, prompts } = fakeApi();
+    const { controller, posted, restartHook } = setup(api);
+    const held: ServerState = { kind: 'not-started', reason: 'project-plugins' };
+    controller.onServerState(held);
+    expect(posted).toContainEqual({
+      type: 'connection.state',
+      connection: { state: 'not-started', reason: 'project-plugins' },
+    });
+    restartHook.run = () => {
+      controller.onServerState(STARTING);
+    };
+    const done = controller.handle(send());
+    await flush();
+    controller.onServerState(held);
+    await done;
+    expect(prompts).toEqual([]);
+    expect(results(posted)[0]).toMatchObject({ error: { code: 'ServerUnavailable' } });
+  });
+
   // Protects the review finding W1 (#124): without `startWaiter?.(false)` in `dispose()`, a prompt
   // waiting for the server stays pending forever once the controller is disposed. SYNTHETIC.
   it('dispose releases a prompt that waits for the server to start', async () => {
     const { api, prompts } = fakeApi();
     const { controller, restartHook } = setup(api);
-    controller.onServerState({ kind: 'not-started' });
+    controller.onServerState({ kind: 'not-started', reason: 'auto-start-off' });
     restartHook.run = () => {
       controller.onServerState(STARTING);
     };
@@ -6720,7 +6742,7 @@ describe('autoStart off: not-started and the prompt that starts the server (issu
   it('answers ServerUnavailable at once when the manager refuses the restart', async () => {
     const { api } = fakeApi();
     const { controller, posted, serverCalls } = setup(api);
-    controller.onServerState({ kind: 'not-started' });
+    controller.onServerState({ kind: 'not-started', reason: 'auto-start-off' });
     // `restartHook` does nothing: the state stays not-started, like a refused restart.
     await controller.handle(send());
     expect(serverCalls).toContain('restart');

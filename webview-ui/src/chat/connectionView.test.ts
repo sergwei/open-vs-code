@@ -220,11 +220,27 @@ describe('describeProblem', () => {
   });
 
   it('not-started is a neutral status card whose only action is Start (server.restart)', () => {
-    const view = describeProblem({ state: 'not-started' });
+    const view = describeProblem({ state: 'not-started', reason: 'auto-start-off' });
     expect(view?.title).toBe('opencode is not running');
     expect(view?.role).toBe('status');
+    expect(view?.cause).toContain('autoStart');
     expect(view?.actions).toEqual([{ label: 'Start', message: { type: 'server.restart' } }]);
-    expect(describeConnection({ state: 'not-started' })).toBe('Not started');
+    expect(describeConnection({ state: 'not-started', reason: 'auto-start-off' })).toBe(
+      'Not started',
+    );
+  });
+
+  // Issue #153. SYNTHETIC: fabricated connection states; the card in a real window is not seen.
+  it('not-started for project plugins says why and still offers only Start', () => {
+    const connection: ConnectionState = { state: 'not-started', reason: 'project-plugins' };
+    const view = describeProblem(connection);
+    expect(view?.title).toBe('opencode is not running');
+    expect(view?.cause).toBe(
+      'This folder has opencode plugins that would run with your permissions. Press Start to review them.',
+    );
+    expect(view?.cause).not.toContain('autoStart');
+    expect(view?.actions).toEqual([{ label: 'Start', message: { type: 'server.restart' } }]);
+    expect(describeConnection(connection)).toBe('Not started');
   });
 
   it('the exited card says the conversation is kept, not the raw server text', () => {
@@ -245,7 +261,9 @@ describe('nextGuideLatch', () => {
   });
 
   it('not-started turns it off even when it was on: the Start card takes its place', () => {
-    expect(nextGuideLatch(true, { state: 'not-started' }, false)).toBe(false);
+    expect(nextGuideLatch(true, { state: 'not-started', reason: 'auto-start-off' }, false)).toBe(
+      false,
+    );
   });
 
   it('a normal start never turns it on', () => {

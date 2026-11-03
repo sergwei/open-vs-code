@@ -1275,7 +1275,8 @@ export class ChatController {
   /**
    * Resolves the wait of {@link startOnPrompt} when the connection reaches an end: `connected`
    * is `true`; a final `unavailable` (no retry scheduled), `stopped` or a fall back to
-   * `not-started` is `false`. `starting` and `reconnecting` keep waiting (the manager is still
+   * `not-started` is `false` (also when the launch guard of issue #153 held it again because the
+   * user cancelled the plugin confirmation). `starting` and `reconnecting` keep waiting (the manager is still
    * working on it and has its own 30 s start timeout, so there is no timer here).
    */
   private settleStartOnPrompt(connection: ConnectionState): void {
@@ -1293,9 +1294,11 @@ export class ChatController {
    * by prompts that arrive meanwhile. It relies on `deps.server.restart()` having published its
    * first state synchronously (`restarting` -> `starting`): if the connection is still
    * `not-started` right after the call, the manager refused and the answer is `false` at once
-   * instead of a hang. With the real manager that refusal cannot happen from `not-started` (that
-   * state needs a binary and a folder); the check is a defensive net against a later refactor of
-   * the manager (R2 of the plan). Known limit: if the stream stays `reconnecting` for good after
+   * instead of a hang. With the real manager that synchronous refusal cannot happen from
+   * `not-started` (that state needs a binary and a folder); the check is a defensive net against a
+   * later refactor of the manager (R2 of the plan). What CAN happen with the real manager (issue
+   * #153) is a later fall back to `not-started/project-plugins`: the plugin confirmation of the
+   * launch guard was cancelled, and {@link settleStartOnPrompt} then answers `false`. Known limit: if the stream stays `reconnecting` for good after
    * `running`, the wait has no timeout of its own and the prompt waits as long as it does. VERIFIED by the unit tests of `chatController.test.ts`
    * with a fake `server.restart`, and with the real manager by `test:visual` step 32 ("ok   N4 the
    * turn of the prompt that started the server ends", Windows 11, 31/10/2026). The refusal path
@@ -1346,6 +1349,8 @@ export class ChatController {
    * the pending requests (they died with the server) and clears the badge. An `unavailable` that
    * carries `binary` (the detection's attempts, E2 issue #85) passes it on to the connection state
    * as is, and one without it adds no field, so the webview can tell step 1 from step 2.
+   * A `not-started` passes its `reason` (`auto-start-off` or `project-plugins`, issue #153) on
+   * untouched, because the card and the status bar word the two differently.
    * VERIFIED by unit tests with fabricated states (synthetic).
    * Issue #128: a new `running` server attaches its client to `deps.serverConfig` (every other
    * state detaches it through `stopStream`).
@@ -1415,7 +1420,7 @@ export class ChatController {
         return;
       case 'not-started':
         this.stopStream();
-        this.setConnection({ state: 'not-started' });
+        this.setConnection({ state: 'not-started', reason: state.reason });
         return;
       case 'unavailable':
         this.stopStream();

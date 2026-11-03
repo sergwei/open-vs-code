@@ -615,7 +615,10 @@ describe('connection states', () => {
     // Issue #124. SYNTHETIC: a fabricated `not-started` state, no host behind it.
     it('not-started shows the Start card, sends server.restart, and still lets a prompt go', () => {
       const h = start();
-      h.apply({ type: 'connection.state', connection: { state: 'not-started' } });
+      h.apply({
+        type: 'connection.state',
+        connection: { state: 'not-started', reason: 'auto-start-off' },
+      });
       const card = must(h.container, '.connection-card');
       expect(card.getAttribute('role')).toBe('status');
       expect(card.textContent).toContain('opencode is not running');
