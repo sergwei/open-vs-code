@@ -25,7 +25,7 @@ affiliated with opencode or with Microsoft.
   hidden, or (with chat tabs) when the request belongs to a tab that is not in front, you get a
   notification and a badge on the Activity Bar icon.
 
-  ![A permission card for the read tool with the buttons Allow once, Always allow, Reject and Reject with feedback](docs/images/permission-card.png)
+  ![A chat tab where a read of .env waits for approval: a permission card above the prompt box with the buttons Allow once, Always allow, Reject and Reject with feedback](docs/images/permission-card.png)
 
 - **Sessions:** a list with groups and search, rename, delete, fork from any of your messages and
   jump into subagent sessions. The open session is remembered per workspace.
