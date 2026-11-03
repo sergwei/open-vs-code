@@ -86,7 +86,8 @@ export interface PluginConsent {
  * only answers whether a launch by the extension would not be a `go`.
  *
  * VERIFIED in a real VS Code with the synthetic server (Windows 11, VS Code 1.144.1, 03/11/2026,
- * the full `npm run test:visual` on the final tree, which ended "all visual checks passed"):
+ * the full `npm run test:visual` of PR #168, the first on a tree where step 40 runs again after
+ * the title fix of f823025, which ended "all visual checks passed", step 40 in 24.0 s):
  * "ok   P1 the toast …
  * offers Start anyway and Don't start" (notice), "ok   P3 after Don't start and a Reload the block is
  * logged (true), no toast shows (false) and nothing starts" (deny), "ok   P4 a modal lists the

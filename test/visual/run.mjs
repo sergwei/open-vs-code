@@ -15733,9 +15733,11 @@ try {
   // plugins. The toast and the modal are the only way to see the buttons of a notification (the
   // test API has none). Cleanup in `finally`: both plugin folders removed (the `command` folder of
   // step 24 stays), the decision forgotten and the server restarted. The DOM of toasts and
-  // status bar is internal to VS Code. VERIFIED by the full `npm run test:visual` on the final tree
+  // status bar is internal to VS Code. VERIFIED by the full `npm run test:visual` of PR #168
   // (Windows 11, VS Code 1.144.1, 03/11/2026, "all visual checks passed", step 40 all ok in
-  // 29.7 s): the lines
+  // 24.0 s), the first full run after f823025 restored the space in this step's title (the run of
+  // #158 that measured 29.7 s came before a header round dropped it, so its tree never ran step 40
+  // as merged): the lines
   // "ok   P1 the toast … offers Start anyway and Don't start", "ok   P2 the chat card says
   // opencode is not running because of the plugins", "ok   P3 after Don't start and a Reload the
   // block is logged (true), no toast shows (false) and nothing starts", "ok   P4 a modal lists the
