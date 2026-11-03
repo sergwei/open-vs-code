@@ -196,7 +196,11 @@ panel.onDidClose(() => station.log.info('closed'));
 
 - **Files.** `html`, `scripts` and `styles` are paths **relative to your mod folder** (`.html` or `.htm`,
   `.js` or `.mjs`, `.css`; each file at most 1 MB). A path with `..`, an absolute path, a drive letter or
-  a link that leaves the folder is refused, and the page can read nothing outside the folder.
+  a link that leaves the folder is refused. That check covers the files you declare. It does **not** cover
+  what the page asks for by itself (an `<img>` or a `url()`): VS Code serves it when its path is under your
+  folder and does not resolve links, so a symlink or junction inside your folder that points outside is
+  readable by the page. The page has no network, so all it can do with that is send it to your mod, which
+  already has Node (see Security). Do not leave links to private places inside a mod folder.
 - **The page has no network.** Its content security policy is `default-src 'none'`, scripts only by a
   nonce the extension adds to the files you declare, styles and images only from your folder, and **no
   `connect-src`**: `fetch`, `XMLHttpRequest` and WebSocket are blocked. Inline `<script>` and `style=`
@@ -204,11 +208,12 @@ panel.onDidClose(() => station.log.info('closed'));
   server, and it never sees its address or password.
 - **Talking to the page.** The page gets `acquireVsCodeApi()`: `vscode.postMessage(data)` arrives in your
   `onMessage`, and `panel.postMessage(data)` arrives in the page as a `message` event (`event.data`).
-  `data` is JSON, at most 1 MB serialized, in both directions; anything else is dropped with a warning in
-  the mods log. At most 30 messages per second go from the mod to the page (all your panels together);
-  the rest are dropped with a warning, so if you send state, resend it rather than relying on every
-  message arriving. Other than that, the content of the messages is yours: the extension does not look
-  into it.
+  `data` is JSON, at most 1 MB serialized, in both directions. A page message that is not valid JSON or
+  is over 1 MB is dropped with a warning in the mods log (at most one per second per panel); a
+  `panel.postMessage` with such data throws a `TypeError` in your mod. At most 30 messages per second go
+  from the mod to the page (all your panels together); the rest are dropped with a warning, so if you
+  send state, resend it rather than relying on every message arriving. Other than that, the content of
+  the messages is yours: the extension does not look into it.
 - **Theme.** Use the `--vscode-*` variables (for example `var(--vscode-editor-background)`); they are
   present in every VS Code webview and follow the light, dark and high contrast themes.
 - **Lifetime.** `onDidClose` runs once when the user closes the tab or the mod calls `dispose()`. A panel
