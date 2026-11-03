@@ -16018,6 +16018,217 @@ try {
       await setTheme(DARK).catch(() => undefined);
     }
   });
+
+  // E10-mods-slash-menu (issue #155, plan Engram #1862, decision
+  // `E10-mods-slash-menu/decisions/menu-sin-catalogo` option 1). A mod command needs no server: in
+  // `not-started` (the only server-less state a real window can hold still) the "/" button, the menu
+  // and the popup list it, and typing it runs it instead of sending a prompt that would start the
+  // server. A step of its own, not an extension of 38: getting `not-started` takes `autoStart: false`
+  // plus a Reload Window, which would wipe the band step 38's M8 checks. The Reload helper is a copy
+  // of step 32's (steps 8, 28, 32 and 40 each carry one; unifying them is out of scope).
+  await step('41 mods: the "/" menu without a server (issue #155)', async () => {
+    const MOD = 'hello-station';
+    const QUALIFIED = 'hello-station:hello';
+    const KEY = 'openVsCode.autoStart';
+    const DARK = 'Default Dark Modern';
+    const sentinel = path.join(vscode.modsHome, '..', 'mods-sentinel', 'hello.ran');
+    const hostLogSizes = () => {
+      const sizes = new Map();
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'OpenCode.log') sizes.set(full, fs.statSync(full).size);
+        }
+      };
+      try {
+        walk(path.join(vscode.userDataDir, 'logs'));
+      } catch {
+        // no logs yet: nothing to subtract
+      }
+      return sizes;
+    };
+    // What the host logged since `before` (a `hostLogSizes()`): the tail of each file, whole new files.
+    const logSince = (before) => {
+      let text = '';
+      for (const file of hostLogSizes().keys()) {
+        text += fs.readFileSync(file, 'utf8').slice(before.get(file) ?? 0) + '\n';
+      }
+      return text;
+    };
+    const reload = async (mark) => {
+      await page.evaluate((key) => {
+        globalThis[key] = true;
+      }, mark);
+      await command('Developer: Reload Window');
+      web?.close();
+      await browser.close().catch(() => undefined);
+      let reloaded = false;
+      for (let tries = 0; tries < 120 && !reloaded; tries++) {
+        await connectWorkbench(90_000);
+        const stale = await page
+          .evaluate((key) => globalThis[key] === true, mark)
+          .catch(() => true);
+        reloaded = !stale;
+        if (reloaded) break;
+        await browser.close().catch(() => undefined);
+        await sleep(250); // between two attempts to reach the new page, not a wait for it
+      }
+      if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
+      await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
+      let opened = true;
+      try {
+        await openChat(8_000);
+      } catch {
+        opened = false;
+      }
+      if (!opened) {
+        await page
+          .locator('.activitybar [aria-label^="OpenCode"]')
+          .first()
+          .click()
+          .catch(() => undefined);
+        await openChat(60_000);
+      }
+    };
+    const card = () =>
+      web.inDoc((doc) => ({
+        connection: doc.querySelector('.app')?.getAttribute('data-connection') ?? '',
+      }));
+    // The "/" button, the menu items and the popup rows, as the webview shows them right now.
+    const slashState = () =>
+      web.inDoc((doc) => {
+        const trigger = doc.querySelector('button[aria-label="Commands"]');
+        const box = (element) => {
+          if (!element) return null;
+          const r = element.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
+        };
+        return {
+          view: { width: doc.defaultView.innerWidth, height: doc.defaultView.innerHeight },
+          triggerDisabled: trigger?.getAttribute('aria-disabled') === 'true',
+          triggerFound: trigger !== null,
+          items: [...doc.querySelectorAll('.command-menu [role="menuitem"]')].map((item) => ({
+            text: item.querySelector('.command-name')?.textContent ?? item.textContent ?? '',
+            disabled: item.getAttribute('aria-disabled') === 'true',
+          })),
+          menu: box(doc.querySelector('.command-menu')),
+          rows: [...doc.querySelectorAll('.command-popup [role="option"]')].map(
+            (row) => row.querySelector('.command-name')?.textContent ?? '',
+          ),
+          popup: box(doc.querySelector('.command-popup')),
+          sendDisabled: [...doc.querySelectorAll('button')].some(
+            (b) => b.getAttribute('aria-label') === 'Send' && b.disabled,
+          ),
+          users: doc.querySelectorAll('[role="log"] .message-user').length,
+        };
+      });
+    const inView = (box, view) =>
+      box !== null &&
+      box.left >= -0.5 &&
+      box.top >= -0.5 &&
+      box.right <= view.width + 0.5 &&
+      box.bottom <= view.height + 0.5;
+
+    await openChat(30_000);
+    await waitConnected();
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    try {
+      await command('Notifications: Clear All Notifications');
+      fs.rmSync(sentinel, { force: true });
+      installModFixture(repoRoot, vscode.modsHome, MOD);
+      writeSettings(vscode.userDataDir, { [KEY]: false });
+      const before = hostLogSizes();
+      await reload('__visualReload41');
+      const noted = await waitFor(
+        () => logSince(before).includes('server not started'),
+        20_000,
+        200,
+      );
+      let loaded = await waitFor(() => logSince(before).includes(`mod ${MOD} loaded`), 20_000, 200);
+      if (loaded !== true) {
+        // HYPOTHESIS R4 of the plan: the mods root may not survive a Reload Window.
+        await command('OpenCode: Reload Mods');
+        loaded = await waitFor(() => logSince(before).includes(`mod ${MOD} loaded`), 20_000, 200);
+      }
+      await waitFor(async () => (await card()).connection === 'not-started', 30_000, 200);
+      check(
+        noted === true && loaded === true && (await card()).connection === 'not-started',
+        `S0 after the Reload the chat is not started (log "server not started" ${String(noted === true)}) and the mod loaded (${String(loaded === true)})`,
+      );
+      await waitFor(async () => (await slashState()).triggerFound, 10_000, 200);
+      // The "/" button is active only once the mods state (posted right after the pane is ready)
+      // lists the mod command: wait up to 10 s for that, then go on and let S1 report it.
+      await focusPromptBox();
+      await waitFor(async () => !(await slashState()).triggerDisabled, 10_000, 200);
+
+      // --- S1: the "/" button is active and its menu lists only the mod command ------------------
+      const narrow = await setSideBarWidth(300).catch(() => undefined);
+      const idle = await slashState();
+      check(
+        idle.triggerFound && !idle.triggerDisabled,
+        `S1 without a server the "/" button is not aria-disabled (found ${String(idle.triggerFound)}, disabled ${String(idle.triggerDisabled)}, side bar ${String(narrow)})`,
+      );
+      check(await clickButton('Commands'), 'S1 the "/" button is pressed with the real mouse');
+      await waitPresent('.command-menu [role="menuitem"]');
+      const menu = await slashState();
+      check(
+        menu.items.some((i) => i.text === `/${QUALIFIED}` && !i.disabled) &&
+          !menu.items.some((i) => i.text === '/hello') &&
+          inView(menu.menu, menu.view),
+        `S1 the menu lists /${QUALIFIED} active and no /hello (the fake's project command: no catalog yet), inside the view (${JSON.stringify(menu.items)})`,
+      );
+      await shot('41-slash-not-started');
+      await page.keyboard.press('Escape');
+      await waitPresent('.command-menu', false);
+
+      // --- S2: typing "/hel" lists it in the popup ------------------------------------------------
+      await clearPromptBox(150);
+      await page.keyboard.type('/hel');
+      await waitPresent('.command-popup [role="option"]');
+      const popup = await slashState();
+      check(
+        popup.rows.includes(`/${QUALIFIED}`) && inView(popup.popup, popup.view),
+        `S2 typing "/hel" lists /${QUALIFIED} in the popup, inside the view (${JSON.stringify(popup.rows)})`,
+      );
+      await clearPromptBox(150);
+      await waitPresent('.command-popup', false);
+
+      // --- S3: Send runs it: no prompt, the server stays stopped ----------------------------------
+      const usersBefore = (await slashState()).users;
+      const sendFrom = hostLogSizes();
+      await page.keyboard.type(`/${QUALIFIED} Bea`);
+      const ready = await slashState();
+      check(!ready.sendDisabled, 'S3 with the mod command typed, Send is not disabled');
+      check(await clickButton('Send'), 'S3 Send is pressed with the real mouse');
+      const ran = await waitFor(() => fs.existsSync(sentinel), 15_000, 200);
+      check(
+        ran === true && fs.readFileSync(sentinel, 'utf8').trim() === 'args=Bea',
+        'S3 the command ran inside its Worker with its arguments ("Bea")',
+      );
+      await sleep(2_000); // margin: a prompt would start the server within it
+      const sent = logSince(sendFrom);
+      check(
+        (await card()).connection === 'not-started' &&
+          !sent.includes('starting the server for') &&
+          (await slashState()).users === usersBefore,
+        `S3 two seconds later the chat is still not started, the log has no "starting the server for" and no user message was added (${String((await slashState()).users)} vs ${String(usersBefore)})`,
+      );
+      assertNoWebviewErrors('step 41');
+    } finally {
+      // Leave the run as the step found it: autoStart back, no mod, server running, dark theme.
+      writeSettings(vscode.userDataDir, { [KEY]: undefined });
+      removeModFixture(vscode.modsHome, MOD);
+      fs.rmSync(sentinel, { force: true });
+      if ((await card().catch(() => ({ connection: '' }))).connection !== 'connected') {
+        await clickButton('Start').catch(() => false);
+        await waitConnected(60_000).catch(() => undefined);
+      }
+      await command('OpenCode: Reload Mods').catch(() => undefined);
+      await command('Notifications: Clear All Notifications').catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+    }
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;

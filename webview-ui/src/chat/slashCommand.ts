@@ -30,15 +30,42 @@ export function withClientCommands(
  * (E10-mods, phase 3), so the "/" menu and the popup list them. Same rule as
  * {@link withClientCommands}: a name the list already has wins, so a server command called
  * `hello-station:hello` keeps working as the server's and the mod's copy is not listed. An absent
- * list stays absent. VERIFIED by `slashCommand.test.ts` with fabricated lists (Windows 11,
- * 02/11/2026).
+ * list (no catalog yet: not-started, starting, a failed `command.list`) yields the mods' commands
+ * alone when there are any, because they never need the server (issue #155, decision
+ * `E10-mods-slash-menu/decisions/menu-sin-catalogo`, option 1: nothing says the server's are
+ * missing); it stays `undefined` only when there are no mods either, so the menu keeps saying
+ * "Loading commands…". VERIFIED by `slashCommand.test.ts` with fabricated lists ("lists only the
+ * mod commands when the list is absent" and "keeps an absent list absent when there are no mods",
+ * Windows 11, 03/11/2026).
  */
 export function withModCommands(
   list: readonly CommandOption[] | undefined,
   mods: readonly ModCommandOption[],
 ): readonly CommandOption[] | undefined {
-  if (list === undefined) return undefined;
+  if (list === undefined) return mods.length === 0 ? undefined : [...mods];
   return [...list, ...mods.filter((own) => !list.some((it) => it.name === own.name))];
+}
+
+/**
+ * The `{ name, args }` of `text` when it runs a mod command the server does not shadow, else
+ * `undefined` (issue #155). Parses against the client and mod commands over `serverList`, so it
+ * works with NO catalog: `/compact` is still recognised (as a client command, which is not a mod
+ * one, so it returns `undefined` here and the caller's normal path handles it) and a server command
+ * with the same name wins. `submit` calls it before its connection gate, because a mod command
+ * needs no server. VERIFIED by `slashCommand.test.ts` with fabricated lists ("modCommandOf",
+ * Windows 11, 03/11/2026).
+ */
+export function modCommandOf(
+  text: string,
+  serverList: readonly CommandOption[] | undefined,
+  mods: readonly ModCommandOption[],
+): { name: string; args: string } | undefined {
+  const command = parseCommand(
+    text,
+    withModCommands(withClientCommands(serverList) ?? CLIENT_COMMANDS, mods),
+  );
+  if (command === undefined || !isModCommand(command.name, serverList, mods)) return undefined;
+  return command;
 }
 
 /**

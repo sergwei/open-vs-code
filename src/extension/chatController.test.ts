@@ -1082,6 +1082,35 @@ describe('mods (E10-mods phase 3)', () => {
     expect(logs.join(' | ')).not.toContain('secret-args');
   });
 
+  // Issue #155. FABRICATED `ModsChat` and a fake api; protects the premise of the webview fix: the
+  // host runs a mod command with no server (not-started), never restarts it and never calls the api.
+  it('runs a mod command in not-started without starting the server or calling the api', async () => {
+    const mods = fakeModsChat();
+    const fake = fakeApi();
+    const { controller, posted, serverCalls } = setup(
+      fake.api,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      mods.sink,
+    );
+    controller.onServerState({ kind: 'not-started', reason: 'auto-start-off' });
+    await controller.handle({
+      type: 'mod.command.run',
+      requestId: 'r1',
+      name: 'hello-station:hello',
+      args: 'Ana',
+    });
+    expect(mods.runs).toHaveLength(1);
+    expect(posted.at(-1)).toEqual({ type: 'request.result', requestId: 'r1' });
+    expect(serverCalls).not.toContain('restart');
+    expect(fake.calls).toEqual([]);
+  });
+
   it('answers the failure of a command as an error result', async () => {
     const mods = fakeModsChat();
     const { controller, posted } = setup(

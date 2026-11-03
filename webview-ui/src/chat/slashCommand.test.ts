@@ -12,6 +12,7 @@ import {
   findSlash,
   isClientCommand,
   isModCommand,
+  modCommandOf,
   parseCommand,
   withClientCommands,
   withModCommands,
@@ -157,8 +158,14 @@ describe('mod commands', () => {
     expect(isModCommand('init', LIST, [HELLO])).toBe(false);
   });
 
-  it('keeps an absent list absent', () => {
-    expect(withModCommands(undefined, [HELLO])).toBeUndefined();
+  // Issue #155: with no catalog the mods' commands are still offered (they need no server), and
+  // the list stays absent only when there are none, so "Loading commands…" is kept for that case.
+  it('lists only the mod commands when the list is absent', () => {
+    expect(withModCommands(undefined, [HELLO])).toEqual([HELLO]);
+  });
+
+  it('keeps an absent list absent when there are no mods', () => {
+    expect(withModCommands(undefined, [])).toBeUndefined();
   });
 
   it('lets parseCommand find a typed mod command with its arguments', () => {
@@ -169,6 +176,33 @@ describe('mod commands', () => {
     expect(filterCommands([...LIST, HELLO], 'hel').map((c) => c.name)).toEqual([
       'hello-station:hello',
     ]);
+  });
+});
+
+// Issue #155. FABRICATED texts and lists. Protects: a typed mod command that is not recognised
+// without a catalog (in not-started it went out as a prompt and started the server), `/compact`
+// turning into a mod command, and a server command being shadowed by a mod of the same name.
+describe('modCommandOf', () => {
+  const HELLO = { modId: 'hello-station', name: 'hello-station:hello', description: 'Says hello' };
+
+  it('recognises a mod command with its arguments without a catalog', () => {
+    expect(modCommandOf('/hello-station:hello Ana', undefined, [HELLO])).toEqual({
+      name: 'hello-station:hello',
+      args: 'Ana',
+    });
+  });
+
+  it('is undefined for /compact without a catalog: it is a client command', () => {
+    expect(modCommandOf('/compact', undefined, [HELLO])).toBeUndefined();
+  });
+
+  it('is undefined when the server lists the same name', () => {
+    expect(modCommandOf('/hello-station:hello', [{ name: HELLO.name }], [HELLO])).toBeUndefined();
+  });
+
+  it('is undefined for a normal text', () => {
+    expect(modCommandOf('hello-station:hello', undefined, [HELLO])).toBeUndefined();
+    expect(modCommandOf('/unknown', LIST, [HELLO])).toBeUndefined();
   });
 });
 

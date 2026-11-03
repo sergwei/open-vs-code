@@ -96,6 +96,11 @@
  * runs, no Reload): 03/11/2026, Windows 11, VS Code 1.144.1, "40    29.7 s", times 1.25 is 37.1,
  * rounded up to 40. It replaces the 35, which came from the earlier full run without that P6
  * (24.3 s, times 1.25 is 30.4); `--steps 40` alone took 25.6 s.
+ * The step 41 (the "/" menu and popup list the mod command without a server, issue #155) came after
+ * it too: it needs the 1, installs the `hello-station` fixture, reloads the window once with
+ * `autoStart` off and sends no prompt. Its `budgetS` of 15 is the criterion above applied to the
+ * full run of 04/11/2026 (Windows 11, VS Code 1.144.1, 819.2 s, its only FAIL the F2 of step 36,
+ * #171): "41    11.7 s", times 1.25 is 14.6, rounded up to 15. It replaces the estimate of 30.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -151,6 +156,7 @@ export const STEPS = [
   { id: '38', needs: ['1'], sendsPrompt: true, groups: ['mods'], budgetS: 25 },
   { id: '39', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
   { id: '40', needs: ['1'], sendsPrompt: false, groups: ['setup'], budgetS: 40 },
+  { id: '41', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
 ];
 
 /** Every valid id, in canonical order. */
