@@ -57,9 +57,10 @@ export const MAX_FILE_SEARCH_LENGTH = 200;
 export const MAX_COMMAND_NAME_LENGTH = 200;
 
 /**
- * Longest argument text `mod.command.run` accepts (E10-mods). Equal to the cap the mods wire puts on
- * the arguments it hands a mod's command (`MAX_COMMAND_ARGS` of the mods wire module, 4000); kept
- * as its own constant because this module imports nothing from the mods code. Our choice.
+ * Longest argument text of a mod command (E10-mods). The ONE cap: `mod.command.run` is validated
+ * against it here and `ModHost.runCommand` applies it too, so the palette (which does not go
+ * through this protocol) is covered. The mods wire module has no constant of its own. Our choice:
+ * same order as a typed `/` line.
  */
 export const MAX_MOD_COMMAND_ARGS = 4000;
 

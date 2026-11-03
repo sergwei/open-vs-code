@@ -27,8 +27,6 @@ export const MAX_COMPOSE_TEXT = 20_000;
 export const MAX_COMMANDS_PER_MOD = 20;
 /** Most mods loaded at once (plan 3.5). */
 export const MAX_MODS = 20;
-/** Longest args string of a command run. Own choice: same order as a typed `/` line. */
-export const MAX_COMMAND_ARGS = 4000;
 
 /** Most panels one mod may have open (plan section 4 F4; own choice: a few tabs, not a flood). */
 export const MAX_PANELS_PER_MOD = 3;
