@@ -14,9 +14,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   npm names included, in the folder or any folder above it) it shows a warning with **Start
   anyway** and **Don't start**. The answer is remembered per folder and asked again if the plugin
   list changes; Start, **OpenCode: Restart Server** and the first prompt ask in a modal. New command
-  **OpenCode: Forget Plugin Decision for This Folder**. Not covered: a plugin added while opencode
-  runs (opencode hot-reloads it), and a server set in `openVsCode.serverUrl`, which the extension
-  does not start. The chat card and the status bar say "not started" because of the plugins.
+  **OpenCode: Forget Plugin Decision for This Folder**. A plugin that arrives while opencode runs
+  (a `git pull`, a branch switch) stops the server and asks again (see Changed). Not covered: a
+  server set in `openVsCode.serverUrl`, which the extension does not start. The chat card and the
+  status bar say "not started" because of the plugins.
 - **Mods**: JavaScript you write yourself, loaded only from `~/.config/opencode-station/mods`
   (never from a project), each in its own Worker. A mod can show a status band in the chat, add
   commands to the `/` menu and to **OpenCode: Run Mod Command…**, show a toast, compose a prompt,
@@ -143,6 +144,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- opencode now starts with its file watcher off (`OPENCODE_FILEWATCHER_DISABLE=1`), so it no longer
+  imports a project plugin that lands while it runs (opencode 2.0.32 did so in under half a
+  second, with no prompt). Instead the extension watches the served folder: a plugin you have not
+  allowed stops the server (cutting a running turn) and asks again, before it runs. The cost:
+  changes to opencode's config, `AGENTS.md`, skills and commands now apply after **OpenCode:
+  Restart Server**. Not covered: plugin folders above the served one, events lost to
+  `files.watcherExclude` or symlinks, and a plugin written while the server is still starting,
+  which can run once (issue #158).
+- Mods have flood limits: at most 50 lines a second in the **OpenCode Mods** channel (including the
+  extension's warnings about what the mod sends) and 30 messages a second to its panels; the rest
+  is dropped with one warning per second. Command arguments are capped at 4000 characters on every
+  path, **OpenCode: Run Mod Command…** included (issue #155).
 - The license is now the [PolyForm Shield License 1.0.0](LICENSE) instead of MIT: you may use,
   change and share the extension for any purpose except providing a product that competes with
   it. It is source-available, not an OSI open source license.
