@@ -82,7 +82,14 @@ export type UnavailableReason =
 
 /** Why a restart happens; it ends up in the log line `restarting the server (<reason>)`. */
 export type RestartReason =
-  'command' | 'binary-changed' | 'folder-changed' | 'crash' | 'target-changed';
+  | 'command'
+  | 'binary-changed'
+  | 'folder-changed'
+  | 'crash'
+  | 'target-changed'
+  // Issue #158: the plugins of the served folder changed while the server ran (`pluginRecheck.ts`).
+  // Like every reason but `command` it launches with `guard: 'auto'` (`userAsked: false`).
+  | 'plugins-changed';
 
 /**
  * Lifecycle of the single server. `not-started` means a binary and a folder are known but the

@@ -119,9 +119,10 @@ export interface OwnServer {
  * environment is the test host's, so the redirected XDG dirs of `.vscode-test.mjs` apply and the
  * run does not touch the developer's opencode data. `extraEnv` is applied on top of `process.env`
  * and `OPENCODE_PASSWORD` always wins over it (the `password` argument is the only source of the
- * credential, so a stray key in `extraEnv` cannot replace it). Only the MCP contract case of
- * `realOpencode.test.ts` passes it, to hand the server a config with a fake MCP server through
- * `OPENCODE_CONFIG_CONTENT`. The extracted code is the spawn that the
+ * credential, so a stray key in `extraEnv` cannot replace it). Two cases of
+ * `realOpencode.test.ts` pass it: the MCP contract case, to hand the server a config with a fake
+ * MCP server through `OPENCODE_CONFIG_CONTENT`, and the #158 plugin case, to give it the
+ * environment of `buildServeEnv`. The extracted code is the spawn that the
  * external-server case used to carry inline; VERIFIED there against a real opencode 2.0.32
  * (Windows 11, 22/10/2026), and by the cases of this suite that use it now (see their headers).
  */

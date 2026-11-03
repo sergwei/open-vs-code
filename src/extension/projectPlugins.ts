@@ -25,8 +25,15 @@
 // guard asks before spawning because the extension makes such requests right after the start.
 // NOT observed: plugins declared in `opencode.json` (npm packages), `.ts` plugins, other OSes.
 // Known false positives: the folder is itself opencode's global config root, or the user runs
-// with `OPENCODE_CONFIG_PROJECT_DISABLE`. Known false negatives: a plugin added while the server
-// runs (hot reload, `source.ts` L81-90).
+// with `OPENCODE_CONFIG_PROJECT_DISABLE`.
+// A plugin added while the server runs (hot reload, `source.ts` L81-90) is handled since issue
+// #158: the child runs with `OPENCODE_FILEWATCHER_DISABLE=1` (`buildServeEnv`), so it is not
+// loaded, and `watchServedPlugins` (`pluginConsentUi.ts`) rescans on file events and restarts the
+// server through the guard of #153. Known false negatives that remain: the folders ABOVE the served
+// one (opencode's own 24 h rescan, and the one it runs on a config `Event.Updated`, can still read
+// them; both read in the tag, not executed), files in a
+// folder excluded by `files.watcherExclude` (no event reaches the extension), and symlinks to
+// plugin folders.
 
 import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';

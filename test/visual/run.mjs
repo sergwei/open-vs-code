@@ -15724,24 +15724,36 @@ try {
   // status bar item "not started"; P3 Don't start closes the toast and a Reload shows no toast
   // (3 s) but logs the block again (deny remembered); P4 Start on the card opens the modal
   // (`.monaco-dialog-box`) with the plugin listed and Start anyway connects; P5 a Reload connects
-  // with no toast and no modal (allow remembered); P6 a second plugin file changes the fingerprint
-  // and the toast comes back; P7 "Forget Plugin Decision for This Folder" shows an information
+  // with no toast and no modal (allow remembered); P6 (#158, no Reload) a second plugin file written
+  // while the server runs makes the extension's file watcher stop it: the toast comes back, the
+  // log has the block line and "restarting the server (plugins-changed)", and the chat card is
+  // not-started; P7 "Forget Plugin Decision for This Folder" shows an information
   // toast and Restart Server then opens the modal, whose Cancel leaves it not started. SYNTHETIC
   // server: the fake loads no plugin, so a pass proves the consent flow and not that opencode loads
   // plugins. The toast and the modal are the only way to see the buttons of a notification (the
   // test API has none). Cleanup in `finally`: both plugin folders removed (the `command` folder of
   // step 24 stays), the decision forgotten and the server restarted. The DOM of toasts and
   // status bar is internal to VS Code. VERIFIED by the full `npm run test:visual` on the final tree
-  // (Windows 11, VS Code 1.144.1, 03/11/2026, step 40 all ok in 24.3 s): the lines
+  // (Windows 11, VS Code 1.144.1, 03/11/2026, "all visual checks passed", step 40 all ok in
+  // 29.7 s): the lines
   // "ok   P1 the toast … offers Start anyway and Don't start", "ok   P2 the chat card says
   // opencode is not running because of the plugins", "ok   P3 after Don't start and a Reload the
   // block is logged (true), no toast shows (false) and nothing starts", "ok   P4 a modal lists the
   // plugin and offers Start anyway", "ok   P4 Start anyway connects and the card is gone", "ok   P5
-  // after a Reload the server connects with no toast and no modal (allow remembered)", "ok   P6 a
-  // new plugin file asks again", "ok   P7 Forget Plugin Decision shows …" and "ok   P7 Cancel leaves
-  // the chat not started". The captures 40a-plugin-toast, 40b-plugin-card and 40c-plugin-modal were
-  // taken but not looked at by anyone. A partial run is not commit evidence.
-  await step('40 project plugins: consent before the server starts (issue #153)', async () => {
+  // after a Reload the server connects with no toast and no modal (allow remembered)", "ok   P7
+  // Forget Plugin Decision shows …" and "ok   P7 Cancel leaves the chat not started" (the old P6,
+  // "a new plugin file asks again" after a Reload, was replaced by the P6 of #158). VERIFIED for
+  // P6 by that same full run: "ok   P6 a plugin added while the server runs stops it and asks
+  // again: the toast is back (true), the log has the block line (true) and "restarting the server
+  // (plugins-changed)" (true), and the chat is not-started (true)" (`--steps 40` alone passed it
+  // too, in 25.6 s). The capture 40d-plugin-hot-reload
+  // was opened: the chat card "opencode is not running", the toast listing second.ts and demo.js
+  // with Start anyway / Don't start, and the status bar "OpenCode: not started". P1 also fires the
+  // watcher (demo.js is written while the server runs, so the guard restarts it and shows a toast
+  // before the Reload); the Reload that follows closes that window, so the toast P1 reads belongs
+  // to the new one. The captures 40a-plugin-toast, 40b-plugin-card and 40c-plugin-modal were taken
+  // but not looked at by anyone.
+  await step('40project plugins: consent before the server starts (issue #153)', async () => {
     const DARK = 'Default Dark Modern';
     const NOTICE = 'This folder has opencode plugins that will run with your permissions';
     const BLOCKED = 'server not started: this folder has opencode plugins';
@@ -15943,15 +15955,25 @@ try {
         'P5 after a Reload the server connects with no toast and no modal (allow remembered)',
       );
 
-      // --- P6: a second plugin changes the fingerprint; the toast comes back ------------------------
+      // --- P6: a plugin added while the server runs stops it and asks again (#158) -----------------
+      // No Reload: the extension's own file watcher sees the new file, the fingerprint is no longer
+      // allowed and the restart goes through the same guard as a launch.
+      await command('Notifications: Clear All Notifications');
       fs.mkdirSync(pluginDir, { recursive: true });
-      fs.writeFileSync(path.join(pluginDir, 'second.ts'), 'export default {};\n');
       before = hostLogSizes();
-      await reload('__visualReload40d');
+      fs.writeFileSync(path.join(pluginDir, 'second.ts'), 'export default {};\n');
       const back = await waitFor(async () => await toastWith(NOTICE), 20_000, 200);
+      const heldBlock = await waitFor(() => logSince(before).includes(BLOCKED), 20_000, 200);
+      const restarting = logSince(before).includes('restarting the server (plugins-changed)');
+      const stopped = await waitFor(
+        async () => ((await card()).connection === 'not-started' ? true : undefined),
+        20_000,
+        200,
+      );
+      await shot('40d-plugin-hot-reload');
       check(
-        back !== undefined && logSince(before).includes(BLOCKED),
-        `P6 a new plugin file asks again: the toast is back (${String(back !== undefined)}) and the launch is held`,
+        back !== undefined && heldBlock === true && restarting && stopped === true,
+        `P6 a plugin added while the server runs stops it and asks again: the toast is back (${String(back !== undefined)}), the log has the block line (${String(heldBlock === true)}) and "restarting the server (plugins-changed)" (${String(restarting)}), and the chat is not-started (${String(stopped === true)})`,
       );
       await pressInToast(NOTICE, "Don't start");
 

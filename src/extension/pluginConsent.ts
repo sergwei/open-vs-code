@@ -55,6 +55,21 @@ export function decideLaunch(input: {
   return same && input.stored?.decision === 'deny' ? 'hold' : 'notify';
 }
 
+/**
+ * True when the plugins of a folder still need the user's review: the launch the extension would
+ * make by itself (`userAsked: false`) is not a `go`. Used by the watcher of #158 to decide whether
+ * a change in the served folder stops the server (a `deny` for the same plugins counts: the
+ * restart that follows is silently held by the guard, see {@link decideLaunch}). VERIFIED by the
+ * table of `needsReview` in `pluginConsent.test.ts` (synthetic findings and decisions).
+ */
+export function needsReview(input: {
+  findings: readonly PluginFinding[];
+  stored: StoredDecision | undefined;
+  fingerprint: string;
+}): boolean {
+  return decideLaunch({ ...input, userAsked: false }) !== 'go';
+}
+
 /** Type guard for what comes back from storage, which may be anything an older build wrote. */
 function isStoredDecision(value: unknown): value is StoredDecision {
   if (typeof value !== 'object' || value === null) return false;
