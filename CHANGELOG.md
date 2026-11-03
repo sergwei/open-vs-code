@@ -9,6 +9,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Plugin consent**: before the extension starts opencode in a folder whose opencode config brings
+  plugins (files in `.opencode/plugin(s)/`, or `plugins` / `plugin` entries in `opencode.json(c)`,
+  npm names included, in the folder or any folder above it) it shows a warning with **Start
+  anyway** and **Don't start**. The answer is remembered per folder and asked again if the plugin
+  list changes; Start, **OpenCode: Restart Server** and the first prompt ask in a modal. New command
+  **OpenCode: Forget Plugin Decision for This Folder**. Not covered: a plugin added while opencode
+  runs (opencode hot-reloads it), and a server set in `openVsCode.serverUrl`, which the extension
+  does not start. The chat card and the status bar say "not started" because of the plugins.
 - **Mods**: JavaScript you write yourself, loaded only from `~/.config/opencode-station/mods`
   (never from a project), each in its own Worker. A mod can show a status band in the chat, add
   commands to the `/` menu and to **OpenCode: Run Mod Command…**, show a toast, compose a prompt,

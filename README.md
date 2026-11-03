@@ -205,6 +205,7 @@ Command Palette (they act on the active editor); the two Explorer entries are no
 | **OpenCode: Open Mods Folder** | Creates the mods folder if needed and reveals it in the file manager. |
 | **OpenCode: Run Mod Command…** | Picks one of the commands that mods registered and runs it. |
 | **OpenCode: Restart Server** | Restarts the server the extension launched (it also starts it when `openVsCode.autoStart` is off), or reconnects to the server in `openVsCode.serverUrl` when that setting is set. Also an entry in the `...` menu of the title bar of the Chat view (`chatLocation` set to `sidebar`) and of the Sessions view. |
+| **OpenCode: Forget Plugin Decision for This Folder** | Forgets your Start anyway / Don't start answer for the folder the server runs in, so the extension asks again before it starts opencode there. It stops nothing and starts nothing. |
 | **OpenCode: Select Workspace Folder** | Chooses which folder the server runs in (multi-root workspaces only). |
 | **OpenCode: Manage Saved Permissions** | Lists the permissions you chose to always allow and lets you revoke them. |
 | **OpenCode: Set Server Password** | Stores the password of the server in `openVsCode.serverUrl` in VS Code's SecretStorage. |
@@ -347,6 +348,24 @@ permissions of your user: a slash command in `.opencode/command` whose text cont
 runs that shell command on your machine when you run the command. Trust the folder only if you
 trust whoever wrote its `.opencode` files, its `opencode.json` and its `AGENTS.md`. (Checked by
 `npm run test:visual`, step 25, on VS Code 1.144.0 and Windows 11 only.)
+
+**Plugins of the folder.** opencode loads and runs, without asking, the plugins a project brings:
+`.ts` and `.js` files in `.opencode/plugin/` and `.opencode/plugins/`, and every entry of `plugins`
+(or `plugin`) in `opencode.json` / `opencode.jsonc` and in `.opencode/opencode.json(c)`, npm package
+names included (opencode downloads and runs them). It looks in the folder you opened **and in every
+folder above it**. Before the extension starts opencode in such a folder it shows a warning, "This
+folder has opencode plugins that will run with your permissions", with **Start anyway** and
+**Don't start**; the answer is remembered per folder on this machine and the question comes back if
+the list of plugins changes. Start, **OpenCode: Restart Server** or your first prompt ask in a modal
+instead. **OpenCode: Forget Plugin Decision for This Folder** clears the answer. Limits: this does not
+apply when you connect to a server with `openVsCode.serverUrl` (the extension starts nothing);
+a plugin added while opencode is already running is loaded by opencode without a warning; and it
+does not cover the other code a project config can run (for example local MCP servers). The check
+replicates what opencode 2.0.32 reads. Checked once against a real opencode 2.0.32 on Windows 11: a
+plugin file in `.opencode/plugins/` was imported by the first request that loads the folder's
+models (`GET /api/model`), not when the server started and not by other requests for the folder;
+the extension makes that request as soon as it connects, so asking before the start is still the
+right moment. Plugins declared in `opencode.json` (npm packages) were not part of that check.
 
 The chat view never talks to the opencode server. The port and the password live only in the
 extension host, and the server password you set is kept in VS Code's SecretStorage. The extension
