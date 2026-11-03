@@ -231,7 +231,7 @@ export function pickWorkspaceFolder(
  * the autoStart one, issue #153 adds the project-plugins one). VERIFIED by unit tests. The restart
  * lines were seen in a real VS Code only by the opt-in `realOpencode.test.ts`; the project-plugins
  * line was seen there by the `project-plugins` integration suite and by a `test:visual` check
- * ("the log has the block line", Windows 11, VS Code 1.144.0, 03/11/2026), not by
+ * ("the log has the block line", Windows 11, VS Code 1.144.1, 03/11/2026), not by
  * `realOpencode.test.ts`.
  *
  * The external-server lines (issue #11) are `connecting to the external server at <url> for
@@ -837,7 +837,7 @@ export class ServerManager {
    * every other aborted path. The guard is awaited only when one is injected, so without it
    * `start` is still called in the same synchronous turn. VERIFIED with fakes by the unit tests
    * of the describe "launch guard (issue #153)" in `serverManager.test.ts`. VERIFIED with the
-   * real prompt of `pluginConsentUi.ts` in a real VS Code (Windows 11, VS Code 1.144.0,
+   * real prompt of `pluginConsentUi.ts` in a real VS Code (Windows 11, VS Code 1.144.1,
    * 03/11/2026, `test:visual` step 40): "ok   P1 the toast … offers Start anyway and Don't
    * start" (hold from an automatic launch), "ok   P4 Start anyway connects and the card is gone"
    * (allowed launch) and "ok   P7 Cancel leaves the chat not started" (hold from a user launch).
