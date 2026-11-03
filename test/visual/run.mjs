@@ -15753,7 +15753,7 @@ try {
   // before the Reload); the Reload that follows closes that window, so the toast P1 reads belongs
   // to the new one. The captures 40a-plugin-toast, 40b-plugin-card and 40c-plugin-modal were taken
   // but not looked at by anyone.
-  await step('40project plugins: consent before the server starts (issue #153)', async () => {
+  await step('40 project plugins: consent before the server starts (issue #153)', async () => {
     const DARK = 'Default Dark Modern';
     const NOTICE = 'This folder has opencode plugins that will run with your permissions';
     const BLOCKED = 'server not started: this folder has opencode plugins';
