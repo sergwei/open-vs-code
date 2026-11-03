@@ -14053,10 +14053,78 @@ try {
         // The webview document has the focus AND the card of `id` is the active element.
         const cardHasFocus = async (id) =>
           (await cardState(id)).focusedCard && (await settingsWeb.inDoc((doc) => doc.hasFocus()));
+        // Focus trace of F1/F2 (#151). The webview annotates the focus request of the provider card
+        // in a ring published as JSON in `data-focus-trace` of `.settings-providers`
+        // (`webview-ui/src/settings/focusTrace.ts`). `focusTraceMark` returns the last `n` and
+        // `focusTraceSince` formats the entries after it as `+<ms> <event>(<fields>)`, the first
+        // `t` being zero. Neither throws: an unreadable trace comes back as `unreadable (<why>)`, so
+        // the check keeps its shape. Both functions are self-contained (`inDoc` takes no closures).
+        // The line `  focus trace F1:`/`F2:` is printed on green runs too and starts with neither ok,
+        // FAIL nor warn, so `extractChecks` skips it. How to read it when F1/F2 fail:
+        //   S1 a long gap: a `window-focus` with hf false, then `poll-stop` with why=limit (the
+        //      poll window is 10 s) or a late `serve`, with hf true only afterwards.
+        //   S2 no `window-focus` at all while hf turned true (the iframe of VS Code polls
+        //      `hasFocus` every 250 ms and may never fire `focus`; HYPOTHESIS).
+        //   S3 the request was used up without focusing: `attempt-end` with card false, or a
+        //      `disarm` whose reason is not `served`.
+        //   S4 `serve` served, then `card-focusout` with no `relatedTarget`: the card had the focus
+        //      and lost it.
+        // `parked` in the check JSON is the id still armed at the last entry (null when green).
+        const focusTraceMark = () =>
+          settingsWeb
+            .inDoc((doc) => {
+              try {
+                const raw = doc
+                  .querySelector('.settings-providers')
+                  ?.getAttribute('data-focus-trace');
+                if (raw === null || raw === undefined) return -1;
+                const list = JSON.parse(raw);
+                return list.length === 0 ? 0 : list[list.length - 1].n;
+              } catch {
+                return -1;
+              }
+            })
+            .catch(() => -1);
+        const focusTraceSince = (mark) =>
+          settingsWeb
+            .inDoc(
+              (doc, since) => {
+                try {
+                  const raw = doc
+                    .querySelector('.settings-providers')
+                    ?.getAttribute('data-focus-trace');
+                  if (raw === null || raw === undefined) {
+                    return { line: 'unreadable (no data-focus-trace attribute)', parked: null };
+                  }
+                  const list = JSON.parse(raw).filter((entry) => entry.n > since.mark);
+                  const zero = list.length === 0 ? 0 : list[0].t;
+                  const text = list.map((entry) => {
+                    const fields = [];
+                    for (const key of ['hf', 'armed', 'why', 'ticks', 'card']) {
+                      if (entry[key] !== undefined) fields.push(`${key}=${String(entry[key])}`);
+                    }
+                    if (entry.act !== undefined) {
+                      fields.push(`act=${entry.act.tag}/${String(entry.act.provider)}`);
+                    }
+                    return `+${String(entry.t - zero)} ${entry.e}(${fields.join(' ')})`;
+                  });
+                  const last = list.length === 0 ? undefined : list[list.length - 1];
+                  return {
+                    line: text.length === 0 ? '(no entries)' : text.join(' | '),
+                    parked: last === undefined ? null : (last.armed ?? null),
+                  };
+                } catch (error) {
+                  return { line: `unreadable (${String(error)})`, parked: null };
+                }
+              },
+              { mark },
+            )
+            .catch((error) => ({ line: `unreadable (${String(error)})`, parked: null }));
 
         // --- F2: Escape in the native box. The box closes, Azure goes back to Add a provider and
         // the rebuilt card gets the focus back from the box (H1 of E10-settings-followup, #143).
         check((await openAzureKeyBox('F2')) === true, 'F2 the native key box is shown');
+        const escMark = await focusTraceMark();
         await page.keyboard.press('Escape');
         const escClosed = await waitFor(async () => !(await quick()).visible, 5_000, 100);
         const escBack = await settingsWait(
@@ -14078,6 +14146,9 @@ try {
           active: doc.activeElement?.tagName ?? null,
           activeProvider: doc.activeElement?.getAttribute('data-provider') ?? null,
         }));
+        const escTrace = await focusTraceSince(escMark);
+        console.log(`  focus trace F2: ${escTrace.line}`);
+        escDiag.parked = escTrace.parked;
         await shot('36d2-key-escaped');
         check(
           escClosed === true &&
@@ -14105,6 +14176,7 @@ try {
           masked.type === 'password' && masked.valueLength === SETTINGS_FAKE_KEY.length,
           `V7 the box holds ${String(masked.valueLength)} characters in a type=${String(masked.type)} input (the DOM of the page is read for the type and the length only)`,
         );
+        const enterMark = await focusTraceMark();
         await page.keyboard.press('Enter');
         const connected = await settingsWait(
           (doc) => {
@@ -14137,6 +14209,9 @@ try {
           active: doc.activeElement?.tagName ?? null,
           activeProvider: doc.activeElement?.getAttribute('data-provider') ?? null,
         }));
+        const enterTrace = await focusTraceSince(enterMark);
+        console.log(`  focus trace F1: ${enterTrace.line}`);
+        enterDiag.parked = enterTrace.parked;
         check(
           enterFocused === true && !(await quick()).visible,
           `F1 after Enter in the key box the Azure card has the focus with the document focused (${String(enterFocused)}; document ${JSON.stringify(enterDiag)}) and the box is closed`,
