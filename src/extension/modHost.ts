@@ -18,6 +18,11 @@
 // (`modPanels.ts`) after the wire guard checked paths, titles and the 1 MB cap; the host keeps the
 // ids each mod has open (at most {@link MAX_PANELS_PER_MOD}) and closes them all when the mod
 // stops, fails or reloads, so a dead mod never leaves a tab behind.
+// Flood limits (E10-mods-limits, #155): everything a mod makes the host write to the "OpenCode Mods"
+// channel is capped at {@link LOG_LINES_PER_SECOND} (plus at most one "limit reached" line per
+// window, which `admit` writes itself and does not count), and the `panel.message` it relays to its
+// panels at {@link PANEL_MESSAGES_PER_SECOND}. The cap lives here and not in `worker.ts` because a
+// Worker runs arbitrary code and can post to the parent port without going through the bootstrap.
 //
 // Secrets: a Worker is NOT a sandbox (a mod has Node and the user's permissions), so the only
 // guarantee is what the host hands over: the Worker gets an explicit copy of the environment
@@ -27,6 +32,7 @@
 
 import { Worker, type WorkerOptions } from 'node:worker_threads';
 import type { ModEvent, ModJson, ModSeverity } from '../mods/api';
+import { MAX_MOD_COMMAND_ARGS } from '../shared/protocol';
 import type { DiscoveredMod } from './modDiscovery';
 import {
   MAX_COMMANDS_PER_MOD,
@@ -142,6 +148,34 @@ export interface ModHostOptions {
 const STATUS_MIN_GAP_MS = 100;
 /** Minimum gap between two toasts of one mod (plan 3.5: one every 2 seconds). */
 const TOAST_MIN_GAP_MS = 2000;
+/**
+ * Most lines per second one mod may add to the "OpenCode Mods" channel (E10-mods-limits, #155).
+ * Own choice: enough for a long stack trace written line by line, far above what a person reads.
+ * Counts `log`, `error` and the host's own `warn` lines about the mod.
+ */
+const LOG_LINES_PER_SECOND = 50;
+/**
+ * Most `panel.message` per second one mod may send to its panels, all panels together
+ * (E10-mods-limits, #155). Own choice: half a 60 Hz refresh, plenty for a live progress view, and
+ * with the 1 MB cap per message it bounds the worst case towards the webview.
+ */
+const PANEL_MESSAGES_PER_SECOND = 30;
+/** Length of the fixed window both flood limits count in. */
+const RATE_WINDOW_MS = 1000;
+
+/** Fixed one-second window of a flood limit: how many were let through, and whether it warned already. */
+interface RateWindow {
+  start: number;
+  count: number;
+  warned: boolean;
+}
+
+/** A window that is expired for any `Date.now()`, so the first call opens a fresh one. */
+const newRateWindow = (): RateWindow => ({
+  start: Number.NEGATIVE_INFINITY,
+  count: 0,
+  warned: false,
+});
 
 interface ModRecord {
   mod: DiscoveredMod;
@@ -165,6 +199,10 @@ interface ModRecord {
   lastToastAt: number;
   /** Ids of the panels this mod has open. */
   panels: Set<string>;
+  /** Window of {@link LOG_LINES_PER_SECOND}. */
+  logWindow: RateWindow;
+  /** Window of {@link PANEL_MESSAGES_PER_SECOND}. */
+  panelWindow: RateWindow;
 }
 
 /**
@@ -290,10 +328,15 @@ export class ModHost {
   /**
    * Runs the command `name` of mod `modId`.
    *
-   * Rejects when the mod is not `active`, has no such command, the handler throws (with its
+   * Rejects when the mod is not `active`, has no such command, `args` is longer than
+   * {@link MAX_MOD_COMMAND_ARGS} (nothing is posted to the Worker; this is the one cap, so it also
+   * covers the palette, which hands `args` over unmeasured), the handler throws (with its
    * message), or `commandTimeoutMs` passes with no answer. A timeout does not fail the mod.
    * VERIFIED by `modHost.test.ts` "runs a command and rejects with its error" and "rejects a
    * command that never answers" with a real Worker (Windows 11, 02/11/2026).
+   * VERIFIED for the args cap by `modHost.test.ts` "rejects command args longer than
+   * MAX_MOD_COMMAND_ARGS and posts nothing" (fake Worker, Windows 11, 03/11/2026); not observed
+   * through the palette in a real VS Code.
    */
   runCommand(modId: string, name: string, args: string, sessionID?: string): Promise<void> {
     const rec = this.records.get(modId);
@@ -302,6 +345,13 @@ export class ModHost {
     }
     if (!rec.commands.has(name)) {
       return Promise.reject(new Error(`mod "${modId}" has no command "${name}"`));
+    }
+    if (args.length > MAX_MOD_COMMAND_ARGS) {
+      return Promise.reject(
+        new Error(
+          `arguments of "${name}" are too long (at most ${MAX_MOD_COMMAND_ARGS} characters)`,
+        ),
+      );
     }
     const requestId = `c${(rec.nextRequest += 1)}`;
     return new Promise<void>((resolve, reject) => {
@@ -374,6 +424,8 @@ export class ModHost {
       hasStatus: false,
       lastToastAt: 0,
       panels: new Set(),
+      logWindow: newRateWindow(),
+      panelWindow: newRateWindow(),
     };
     this.records.set(id, rec);
     try {
@@ -432,14 +484,56 @@ export class ModHost {
   }
 
   /**
+   * Fixed-window flood limit: lets through at most `max` calls per {@link RATE_WINDOW_MS} and
+   * answers `false` for the rest. The first drop of a window writes ONE `warn` saying `what` was
+   * dropped, straight to `logMod` (that line is not counted, or the limit could not speak). Dropped,
+   * not coalesced: a log line is not a state, and a panel payload is opaque to the host.
+   * A window can let up to twice the cap through around its edge (accepted: no token bucket).
+   * Uses `Date.now()` like {@link ModHost.showToast}, so a backwards clock jump keeps the window
+   * open longer (HYPOTHESIS, not reproduced).
+   */
+  private admit(rec: ModRecord, win: RateWindow, max: number, what: string): boolean {
+    const now = Date.now();
+    if (now - win.start >= RATE_WINDOW_MS) {
+      win.start = now;
+      win.count = 0;
+      win.warned = false;
+    }
+    if (win.count < max) {
+      win.count += 1;
+      return true;
+    }
+    if (!win.warned) {
+      win.warned = true;
+      this.options.logMod(
+        rec.mod.manifest.id,
+        'warn',
+        `${what} dropped: more than ${max} per second, the rest of this second is discarded`,
+      );
+    }
+    return false;
+  }
+
+  /**
+   * Writes a line to the mod's log channel, counted against {@link LOG_LINES_PER_SECOND}. Every host
+   * write about what the mod sends goes through here except the one "limit reached" line per window
+   * that `admit` writes directly.
+   */
+  private log(rec: ModRecord, level: LogLevel, text: string): void {
+    if (this.admit(rec, rec.logWindow, LOG_LINES_PER_SECOND, 'log lines')) {
+      this.options.logMod(rec.mod.manifest.id, level, text);
+    }
+  }
+
+  /**
    * Border of the host: drops anything from a mod that is not running, and anything that fails
-   * {@link isWorkerToHost} (one `warn` in the mod's log). Everything valid goes to `handle`.
+   * {@link isWorkerToHost} (one `warn` in the mod's log, counted in the log limit). Everything
+   * valid goes to `handle`.
    */
   private onMessage(rec: ModRecord, value: unknown): void {
-    const id = rec.mod.manifest.id;
     if (rec.state !== 'starting' && rec.state !== 'active') return;
     if (!isWorkerToHost(value)) {
-      this.options.logMod(id, 'warn', 'ignored an invalid message from the mod worker');
+      this.log(rec, 'warn', 'ignored an invalid message from the mod worker');
       return;
     }
     this.handle(rec, value);
@@ -448,8 +542,9 @@ export class ModHost {
   /**
    * Acts on one validated message: `ready` makes the mod `active`, `failed` fails it, `pong`
    * resets the heartbeat, `command.*` keep the command table and settle pending runs, and the UI
-   * messages go to {@link ModUi} (status coalesced, toast rate-limited). Commands registered
-   * during `activate` are accepted before `ready`.
+   * messages go to {@link ModUi} (status coalesced, toast rate-limited, log lines and
+   * `panel.message` flood-limited). Commands registered during `activate` are accepted before
+   * `ready`.
    */
   private handle(rec: ModRecord, message: WorkerToHost): void {
     const id = rec.mod.manifest.id;
@@ -465,17 +560,17 @@ export class ModHost {
         this.fail(rec, message.message);
         return;
       case 'log':
-        this.options.logMod(id, message.level, message.text);
+        this.log(rec, message.level, message.text);
         return;
       case 'error':
-        this.options.logMod(id, 'error', message.message);
+        this.log(rec, 'error', message.message);
         return;
       case 'pong':
         rec.outstandingPings = 0;
         return;
       case 'command.add':
         if (rec.commands.size >= MAX_COMMANDS_PER_MOD && !rec.commands.has(message.name)) {
-          this.options.logMod(id, 'warn', `command "${message.name}" ignored: too many commands`);
+          this.log(rec, 'warn', `command "${message.name}" ignored: too many commands`);
           return;
         }
         rec.commands.set(message.name, message.description);
@@ -517,7 +612,10 @@ export class ModHost {
         this.openPanel(rec, message);
         return;
       case 'panel.message':
-        if (rec.panels.has(message.panelId)) {
+        if (
+          rec.panels.has(message.panelId) &&
+          this.admit(rec, rec.panelWindow, PANEL_MESSAGES_PER_SECOND, 'panel messages')
+        ) {
           this.options.panels?.message(id, message.panelId, message.data);
         }
         return;
@@ -540,7 +638,7 @@ export class ModHost {
       rec.panels.size >= MAX_PANELS_PER_MOD ||
       rec.panels.has(message.panelId)
     ) {
-      this.options.logMod(id, 'warn', 'panel refused: no panel support or too many panels open');
+      this.log(rec, 'warn', 'panel refused: no panel support or too many panels open');
       this.post(rec, { type: 'panel.closed', panelId: message.panelId });
       return;
     }
@@ -607,7 +705,7 @@ export class ModHost {
     const id = rec.mod.manifest.id;
     const now = Date.now();
     if (rec.lastToastAt !== 0 && now - rec.lastToastAt < TOAST_MIN_GAP_MS) {
-      this.options.logMod(id, 'warn', 'toast dropped: at most one every 2 seconds');
+      this.log(rec, 'warn', 'toast dropped: at most one every 2 seconds');
       this.post(rec, { type: 'toast.result', requestId: message.requestId });
       return;
     }

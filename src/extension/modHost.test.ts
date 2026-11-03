@@ -28,6 +28,7 @@ import { build } from 'esbuild';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ModEvent } from '../mods/api';
 import type { LogLevel } from '../mods/wire';
+import { MAX_MOD_COMMAND_ARGS } from '../shared/protocol';
 import type { DiscoveredMod } from './modDiscovery';
 import {
   ModHost,
@@ -435,6 +436,25 @@ describe('ModHost with a real Worker', () => {
     await h.workers[0]?.exited;
   });
 
+  /**
+   * Protects the log cap (#155) on the real path worker.ts -> host: a mod that logs in a loop cannot flood the
+   * channel. Real Worker and a real mod; the assertion is not exact because a window may split on a
+   * slow machine.
+   */
+  it('a mod that logs in a loop cannot flood the channel', async () => {
+    const h = harness();
+    const mod = await makeMod(
+      'loud',
+      `export function activate(station) {
+         for (let i = 0; i < 1000; i++) station.log.info('n' + i);
+       }`,
+    );
+    h.host.start([mod]);
+    await waitFor(() => state(h, 'loud') === 'active', 'loud to be active');
+    await waitFor(() => h.logs.some((l) => l.includes('log lines dropped')), 'the limit warning');
+    expect(h.logs.filter((l) => l.startsWith('loud|info|n')).length).toBeLessThan(1000);
+  });
+
   it("dispose leaves no Worker alive and runs the mods' deactivate", async () => {
     const h = harness({ deactivateGraceMs: 300 });
     const mod = await makeMod(
@@ -503,6 +523,7 @@ describe('ModHost with a fake Worker and fake timers', () => {
   let host: ModHost;
   let uiStatus: Array<ModStatusLine | undefined>;
   let uiToast: ReturnType<typeof vi.fn>;
+  let logs: string[];
   const mod: DiscoveredMod = {
     manifest: { id: 'f', name: 'F', version: '1', apiVersion: 1, main: 'i.mjs' },
     dir: '/m/f',
@@ -514,6 +535,7 @@ describe('ModHost with a fake Worker and fake timers', () => {
     fake = new FakeWorker();
     uiStatus = [];
     uiToast = vi.fn(() => Promise.resolve(undefined));
+    logs = [];
     host = new ModHost({
       workerFile: '/w.cjs',
       createWorker: () => fake,
@@ -525,7 +547,7 @@ describe('ModHost with a fake Worker and fake timers', () => {
         compose: () => undefined,
       },
       logLifecycle: () => undefined,
-      logMod: () => undefined,
+      logMod: (_id, level, text) => void logs.push(`${level}|${text}`),
     });
     host.start([mod]);
     fake.say({ type: 'ready' });
@@ -663,5 +685,98 @@ describe('ModHost with a fake Worker and fake timers', () => {
     fake.say({ type: 'rm-rf' });
     expect(host.statuses()[0]?.state).toBe('active');
     expect(uiStatus).toEqual([]);
+  });
+
+  /**
+   * Protects the log cap of #155: a mod cannot flood the "OpenCode Mods" channel. Fabricated
+   * `log` messages through a fake Worker and fake timers (the real-Worker path is the test below).
+   * MUTATION (03/11/2026, Windows 11): replacing the `if (this.admit(...))` of `log` by `if (true)`
+   * made this test, "counts the host's own warnings...", "counts `error` reports..." and the
+   * real-Worker "a mod that logs in a loop..." fail; reverted afterwards.
+   */
+  it('lets 50 log lines a second through and drops the rest with one warning per window', async () => {
+    for (let i = 0; i < 60; i += 1) fake.say({ type: 'log', level: 'info', text: `l${i}` });
+    expect(logs.filter((l) => l.startsWith('info|'))).toHaveLength(50);
+    expect(logs.filter((l) => l.startsWith('warn|'))).toHaveLength(1);
+    expect(logs.at(-1)).toMatch(/^warn\|log lines dropped: more than 50 per second/);
+    await vi.advanceTimersByTimeAsync(1000);
+    fake.say({ type: 'log', level: 'info', text: 'after' });
+    expect(logs.at(-1)).toBe('info|after');
+    for (let i = 0; i < 60; i += 1) fake.say({ type: 'log', level: 'info', text: `m${i}` });
+    expect(logs.filter((l) => l.startsWith('warn|'))).toHaveLength(2);
+  });
+
+  /** Protects the host's own `warn` lines (invalid message) from being an unlimited log path. Fabricated input. */
+  it("counts the host's own warnings about the mod in the log limit", () => {
+    for (let i = 0; i < 60; i += 1) fake.say({ type: 'rm-rf' });
+    expect(logs.filter((l) => l.includes('ignored an invalid message'))).toHaveLength(50);
+    expect(logs.filter((l) => l.includes('log lines dropped'))).toHaveLength(1);
+  });
+
+  /** Protects `error` reports of the Worker from bypassing the log limit. Fabricated input. */
+  it('counts `error` reports in the log budget', () => {
+    for (let i = 0; i < 60; i += 1) fake.say({ type: 'error', message: `e${i}` });
+    expect(logs.filter((l) => l.startsWith('error|'))).toHaveLength(50);
+    expect(logs.filter((l) => l.includes('log lines dropped'))).toHaveLength(1);
+  });
+
+  /**
+   * Protects the panel.message cap of #155: at most 30 `panel.message` a second per mod, all its panels together, one `warn`
+   * per window. Fabricated messages, a recording `ModPanelUi`.
+   * MUTATION (03/11/2026, Windows 11): removing the `this.admit(...)` condition of the
+   * `panel.message` case made this test fail (only that test); reverted afterwards.
+   */
+  it('relays at most 30 panel messages a second, all panels together, and warns once', async () => {
+    const delivered: string[] = [];
+    const panels: ModPanelUi = {
+      open: () => undefined,
+      message: (_id, panelId) => void delivered.push(panelId),
+      close: () => undefined,
+    };
+    const worker = new FakeWorker();
+    const panelLogs: string[] = [];
+    const h = new ModHost({
+      workerFile: '/w.cjs',
+      createWorker: () => worker,
+      heartbeatMs: 60_000,
+      ui: { status: () => undefined, toast: uiToast as never, compose: () => undefined },
+      panels,
+      logLifecycle: () => undefined,
+      logMod: (_id, level, text) => void panelLogs.push(`${level}|${text}`),
+    });
+    h.start([{ ...mod, manifest: { ...mod.manifest, id: 'p' } }]);
+    worker.say({ type: 'ready' });
+    for (const panelId of ['a', 'b']) {
+      worker.say({ type: 'panel.open', panelId, title: 'T', html: 'p.html' });
+    }
+    for (let i = 0; i < 20; i += 1) {
+      worker.say({ type: 'panel.message', panelId: 'a', data: i });
+      worker.say({ type: 'panel.message', panelId: 'b', data: i });
+    }
+    expect(delivered).toHaveLength(30);
+    expect(panelLogs.filter((l) => l.includes('panel messages dropped'))).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    worker.say({ type: 'panel.message', panelId: 'a', data: 'again' });
+    expect(delivered).toHaveLength(31);
+    const closing = h.dispose();
+    await vi.advanceTimersByTimeAsync(1000);
+    await closing;
+  });
+
+  /**
+   * Protects the single args cap of #155: the single cap on command args is applied by the host, so it also covers the
+   * palette. Fabricated `command.add`; the real-Worker run of a command is covered elsewhere.
+   * MUTATION (03/11/2026, Windows 11): disabling the `args.length` check of `runCommand` made
+   * this test fail (the 4001-character call stayed pending until the 5 s test timeout instead of
+   * rejecting); reverted afterwards.
+   */
+  it('rejects command args longer than MAX_MOD_COMMAND_ARGS and posts nothing', async () => {
+    fake.say({ type: 'command.add', name: 'go' });
+    void host.runCommand('f', 'go', 'x'.repeat(MAX_MOD_COMMAND_ARGS)).catch(() => undefined);
+    expect(fake.count('command.run')).toBe(1);
+    await expect(host.runCommand('f', 'go', 'x'.repeat(MAX_MOD_COMMAND_ARGS + 1))).rejects.toThrow(
+      /too long/,
+    );
+    expect(fake.count('command.run')).toBe(1);
   });
 });
