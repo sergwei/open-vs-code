@@ -42,7 +42,9 @@ The setting `openVsCode.mods.enabled` (default on, user-level only: a workspace 
 turns every mod off.
 
 What a mod logs goes to the **OpenCode Mods** output channel, prefixed with its id. Lines about its
-life (`mod x loaded`, `mod x failed: …`) go to the **OpenCode** channel.
+life (`mod x loaded`, `mod x failed: …`) go to the **OpenCode** channel. A mod gets at most 50 lines
+per second in its channel, counting the warnings the extension writes about what the mod sends; the
+rest are dropped, with one warning per second in which something was dropped.
 
 ## The format
 
@@ -144,7 +146,8 @@ A handler's return value is ignored. A handler that throws is logged and the mod
 `station.commands.register` adds a command that users see as `<modId>:<name>`: in the `/` menu of the
 chat (type `/hel` to find `/hello-station:hello`) and in **OpenCode: Run Mod Command…**. `name` follows
 `^[a-z0-9][a-z0-9-]{0,47}$`. `run({ args, sessionID })` receives the text typed after the command and
-the open session, if any. At most 20 commands per mod. A command that does not finish in 30 seconds is
+the open session, if any. `args` is at most 4000 characters (a longer text is refused, from the `/`
+menu and from the palette alike). At most 20 commands per mod. A command that does not finish in 30 seconds is
 answered with an error (the mod itself keeps running).
 
 A mod command is **an action of the client, not a prompt**: running it never creates a session and
@@ -198,7 +201,10 @@ panel.onDidClose(() => station.log.info('closed'));
 - **Talking to the page.** The page gets `acquireVsCodeApi()`: `vscode.postMessage(data)` arrives in your
   `onMessage`, and `panel.postMessage(data)` arrives in the page as a `message` event (`event.data`).
   `data` is JSON, at most 1 MB serialized, in both directions; anything else is dropped with a warning in
-  the mods log. Other than that, the content of the messages is yours: the extension does not look into it.
+  the mods log. At most 30 messages per second go from the mod to the page (all your panels together);
+  the rest are dropped with a warning, so if you send state, resend it rather than relying on every
+  message arriving. Other than that, the content of the messages is yours: the extension does not look
+  into it.
 - **Theme.** Use the `--vscode-*` variables (for example `var(--vscode-editor-background)`); they are
   present in every VS Code webview and follow the light, dark and high contrast themes.
 - **Lifetime.** `onDidClose` runs once when the user closes the tab or the mod calls `dispose()`. A panel
