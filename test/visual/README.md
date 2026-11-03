@@ -372,6 +372,7 @@ added steps):
 | 37 | 1, 37 | 30.2 s in the full run of E11-publish-prep (2/11/2026; the budget is 40 s); 30.7 s in `--steps 37`, the same day, before the budget was recalibrated | in the full run |
 | 38 | 1, 38 | 16.3 s in the full run of E10-mods (2/11/2026, 776.4 s in total; the budget is 25 s); 16.8 s in the previous full run that passed it | in the full run |
 | 39 | 1, 39 | 9.5 s in the full run of E10-mods (2/11/2026; the budget is 15 s) | in the full run |
+| 40 | 1, 40 | 24.3 s in the full run on the final tree (3/11/2026; budget 35 s) | in the full run |
 
 The 16 needs the 2 because its "ArrowUp with the popup closed recalls the last prompt" reads a
 prompt history that an earlier step fills; 4, 7b, 9 and 22 need a conversation open (the 2's), and

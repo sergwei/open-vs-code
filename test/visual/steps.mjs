@@ -88,6 +88,11 @@
  * mod command, which never reaches the model). Its `budgetS` of 15 is the criterion above applied
  * to the full run that passed it (02/11/2026, Windows 11, VS Code 1.144.0: 9.5 s, times 1.25 is
  * 11.9, rounded up to 15); it replaces the plan's estimate of 45.
+ * The step 40 (a folder with an opencode plugin is not launched without consent, issue #153) came
+ * after it too: it needs the 1, writes and removes plugin files in the served folder, reloads the
+ * window four times and sends no prompt. Its `budgetS` of 35 is the criterion above applied
+ * to the full run on the final tree (03/11/2026, Windows 11, VS Code 1.144.0: 24.3 s, times 1.25 is
+ * 30.4, rounded up to 35).
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -142,6 +147,7 @@ export const STEPS = [
   { id: '37', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 40 },
   { id: '38', needs: ['1'], sendsPrompt: true, groups: ['mods'], budgetS: 25 },
   { id: '39', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
+  { id: '40', needs: ['1'], sendsPrompt: false, groups: ['setup'], budgetS: 35 },
 ];
 
 /** Every valid id, in canonical order. */
