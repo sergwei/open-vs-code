@@ -156,6 +156,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   extension's warnings about what the mod sends) and 30 messages a second to its panels; the rest
   is dropped with one warning per second. Command arguments are capped at 4000 characters on every
   path, **OpenCode: Run Mod Command…** included (issue #155).
+- Mod commands show in the `/` menu and run even when opencode is not running (autoStart off,
+  starting, reconnecting): a typed mod command runs in its mod instead of going out as a prompt,
+  which used to start the server. opencode's own commands appear once the server sends them
+  (issue #155).
 - The license is now the [PolyForm Shield License 1.0.0](LICENSE) instead of MIT: you may use,
   change and share the extension for any purpose except providing a product that competes with
   it. It is source-available, not an OSI open source license.

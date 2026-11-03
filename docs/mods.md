@@ -155,6 +155,10 @@ never reaches the model. (For a command that expands to a prompt template, use o
 commands, which the `/` menu already lists.) When the server lists a command with the same qualified
 name, the server's wins.
 
+Mod commands are listed and run even when opencode is not running (autoStart off, starting,
+reconnecting): they never need the server. opencode's own commands appear in the `/` menu once the
+server has sent them.
+
 ### The band
 
 `station.ui.status.set` pins one line of plain text above the prompt box, one row per mod. `text` is
