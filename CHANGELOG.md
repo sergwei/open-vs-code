@@ -160,6 +160,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   starting, reconnecting): a typed mod command runs in its mod instead of going out as a prompt,
   which used to start the server. opencode's own commands appear once the server sends them
   (issue #155).
+- Mods are sturdier around shutdown: a load or a message that ends after the extension stops no
+  longer writes to a closed output channel. A panel page's warning for a dropped message is limited
+  to one a second per panel. `docs/mods.md` now says that a link inside a mod folder that points
+  outside it can be read by that mod's panel page (issue #155).
 - The license is now the [PolyForm Shield License 1.0.0](LICENSE) instead of MIT: you may use,
   change and share the extension for any purpose except providing a product that competes with
   it. It is source-available, not an OSI open source license.
