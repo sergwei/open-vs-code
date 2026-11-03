@@ -188,7 +188,8 @@ export function serveArgs(port: 0 | undefined): string[] {
  * instead (`pluginRecheck.ts`). Spike of 03/11/2026 (Windows 11, real opencode 2.0.32, Engram
  * 1849): a marker plugin written into the served folder after the `{"url":…}` line was imported
  * 223-446 ms later in the runs without the variable (A 337 ms, B 446 ms, C 331 ms, E 223 ms) and
- * was NOT imported with it (D; the control F, without it, imported it). The cost: with the
+ * was NOT imported with it (D; the control F, with it too, still loaded a plugin present at start
+ * and not the one added later). The cost: with the
  * watcher off opencode no longer hot-reloads its config, AGENTS.md, skills or commands while
  * running; Restart Server applies them. The unit tests use synthetic input. VERIFIED against the
  * real opencode 2.0.32 (Windows 11, 03/11/2026, `--label real-opencode`): the case "does not run a
