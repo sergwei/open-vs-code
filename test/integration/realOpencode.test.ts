@@ -61,7 +61,7 @@ import {
   TEST_SET_SERVER_PASSWORD_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
-import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
+import { buildServeEnv, PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
 import { diffRoot } from '../../src/extension/sessionDiff';
 import {
   toAgentOptions,
@@ -1280,6 +1280,91 @@ describe('real opencode', function () {
     );
     assert.notStrictEqual(Number(ready[1]), pid);
     await log.waitFor('event stream connected', 10_000);
+  });
+
+  /**
+   * Issue #158, NO prompt: a plugin written into the served folder while a real opencode runs with
+   * the environment of the extension's own server (`buildServeEnv`) is NOT imported, while the same
+   * plugin IS imported by a server started without that variable (the control, which keeps the
+   * case from passing just because the plugin never loads).
+   *
+   * Protects the premise of the whole feature: with `OPENCODE_FILEWATCHER_DISABLE=1` opencode does
+   * not hot-load a new plugin, so the extension can stop the server and ask before it ever runs.
+   * It is what notices a newer opencode renaming the variable. The plugin's only effect is a line
+   * appended to a marker file outside the project. Own servers, not the extension's: the
+   * extension's watcher would restart the extension's server within ~0.5 s and could hide a plugin
+   * that opencode was about to load (so this is a DEVIATION from the plan, which used the
+   * extension's server); the environment still comes from `buildServeEnv`, minus the password.
+   * The control is skipped when the host already sets either name of the variable, in any
+   * spelling. `.opencode/plugins/` exists
+   * (empty) before each server starts, so the case does not depend on opencode watching a folder
+   * that was created later (the spike of Engram 1849 did not record that detail). Each server gets
+   * one `model.list()` BEFORE the plugin is written, because opencode loads the plugins of a
+   * location lazily, with the first request that instantiates it (`projectPlugins.ts`), and only
+   * a location that is already up has a watcher: the first run of this case, without that
+   * request, saw the control server NOT import the plugin within 10 s. The extension makes such
+   * requests right after the start, so a running server has the location up.
+   * VERIFIED (Windows 11, VS Code 1.144.1, opencode 2.0.32, 03/11/2026, `--label real-opencode`):
+   * "✔ does not run a plugin written while the server runs" (about 5 s), "20 passing"; with the
+   * line that sets the variable removed from `buildServeEnv`, the same run printed "AssertionError
+   * [ERR_ASSERTION]: the plugin ran although the file watcher is off", so the case does see a
+   * server whose watcher is on. NOT observed: macOS and Linux, and a plugin declared in
+   * `opencode.json`.
+   */
+  it('does not run a plugin written while the server runs', async function () {
+    this.timeout(READY_WAIT_MS * 2 + 60_000);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ovsc-hotplugin-'));
+    const marker = path.join(root, 'marker.txt');
+    const writePlugin = (served: string): void => {
+      fs.writeFileSync(
+        path.join(served, '.opencode', 'plugins', 'late.js'),
+        `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(marker)}, 'loaded\\n');\nexport default {};\n`,
+      );
+    };
+    const prepare = (name: string): string => {
+      const served = path.join(root, name);
+      fs.mkdirSync(path.join(served, '.opencode', 'plugins'), { recursive: true });
+      return served;
+    };
+    const ownEnv: Record<string, string> = {};
+    for (const [key, value] of Object.entries(buildServeEnv({}, 'unused', process.platform))) {
+      if (key !== 'OPENCODE_PASSWORD' && value !== undefined) ownEnv[key] = value;
+    }
+    try {
+      const hostSetsWatcher = Object.keys(process.env).some((key) =>
+        ['OPENCODE_FILEWATCHER_DISABLE', 'OPENCODE_DISABLE_FILEWATCHER'].includes(
+          key.toUpperCase(),
+        ),
+      );
+      if (!hostSetsWatcher) {
+        const control = await startOwnServer(binary, prepare('control'), 'hotplugin-control-pw');
+        try {
+          await control.client.model.list();
+          writePlugin(path.join(root, 'control'));
+          const deadline = Date.now() + 10_000;
+          while (!fs.existsSync(marker) && Date.now() < deadline) await sleep(100);
+          assert.ok(
+            fs.existsSync(marker),
+            'the control server (file watcher on) did not import the new plugin: the case cannot tell anything',
+          );
+        } finally {
+          await control.stop();
+        }
+        fs.rmSync(marker, { force: true });
+      }
+      const served = prepare('served');
+      const own = await startOwnServer(binary, served, 'hotplugin-pw', ownEnv);
+      try {
+        await own.client.model.list();
+        writePlugin(served);
+        await sleep(3_000);
+        assert.ok(!fs.existsSync(marker), 'the plugin ran although the file watcher is off');
+      } finally {
+        await own.stop();
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
   });
 
   /**

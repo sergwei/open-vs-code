@@ -5,17 +5,20 @@
 // Out of scope, recorded on purpose: opencode can also instantiate ANOTHER location (a session
 // whose location is a different folder) and load that folder's plugins; nothing here covers it
 // (the layers of the served folder are lazy, VERIFIED in `projectPlugins.ts`; for another location
-// it is HYPOTHESIS, `makeLocationNode`, not exercised). A plugin that
-// appears while the server runs is hot-reloaded by opencode (`source.ts` L81-90) with no notice.
+// it is HYPOTHESIS, `makeLocationNode`, not exercised). A plugin that appears while the server
+// runs is covered by `watchServedPlugins` (issue #158, below): opencode runs with its file watcher
+// off, so it does not load the plugin, and the extension stops the server and asks.
 
 import * as vscode from 'vscode';
 import {
   confirmDetail,
   createDecisionStore,
   decideLaunch,
+  needsReview as policyNeedsReview,
   noticeMessage,
   type DecisionStore,
 } from './pluginConsent';
+import { createPluginRecheck } from './pluginRecheck';
 import {
   folderKey,
   pluginFingerprint,
@@ -25,7 +28,13 @@ import {
 import { sanitizeLinkText } from './attentionPolicy';
 import { PROJECT_PLUGIN_DECISIONS_KEY } from './ids';
 import type { ServerLog } from './opencodeServer';
-import type { LaunchGuardRequest, LaunchGuardVerdict, ServerState } from './serverManager';
+import type {
+  LaunchGuardRequest,
+  LaunchGuardVerdict,
+  RunningServerInfo,
+  ServerManager,
+  ServerState,
+} from './serverManager';
 
 /** Button of the notice and of the modal that allows the plugins of the folder. */
 const START_ANYWAY = 'Start anyway';
@@ -50,6 +59,11 @@ export interface PluginConsent {
   launchGuard(request: LaunchGuardRequest): Promise<LaunchGuardVerdict>;
   /** Forgets the decision of the served folder and tells the user; changes no running server. */
   forgetServedFolder(): Promise<void>;
+  /**
+   * Scans `folder` and says whether its plugins need the user's review: the launch the extension
+   * would make by itself would not be a `go`. Shows nothing and records nothing (issue #158).
+   */
+  needsReview(folder: string): Promise<boolean>;
 }
 
 /**
@@ -67,21 +81,29 @@ export interface PluginConsent {
  * only if the manager is still `not-started/project-plugins` and still serves that folder (the
  * answer may come minutes later, vscode-extension section 7, plan B); closing the notice records
  * nothing. A blocked launch logs `project plugins in <folder>: <n> (<list>)`, and the config files
- * opencode would reject as invalid JSONC are logged as warnings.
+ * opencode would reject as invalid JSONC are logged as warnings. `needsReview(folder)` (issue
+ * #158) runs the same scan, warnings and policy for a running server without asking anything: it
+ * only answers whether a launch by the extension would not be a `go`.
  *
  * VERIFIED in a real VS Code with the synthetic server (Windows 11, VS Code 1.144.1, 03/11/2026,
- * the full `npm run test:visual` on the final tree: step 40 all ok; its only FAIL was F2 of step
- * 36, a known intermittent, which passed alone): "ok   P1 the toast …
+ * the full `npm run test:visual` on the final tree, which ended "all visual checks passed"):
+ * "ok   P1 the toast …
  * offers Start anyway and Don't start" (notice), "ok   P3 after Don't start and a Reload the block is
  * logged (true), no toast shows (false) and nothing starts" (deny), "ok   P4 a modal lists the
  * plugin and offers Start anyway" and "ok   P4 Start anyway connects and the card is gone" (modal
  * and allow), "ok   P5 after a Reload the server connects with no toast and no modal (allow
- * remembered)", "ok   P6 a new plugin file asks again" (fingerprint) and "ok   P7 Cancel leaves the
- * chat not started". NOT observed: the late "Start anyway" of the notice (the run never pressed it
- * on the notice), the revalidation branch (state or folder changed meanwhile), the early `hold`
- * of an attempt aborted during the scan, the link-stripped folder in the forget message (the P7
- * check matches only its start), macOS and Linux. UNVERIFIED until a visual step aborts a start
- * during the scan.
+ * remembered)", "ok   P6 a plugin added while the server runs stops it and asks again: the toast
+ * is back (true), the log has the block line (true) and "restarting the server
+ * (plugins-changed)" (true), and the chat is not-started (true)" (this replaced the old P6 "a new
+ * plugin file asks again", which is no longer cited) and "ok   P7 Cancel leaves the chat not
+ * started". `needsReview` is VERIFIED through that P6 (the restart reaches the guard only because
+ * `needsReview` answered true) and through the integration case "restarts for a plugin that
+ * arrives while the server runs, and for nothing else" (I3, same day and machine); its policy
+ * is the `needsReview` table of `pluginConsent.test.ts`. NOT observed: the late "Start anyway" of
+ * the notice (the run never pressed it on the notice), the revalidation branch (state or folder
+ * changed meanwhile), the early `hold` of an attempt aborted during the scan, the link-stripped
+ * folder in the forget message (the P7 check matches only its start), macOS and Linux. UNVERIFIED
+ * until a visual step aborts a start during the scan.
  * The pure parts are tested by `pluginConsent.test.ts` and `projectPlugins.test.ts`.
  */
 export function createPluginConsent(options: PluginConsentOptions): PluginConsent {
@@ -147,6 +169,19 @@ export function createPluginConsent(options: PluginConsentOptions): PluginConsen
   };
 
   return {
+    async needsReview(folder) {
+      const scan = await scanProjectPlugins(folder);
+      for (const file of scan.skipped) {
+        options.log.warn(
+          `opencode ignores ${file} (not valid JSON), so it is not scanned for plugins`,
+        );
+      }
+      return policyNeedsReview({
+        findings: scan.findings,
+        stored: store.read(folder),
+        fingerprint: pluginFingerprint(scan.findings),
+      });
+    },
     async launchGuard(request) {
       const { folder, userAsked, signal } = request;
       const scan = await scanProjectPlugins(folder);
@@ -191,6 +226,99 @@ export function createPluginConsent(options: PluginConsentOptions): PluginConsen
           ? `OpenCode will ask again before it starts opencode in ${shown}.`
           : `No plugin decision is stored for ${shown}.`,
       );
+    },
+  };
+}
+
+/**
+ * Keeps an eye on the plugins of the served folder while the extension's own server runs, and
+ * restarts the server through the consent guard when they need review (issue #158).
+ *
+ * Why: opencode loads a plugin that appears while it runs, but `buildServeEnv` turns its file
+ * watcher off, so a new plugin is not loaded and the guard of #153, which only asks before a
+ * start, would never see it. On `running` with `source: 'spawned'` it creates a
+ * `FileSystemWatcher` on `{opencode.json,opencode.jsonc,.opencode,.opencode/**}` of the folder
+ * (create, change and delete all `poke` the re-check) and starts the re-check, which also looks
+ * once at once, because a plugin may have arrived during `starting`. Leaving `running` (a restart,
+ * a crash, a stop) disposes the watcher and stops the re-check; an external server is never
+ * watched (its files are not ours). The restart is `manager.restart('plugins-changed')`, so the
+ * guard decides with `userAsked: false`: the notice, the silent `hold` for a stored `deny`, or
+ * nothing if the new fingerprint is allowed.
+ *
+ * Not covered, on purpose: the folders above the served one (opencode's own 24 h rescan, and the
+ * one it runs on a config `Event.Updated`, still reach them; both read in `supervisor.ts` of the
+ * spike #1849, not executed), `files.watcherExclude` (a folder excluded from VS Code's watcher raises no event)
+ * and symlinked plugin folders. A plugin written during `starting` can run once before the check
+ * at `running` stops the server.
+ * VERIFIED in a real VS Code with the synthetic server (Windows 11, VS Code 1.144.1, 03/11/2026,
+ * `npm run test:integration -- --label project-plugins`): "✔ restarts for a plugin that arrives
+ * while the server runs, and for nothing else", so one `RelativePattern` with braces and `/**`
+ * delivers the event of a new `.opencode/plugins/late.js`, the restart goes through the guard and
+ * ends held. HYPOTHESIS (read in the code, no test exercises `watchServedPlugins` itself apart from
+ * that check and the visual P6): leaving `running`, a crash or `dispose` disposes the watcher and
+ * stops the re-check, and an external server is never watched; to check it, inject the watcher
+ * factory and drive a fake manager through those states. NOT observed: a plugin created inside a
+ * folder that did not exist when the watcher was created, `opencode.json` edits,
+ * `files.watcherExclude`, macOS and Linux (inotify limits included).
+ */
+export function watchServedPlugins(
+  manager: Pick<ServerManager, 'state' | 'onDidChangeState' | 'restart'>,
+  consent: Pick<PluginConsent, 'needsReview'>,
+  log: ServerLog,
+): vscode.Disposable {
+  const recheck = createPluginRecheck({
+    check: (folder) => consent.needsReview(folder),
+    restart: () => manager.restart('plugins-changed'),
+    isRunning: (folder) => {
+      const state = manager.state;
+      return (
+        state.kind === 'running' &&
+        state.server.source === 'spawned' &&
+        folderKey(state.server.folder) === folderKey(folder)
+      );
+    },
+    log,
+  });
+  let watcher: vscode.FileSystemWatcher | undefined;
+  let watched: RunningServerInfo | undefined;
+
+  const release = (): void => {
+    watcher?.dispose();
+    watcher = undefined;
+    watched = undefined;
+    recheck.stop();
+  };
+  const apply = (state: ServerState): void => {
+    if (state.kind !== 'running' || state.server.source !== 'spawned') {
+      release();
+      return;
+    }
+    if (watched === state.server) return;
+    release();
+    watched = state.server;
+    const folder = state.server.folder;
+    watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(
+        vscode.Uri.file(folder),
+        '{opencode.json,opencode.jsonc,.opencode,.opencode/**}',
+      ),
+    );
+    const poke = (): void => {
+      recheck.poke();
+    };
+    watcher.onDidCreate(poke);
+    watcher.onDidChange(poke);
+    watcher.onDidDelete(poke);
+    log.debug(`watching the plugins of ${folder} while the server runs`);
+    recheck.start(folder);
+  };
+
+  const subscription = manager.onDidChangeState(apply);
+  apply(manager.state);
+  return {
+    dispose: () => {
+      subscription.dispose();
+      release();
     },
   };
 }

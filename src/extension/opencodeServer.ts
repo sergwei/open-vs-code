@@ -180,7 +180,22 @@ export function serveArgs(port: 0 | undefined): string[] {
  * On win32 any spelling of both names is removed first, because the spread of `process.env`
  * is a plain case-sensitive object there; which variant would win in the child if two spellings
  * survived is HYPOTHESIS, so the doubt is removed instead of tested. Does not mutate `baseEnv`.
- * VERIFIED by unit tests (synthetic input).
+ *
+ * Issue #158: it also sets `OPENCODE_FILEWATCHER_DISABLE=1`, overwriting any inherited value and
+ * removing the old name `OPENCODE_DISABLE_FILEWATCHER`. With the file watcher on, opencode loads
+ * a plugin that appears while the server runs with no request at all, so the consent of #153
+ * (asked before the start) would never see it; the extension watches the served folder itself
+ * instead (`pluginRecheck.ts`). Spike of 03/11/2026 (Windows 11, real opencode 2.0.32, Engram
+ * 1849): a marker plugin written into the served folder after the `{"url":…}` line was imported
+ * 223-446 ms later in the runs without the variable (A 337 ms, B 446 ms, C 331 ms, E 223 ms) and
+ * was NOT imported with it (D; the control F, without it, imported it). The cost: with the
+ * watcher off opencode no longer hot-reloads its config, AGENTS.md, skills or commands while
+ * running; Restart Server applies them. The unit tests use synthetic input. VERIFIED against the
+ * real opencode 2.0.32 (Windows 11, 03/11/2026, `--label real-opencode`): the case "does not run a
+ * plugin written while the server runs" passed with the environment of this function, and failed
+ * ("the plugin ran although the file watcher is off") with the line that sets the variable
+ * removed, so a newer opencode that renames the variable turns that case red. Not observed: macOS
+ * and Linux.
  */
 export function buildServeEnv(
   baseEnv: NodeJS.ProcessEnv,
@@ -190,14 +205,22 @@ export function buildServeEnv(
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   if (platform === 'win32') {
     for (const key of Object.keys(env)) {
-      const upper = key.toUpperCase();
-      if (upper === 'OPENCODE_PASSWORD' || upper === 'OPENCODE_SERVER_PASSWORD') delete env[key];
+      if (OWNED_ENV_NAMES.includes(key.toUpperCase())) delete env[key];
     }
   }
-  delete env['OPENCODE_SERVER_PASSWORD'];
+  for (const name of OWNED_ENV_NAMES) delete env[name];
   env['OPENCODE_PASSWORD'] = password;
+  env['OPENCODE_FILEWATCHER_DISABLE'] = '1';
   return env;
 }
+
+/** Variables of the child's environment that `buildServeEnv` sets itself, so none is inherited. */
+const OWNED_ENV_NAMES = [
+  'OPENCODE_PASSWORD',
+  'OPENCODE_SERVER_PASSWORD',
+  'OPENCODE_FILEWATCHER_DISABLE',
+  'OPENCODE_DISABLE_FILEWATCHER',
+];
 
 /**
  * Interprets one stdout line as the readiness line `{ "url": "http://127.0.0.1:<port>" }`.

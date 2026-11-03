@@ -8,6 +8,7 @@ import {
   confirmDetail,
   createDecisionStore,
   decideLaunch,
+  needsReview,
   noticeMessage,
   type DecisionMemento,
   type LaunchAction,
@@ -60,6 +61,23 @@ describe('decideLaunch', () => {
     expect(decideLaunch({ findings, stored: storedDecision, fingerprint: fp, userAsked })).toBe(
       expected,
     );
+  });
+});
+
+/**
+ * Protects #158: the watcher stops the server only for plugins that would not launch by
+ * themselves. Synthetic findings and decisions, like the matrix above.
+ */
+describe('needsReview', () => {
+  const rows: Array<[string, PluginFinding[], StoredDecision | undefined, boolean]> = [
+    ['no findings', [], undefined, false],
+    ['allow with the same fingerprint', one, stored('allow'), false],
+    ['deny with the same fingerprint', one, stored('deny'), true],
+    ['allow with another fingerprint', one, stored('allow', 'old'), true],
+    ['nothing stored', one, undefined, true],
+  ];
+  it.each(rows)('%s -> %s', (_name, findings, storedDecision, expected) => {
+    expect(needsReview({ findings, stored: storedDecision, fingerprint: fp })).toBe(expected);
   });
 });
 

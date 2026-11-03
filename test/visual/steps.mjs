@@ -91,9 +91,11 @@
  * 11.9, rounded up to 15); it replaces the plan's estimate of 45.
  * The step 40 (a folder with an opencode plugin is not launched without consent, issue #153) came
  * after it too: it needs the 1, writes and removes plugin files in the served folder, reloads the
- * window four times and sends no prompt. Its `budgetS` of 35 is the criterion above applied
- * to the full run on the final tree (03/11/2026, Windows 11, VS Code 1.144.1: 24.3 s, times 1.25 is
- * 30.4, rounded up to 35).
+ * window three times (40a, 40b and 40c) and sends no prompt. Its `budgetS` of 40 is the criterion
+ * above applied to the full run that includes the P6 of #158 (a plugin written while the server
+ * runs, no Reload): 03/11/2026, Windows 11, VS Code 1.144.1, "40    29.7 s", times 1.25 is 37.1,
+ * rounded up to 40. It replaces the 35, which came from the earlier full run without that P6
+ * (24.3 s, times 1.25 is 30.4); `--steps 40` alone took 25.6 s.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -148,7 +150,7 @@ export const STEPS = [
   { id: '37', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 45 },
   { id: '38', needs: ['1'], sendsPrompt: true, groups: ['mods'], budgetS: 25 },
   { id: '39', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
-  { id: '40', needs: ['1'], sendsPrompt: false, groups: ['setup'], budgetS: 35 },
+  { id: '40', needs: ['1'], sendsPrompt: false, groups: ['setup'], budgetS: 40 },
 ];
 
 /** Every valid id, in canonical order. */

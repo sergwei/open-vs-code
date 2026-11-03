@@ -392,7 +392,9 @@ fs.writeFileSync(path.join(defaultUserDataDir, 'User', 'settings.json'), '{}\n')
  * stored in `globalState` by a previous run would turn the case into a different one), and its own
  * folder under `.vscode-test/` of THIS checkout, whose ancestors carry no opencode config (checked
  * 03/11/2026 for the repository and its parent). The suite reads the log of the FIRST activation, so
- * it must be the only suite of the configuration. `--password-store=basic`, as in the other private
+ * it must be the only suite of the configuration. Since issue #158 the suite also writes into that
+ * workspace while the server runs (case I3: it removes `demo.js`, then adds and removes plugin and
+ * command files), so the folder is rebuilt below on every load. `--password-store=basic`, as in the other private
  * profiles. UNVERIFIED on macOS and Linux until the CI runs it.
  */
 const pluginsRoot = path.join(import.meta.dirname, '.vscode-test', 'project-plugins');

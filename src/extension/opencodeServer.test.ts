@@ -121,13 +121,43 @@ describe('pure helpers', () => {
     expect(input.OPENCODE_SERVER_PASSWORD).toBe('legacy');
   });
 
-  it('buildServeEnv removes every spelling of both names on win32 only', () => {
-    const input = { opencode_password: 'a', Opencode_Server_Password: 'b', Other: 'c' };
+  /**
+   * Protects the win32 case-insensitive environment: every spelling of the four names the child
+   * environment owns (the two passwords and the two file watcher names, #158) is removed on win32
+   * and kept elsewhere. Synthetic input.
+   */
+  it('buildServeEnv removes every spelling of the owned names on win32 only', () => {
+    const input = {
+      opencode_password: 'a',
+      Opencode_Server_Password: 'b',
+      opencode_filewatcher_disable: '0',
+      Opencode_Disable_Filewatcher: '0',
+      Other: 'c',
+    };
     const win = buildServeEnv(input, 'ours', 'win32');
-    expect(Object.keys(win).sort()).toEqual(['OPENCODE_PASSWORD', 'Other']);
+    expect(Object.keys(win).sort()).toEqual([
+      'OPENCODE_FILEWATCHER_DISABLE',
+      'OPENCODE_PASSWORD',
+      'Other',
+    ]);
+    expect(win['OPENCODE_FILEWATCHER_DISABLE']).toBe('1');
     const linux = buildServeEnv(input, 'ours', 'linux');
     expect(linux['opencode_password']).toBe('a');
     expect(linux['Opencode_Server_Password']).toBe('b');
+  });
+
+  /**
+   * Protects #158: the child always runs with opencode's file watcher off. Synthetic input; the
+   * real effect of the variable is the `real-opencode` case "does not run a plugin written while
+   * the server runs".
+   */
+  it('buildServeEnv turns the file watcher off, over an inherited 0 and the old name', () => {
+    expect(buildServeEnv({}, 'ours', 'linux')['OPENCODE_FILEWATCHER_DISABLE']).toBe('1');
+    const input = { OPENCODE_FILEWATCHER_DISABLE: '0', OPENCODE_DISABLE_FILEWATCHER: '0' };
+    const env = buildServeEnv(input, 'ours', 'linux');
+    expect(env['OPENCODE_FILEWATCHER_DISABLE']).toBe('1');
+    expect('OPENCODE_DISABLE_FILEWATCHER' in env).toBe(false);
+    expect(input.OPENCODE_FILEWATCHER_DISABLE).toBe('0');
   });
 
   it('serveArgs includes --port 0 or omits --port', () => {

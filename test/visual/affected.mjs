@@ -92,7 +92,7 @@ export const AFFECTED_RULES = [
   },
   {
     pattern:
-      /^src\/extension\/(opencodeServer|opencodeBinary|binaryDetection|externalServer|setupActions|serverStatus|projectPlugins|pluginConsent|pluginConsentUi)\.ts$/,
+      /^src\/extension\/(opencodeServer|opencodeBinary|binaryDetection|externalServer|setupActions|serverStatus|projectPlugins|pluginConsent|pluginConsentUi|pluginRecheck)\.ts$/,
     groups: ['setup'],
   },
 ];

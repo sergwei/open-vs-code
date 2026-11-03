@@ -13,7 +13,7 @@ import {
   SET_SERVER_PASSWORD_COMMAND_ID,
 } from './ids';
 import { failureActions, ForgottenPasswords } from './externalServer';
-import { createPluginConsent } from './pluginConsentUi';
+import { createPluginConsent, watchServedPlugins } from './pluginConsentUi';
 import { readServerTarget, registerServerCredentials } from './serverCredentials';
 import {
   describeServerFailure,
@@ -147,6 +147,9 @@ async function runFailureAction(
  * guarded) and the command `openVsCode.forgetPluginDecision` is registered here. The guard and the
  * manager reference each other, so the guard reads the manager through `managerRef`, set right
  * after the constructor and before any launch can happen.
+ * Issue #158: `watchServedPlugins` is a plain disposable in `context.subscriptions` too (a file
+ * watcher, no process): while the own server runs it restarts it, through that same guard, when
+ * the plugins of the served folder change to ones nobody allowed.
  * Workspace Trust: the extension declares no `capabilities.untrustedWorkspaces`, so it does not
  * activate in Restricted Mode and nothing is launched against an untrusted folder (HYPOTHESIS:
  * VS Code's documented default, not exercised).
@@ -271,6 +274,7 @@ export function registerServerLifecycle(
     vscode.commands.registerCommand(FORGET_PLUGIN_DECISION_COMMAND_ID, async () => {
       await consent.forgetServedFolder();
     }),
+    watchServedPlugins(manager, consent, log),
     vscode.commands.registerCommand(SELECT_FOLDER_COMMAND_ID, async () => {
       const folders = (vscode.workspace.workspaceFolders ?? []).filter(
         (folder) => folder.uri.scheme === 'file',

@@ -1619,6 +1619,28 @@ describe('launch guard (issue #153)', () => {
     expect(guard.mock.calls.map(([request]) => request.userAsked)).toEqual([false, false]);
   });
 
+  /**
+   * Protects #158: a `plugins-changed` restart goes through the guard as the extension acting by
+   * itself (`userAsked: false`), so a hold ends in `not-started/project-plugins` and the reason
+   * shows in the log. Synthetic guard and fake server.
+   */
+  it('a plugins-changed restart asks with userAsked false and a hold ends not-started', async () => {
+    const guard = vi
+      .fn((_request: LaunchGuardRequest) => Promise.resolve<LaunchGuardVerdict>('hold'))
+      .mockResolvedValueOnce('go');
+    const { manager, states } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    await reach(manager, 'running');
+    await expect(manager.restart('plugins-changed')).resolves.toBe('attempted');
+    expect(guard.mock.calls.map(([request]) => request.userAsked)).toEqual([false, false]);
+    expect(manager.state).toEqual({ kind: 'not-started', reason: 'project-plugins' });
+    const restarting = states.find((state) => state.kind === 'restarting');
+    expect(restarting && describeServerState(restarting).message).toBe(
+      'restarting the server (plugins-changed)',
+    );
+  });
+
   it('a folder change asks the guard about the NEW folder', async () => {
     const guard = answering('go');
     const { manager } = harness({ launchGuard: guard });
