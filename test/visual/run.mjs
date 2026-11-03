@@ -859,19 +859,20 @@ async function shot(name) {
 /**
  * Shots that also get a webview-only crop in `readmeDir`: candidates for `docs/images/`.
  *
- * The Markdown reply, the fork and the agent/model panel are the three taken by step 37 with the
- * chat in an editor tab (the default mode, issue #126); the side bar versions of them
- * (`02b-markdown`, `11c-fork-dark`, `12b-chip-panel-dark`) are still shot for judgement but no
- * longer cropped, so that nobody copies a side bar picture into the docs by mistake.
+ * The Markdown reply, the fork, the agent/model panel (issue #126) and the permission card (issue
+ * #149) are the four taken by step 37 with the chat in an editor tab (the default mode); the side
+ * bar versions of them (`02b-markdown`, `11c-fork-dark`, `12b-chip-panel-dark`, `05b-card`) are
+ * still shot for judgement but no longer cropped, so that nobody copies a side bar picture into the
+ * docs by mistake.
  */
 const README_CROPS = new Set([
-  '05b-card',
   '07a-question',
   '10a-sessions-dark',
   '12f-reply-meta-dark',
   '37a-tab-markdown',
   '37b-tab-fork',
   '37c-tab-chip-panel',
+  '37d-tab-permission',
   '15a-tool-cards-folded',
   '15b-tool-edit-open',
   '15c-diff-dark',
@@ -14749,16 +14750,19 @@ try {
     }),
   );
 
-  // Step 37 (issue #126): the three README crops that show the chat, taken with the chat in an
-  // editor tab (the default mode) instead of the side bar. Cells: R1 the tab sits beside the code
-  // and is 400-900 px wide (printed); R2 the Markdown reply of the tab has highlighted code, a table
-  // and Copy buttons; R3 the agent/model panel of the tab has Agent and Model side by side and,
-  // when the free GLM model could be chosen, Reasoning under the model list; R4 the fork opened in
-  // the same tab says "Forked from" and holds only the first exchange; R5 the three crops exist in
-  // the crops directory and differ from each other (`cropWebview` only warns when it has no frame).
+  // Step 37 (issues #126 and #149): the four README crops that show the chat, taken with the chat
+  // in an editor tab (the default mode) instead of the side bar. Cells: R1 the tab sits beside the
+  // code and is 400-900 px wide (printed); R2 the Markdown reply of the tab has highlighted code, a
+  // table and Copy buttons; R3 the agent/model panel of the tab has Agent and Model side by side
+  // and, when the free GLM model could be chosen, Reasoning under the model list; R4 the fork opened
+  // in the same tab says "Forked from" and holds only the first exchange; R6 (#149) the permission
+  // card of the ASK_PERMISSION turn of step 5 shows in a new session of the tab and the turn ends
+  // after Allow once; R5 the four crops exist in the crops directory and differ from each other
+  // (`cropWebview` only warns when it has no frame).
   // Not a step of the user's flow: it exists so that `--steps 37` regenerates the docs images alone.
   // T1-T3 (added after the first full run): no hover card of the workbench is visible when each crop
-  // is taken, and for 37b the keyboard focus is still on "Fork from here". They measure it (the
+  // is taken, and for 37b the keyboard focus is still on "Fork from here"; T4 (#149) the same for
+  // 37d, with the focus inside the permission card (the card takes it itself). They measure it (the
   // cards that `restMouse` finds visible are printed); they exist because the command center
   // tooltip left by the Quick Open that opens `src/sample.ts` sat in the top left corner of the
   // three crops (seen 02/11/2026): the mouse that goes from the command center straight into the
@@ -14779,7 +14783,8 @@ try {
   // "ok   R4 the fork opened in the tab says "Forked from" and holds only the first exchange
   // ({"users":["Reply with exactly: ONE. Do not use any tools."],"path":"Forked from Reply with
   // exactly: ONE. Do not use any"})",
-  // "ok   R5 the three README crops of the tab exist and are three different pictures",
+  // "ok   R5 the three README crops of the tab exist and are three different pictures" (the text
+  // before #149 added the fourth crop),
   // "ok   T1 no hover card is visible when 37a is taken ([])",
   // "ok   T3 no hover card is visible and the panel is still open when 37c is taken ([])",
   // "ok   T2 no hover card is visible and the keyboard focus is still on "Fork from here" when
@@ -14790,10 +14795,25 @@ try {
   // over the message the crop had no "Fork from here" button, so the fork crop is taken with the
   // keyboard focus on it. The crops are copied by hand to `docs/images/` only after looking at
   // them (`cropWebview`).
-  await step('37 README crops in a chat tab (issue #126)', async () => {
+  // R6 and T4 (#149) VERIFIED in the full run of 03/11/2026 (Windows 11, VS Code 1.144.1, "all
+  // visual checks passed"), with these lines of its log:
+  // "ok   R6 the permission card is shown in the tab ("Permission needed: Read\n\nRequested by the
+  // read tool\n\n.env\nAllow once\nAlways allow…\nReject\nReject with feedback…")",
+  // "ok   T4 no hover card is visible and the focus is inside the permission card when 37d is
+  // taken (cards [], focus in card true)",
+  // "ok   R6 the permission turn of the tab ends after Allow once",
+  // "ok   R5 the four README crops of the tab exist and are four different pictures".
+  // `docs/images/permission-card.png` is the 37d crop of that run (its md5 is the fourth one the
+  // log prints in "crops md5"); the other three images still come from the run of 02/11/2026.
+  // NOT observed: macOS, Linux, other themes, and a card from a real opencode (the turn is the
+  // synthetic server's ASK_PERMISSION fixture).
+  await step('37 README crops in a chat tab (issues #126, #149)', async () => {
     const DARK = 'Default Dark Modern';
     const GLM = 'opencode/glm-5.3-flash-free';
-    const CROPS = ['37a-tab-markdown', '37b-tab-fork', '37c-tab-chip-panel'];
+    const CROPS = ['37a-tab-markdown', '37b-tab-fork', '37c-tab-chip-panel', '37d-tab-permission'];
+    // The prompt of step 5, so that the card is the one the docs showed before.
+    const PERMISSION_PROMPT =
+      'Use the read tool to read the file .env in the workspace root and tell me its content. ASK_PERMISSION';
     // The text of step 2, so that the reply is the same one the docs showed before.
     const MARKDOWN_PROMPT =
       'Reply with: a short TypeScript function in a ts code block, a bash command in a bash code block, ' +
@@ -15057,7 +15077,36 @@ try {
       await shot('37b-tab-fork');
       assertNoWebviewErrors('step 37 fork');
 
-      // --- R5: the crops exist and are three different pictures ------------------------------------
+      // --- 37d + R6: the permission card, in a new tab session (issue #149) -----------------------
+      // The same ASK_PERMISSION turn as step 5 (a `read` of `.env` that waits for the reply), so the
+      // card is the one the README showed from the side bar. The card takes the keyboard focus
+      // itself (step 5 checks it), so the mouse is only parked away from it.
+      const beforePermission = drivenChatId;
+      await command('OpenCode: New Session');
+      await connectToNew(beforePermission);
+      await send(PERMISSION_PROMPT);
+      const permissionCard = await waitFor(
+        () => web.inDoc((doc) => doc.querySelector('.permission-card')?.innerText?.slice(0, 200)),
+        20_000,
+      );
+      check(
+        permissionCard !== undefined,
+        `R6 the permission card is shown in the tab (${JSON.stringify(permissionCard)})`,
+      );
+      const cards37d = await restMouse();
+      const cardFocus = await web.inDoc(
+        (doc) => doc.activeElement?.closest?.('.permission-card') != null,
+      );
+      check(
+        cards37d.length === 0 && cardFocus === true,
+        `T4 no hover card is visible and the focus is inside the permission card when 37d is taken (cards ${JSON.stringify(cards37d)}, focus in card ${String(cardFocus)})`,
+      );
+      await shot('37d-tab-permission');
+      check(await clickButton('Allow once'), 'R6 Allow once is pressed (never Always)');
+      check(await waitIdle(30_000), 'R6 the permission turn of the tab ends after Allow once');
+      assertNoWebviewErrors('step 37 permission');
+
+      // --- R5: the crops exist and are four different pictures -------------------------------------
       const hashes = CROPS.map((name) => {
         const file = path.join(readmeDir, `${name}.png`);
         return fs.existsSync(file)
@@ -15067,7 +15116,7 @@ try {
       console.log(`  crops md5 ${JSON.stringify(hashes)}`);
       check(
         hashes.every((hash) => hash !== undefined) && new Set(hashes).size === CROPS.length,
-        'R5 the three README crops of the tab exist and are three different pictures',
+        'R5 the four README crops of the tab exist and are four different pictures',
       );
     } finally {
       // Leave the workspace as the step found it: no chat tab or file tab, the setting at `sidebar`.

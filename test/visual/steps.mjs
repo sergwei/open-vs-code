@@ -64,11 +64,12 @@
  * six turns. Its `budgetS` of 40 is an ESTIMATE (the 24, with 36 cells, has 50): recalibrate it
  * from its first full run with the criterion above.
  * The step 37 (the README crops with the chat in an editor tab, issue #126) came after it too: it
- * needs the 1 (it starts from the side bar chat), sends three prompts (the Markdown one and the two
- * "Reply with exactly" turns of the fork) and ends with `chatLocation` back at `sidebar`. Its
- * `budgetS` of 40 is the criterion above applied to the full run that the README cites
- * (02/11/2026, Windows 11, VS Code 1.144.0: 30.2 s, times 1.25 is 37.75, rounded up to 40; the
- * estimate it replaces was 35).
+ * needs the 1 (it starts from the side bar chat), sends four prompts (the Markdown one, the two
+ * "Reply with exactly" turns of the fork and the ASK_PERMISSION one of the permission crop, #149)
+ * and ends with `chatLocation` back at `sidebar`. Its `budgetS` of 45 is the criterion above
+ * applied to the full run with the permission crop (03/11/2026, Windows 11, VS Code 1.144.1:
+ * 33.1 s, times 1.25 is 41.4, rounded up to 45); the 40 it replaces came from 30.2 s with three
+ * prompts (02/11/2026).
  * The step 36 gained the cells F1, F2, K1-K3 and "Copy link" in E10-settings-followup (#143). Its
  * `budgetS` of 50 is the criterion above applied to the full run of 02/11/2026 on the final tree
  * (Windows 11, VS Code 1.144.0, "all visual checks passed", no check FAIL: 38.7 s in the
@@ -144,7 +145,7 @@ export const STEPS = [
   { id: '34', needs: ['1'], sendsPrompt: true, groups: ['sessions'], budgetS: 120 },
   { id: '35', needs: ['1'], sendsPrompt: true, groups: ['config'], budgetS: 120 },
   { id: '36', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 50 },
-  { id: '37', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 40 },
+  { id: '37', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 45 },
   { id: '38', needs: ['1'], sendsPrompt: true, groups: ['mods'], budgetS: 25 },
   { id: '39', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
   { id: '40', needs: ['1'], sendsPrompt: false, groups: ['setup'], budgetS: 35 },
