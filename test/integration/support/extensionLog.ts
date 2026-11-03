@@ -14,6 +14,10 @@ import * as path from 'node:path';
 const EXTENSION_ID = 'sergwei.open-vs-code';
 const LOG_FILE_NAME = 'OpenCode.log';
 const POLL_INTERVAL_MS = 100;
+const RENDERER_LOG_NAME = 'renderer.log';
+// Lines worth showing in a failure (#141): VS Code's own webview messages. Our own choice.
+const RENDERER_PATTERN = /Webview\(|Error loading webview|service worker/i;
+const RENDERER_EXCERPT_MAX_LINES = 40;
 
 /**
  * Sleeps for `ms` milliseconds.
@@ -102,8 +106,75 @@ function readFrom(file: string, offset: number): string {
  */
 export class LogCursor {
   private offset = 0;
+  private rendererOffset = 0;
 
   constructor(private readonly file: string) {}
+
+  /**
+   * Returns the `renderer.log` of the window this extension log belongs to.
+   *
+   * The extension log lives at `<window>/exthost/<id>/OpenCode.log`, so the window folder is three
+   * levels up (the same layout {@link findExtensionLog} walks down). `path` is used for every step.
+   * VERIFIED on Windows 11, VS Code 1.144.1 (03/11/2026): the window folder held `renderer.log`
+   * next to `exthost` (listing of the newest session of the `main` profile).
+   * UNVERIFIED on macOS and Linux until the CI runs it.
+   */
+  private rendererFile(): string {
+    const windowDir = path.dirname(path.dirname(path.dirname(this.file)));
+    return path.join(windowDir, RENDERER_LOG_NAME);
+  }
+
+  /**
+   * Remembers the current end of the window's `renderer.log`, for
+   * {@link LogCursor.rendererExcerpt}.
+   *
+   * Independent from {@link LogCursor.mark}: call it BEFORE the action that opens a tab, because
+   * `mark()` is taken after the tab said `ready` and by then the handshake lines are behind it
+   * (#141, reopened). A missing file leaves the offset at 0; it never throws.
+   * VERIFIED (Windows 11, VS Code 1.144.1, 03/11/2026): the mutated run of `chatPanel.test.ts`
+   * (`TAB_READY_WAIT_MS = 1`) failed with "renderer.log (webview lines):" and three
+   * `Webview(<id>): will update content...` lines. UNVERIFIED that the offset excludes anything:
+   * that renderer.log had no `Webview(` line before the New Session, so an offset of 0 would have
+   * printed the same; a second wait or a case after another tab would exercise it.
+   */
+  markRenderer(): void {
+    try {
+      this.rendererOffset = fs.statSync(this.rendererFile()).size;
+    } catch {
+      this.rendererOffset = 0;
+    }
+  }
+
+  /**
+   * Returns the lines the renderer log gained since {@link LogCursor.markRenderer} that mention a
+   * webview, or one fixed sentence if the file cannot be read or has none.
+   *
+   * Why: when a chat tab never says `ready` (#141, macOS runner) the host log shows only that
+   * nothing arrived; the renderer log is where VS Code writes `Webview(<id>): …` (TRACE) and
+   * `Error loading webview`, which tells a handshake that never completes from a bundle that never
+   * posts `ready`. A line matches if it contains `Webview(`, `Error loading webview` or `service
+   * worker` (case-insensitive). At most {@link RENDERER_EXCERPT_MAX_LINES} lines come back (the
+   * FIRST ones: the handshake order is what matters), with a count of the omitted ones. The output
+   * goes to the public CI log, but it is only a summary: with the renderer at trace
+   * the test host already mirrors the WHOLE renderer.log to the job's stdout (runner paths, command
+   * ids, settings keys, crash-reporter id; `main` has no server and no password), so this adds
+   * nothing new to what is public.
+   * UNVERIFIED: that those lines show up at all on the macOS runner (needs the renderer at trace,
+   * see `.vscode-test.mjs`); the fixed sentence says so when they do not.
+   */
+  rendererExcerpt(): string {
+    let text: string;
+    try {
+      text = readFrom(this.rendererFile(), this.rendererOffset);
+    } catch {
+      return '(renderer.log not readable)';
+    }
+    const lines = text.split(/\r?\n/).filter((line) => RENDERER_PATTERN.test(line));
+    if (lines.length === 0) return '(no webview lines in renderer.log since the tab was requested)';
+    const shown = lines.slice(0, RENDERER_EXCERPT_MAX_LINES);
+    const omitted = lines.length - shown.length;
+    return omitted > 0 ? `${shown.join('\n')}\n(+${String(omitted)} more lines)` : shown.join('\n');
+  }
 
   /**
    * Moves the cursor to the current end of the log.

@@ -60,6 +60,14 @@ const EXTENSION_ID = 'sergwei.open-vs-code';
 // preceded a `mark()` and a positive wait now use `log.waitForQuiet()` (tooling/test-speed).
 const READY_WAIT_MS = 8000;
 const SETTLE_MS = 1500;
+// #141 reopened (run 41485490446, macOS): the `ready` of a NEW TAB's document did not arrive
+// within 8 s in some VS Code sessions of the runner. Only that wait is longer, to tell "late" from
+// "never"; the other waits keep READY_WAIT_MS. 20 s is our own choice (2.5x the old one), not a VS
+// Code value; healthy numbers: a `ready` took 0.3 s (CI run 41296463458) and whole openOneTab cases
+// took 2.1-2.6 s (CI job 125419545545). A `ready` slower than SLOW_READY_MS is printed even if the
+// case passes, so a slow document stays visible instead of being absorbed by the longer wait.
+const TAB_READY_WAIT_MS = 20_000;
+const SLOW_READY_MS = READY_WAIT_MS;
 
 /** Counts the occurrences of `text` in what the log gained since its mark. */
 function countOf(log: LogCursor, text: string): number {
@@ -85,19 +93,48 @@ async function waitForCount(log: LogCursor, text: string, times: number): Promis
 }
 
 /**
- * Waits for the next `webview ready` line (see {@link READY_WAIT_MS}) and, if it never comes,
- * rethrows the failure with the layout of the editor groups appended (#141). `LogCursor.waitFor`
- * is generic and stays unaware of VS Code, so the layout is added here.
- * UNVERIFIED: the mutation that exercised the failure path (waiting for 3 `webview ready`) went
- * through {@link waitForCount}, not through this helper; a failing `waitFor` here is not observed.
+ * Waits until the log holds `times` x `webview ready` since the mark: the `ready` of the document
+ * of a chat TAB, which the host writes when it receives the message (#141).
+ *
+ * Waits up to {@link TAB_READY_WAIT_MS}, goes on after that by failing (it does not return
+ * quietly),
+ * and prints `slow webview ready: N ms` when the wait passed {@link SLOW_READY_MS} but succeeded.
+ * That N is measured from this call, i.e. after `waitForChatTabs`, so it does not include the time
+ * the tab took to appear.
+ * On failure the message carries the layout of the editor groups AND the webview lines of the
+ * window's `renderer.log` since {@link LogCursor.markRenderer}: with the renderer at trace
+ * (`.vscode-test.mjs`) they tell H-a (the outer iframe never completes its handshake: no
+ * `Webview(<id>): webview ready`), H-b (the handshake completes but our bundle never posts `ready`)
+ * and H-c (late, not never: the `slow` line of a passing run). Callers call `log.markRenderer()`
+ * before the New Session that creates the tab.
+ * VERIFIED (Windows 11, VS Code 1.144.1, 03/11/2026): with `TAB_READY_WAIT_MS = 1`, `--label main
+ * --grep "one tab per New Session"` failed with "expected 1 x webview ready within 1 ms; layout:
+ * group column=1 (active): [...]" followed by "renderer.log (webview lines):" and three
+ * `[debug] Webview(<id>): will update content...` lines (the mutation was reverted). The excerpt
+ * there holds only `will update content` lines because `ready` had not arrived yet.
+ * UNVERIFIED until a bad macOS job: that the excerpt explains the missing `ready`, and the `slow`
+ * line (it never appears locally: no run printed it).
  */
-async function waitForReady(log: LogCursor): Promise<void> {
-  try {
-    await log.waitFor('webview ready', READY_WAIT_MS);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    assert.fail(`${reason}\nlayout: ${describeChatLayout()}`);
+async function waitForReadyCount(log: LogCursor, times: number): Promise<void> {
+  const started = Date.now();
+  const deadline = started + TAB_READY_WAIT_MS;
+  while (countOf(log, 'webview ready') < times) {
+    if (Date.now() >= deadline) {
+      assert.fail(
+        `expected ${String(times)} x webview ready within ${String(TAB_READY_WAIT_MS)} ms; ` +
+          `layout: ${describeChatLayout()}; log:\n${log.added()}\n` +
+          `renderer.log (webview lines):\n${log.rendererExcerpt()}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  const elapsed = Date.now() - started;
+  if (elapsed > SLOW_READY_MS) console.log(`slow webview ready: ${String(elapsed)} ms`);
+}
+
+/** Waits for the next `webview ready` line of a tab: {@link waitForReadyCount} for one. */
+async function waitForReady(log: LogCursor): Promise<void> {
+  await waitForReadyCount(log, 1);
 }
 
 /** Temp folders of the cases that open a file, removed after each case. */
@@ -125,6 +162,7 @@ function pause(ms: number): Promise<void> {
 async function openOneTab(): Promise<LogCursor> {
   const log = await openLogCursor();
   await setChatLocation('editor', log);
+  log.markRenderer();
   await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
   await waitForChatTabs(1);
   await waitForReady(log);
@@ -134,7 +172,10 @@ async function openOneTab(): Promise<LogCursor> {
 }
 
 describe('chat in editor tabs', function () {
-  this.timeout(30_000);
+  // 90 s: it must stay above the sum of the waits inside the first case (#141). Worst case of that
+  // case: setChatLocation 8 (APPLY_WAIT_MS) + waitForChatTabs 8 + ready 20 + waitForQuiet 8 +
+  // waitForChatTabs 8 + waitForCount 8 + ready 20 + SETTLE_MS 1.5 = 81.5 s.
+  this.timeout(90_000);
 
   before(async () => {
     await vscode.extensions.getExtension(EXTENSION_ID)?.activate();
@@ -172,20 +213,27 @@ describe('chat in editor tabs', function () {
    * `ready` showed both tabs in `group column=1`). The full `npm run test:integration` on the
    * final code printed "44 passing" (main) with "✔ opens one tab per New Session, each with a
    * ready document (2345ms)".
+   * Both waits for `webview ready` are {@link waitForReadyCount} (20 s, `slow webview ready` line,
+   * renderer excerpt on failure; #141 reopened) and the renderer mark is taken before each New
+   * Session. VERIFIED by the mutation described there (`TAB_READY_WAIT_MS = 1`, first wait). The
+   * failure path of the SECOND wait (count 2, excerpt from the second mark) was NOT reached by that
+   * mutation, because the first wait failed first: UNVERIFIED.
    * NOT covered: a fast double click on New Session. HYPOTHESIS: the mechanism above explains the
    * macOS failure; it was never reproduced on Windows. UNVERIFIED on macOS until CI reruns its job.
    */
   it('opens one tab per New Session, each with a ready document', async () => {
     const log = await openLogCursor();
     await setChatLocation('editor', log);
+    log.markRenderer();
     await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
     await waitForChatTabs(1);
-    await waitForCount(log, 'webview ready', 1);
+    await waitForReadyCount(log, 1);
     await log.waitForQuiet(); // HYPOTHESIS: the host learns the real column of the first tab
+    log.markRenderer(); // the excerpt of a failure of the second tab starts at ITS New Session
     await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
     await waitForChatTabs(2);
     await waitForCount(log, 'chat tab created (pane', 2);
-    await waitForCount(log, 'webview ready', 2);
+    await waitForReadyCount(log, 2);
     await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
     log.assertAbsent('Webview bundle file missing');
     log.assertAbsent('rejected a message from the webview');
@@ -378,6 +426,7 @@ describe('chat in editor tabs', function () {
     const log = await openLogCursor();
     await setChatLocation('editor', log);
     const editor = await openTempFile(vscode.ViewColumn.One);
+    log.markRenderer();
     await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
     await waitForChatTabs(1);
     await waitForReady(log);
