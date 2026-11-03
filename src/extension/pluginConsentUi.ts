@@ -69,7 +69,7 @@ export interface PluginConsent {
  * nothing. A blocked launch logs `project plugins in <folder>: <n> (<list>)`, and the config files
  * opencode would reject as invalid JSONC are logged as warnings.
  *
- * VERIFIED in a real VS Code with the synthetic server (Windows 11, VS Code 1.144.0, 03/11/2026,
+ * VERIFIED in a real VS Code with the synthetic server (Windows 11, VS Code 1.144.1, 03/11/2026,
  * the full `npm run test:visual` on the final tree: step 40 all ok; its only FAIL was F2 of step
  * 36, a known intermittent, which passed alone): "ok   P1 the toast …
  * offers Start anyway and Don't start" (notice), "ok   P3 after Don't start and a Reload the block is

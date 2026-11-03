@@ -248,8 +248,9 @@ extension, so there is nothing to ask; and other project code that opencode runs
 servers, formatters) is not checked. The detection replicates what opencode 2.0.32 reads. Checked
 once against a real opencode 2.0.32 on Windows 11: a plugin file in `.opencode/plugins/` was
 imported by the first request that loads the folder's models (`GET /api/model`), not when the
-server started and not by other requests for the folder (the extension makes that request as soon
-as it connects); plugins declared in `opencode.json` were not part of that check. You can still
+server started and not by the other requests tried (`GET /api/info`, `/api/session`,
+`/api/agent` and `/api/command`); the extension makes the `GET /api/model` request as soon as it
+connects. Plugins declared in `opencode.json` were not part of that check. You can still
 set `openVsCode.autoStart` to `false` so the server starts only when you ask. VS Code's own Workspace Trust also applies: the extension does not run in
 Restricted Mode.
 

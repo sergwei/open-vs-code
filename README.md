@@ -363,9 +363,10 @@ a plugin added while opencode is already running is loaded by opencode without a
 does not cover the other code a project config can run (for example local MCP servers). The check
 replicates what opencode 2.0.32 reads. Checked once against a real opencode 2.0.32 on Windows 11: a
 plugin file in `.opencode/plugins/` was imported by the first request that loads the folder's
-models (`GET /api/model`), not when the server started and not by other requests for the folder;
-the extension makes that request as soon as it connects, so asking before the start is still the
-right moment. Plugins declared in `opencode.json` (npm packages) were not part of that check.
+models (`GET /api/model`), not when the server started and not by the other requests tried
+(`GET /api/info`, `/api/session`, `/api/agent` and `/api/command`); the extension makes the
+`GET /api/model` request as soon as it connects, so asking before the start is still the right
+moment. Plugins declared in `opencode.json` (npm packages) were not part of that check.
 
 The chat view never talks to the opencode server. The port and the password live only in the
 extension host, and the server password you set is kept in VS Code's SecretStorage. The extension

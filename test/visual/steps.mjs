@@ -91,7 +91,7 @@
  * The step 40 (a folder with an opencode plugin is not launched without consent, issue #153) came
  * after it too: it needs the 1, writes and removes plugin files in the served folder, reloads the
  * window four times and sends no prompt. Its `budgetS` of 35 is the criterion above applied
- * to the full run on the final tree (03/11/2026, Windows 11, VS Code 1.144.0: 24.3 s, times 1.25 is
+ * to the full run on the final tree (03/11/2026, Windows 11, VS Code 1.144.1: 24.3 s, times 1.25 is
  * 30.4, rounded up to 35).
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the

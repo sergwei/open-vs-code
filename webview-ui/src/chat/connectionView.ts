@@ -225,7 +225,7 @@ export function guideSteps(
  * is the "opencode is not running" status card with a Start button; its cause depends on the
  * `reason` (`auto-start-off`, or `project-plugins` of issue #153: the plugins of the folder were
  * not allowed yet and Start opens a confirmation). The `project-plugins` card is covered by a
- * SYNTHETIC unit test and VERIFIED in a real window (Windows 11, VS Code 1.144.0, 03/11/2026,
+ * SYNTHETIC unit test and VERIFIED in a real window (Windows 11, VS Code 1.144.1, 03/11/2026,
  * the full `npm run test:visual` on the final tree, step 40 all ok): "ok   P2 the chat card says opencode is not running
  * because of the plugins" and "ok   P4 Start is pressed on the card with the real mouse".
  * Not observed: other OSes and themes.
