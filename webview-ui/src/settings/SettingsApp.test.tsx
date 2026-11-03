@@ -594,17 +594,22 @@ describe('focus when a row changes list', () => {
     expect(readTrace(container).at(-1)?.armed).toBe('acme');
   });
 
-  // Protects the S1 case of #151 (a gap longer than 1 s before the document gets the focus): the
-  // poll window must outlast 2 s. With POLL_TICKS 10 (1 s at POLL_MS 100) the poll would stop at
-  // 1 s and this card would never be focused (mutation run: the test went red; reverted).
-  // FABRICATED states, `hasFocus` stubbed, fake clock; no `focus` event on purpose.
-  it('S1: the poll still focuses the card when hasFocus turns true after 2 s', () => {
+  // Protects the S1 case of #151 (a `focus` event arrives with `hasFocus` still false, and the
+  // document only gets the focus more than 1 s later): the poll window must outlast 2 s. The
+  // `window-focus` entry with hf=false is what the key of `test/visual/run.mjs` reads as S1; without
+  // it the trace would read as S2 with a long gap (#163, W2). With POLL_TICKS 10 (1 s at POLL_MS
+  // 100) the poll stops at 1 s and the card is never focused (mutation run, 03/11/2026: this test
+  // went red, the other 35 of the file stayed green; reverted).
+  // FABRICATED states, `hasFocus` stubbed, synthetic `focus` event, fake clock.
+  it('S1: after a focus event with hasFocus false, the poll still focuses the card when hasFocus turns true 2 s later', () => {
     vi.useFakeTimers();
     const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
     const { container, apply } = setup(stateWith('idle'));
     pressConnect(container);
     apply({ type: 'settings.state', state: stateWith('attempt') });
     apply({ type: 'settings.state', state: stateWith('connected') });
+    windowFocus();
+    expect(readTrace(container).find((entry) => entry.e === 'window-focus')?.hf).toBe(false);
     vi.advanceTimersByTime(2000);
     expect(document.activeElement).not.toBe(cardOf(container));
     hasFocus.mockReturnValue(true);
@@ -613,10 +618,14 @@ describe('focus when a row changes list', () => {
   });
 
   // Protects the S3 case of #151: when the attempt ends with the document focused but the card of
-  // that provider is not in the DOM yet (`why=no-card`), the request stays parked instead of being
-  // consumed, and the card that appears is focused. Mutation run: making `no-card` consume the
-  // request (`setFocusID(undefined)` + `disarm`, as the old `cardOf(id)?.focus()` did) turned this
-  // test red; reverted.
+  // that provider is not in the DOM yet (`why=no-card`), the request stays parked (armed, not
+  // disarmed) instead of being consumed. The card that appears later focuses itself through its
+  // `takeFocus` (`disarm:direct`) because `focusID` is kept, so the final focus alone would not tell
+  // a parked request from a consumed one: that is why the trace is checked right after `no-card`
+  // (#163, W1). Mutation run, 03/11/2026: making `no-card` consume the request with `disarm` alone
+  // (keeping `focusID`) still left the card focused; this test now goes red at the check right
+  // after `no-card` (`['disarm:no-card']`), where before it only went red at the last line,
+  // because a disarmed request writes no `disarm:direct`; reverted.
   // FABRICATED states (the row is absent at the end of the attempt), `hasFocus` stubbed.
   it('S3: at the end of the attempt without the card the request stays parked until the card appears', () => {
     vi.useFakeTimers();
@@ -630,13 +639,19 @@ describe('focus when a row changes list', () => {
         providers: { loaded: true, failed: false, rows: structuredClone([anthropic]) },
       }),
     });
-    expect(labels(readTrace(container))).toContain('serve:no-card');
+    const atNoCard = readTrace(container);
+    const seenAtNoCard = labels(atNoCard);
+    expect(seenAtNoCard).toContain('serve:no-card');
+    const afterNoCard = seenAtNoCard.slice(seenAtNoCard.lastIndexOf('serve:no-card') + 1);
+    expect(afterNoCard.filter((label) => label.startsWith('disarm'))).toEqual([]);
+    expect(atNoCard.at(-1)?.armed).toBe('acme');
     expect(document.activeElement).toBe(document.body);
     apply({ type: 'settings.state', state: stateWith('idle') });
     vi.advanceTimersByTime(250);
     expect(document.activeElement).toBe(cardOf(container));
-    // The card that appears asks for the focus itself (`disarm:direct`): it could only do so
-    // because `focusID` was kept, which is what the parked request guarantees.
+    // The card that appears takes the focus itself (`takeFocus`). `disarm:direct` is only written
+    // while the request is still armed (`disarm` notes nothing otherwise), so it proves the request
+    // was parked, not just that `focusID` was kept.
     expect(labels(readTrace(container))).toContain('disarm:direct');
   });
 

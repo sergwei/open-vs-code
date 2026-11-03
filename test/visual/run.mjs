@@ -14066,7 +14066,9 @@ try {
         //   S2 no `window-focus` at all while hf turned true (the iframe of VS Code polls
         //      `hasFocus` every 250 ms and may never fire `focus`; HYPOTHESIS).
         //   S3 the request was used up without focusing: `attempt-end` with card false, or a
-        //      `disarm` whose reason is not `served`.
+        //      `disarm` whose reason is neither `served` nor `direct`; either of them with no later
+        //      `disarm:direct` (that one is the card that appeared taking the focus itself: the
+        //      fixed path, green; #163).
         //   S4 `serve` served, then `card-focusout` with no `relatedTarget`: the card had the focus
         //      and lost it.
         // `parked` in the check JSON is the id still armed at the last entry (null when green).
