@@ -13094,12 +13094,22 @@ try {
       );
       await sleep(1_000); // the context keys follow the setting a moment later; no signal to wait on
       const offered = [];
-      for (const word of ['Folder', 'Pin', 'Archive', 'Filter']) {
-        for (const row of await paletteRows(`OpenCode: ${word}`)) {
-          // "OpenCode: Open Mods Folder" (E10-mods) contains the word but is not an organizing command.
-          if (/Folder|Pin|Archive|Filter/.test(row) && !/Open Mods Folder/.test(row)) {
-            offered.push(row);
-          }
+      // The EXACT titles of the organizing commands (package.json), not a substring: other commands
+      // legitimately contain "Folder" ("Open Mods Folder", E10-mods; "Forget Plugin Decision for
+      // This Folder", issue #153) and are offered in every mode.
+      const organizing = [
+        'New Folder…',
+        'Rename Folder…',
+        'Delete Folder',
+        'Move to Folder…',
+        'Pin',
+        'Archive',
+        'Filter Sessions…',
+        'Clear Filters',
+      ];
+      for (const title of organizing) {
+        for (const row of await paletteRows(`OpenCode: ${title}`)) {
+          if (row.includes(`OpenCode: ${title}`)) offered.push(row);
         }
       }
       const kept = await paletteRows('OpenCode: New Session');
@@ -15577,6 +15587,284 @@ try {
       removeModFixture(vscode.modsHome, MOD);
       await closeAllEditors().catch(() => undefined);
       await command('OpenCode: Reload Mods').catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+    }
+  });
+
+  // Step 40 (issue #153, E1-plugin-warning): a folder with an opencode plugin is not launched
+  // without consent. Cells: P1 a native toast "This folder has opencode plugins that will run with
+  // your permissions" with Start anyway / Don't start, the log line of `not-started` and no `server
+  // ready at` within 2 s; P2 the chat card "opencode is not running" naming the plugins, and the
+  // status bar item "not started"; P3 Don't start closes the toast and a Reload shows no toast
+  // (3 s) but logs the block again (deny remembered); P4 Start on the card opens the modal
+  // (`.monaco-dialog-box`) with the plugin listed and Start anyway connects; P5 a Reload connects
+  // with no toast and no modal (allow remembered); P6 a second plugin file changes the fingerprint
+  // and the toast comes back; P7 "Forget Plugin Decision for This Folder" shows an information
+  // toast and Restart Server then opens the modal, whose Cancel leaves it not started. SYNTHETIC
+  // server: the fake loads no plugin, so a pass proves the consent flow and not that opencode loads
+  // plugins. The toast and the modal are the only way to see the buttons of a notification (the
+  // test API has none). Cleanup in `finally`: both plugin folders removed (the `command` folder of
+  // step 24 stays), the decision forgotten and the server restarted. The DOM of toasts and
+  // status bar is internal to VS Code. VERIFIED by `npm run test:visual -- --steps 40 --bail`
+  // (Windows 11, VS Code 1.144.0, 03/11/2026, "all visual checks passed", step 40 in 23.1 s): the
+  // lines "ok   P1 the toast … offers Start anyway and Don't start", "ok   P2 the chat card says
+  // opencode is not running because of the plugins", "ok   P3 after Don't start and a Reload the
+  // block is logged (true), no toast shows (false) and nothing starts", "ok   P4 a modal lists the
+  // plugin and offers Start anyway", "ok   P4 Start anyway connects and the card is gone", "ok   P5
+  // after a Reload the server connects with no toast and no modal (allow remembered)", "ok   P6 a
+  // new plugin file asks again", "ok   P7 Forget Plugin Decision shows …" and "ok   P7 Cancel leaves
+  // the chat not started". The captures 40a-plugin-toast, 40b-plugin-card and 40c-plugin-modal were
+  // taken but not looked at by anyone. A partial run is not commit evidence.
+  await step('40 project plugins: consent before the server starts (issue #153)', async () => {
+    const DARK = 'Default Dark Modern';
+    const NOTICE = 'This folder has opencode plugins that will run with your permissions';
+    const BLOCKED = 'server not started: this folder has opencode plugins';
+    const pluginsDir = path.join(workspace, '.opencode', 'plugins');
+    const pluginDir = path.join(workspace, '.opencode', 'plugin');
+    const hostLogSizes = () => {
+      const sizes = new Map();
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'OpenCode.log') sizes.set(full, fs.statSync(full).size);
+        }
+      };
+      try {
+        walk(path.join(vscode.userDataDir, 'logs'));
+      } catch {
+        // no logs yet: nothing to subtract
+      }
+      return sizes;
+    };
+    const logSince = (before) => {
+      let text = '';
+      for (const file of hostLogSizes().keys()) {
+        text += fs.readFileSync(file, 'utf8').slice(before.get(file) ?? 0) + '\n';
+      }
+      return text;
+    };
+    const statusItems = () =>
+      page.evaluate(() =>
+        [...globalThis.document.querySelectorAll('.part.statusbar .statusbar-item')]
+          .map(
+            (item) =>
+              `${item.getAttribute('aria-label') ?? ''} | ${(item.textContent ?? '').trim()}`,
+          )
+          .filter((text) => /opencode/i.test(text)),
+      );
+    const reload = async (mark) => {
+      await page.evaluate((key) => {
+        globalThis[key] = true;
+      }, mark);
+      await command('Developer: Reload Window');
+      web?.close();
+      await browser.close().catch(() => undefined);
+      let reloaded = false;
+      for (let tries = 0; tries < 120 && !reloaded; tries++) {
+        await connectWorkbench(90_000);
+        const stale = await page
+          .evaluate((key) => globalThis[key] === true, mark)
+          .catch(() => true);
+        reloaded = !stale;
+        if (reloaded) break;
+        await browser.close().catch(() => undefined);
+        await sleep(250); // between two attempts to reach the new page, not a wait for it
+      }
+      if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
+      await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
+      let opened = true;
+      try {
+        await openChat(8_000);
+      } catch {
+        opened = false;
+      }
+      if (!opened) {
+        await page
+          .locator('.activitybar [aria-label^="OpenCode"]')
+          .first()
+          .click()
+          .catch(() => undefined);
+        await openChat(60_000);
+      }
+    };
+    const card = () =>
+      web.inDoc((doc) => ({
+        text: doc.querySelector('.connection-card')?.textContent ?? '',
+        start: [...doc.querySelectorAll('.connection-card button')].some(
+          (b) => b.textContent.trim() === 'Start',
+        ),
+        connection: doc.querySelector('.app')?.getAttribute('data-connection') ?? '',
+      }));
+    const toasts = () => page.locator('.notifications-toasts .notification-toast');
+    // The toast that carries `text`, as data: its text and the labels of its buttons.
+    const toastWith = async (text) => {
+      const toast = toasts().filter({ hasText: text });
+      if ((await toast.count()) === 0) return undefined;
+      return toast
+        .first()
+        .evaluate((node) => ({
+          text: node.innerText.replace(/\s+/g, ' ').trim(),
+          buttons: [...node.querySelectorAll('.monaco-button')].map((b) => b.textContent.trim()),
+        }))
+        .catch(() => undefined);
+    };
+    // A function, not a Locator: `page` is a NEW object after every Reload Window above.
+    const dialog = () => page.locator('.monaco-dialog-box');
+    const dialogText = async () =>
+      (await dialog().count()) > 0 ? (await dialog().first().innerText()).replace(/\s+/g, ' ') : '';
+    const pressInDialog = async (label) => {
+      await dialog().first().locator('.monaco-button', { hasText: label }).first().click();
+      await waitFor(async () => (await dialog().count()) === 0, 5_000, 100);
+    };
+    const pressInToast = async (text, label) => {
+      await toasts()
+        .filter({ hasText: text })
+        .first()
+        .locator('.monaco-button', { hasText: label })
+        .first()
+        .click();
+      await waitFor(
+        async () => (await toasts().filter({ hasText: text }).count()) === 0,
+        5_000,
+        100,
+      );
+    };
+
+    await waitFor(
+      async () => (await visibleChatId().catch(() => undefined)) !== undefined,
+      15_000,
+      300,
+    );
+    await openChat(30_000);
+    await waitConnected();
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    try {
+      await command('Notifications: Clear All Notifications');
+      fs.mkdirSync(pluginsDir, { recursive: true });
+      fs.writeFileSync(path.join(pluginsDir, 'demo.js'), 'export default {};\n');
+
+      // --- P1/P2: the folder now has a plugin; the new window must not launch ----------------------
+      let before = hostLogSizes();
+      await reload('__visualReload40a');
+      const blocked = await waitFor(() => logSince(before).includes(BLOCKED), 20_000, 200);
+      const noticeShown = await waitFor(async () => await toastWith(NOTICE), 15_000, 200);
+      await sleep(2_000); // margin: a launch would show within it; the check below is on the final state
+      const afterReload = logSince(before);
+      check(
+        blocked === true &&
+          noticeShown !== undefined &&
+          noticeShown.buttons.includes('Start anyway') &&
+          noticeShown.buttons.includes("Don't start") &&
+          !afterReload.includes('server ready at'),
+        `P1 the toast ${JSON.stringify(noticeShown)} offers Start anyway and Don't start, the log has the block line (${String(blocked === true)}) and no "server ready at" follows (${String(afterReload.includes('server ready at'))})`,
+      );
+      await shot('40a-plugin-toast');
+      const shown = await waitFor(async () => (await card()).start, 15_000, 200);
+      const notStarted = await card();
+      const item = await waitFor(
+        async () =>
+          (await statusItems()).some((t) => t.includes('not started')) ? true : undefined,
+        15_000,
+        200,
+      );
+      console.log(`  status bar items: ${JSON.stringify(await statusItems())}`);
+      check(
+        shown === true &&
+          notStarted.text.includes('opencode is not running') &&
+          /plugins/i.test(notStarted.text) &&
+          item === true,
+        `P2 the chat card says opencode is not running because of the plugins (${JSON.stringify(notStarted.text.slice(0, 140))}) with Start, and the status bar reads "not started" (${String(item === true)})`,
+      );
+      await shot('40b-plugin-card');
+
+      // --- P3: Don't start is remembered ---------------------------------------------------------
+      await pressInToast(NOTICE, "Don't start");
+      before = hostLogSizes();
+      await reload('__visualReload40b');
+      const blockedAgain = await waitFor(() => logSince(before).includes(BLOCKED), 20_000, 200);
+      await sleep(3_000); // margin: a notice would show within it; the check below is on the final state
+      check(
+        blockedAgain === true &&
+          (await toastWith(NOTICE)) === undefined &&
+          logSince(before).includes('project plugins in ') &&
+          !logSince(before).includes('server ready at'),
+        `P3 after Don't start and a Reload the block is logged (${String(blockedAgain === true)}), no toast shows (${String((await toastWith(NOTICE)) !== undefined)}) and nothing starts`,
+      );
+
+      // --- P4: Start on the card asks in a modal; Start anyway connects ----------------------------
+      await waitFor(async () => (await card()).start, 15_000, 200);
+      check(await clickButton('Start'), 'P4 Start is pressed on the card with the real mouse');
+      const modal = await waitFor(async () => (await dialogText()) || undefined, 10_000, 200);
+      await shot('40c-plugin-modal');
+      check(
+        modal !== undefined && modal.includes('demo.js') && modal.includes('Start anyway'),
+        `P4 a modal lists the plugin and offers Start anyway (${String(modal).slice(0, 200)})`,
+      );
+      await pressInDialog('Start anyway');
+      await waitConnected(60_000);
+      check((await card()).text === '', 'P4 Start anyway connects and the card is gone');
+
+      // --- P5: Start anyway is remembered --------------------------------------------------------
+      before = hostLogSizes();
+      await reload('__visualReload40c');
+      await waitConnected(60_000);
+      check(
+        (await toastWith(NOTICE)) === undefined &&
+          (await dialog().count()) === 0 &&
+          logSince(before).includes('server ready at') &&
+          !logSince(before).includes(BLOCKED),
+        'P5 after a Reload the server connects with no toast and no modal (allow remembered)',
+      );
+
+      // --- P6: a second plugin changes the fingerprint; the toast comes back ------------------------
+      fs.mkdirSync(pluginDir, { recursive: true });
+      fs.writeFileSync(path.join(pluginDir, 'second.ts'), 'export default {};\n');
+      before = hostLogSizes();
+      await reload('__visualReload40d');
+      const back = await waitFor(async () => await toastWith(NOTICE), 20_000, 200);
+      check(
+        back !== undefined && logSince(before).includes(BLOCKED),
+        `P6 a new plugin file asks again: the toast is back (${String(back !== undefined)}) and the launch is held`,
+      );
+      await pressInToast(NOTICE, "Don't start");
+
+      // --- P7: forgetting the decision, then Restart Server asks in a modal -------------------------
+      await command('OpenCode: Forget Plugin Decision for This Folder');
+      const info = await waitFor(
+        async () => await toastWith('OpenCode will ask again before it starts opencode'),
+        10_000,
+        200,
+      );
+      check(
+        info !== undefined,
+        'P7 Forget Plugin Decision shows "OpenCode will ask again before it starts opencode"',
+      );
+      await command('Notifications: Clear All Notifications');
+      await command('OpenCode: Restart Server');
+      const asked = await waitFor(async () => (await dialogText()) || undefined, 10_000, 200);
+      check(
+        asked !== undefined && asked.includes('second.ts'),
+        `P7 Restart Server asks in a modal that lists the second plugin (${String(asked).slice(0, 200)})`,
+      );
+      await pressInDialog('Cancel');
+      await sleep(1_500); // margin: a launch would show within it
+      check((await card()).connection === 'not-started', 'P7 Cancel leaves the chat not started');
+      assertNoWebviewErrors('step 40');
+    } finally {
+      // Leave the run as the step found it: no plugin folders, no stored decision, server running.
+      if (
+        (await dialog()
+          .count()
+          .catch(() => 0)) > 0
+      )
+        await page.keyboard.press('Escape');
+      fs.rmSync(pluginsDir, { recursive: true, force: true });
+      fs.rmSync(pluginDir, { recursive: true, force: true });
+      await command('OpenCode: Forget Plugin Decision for This Folder').catch(() => undefined);
+      await command('OpenCode: Restart Server').catch(() => undefined);
+      await waitConnected(60_000).catch(() => undefined);
+      await command('Notifications: Clear All Notifications').catch(() => undefined);
       await setTheme(DARK).catch(() => undefined);
     }
   });
