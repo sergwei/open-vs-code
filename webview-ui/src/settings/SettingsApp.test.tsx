@@ -22,6 +22,7 @@ afterEach(() => {
   mounted?.dispose();
   mounted = undefined;
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 /** Disposes the mounted tab now (a test that mounts a second one, or checks what an unmount leaves). */
@@ -485,6 +486,197 @@ describe('focus when a row changes list', () => {
     hasFocus.mockReturnValue(true);
     windowFocus();
     expect(document.activeElement).toBe(document.body);
+  });
+
+  // Protects the focus trace of issue #151 (the diagnostic `test:visual` step 36 prints for F1/F2)
+  // and the poll that starts at every arm. Provenance: FABRICATED states and orders, `hasFocus`
+  // stubbed, synthetic `focus` events; jsdom proves the annotations and the poll, not what VS Code
+  // delivers. The trace is read from the same attribute the harness reads.
+  interface TraceEntry {
+    n: number;
+    e: string;
+    hf?: boolean;
+    armed?: string | null;
+    why?: string;
+  }
+  const readTrace = (container: HTMLElement): TraceEntry[] =>
+    JSON.parse(
+      must(container, '.settings-providers').getAttribute('data-focus-trace') ?? '[]',
+    ) as TraceEntry[];
+  const labels = (entries: TraceEntry[]): string[] =>
+    entries.map((entry) => (entry.why === undefined ? entry.e : `${entry.e}:${entry.why}`));
+  /** True when `wanted` appears in `all` in that order (other entries may sit between them). */
+  const inOrder = (all: string[], wanted: string[]): boolean => {
+    let at = 0;
+    for (const label of all) if (label === wanted[at]) at++;
+    return at === wanted.length;
+  };
+
+  it('traces Escape with the state first: arm, attempt end, window focus, served, disarmed', () => {
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const { container, apply } = setup(stateWith('idle'));
+    pressConnect(container);
+    apply({ type: 'settings.state', state: stateWith('attempt') });
+    apply({ type: 'settings.state', state: stateWith('idle') });
+    hasFocus.mockReturnValue(true);
+    windowFocus();
+    const entries = readTrace(container);
+    expect(
+      inOrder(labels(entries), [
+        'arm:take-focus',
+        'attempt-end',
+        'arm:attempt-end',
+        'window-focus',
+        'serve:served',
+        'disarm:served',
+      ]),
+    ).toBe(true);
+    const focusEntry = entries.find((entry) => entry.e === 'window-focus');
+    expect(focusEntry?.hf).toBe(true);
+    expect(focusEntry?.armed).toBe('acme');
+    expect(document.activeElement).toBe(cardOf(container));
+  });
+
+  it('traces a focus event before hasFocus: no-doc-focus, a new poll window, then served by the poll', () => {
+    vi.useFakeTimers();
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const { container, apply } = setup(stateWith('idle'));
+    pressConnect(container);
+    apply({ type: 'settings.state', state: stateWith('attempt') });
+    apply({ type: 'settings.state', state: stateWith('connected') });
+    windowFocus();
+    const early = readTrace(container);
+    const focusEntry = early.find((entry) => entry.e === 'window-focus');
+    expect(focusEntry?.hf).toBe(false);
+    expect(focusEntry?.armed).toBe('acme');
+    hasFocus.mockReturnValue(true);
+    vi.advanceTimersByTime(250); // two poll ticks of 100 ms, on a fake clock
+    expect(
+      inOrder(labels(readTrace(container)), [
+        'window-focus',
+        'serve:no-doc-focus',
+        'poll-start',
+        'serve:served',
+        'poll-stop:served',
+      ]),
+    ).toBe(true);
+    expect(document.activeElement).toBe(cardOf(container));
+  });
+
+  for (const outcome of ['connected', 'idle'] as const) {
+    it(`${outcome === 'connected' ? 'Enter' : 'Escape'}: with no focus event at all the poll focuses the card once hasFocus is true`, () => {
+      vi.useFakeTimers();
+      const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+      const { container, apply } = setup(stateWith('idle'));
+      pressConnect(container);
+      apply({ type: 'settings.state', state: stateWith('attempt') });
+      apply({ type: 'settings.state', state: stateWith(outcome) });
+      expect(document.activeElement).not.toBe(cardOf(container));
+      hasFocus.mockReturnValue(true); // and no focus event comes (HYPOTHESIS S2)
+      vi.advanceTimersByTime(250);
+      expect(document.activeElement).toBe(cardOf(container));
+      const seen = labels(readTrace(container));
+      expect(seen).toContain('serve:served');
+      expect(seen).not.toContain('window-focus');
+    });
+  }
+
+  it('the poll does not focus the card while hasFocus is false', () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const { container, apply } = setup(stateWith('idle'));
+    pressConnect(container);
+    apply({ type: 'settings.state', state: stateWith('attempt') });
+    apply({ type: 'settings.state', state: stateWith('connected') });
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    vi.advanceTimersByTime(250);
+    expect(focus).not.toHaveBeenCalled();
+    expect(readTrace(container).at(-1)?.armed).toBe('acme');
+  });
+
+  // Protects the S1 case of #151 (a gap longer than 1 s before the document gets the focus): the
+  // poll window must outlast 2 s. With POLL_TICKS 10 (1 s at POLL_MS 100) the poll would stop at
+  // 1 s and this card would never be focused (mutation run: the test went red; reverted).
+  // FABRICATED states, `hasFocus` stubbed, fake clock; no `focus` event on purpose.
+  it('S1: the poll still focuses the card when hasFocus turns true after 2 s', () => {
+    vi.useFakeTimers();
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const { container, apply } = setup(stateWith('idle'));
+    pressConnect(container);
+    apply({ type: 'settings.state', state: stateWith('attempt') });
+    apply({ type: 'settings.state', state: stateWith('connected') });
+    vi.advanceTimersByTime(2000);
+    expect(document.activeElement).not.toBe(cardOf(container));
+    hasFocus.mockReturnValue(true);
+    vi.advanceTimersByTime(200);
+    expect(document.activeElement).toBe(cardOf(container));
+  });
+
+  // Protects the S3 case of #151: when the attempt ends with the document focused but the card of
+  // that provider is not in the DOM yet (`why=no-card`), the request stays parked instead of being
+  // consumed, and the card that appears is focused. Mutation run: making `no-card` consume the
+  // request (`setFocusID(undefined)` + `disarm`, as the old `cardOf(id)?.focus()` did) turned this
+  // test red; reverted.
+  // FABRICATED states (the row is absent at the end of the attempt), `hasFocus` stubbed.
+  it('S3: at the end of the attempt without the card the request stays parked until the card appears', () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const { container, apply } = setup(stateWith('idle'));
+    pressConnect(container);
+    apply({ type: 'settings.state', state: stateWith('attempt') });
+    apply({
+      type: 'settings.state',
+      state: makeState({
+        providers: { loaded: true, failed: false, rows: structuredClone([anthropic]) },
+      }),
+    });
+    expect(labels(readTrace(container))).toContain('serve:no-card');
+    expect(document.activeElement).toBe(document.body);
+    apply({ type: 'settings.state', state: stateWith('idle') });
+    vi.advanceTimersByTime(250);
+    expect(document.activeElement).toBe(cardOf(container));
+    // The card that appears asks for the focus itself (`disarm:direct`): it could only do so
+    // because `focusID` was kept, which is what the parked request guarantees.
+    expect(labels(readTrace(container))).toContain('disarm:direct');
+  });
+
+  // Protects the privacy of the trace: the search box holds a typed value, so `describeActive`
+  // looks at an INPUT with a value. Focusing it disarms the request (`focusin-other`), and the
+  // `focusin` and `disarm` annotations are the ones that describe that INPUT. Only the tag name and
+  // `data-provider` may reach the attribute. FABRICATED states, `hasFocus` stubbed.
+  it('keeps typed values out of the trace', () => {
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const { container, apply } = setup(stateWith('idle'));
+    pressConnect(container);
+    apply({ type: 'settings.state', state: stateWith('attempt') });
+    apply({ type: 'settings.state', state: stateWith('connected') });
+    const search = must<HTMLInputElement>(container, 'input[type="search"]');
+    search.value = 'search-marker-xyz';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    search.focus();
+    expect(document.activeElement).toBe(search);
+    expect(labels(readTrace(container))).toContain('disarm:focusin-other');
+    const raw = must(container, '.settings-providers').getAttribute('data-focus-trace') ?? '';
+    expect(raw).toContain('"tag":"INPUT"');
+    expect(raw).not.toContain('search-marker-xyz');
+  });
+
+  // Protects the one visible change of the end of the attempt (#151): with the document focused and
+  // the focus on the "MCP servers" tab (outside the section, so no `focusin` of the section
+  // disarms), the request is served as `left-active` and the card does NOT take the focus. An
+  // unconditional `card.focus()` there would steal it. FABRICATED states, `hasFocus` stubbed.
+  it('at the end of the attempt does not take a focus that sits outside the section', () => {
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const { container, apply } = setup(stateWith('idle'));
+    pressConnect(container);
+    apply({ type: 'settings.state', state: stateWith('attempt') });
+    const mcpTab = must(container, '#settings-tab-mcp');
+    mcpTab.focus();
+    apply({ type: 'settings.state', state: stateWith('idle') });
+    expect(document.activeElement).toBe(mcpTab);
+    const seen = labels(readTrace(container));
+    expect(seen).toContain('serve:left-active');
+    expect(seen).toContain('disarm:served');
   });
 
   it('does not take the focus back on a later refresh once the user is elsewhere', async () => {
