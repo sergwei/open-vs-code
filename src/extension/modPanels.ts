@@ -2,8 +2,10 @@
 // section 3.3 option B, decision P1=2): one `WebviewPanel` per panel, built by the host.
 //
 // What a panel is allowed to be (architecture rules 1, 2 and 6):
-//   - It is not the chat webview and shares nothing with it. Its page can read only files inside its
-//     mod folder (`localResourceRoots` = that folder), and its HTML comes from
+//   - It is not the chat webview and shares nothing with it. Its page is served files by path under
+//     its mod folder (`localResourceRoots` = that folder; VS Code compares paths as text and does not
+//     resolve links, so a link inside the folder that points outside is readable by the page: see
+//     `resolveModFile` and `docs/mods.md`), and its HTML comes from
 //     `buildModPanelHtml`, whose CSP has no `connect-src`: the page cannot make a request, so it can
 //     reach neither the opencode server nor the network. The server URL and the password never enter
 //     this file; the only data that crosses is what the mod and its page choose to exchange.
@@ -18,13 +20,13 @@
 // composer, and without `retainContextWhenHidden` (memory; `vscode-extension` section 2): a hidden
 // tab's page is rebuilt when shown, and a message posted while it is hidden is dropped.
 
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import * as vscode from 'vscode';
 import type { ModJson } from '../mods/api';
-import { MAX_PANEL_MESSAGE_BYTES, isPanelData, type LogLevel } from '../mods/wire';
+import { isPanelData, type LogLevel } from '../mods/wire';
 import type { ModPanelRequest, ModPanelUi } from './modHost';
 import { buildModPanelHtml } from './modPanelHtml';
-import { resolveInsideFolder } from './pathPolicy';
+import { PANEL_DROP_WARN_WINDOW_MS, createWarnGate, resolveModFile } from './modPanelPolicy';
 import { createNonce } from './webviewHtml';
 
 /** What {@link createModPanels} needs from the rest of the extension. */
@@ -44,41 +46,26 @@ export function modPanelViewType(modId: string): string {
 }
 
 /**
- * Resolves `relative` inside `dir` and returns the real path of an existing file, or throws.
- *
- * `dir` is already a real path (`DiscoveredMod.dir`). The lexical check catches `..`; `realpath`
- * then follows symlinks, and the second check refuses a link that leaves the folder, so a panel
- * cannot name a file outside the mod. The file must also be at most 1 MB.
- * UNVERIFIED for a symlink that leaves the folder: no test creates one (needs privileges on Windows).
- */
-async function resolveModFile(dir: string, relative: string): Promise<string> {
-  const lexical = resolveInsideFolder(dir, relative);
-  if (lexical === undefined) throw new Error(`"${relative}" is outside the mod folder`);
-  const real = await realpath(lexical);
-  if (resolveInsideFolder(dir, real) === undefined) {
-    throw new Error(`"${relative}" is outside the mod folder`);
-  }
-  if ((await stat(real)).size > MAX_PANEL_MESSAGE_BYTES) {
-    throw new Error(`"${relative}" is larger than 1 MB`);
-  }
-  return real;
-}
-
-/**
  * Creates the {@link ModPanelUi} that `ModHost` drives.
  *
  * `open` creates the tab at once (`ViewColumn.Beside`, `preserveFocus`) and fills it after the
  * files are read; if any file is refused or missing the tab is closed, one `error` line goes to the
  * mod's log and the mod is told `panel.closed` (the tab's dispose). A message from the page that
- * is not JSON of at most 1 MB is dropped with a `warn`. Panels are keyed by mod id and panel id.
+ * is not JSON of at most 1 MB is dropped, with a `warn` gated to one per second per panel
+ * (`createWarnGate`; the message is always dropped, only the line is limited). Panels are keyed by
+ * mod id and panel id.
  * VERIFIED in VS Code 1.144.0 on Windows 11 (02/11/2026, `test:visual --steps 39`): "ok   P1 the
  * panel opened Beside the chat, in the editor area to the right of the side bar" (with the active
  * group empty VS Code reuses it: one group, not a split), "ok   P2 a click on the button reaches the
  * mod and its answer comes back: "pong 1 from mod"" (both directions of the relay), "ok   P5 the mod
  * heard onDidClose (its sentinel panel.closed exists)" (a tab closed by the user) and "ok   P6
- * Reload Mods closed the open panel (its tab is gone)" (a panel closed by the host). UNVERIFIED on
- * macOS or Linux, for a page message over 1 MB, a missing file, a hidden tab receiving a message and
- * a symlink out of the folder: no test makes them happen.
+ * Reload Mods closed the open panel (its tab is gone)" (a panel closed by the host). Also VERIFIED
+ * there (03/11/2026, `test:visual --steps 39`): "ok   P7 a link inside the mod folder that points
+ * outside is served to the page" (a junction out of the folder: the page loaded the file) and "ok
+ * P8 ten page messages over 1 MB were dropped with 1 warning(s) in the mods log, not ten" (mutation
+ * with the gate bypassed: the same check read 10 warnings and failed). UNVERIFIED on macOS or
+ * Linux (P7 needs a link: only run locally), for a missing file and a hidden tab receiving a
+ * message: no test makes them happen.
  */
 export function createModPanels(deps: ModPanelsDeps): ModPanelUi {
   const open = new Map<string, { panel: vscode.WebviewPanel; byHost: boolean }>();
@@ -121,9 +108,17 @@ export function createModPanels(deps: ModPanelsDeps): ModPanelUi {
       );
       const entry = { panel, byHost: false };
       open.set(key, entry);
+      // One gate per panel: at most one warning a second for each of its (at most 3) panels.
+      const mayWarn = createWarnGate(PANEL_DROP_WARN_WINDOW_MS);
       panel.webview.onDidReceiveMessage((raw: unknown) => {
         if (!isPanelData(raw)) {
-          deps.log(modId, 'warn', 'dropped a panel message: not JSON, or larger than 1 MB');
+          if (mayWarn()) {
+            deps.log(
+              modId,
+              'warn',
+              'dropped a panel message: not JSON, or larger than 1 MB (more drops in the next second are not logged)',
+            );
+          }
           return;
         }
         deps.relay.message(modId, panelId, raw);

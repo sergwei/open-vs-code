@@ -10,7 +10,9 @@
 //
 // Loading never blocks activation: `registerMods` returns at once and `load()` runs behind it. Loads
 // are serialized (a reload while one runs waits for it), so two quick setting changes cannot leave
-// two generations of Workers.
+// two generations of Workers. The loop and the "disposed" flag live in `modsLoader.ts`; this file
+// routes every write to the two channels through that flag, because VS Code releases a channel on
+// deactivate and a released channel throws.
 
 import { mkdir } from 'node:fs/promises';
 import os from 'node:os';
@@ -27,11 +29,13 @@ import {
   RUN_MOD_COMMAND_ID,
   TEST_MODS_STATE_COMMAND_ID,
 } from './ids';
-import { discoverMods, globalModsRoot, type DiscoveryProblem } from './modDiscovery';
+import { globalModsRoot, discoverMods } from './modDiscovery';
 import { createModsSink, type ModsSink } from './modEvents';
 import { ModHost, type ModUi } from './modHost';
 import { createModPanels } from './modPanels';
 import { createModsChat } from './modsChat';
+import { createModsLoader } from './modsLoader';
+import type { LogLevel } from '../mods/wire';
 
 /** What {@link registerMods} gives back. */
 export interface ModsRegistration {
@@ -100,6 +104,11 @@ function showToast(
  * VS Code 1.144.0, 02/11/2026, checks "✔ loads the good mod and contains the one that throws and
  * the one that hangs", "✔ runs the command of the good mod inside its Worker" and "✔ stops every
  * mod when openVsCode.mods.enabled is turned off". UNVERIFIED on macOS and Linux until the CI.
+ * The returned `dispose` also silences both channels (see `modsLoader.ts`): UNVERIFIED in a real
+ * extension host that a log arriving after `deactivate` would have thrown and that it no longer
+ * does, because an integration suite cannot deactivate the extension in the middle of a run; the
+ * guard logic is covered with a fabricated host by `modsLoader.test.ts`. Look at the extension
+ * host log for "Channel has been closed" if a mod's `deactivate()` errors ever go missing.
  */
 export function registerMods(
   context: vscode.ExtensionContext,
@@ -109,7 +118,19 @@ export function registerMods(
   context.subscriptions.push(modsChannel);
   const root = globalModsRoot(process.env, os.homedir());
   const isTest = context.extensionMode === vscode.ExtensionMode.Test;
-  let problems: DiscoveryProblem[] = [];
+  // Every write to `modsChannel` and to `channel` goes through `loader.guard`: VS Code releases the
+  // first one with `context.subscriptions` while the Workers are still in their grace, and a
+  // released channel throws. The guards are read by closure, after the host and the loader exist,
+  // like `chat`.
+  const writeMods = (modId: string, level: LogLevel, text: string): void => {
+    modsChannel[level](`[${modId}] ${text}`);
+  };
+  const writeMain = (text: string): void => {
+    channel.info(text);
+  };
+  const writeComposeDropped = (modId: string): void => {
+    modsChannel.warn(`[${modId}] chat.compose dropped: the chat is not available`);
+  };
   // Declared before the host: the UI callbacks need the host's list to find a mod's name.
   const names = (modId: string): string =>
     host.statuses().find((s) => s.id === modId)?.name ?? modId;
@@ -138,44 +159,32 @@ export function registerMods(
         },
       },
       log: (modId, level, text) => {
-        modsChannel[level](`[${modId}] ${text}`);
+        logMod(modId, level, text);
       },
     }),
     logLifecycle: (text) => {
-      channel.info(text);
+      logLifecycle(text);
     },
     logMod: (modId, level, text) => {
-      modsChannel[level](`[${modId}] ${text}`);
+      logMod(modId, level, text);
     },
     ...(isTest ? { heartbeatMs: TEST_HEARTBEAT_MS } : {}),
   });
   const chat = createModsChat(host, (modId) => {
-    modsChannel.warn(`[${modId}] chat.compose dropped: the chat is not available`);
+    logComposeDropped(modId);
   });
-
-  /** Discovers and starts the mods, or stops them all when the switch is off. */
-  const loadNow = async (): Promise<void> => {
-    try {
-      if (!readEnabled()) {
-        problems = [];
-        await host.reload([]);
-        channel.info('mods are turned off (openVsCode.mods.enabled)');
-        return;
-      }
-      const found = await discoverMods(root);
-      problems = found.problems;
-      for (const problem of found.problems) {
-        channel.warn(`mod folder ${problem.folder} skipped: ${problem.reason}`);
-      }
-      await host.reload(found.mods);
-    } catch (error) {
-      channel.error(
-        `could not load mods: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  };
-  let chain: Promise<void> = Promise.resolve();
-  const load = (): Promise<void> => (chain = chain.then(loadNow));
+  const loader = createModsLoader({
+    readEnabled,
+    discover: () => discoverMods(root),
+    host,
+    log: (level, text) => {
+      channel[level](text);
+    },
+  });
+  const logMod = loader.guard(writeMods);
+  const logLifecycle = loader.guard(writeMain);
+  const logComposeDropped = loader.guard(writeComposeDropped);
+  const load = loader.load;
 
   const manage = async (): Promise<void> => {
     const items: ManageItem[] = host.statuses().map((status) => {
@@ -186,7 +195,7 @@ export function registerMods(
       if (status.error !== undefined) item.detail = status.error;
       return item;
     });
-    for (const problem of problems) {
+    for (const problem of loader.problems()) {
       items.push({
         label: `$(warning) ${problem.folder}`,
         description: 'skipped',
@@ -261,7 +270,7 @@ export function registerMods(
         root,
         mods: host.statuses(),
         commands: host.commands(),
-        problems,
+        problems: loader.problems(),
       })),
     );
   }
@@ -270,8 +279,9 @@ export function registerMods(
     sink: createModsSink((event) => {
       host.dispatch(event);
     }, chat),
-    // `host.dispose` sets the host's `disposed` flag first, so a load still in flight (it awaits
-    // discovery or the grace of `reload`) cannot start Workers afterwards: no chain needed.
-    dispose: () => host.dispose(),
+    // `loader.dispose` raises the loader's flag, then calls `host.dispose`, which raises the host's
+    // own: a load still in flight (it awaits discovery or the grace of `reload`) neither starts
+    // Workers nor writes a line afterwards, and neither does a Worker that logs during its grace.
+    dispose: () => loader.dispose(),
   };
 }
