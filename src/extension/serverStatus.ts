@@ -69,7 +69,9 @@ export function describeServerStatus(
       return make(
         'circle-outline',
         'OpenCode: not started',
-        'The server is not started (openVsCode.autoStart is off).',
+        connection.reason === 'project-plugins'
+          ? 'The server is not started: this folder has opencode plugins that have not been allowed.'
+          : 'The server is not started (openVsCode.autoStart is off).',
       );
     case 'unavailable':
       return make('error', 'OpenCode: unavailable', 'The server is not available.', true);

@@ -117,7 +117,7 @@ const main = {
   label: 'main',
   // Relative to this file. Compiled by `npm run compile:integration`, not by Vitest.
   files:
-    'out/test/integration/**/!(realOpencode|externalServer|fakeServer|defaultLocation).test.js',
+    'out/test/integration/**/!(realOpencode|externalServer|fakeServer|defaultLocation|projectPlugins).test.js',
 };
 fs.mkdirSync(path.join(userDataDir, 'User'), { recursive: true });
 fs.writeFileSync(
@@ -362,8 +362,64 @@ try {
 fs.mkdirSync(path.join(defaultUserDataDir, 'User'), { recursive: true });
 fs.writeFileSync(path.join(defaultUserDataDir, 'User', 'settings.json'), '{}\n');
 
+/**
+ * Configuration of `projectPlugins.test.ts` (issue #153): the extension, set to run the synthetic
+ * opencode as its own server, opens a folder whose `.opencode/plugins/` holds a plugin and must NOT
+ * launch it without consent. Its own profile, deleted and recreated on every load (a decision
+ * stored in `globalState` by a previous run would turn the case into a different one), and its own
+ * folder under `.vscode-test/` of THIS checkout, whose ancestors carry no opencode config (checked
+ * 03/11/2026 for the repository and its parent). The suite reads the log of the FIRST activation, so
+ * it must be the only suite of the configuration. `--password-store=basic`, as in the other private
+ * profiles. UNVERIFIED on macOS and Linux until the CI runs it.
+ */
+const pluginsRoot = path.join(import.meta.dirname, '.vscode-test', 'project-plugins');
+const pluginsUserDataDir = path.join(pluginsRoot, 'user-data');
+const pluginsWorkspace = path.join(pluginsRoot, 'workspace');
+const projectPlugins = {
+  ...common,
+  label: 'project-plugins',
+  env: {
+    ...env,
+    OPEN_VS_CODE_TEST_USER_DATA_DIR: pluginsUserDataDir,
+    FAKE_OPENCODE_LIFETIME_MS: '600000',
+    XDG_DATA_HOME: path.join(pluginsRoot, 'xdg', 'data'),
+    XDG_STATE_HOME: path.join(pluginsRoot, 'xdg', 'state'),
+    XDG_CACHE_HOME: path.join(pluginsRoot, 'xdg', 'cache'),
+  },
+  files: 'out/test/integration/projectPlugins.test.js',
+  workspaceFolder: pluginsWorkspace,
+  launchArgs: [
+    '--disable-extensions',
+    `--user-data-dir=${pluginsUserDataDir}`,
+    '--disable-workspace-trust',
+    '--password-store=basic',
+  ],
+  mocha: { ...common.mocha, timeout: 60000 },
+};
+try {
+  fs.rmSync(pluginsRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+} catch (error) {
+  console.warn(
+    `could not wipe ${pluginsRoot}: ${error instanceof Error ? error.message : String(error)}`,
+  );
+}
+fs.mkdirSync(path.join(pluginsWorkspace, '.opencode', 'plugins'), { recursive: true });
+fs.writeFileSync(
+  path.join(pluginsWorkspace, '.opencode', 'plugins', 'demo.js'),
+  'export default {};\n',
+);
+fs.mkdirSync(path.join(pluginsUserDataDir, 'User'), { recursive: true });
+fs.writeFileSync(
+  path.join(pluginsUserDataDir, 'User', 'settings.json'),
+  JSON.stringify(
+    { 'openVsCode.opencodePath': fakeOpencode, 'openVsCode.chatLocation': TEST_CHAT_LOCATION },
+    null,
+    2,
+  ),
+);
+
 export default defineConfig(
   process.env.OPEN_VS_CODE_REAL_OPENCODE
-    ? [main, realOpencode, externalServer, fakeServer, defaultLocation]
-    : [main, externalServer, fakeServer, defaultLocation],
+    ? [main, realOpencode, externalServer, fakeServer, defaultLocation, projectPlugins]
+    : [main, externalServer, fakeServer, defaultLocation, projectPlugins],
 );

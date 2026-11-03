@@ -26,6 +26,7 @@ Measured on Windows 11, 31/10/2026, in a full `npm run test:integration` run (th
 | `external-server` | 9 | 9 s |
 | `fake-server` | 44 | about 2 min (Mocha prints `2m`; about 110 s by the timestamps of the log) |
 | `default-location` | 5 | 6 s |
+| `project-plugins` (issue #153) | 2 | 4 s (`passing (4s)`, run of 03/11/2026 on Windows 11 alone with `--label project-plugins`; not part of the baseline above) |
 | `real-opencode` (opt-in) | 16 | 20 s, in the baseline of 30/10/2026 (`OPEN_VS_CODE_REAL_OPENCODE` set: 223 s wall clock, 117 passing + 1 pending in all) |
 
 Each label starts its own VS Code, which costs a few seconds on top of the Mocha time (about 20 s
@@ -62,7 +63,7 @@ running.
 - Linux needs a display: `xvfb-run -a npm run test:integration`. Windows and macOS: as is.
 - Needs network on the first run (VS Code download). Cache `.vscode-test/vscode-*` if wanted.
 - `npm run test:integration` runs every configuration that is not opt-in: `main`,
-  `external-server`, `fake-server` and `default-location`.
+  `external-server`, `fake-server`, `default-location` and `project-plugins`.
 - Run it before `npm run vsix` (that one rebuilds `dist/` in production mode).
 
 ## How the tests observe the extension

@@ -209,6 +209,11 @@
         "category": "OpenCode"
       },
       {
+        "command": "openVsCode.forgetPluginDecision",
+        "title": "Forget Plugin Decision for This Folder",
+        "category": "OpenCode"
+      },
+      {
         "command": "openVsCode.addToChat",
         "title": "Add to OpenCode Chat"
       },

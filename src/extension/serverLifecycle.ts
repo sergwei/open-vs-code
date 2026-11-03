@@ -6,12 +6,14 @@ import {
   AUTO_START_KEY,
   AUTO_START_SETTING,
   CONFIG_SECTION,
+  FORGET_PLUGIN_DECISION_COMMAND_ID,
   RESTART_SERVER_COMMAND_ID,
   SELECT_FOLDER_COMMAND_ID,
   SERVER_URL_SETTING,
   SET_SERVER_PASSWORD_COMMAND_ID,
 } from './ids';
 import { failureActions, ForgottenPasswords } from './externalServer';
+import { createPluginConsent } from './pluginConsentUi';
 import { readServerTarget, registerServerCredentials } from './serverCredentials';
 import {
   describeServerFailure,
@@ -140,6 +142,11 @@ async function runFailureAction(
  * external) and Show Logs.
  * `openVsCode.autoStart` (issue #124) is read right after the manager is built and on every change
  * of the setting (`manager.setAutoStart`).
+ * Issue #153: the manager gets the `launchGuard` of `pluginConsentUi.ts` (plugins of the served
+ * folder need the user's consent before an own process starts; an external server is never
+ * guarded) and the command `openVsCode.forgetPluginDecision` is registered here. The guard and the
+ * manager reference each other, so the guard reads the manager through `managerRef`, set right
+ * after the constructor and before any launch can happen.
  * Workspace Trust: the extension declares no `capabilities.untrustedWorkspaces`, so it does not
  * activate in Restricted Mode and nothing is launched against an untrusted folder (HYPOTHESIS:
  * VS Code's documented default, not exercised).
@@ -162,7 +169,25 @@ export function registerServerLifecycle(
   onDetection: (result: DetectionResult) => void;
 } {
   const log = safeLog(channel);
+  const preferred = (): string | undefined => context.workspaceState.get<string>(SERVED_FOLDER_KEY);
+  const servedFolder = (): string | undefined => {
+    const choice = pickWorkspaceFolder(vscode.workspace.workspaceFolders, preferred());
+    return 'folder' in choice ? choice.folder : undefined;
+  };
+  // The consent reads the manager (late answers) and the manager calls the consent's guard: the
+  // callbacks run only after the constructor returned, so the reference below is always set.
+  const managerRef: { current?: ServerManager } = {};
+  const consent = createPluginConsent({
+    memento: context.globalState,
+    log,
+    serverState: () => managerRef.current?.state ?? { kind: 'idle' },
+    servedFolder,
+    restart: async () => {
+      if (managerRef.current !== undefined) await restartServerWithFeedback(managerRef.current);
+    },
+  });
   const manager = new ServerManager({
+    launchGuard: (request) => consent.launchGuard(request),
     // Seam of issue #41: `startServer` itself unless the host is a test host or the visual run's
     // explicit opt-in (never in production). See `testLaunchFrom`.
     start: wrapStartServer(
@@ -184,8 +209,8 @@ export function registerServerLifecycle(
   // Read before the first detection (asynchronous), so a window with autoStart off never launches.
   const readAutoStart = (): boolean =>
     vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>(AUTO_START_KEY, true);
+  managerRef.current = manager;
   manager.setAutoStart(readAutoStart());
-  const preferred = (): string | undefined => context.workspaceState.get<string>(SERVED_FOLDER_KEY);
   manager.setFolder(pickWorkspaceFolder(vscode.workspace.workspaceFolders, preferred()));
 
   let previous: ServerState = manager.state;
@@ -242,6 +267,9 @@ export function registerServerLifecycle(
   context.subscriptions.push(
     vscode.commands.registerCommand(RESTART_SERVER_COMMAND_ID, async () => {
       await restartServerWithFeedback(manager);
+    }),
+    vscode.commands.registerCommand(FORGET_PLUGIN_DECISION_COMMAND_ID, async () => {
+      await consent.forgetServedFolder();
     }),
     vscode.commands.registerCommand(SELECT_FOLDER_COMMAND_ID, async () => {
       const folders = (vscode.workspace.workspaceFolders ?? []).filter(

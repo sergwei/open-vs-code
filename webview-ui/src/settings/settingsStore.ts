@@ -49,7 +49,7 @@ export interface SettingsStore {
 export function createSettingsStore(): SettingsStore {
   const [state, setState] = createStore<SettingsStoreState>({
     received: false,
-    connection: { state: 'not-started' },
+    connection: { state: 'not-started', reason: 'auto-start-off' },
     folder: '',
     serverVersion: undefined,
     remote: undefined,

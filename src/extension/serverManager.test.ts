@@ -37,6 +37,8 @@ import {
   pickWorkspaceFolder,
   ServerManager,
   STABLE_RUN_MS,
+  type LaunchGuardRequest,
+  type LaunchGuardVerdict,
   type ServerState,
 } from './serverManager';
 
@@ -71,6 +73,7 @@ function harness(
     start?: (options: StartServerOptions) => Promise<RunningServer>;
     fetchInfo?: (url: string, password: string, signal: AbortSignal) => Promise<ServerInfo>;
     stop?: (server: RunningServer) => Promise<unknown>;
+    launchGuard?: (request: LaunchGuardRequest) => Promise<LaunchGuardVerdict>;
   } = {},
 ) {
   const messages: string[] = [];
@@ -114,6 +117,7 @@ function harness(
       };
     },
     now: () => clock,
+    ...(overrides.launchGuard === undefined ? {} : { launchGuard: overrides.launchGuard }),
   });
   const states: ServerState[] = [];
   manager.onDidChangeState((state) => states.push(state));
@@ -1318,7 +1322,7 @@ describe('ServerManager with autoStart off (issue #124)', () => {
 
   it('holds the launch of a usable detection in not-started and never calls start', () => {
     const { manager, start, states } = held();
-    expect(manager.state).toEqual({ kind: 'not-started' });
+    expect(manager.state).toEqual({ kind: 'not-started', reason: 'auto-start-off' });
     expect(states.map((s) => s.kind)).toEqual(['not-started']);
     expect(start).not.toHaveBeenCalled();
   });
@@ -1343,7 +1347,7 @@ describe('ServerManager with autoStart off (issue #124)', () => {
   it('a folder change keeps not-started without restarting or starting', () => {
     const { manager, start, states } = held();
     manager.setFolder({ folder: '/work/other', ignored: [] });
-    expect(manager.state).toEqual({ kind: 'not-started' });
+    expect(manager.state).toEqual({ kind: 'not-started', reason: 'auto-start-off' });
     expect(states.some((s) => s.kind === 'restarting')).toBe(false);
     expect(start).not.toHaveBeenCalled();
   });
@@ -1387,11 +1391,251 @@ describe('ServerManager with autoStart off (issue #124)', () => {
   });
 
   it('the not-started log line is stable and it is not a failure to notify', () => {
-    expect(describeServerState({ kind: 'not-started' })).toEqual({
+    expect(describeServerState({ kind: 'not-started', reason: 'auto-start-off' })).toEqual({
       level: 'info',
       message:
         'server not started: openVsCode.autoStart is off (send a prompt or run Restart Server)',
     });
-    expect(describeServerFailure({ kind: 'idle' }, { kind: 'not-started' })).toBeUndefined();
+    expect(
+      describeServerFailure({ kind: 'idle' }, { kind: 'not-started', reason: 'auto-start-off' }),
+    ).toBeUndefined();
+  });
+});
+
+// Issue #153: the launch guard. SYNTHETIC: the guard is a fake that answers by hand (a deferred
+// promise where the order of events matters); nothing here says what the real prompt looks like
+// (`pluginConsentUi.ts`) nor what a real opencode loads.
+describe('launch guard (issue #153)', () => {
+  /** A guard whose answers are handed out by the test, in call order. */
+  function manualGuard() {
+    const calls: LaunchGuardRequest[] = [];
+    const pending: Array<(verdict: LaunchGuardVerdict) => void> = [];
+    const guard = vi.fn((request: LaunchGuardRequest) => {
+      calls.push(request);
+      return new Promise<LaunchGuardVerdict>((resolve) => {
+        pending.push(resolve);
+      });
+    });
+    return {
+      guard,
+      calls,
+      answer: (index: number, verdict: LaunchGuardVerdict) => pending[index]?.(verdict),
+    };
+  }
+  const answering = (verdict: LaunchGuardVerdict) =>
+    vi.fn((_request: LaunchGuardRequest) => Promise.resolve(verdict));
+
+  it('a hold on a detection publishes not-started/project-plugins and never calls start', async () => {
+    const guard = answering('hold');
+    const { manager, start, states, messages } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    await reach(manager, 'not-started');
+    expect(manager.state).toEqual({ kind: 'not-started', reason: 'project-plugins' });
+    expect(states.map((s) => s.kind)).toEqual(['starting', 'not-started']);
+    expect(start).not.toHaveBeenCalled();
+    expect(guard.mock.calls[0]?.[0]).toMatchObject({ folder: '/work/project', userAsked: false });
+    expect(messages).toContain('serving folder /work/project');
+    expect(describeServerState(manager.state)).toEqual({
+      level: 'info',
+      message:
+        'server not started: this folder has opencode plugins that have not been allowed (send a prompt or run Restart Server to review them)',
+    });
+  });
+
+  it('a command restart asks with userAsked and starts when the guard says go', async () => {
+    const guard = vi.fn((request: LaunchGuardRequest) =>
+      Promise.resolve<LaunchGuardVerdict>(request.userAsked ? 'go' : 'hold'),
+    );
+    const { manager, start } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    await reach(manager, 'not-started');
+    await expect(manager.restart('command')).resolves.toBe('attempted');
+    expect(guard.mock.calls.map(([request]) => request.userAsked)).toEqual([false, true]);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(manager.state.kind).toBe('running');
+  });
+
+  it('a hold from an automatic launch does not open the autoStart gate', async () => {
+    const { manager, start } = harness({ launchGuard: answering('hold') });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    await reach(manager, 'not-started');
+    expect(manager.state).toEqual({ kind: 'not-started', reason: 'project-plugins' });
+    manager.setAutoStart(false); // the user turns it off after the hold: nothing launched yet
+    manager.onDetection(okResult('/bin/other'));
+    expect(manager.state).toEqual({ kind: 'not-started', reason: 'auto-start-off' });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('a restart while the guard is pending silences the old attempt and starts once', async () => {
+    const { guard, answer } = manualGuard();
+    const { manager, start, states } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    expect(guard).toHaveBeenCalledTimes(1);
+    const restarted = manager.restart('command');
+    answer(0, 'hold'); // the old attempt gets its answer after being aborted
+    await vi.waitFor(() => {
+      expect(guard).toHaveBeenCalledTimes(2);
+    });
+    answer(1, 'go');
+    await restarted;
+    await reach(manager, 'running');
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(states.some((s) => s.kind === 'not-started')).toBe(false);
+  });
+
+  it('stop() while the guard is pending starts nothing and ends stopped', async () => {
+    const { guard, answer } = manualGuard();
+    const { manager, start } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    const stopping = manager.stop();
+    answer(0, 'go');
+    await stopping;
+    expect(start).not.toHaveBeenCalled();
+    expect(manager.state.kind).toBe('stopped');
+  });
+
+  // Regression of review W2 of E1-plugin-warning: the real guard shows a modal that code cannot
+  // close, so `stop()` used to wait for the user. SYNTHETIC: the fake guard never resolves.
+  it('stop() with a guard that never resolves still ends stopped', async () => {
+    const { guard } = manualGuard();
+    const { manager, start } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    expect(guard).toHaveBeenCalledTimes(1);
+    await manager.stop();
+    expect(start).not.toHaveBeenCalled();
+    expect(manager.state.kind).toBe('stopped');
+  });
+
+  // Same cause for a restart: it waits for `launching`, which must not wait for the first guard.
+  it('a restart with a first guard that never resolves still starts once', async () => {
+    const { guard, answer } = manualGuard();
+    const { manager, start } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    const restarted = manager.restart('command');
+    await vi.waitFor(() => {
+      expect(guard).toHaveBeenCalledTimes(2);
+    });
+    answer(1, 'go');
+    await restarted;
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(manager.state.kind).toBe('running');
+  });
+
+  // Review S3: the 'skip' path. The guard said go, the start failed, and a binary detected
+  // meanwhile is retried WITHOUT asking again (the folder already passed). SYNTHETIC fakes.
+  it('a retry with a binary detected during starting does not ask the guard again', async () => {
+    const guard = answering('go');
+    let failFirst: (error: Error) => void = () => undefined;
+    const first = new Promise<RunningServer>((_resolve, reject) => {
+      failFirst = reject;
+    });
+    const start = vi
+      .fn<(options: StartServerOptions) => Promise<RunningServer>>()
+      .mockReturnValueOnce(first)
+      .mockResolvedValueOnce(fakeServer());
+    const { manager } = harness({ launchGuard: guard, start });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult('/bin/a'));
+    await vi.waitFor(() => {
+      expect(start).toHaveBeenCalledTimes(1);
+    });
+    manager.onDetection(okResult('/bin/b'));
+    failFirst(new Error('spawn failed'));
+    await reach(manager, 'running');
+    expect(start.mock.calls[1]?.[0].command).toBe('/bin/b');
+    expect(guard).toHaveBeenCalledTimes(1);
+  });
+
+  // Review S3: the autoStart gate does not release a hold of the guard. SYNTHETIC fakes.
+  it('setAutoStart(true) from not-started/project-plugins launches nothing', async () => {
+    const guard = answering('hold');
+    const { manager, start } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    await reach(manager, 'not-started');
+    manager.setAutoStart(false);
+    manager.setAutoStart(true);
+    await Promise.resolve();
+    expect(manager.state).toEqual({ kind: 'not-started', reason: 'project-plugins' });
+    expect(guard).toHaveBeenCalledTimes(1);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('a detection during the guard waits aside: no second guard call, and a hold drops it', async () => {
+    const { guard, answer } = manualGuard();
+    const { manager, start } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult('/bin/a'));
+    manager.onDetection(okResult('/bin/b'));
+    expect(guard).toHaveBeenCalledTimes(1);
+    answer(0, 'hold');
+    await reach(manager, 'not-started');
+    await Promise.resolve();
+    expect(guard).toHaveBeenCalledTimes(1);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('a guard that rejects fails closed: held, and the error is logged', async () => {
+    const guard = vi.fn((_request: LaunchGuardRequest) =>
+      Promise.reject<LaunchGuardVerdict>(new Error('scan exploded')),
+    );
+    const { manager, start, messages } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    await reach(manager, 'not-started');
+    expect(manager.state).toEqual({ kind: 'not-started', reason: 'project-plugins' });
+    expect(start).not.toHaveBeenCalled();
+    expect(messages).toContain('the launch guard failed; not starting the server: scan exploded');
+  });
+
+  it('an external target never asks the guard', async () => {
+    const guard = answering('hold');
+    const { manager, start } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.setTarget({ kind: 'external', url: 'http://127.0.0.1:4096', password: 'pw' });
+    await reach(manager, 'running');
+    expect(guard).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('a restart after a crash asks with userAsked false', async () => {
+    const guard = answering('go');
+    const { manager, created, fire } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    await reach(manager, 'running');
+    created[0]?.child.emit('exit', 1, null);
+    fire();
+    await vi.waitFor(() => {
+      expect(guard).toHaveBeenCalledTimes(2);
+    });
+    expect(guard.mock.calls.map(([request]) => request.userAsked)).toEqual([false, false]);
+  });
+
+  it('a folder change asks the guard about the NEW folder', async () => {
+    const guard = answering('go');
+    const { manager } = harness({ launchGuard: guard });
+    manager.setFolder(folderChoice);
+    manager.onDetection(okResult());
+    await reach(manager, 'running');
+    manager.setFolder({ folder: '/work/other', ignored: [] });
+    await vi.waitFor(() => {
+      expect(guard).toHaveBeenCalledTimes(2);
+    });
+    expect(guard.mock.calls[1]?.[0]).toMatchObject({ folder: '/work/other', userAsked: false });
+  });
+
+  it('a hold is not a failure to notify', () => {
+    const starting: ServerState = { kind: 'starting', folder: '/f', binaryPath: '/b' };
+    expect(
+      describeServerFailure(starting, { kind: 'not-started', reason: 'project-plugins' }),
+    ).toBeUndefined();
   });
 });
