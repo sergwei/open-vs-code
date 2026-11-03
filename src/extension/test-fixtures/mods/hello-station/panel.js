@@ -14,4 +14,12 @@ document.getElementById('ping')?.addEventListener('click', () => {
   vscode.postMessage({ kind: 'ping', n: pings });
 });
 
+// Hidden button (E10-mods-hardening): ten messages over the 1 MB cap, which the host must drop with
+// at most one warning in the same second. Hidden, so the screenshots and contrast checks of step 39
+// do not see it.
+document.getElementById('flood')?.addEventListener('click', () => {
+  for (let i = 0; i < 10; i += 1)
+    vscode.postMessage({ kind: 'flood', blob: 'x'.repeat(1_100_000) });
+});
+
 vscode.postMessage({ kind: 'ping', n: 0 });

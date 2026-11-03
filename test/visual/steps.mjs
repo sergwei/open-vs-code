@@ -86,9 +86,11 @@
  * reconnect to the side bar chat: the step does `openChat` first.
  * The step 39 (the panel a mod opens beside the chat, E10-mods phase 4) came after it too: it needs
  * the 1, installs the same fixture mod as the 38 on its own and sends no prompt (it types one
- * mod command, which never reaches the model). Its `budgetS` of 15 is the criterion above applied
- * to the full run that passed it (02/11/2026, Windows 11, VS Code 1.144.0: 9.5 s, times 1.25 is
- * 11.9, rounded up to 15); it replaces the plan's estimate of 45.
+ * mod command, which never reaches the model). Its `budgetS` of 20 is the criterion above applied
+ * to the full run of 04/11/2026 with the cells P7 and P8 of #155, which wait 2.5 s (Windows 11,
+ * VS Code 1.144.1, 795.2 s; its FAILs were in the steps 16 and 36, the 39 passed): "39    12.3 s",
+ * times 1.25 is 15.4, rounded up to 20. It replaces the 15 of the full run of 02/11/2026 before
+ * them (VS Code 1.144.0: 9.5 s, times 1.25 is 11.9), which replaced the plan's estimate of 45.
  * The step 40 (a folder with an opencode plugin is not launched without consent, issue #153) came
  * after it too: it needs the 1, writes and removes plugin files in the served folder, reloads the
  * window three times (40a, 40b and 40c) and sends no prompt. Its `budgetS` of 40 is the criterion
@@ -154,7 +156,7 @@ export const STEPS = [
   { id: '36', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 50 },
   { id: '37', needs: ['1'], sendsPrompt: true, groups: ['tabs'], budgetS: 45 },
   { id: '38', needs: ['1'], sendsPrompt: true, groups: ['mods'], budgetS: 25 },
-  { id: '39', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
+  { id: '39', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 20 },
   { id: '40', needs: ['1'], sendsPrompt: false, groups: ['setup'], budgetS: 40 },
   { id: '41', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
 ];

@@ -43,6 +43,8 @@ describe('selectForFiles', () => {
       'src/mods/worker.ts',
       'src/extension/modHost.ts',
       'src/extension/modsLifecycle.ts',
+      'src/extension/modsLoader.ts',
+      'src/extension/modPanelPolicy.ts',
       'src/extension/modsChat.ts',
       'webview-ui/src/mods/ModBand.tsx',
     ]) {

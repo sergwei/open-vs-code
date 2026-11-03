@@ -15462,14 +15462,21 @@ try {
     const closedFile = path.join(vscode.modsHome, '..', 'mods-sentinel', 'panel.closed');
     const panelLogs = [];
     let panelWeb;
-    // The text the host logged, from every OpenCode.log of the isolated profile of this run.
-    const hostLogText = () => {
+    // P7: a folder outside the mod, and a junction to it inside the mod folder.
+    const outsideDir = path.join(vscode.modsHome, '..', 'mods-outside');
+    const linkPath = path.join(vscode.modsHome, MOD, 'outside');
+    const PIXEL_PNG = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    // The text the host logged, from every log file called `name` of the isolated profile of this run.
+    const hostLogText = (name = 'OpenCode.log') => {
       const files = [];
       const walk = (dir) => {
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
           const full = path.join(dir, entry.name);
           if (entry.isDirectory()) walk(full);
-          else if (entry.name === 'OpenCode.log') files.push(full);
+          else if (entry.name === name) files.push(full);
         }
       };
       try {
@@ -15551,6 +15558,12 @@ try {
       // --- P0: install the fixture and reload the mods ------------------------------------------------
       fs.rmSync(closedFile, { force: true });
       installModFixture(repoRoot, vscode.modsHome, MOD);
+      // P7 setup: a file outside the mod folder, reached through a junction inside it, and a control
+      // file inside it. Both are 1x1 PNGs.
+      fs.mkdirSync(outsideDir, { recursive: true });
+      fs.writeFileSync(path.join(outsideDir, 'probe.png'), PIXEL_PNG);
+      fs.writeFileSync(path.join(vscode.modsHome, MOD, 'inside.png'), PIXEL_PNG);
+      fs.symlinkSync(outsideDir, linkPath, 'junction');
       await command('OpenCode: Reload Mods');
       check(
         (await waitFor(() => hostLogText().includes(`mod ${MOD} loaded`), 20_000, 200)) === true,
@@ -15606,12 +15619,53 @@ try {
         'P2 a click on the button reaches the mod and its answer comes back: "pong 1 from mod"',
       );
 
-      // --- P3: the CSP is live, and the page broke none of it by itself -------------------------------
+      // --- P3 (load): the page broke no CSP rule by itself. It reads `panelLogs` BEFORE P7 empties it -
       check(
         panelLogs.filter((line) => /Refused to|Content Security Policy|^\[exception\]/i.test(line))
           .length === 0,
         `P3 the panel page loaded its script and stylesheet with no CSP violation (${JSON.stringify(panelLogs.slice(0, 3))})`,
       );
+
+      // --- P7 (measure): does the page get a file through a link that leaves the mod folder? ----------
+      const linkProbe = await panelWeb.inDoc(async (doc) => {
+        const base = doc.querySelector('link[rel="stylesheet"]')?.href ?? '';
+        const load = (relative) =>
+          new Promise((resolve) => {
+            const img = doc.createElement('img');
+            img.onload = () => resolve('loaded');
+            img.onerror = () => resolve('error');
+            img.src = new URL(relative, base).href;
+            doc.body.appendChild(img);
+            setTimeout(() => resolve('timeout'), 8000);
+          });
+        return { base, inside: await load('inside.png'), outside: await load('outside/probe.png') };
+      });
+      check(
+        linkProbe.inside === 'loaded' && linkProbe.outside === 'loaded',
+        `P7 a link inside the mod folder that points outside is served to the page (VS Code checks localResourceRoots by path; documented in docs/mods.md): inside.png ${linkProbe.inside}, outside/probe.png ${linkProbe.outside}`,
+      );
+      panelLogs.length = 0;
+
+      // --- P8: a page that floods oversized messages gets at most one warning a second ---------------
+      const dropLines = () =>
+        hostLogText('OpenCode Mods.log')
+          .split('\n')
+          .filter((line) => line.includes('dropped a panel message')).length;
+      const dropsBefore = dropLines();
+      const floodStart = performance.now();
+      await panelWeb.inDoc((doc) => {
+        doc.getElementById('flood')?.click();
+      });
+      const firstDrop = await waitFor(() => dropLines() > dropsBefore, 15_000, 100);
+      const firstDropMs = Math.round(performance.now() - floodStart);
+      await sleep(2_500); // longer than two windows: the last of the ten messages has arrived by now
+      const drops = dropLines() - dropsBefore;
+      check(
+        firstDrop === true && drops >= 1 && drops <= 2,
+        `P8 ten page messages over 1 MB were dropped with ${String(drops)} warning(s) in the mods log, not ten (the first after ${String(firstDropMs)} ms, counted 2.5 s later)`,
+      );
+
+      // --- P3 (probes): the CSP is live ---------------------------------------------------------------
       const probes = await panelWeb.inDoc(async (doc) => {
         const win = doc.defaultView;
         const out = {};
@@ -15710,6 +15764,16 @@ try {
       assertNoWebviewErrors('step 39');
     } finally {
       panelWeb?.close();
+      // The junction goes first, so `removeModFixture` never has to decide whether to follow it.
+      try {
+        fs.unlinkSync(linkPath);
+      } catch (error) {
+        // ENOENT: the junction was never created (the step failed before it). Anything else is said.
+        if (error?.code !== 'ENOENT') {
+          console.warn(`step 39: could not remove the junction ${linkPath}: ${String(error)}`);
+        }
+      }
+      fs.rmSync(outsideDir, { recursive: true, force: true });
       removeModFixture(vscode.modsHome, MOD);
       await closeAllEditors().catch(() => undefined);
       await command('OpenCode: Reload Mods').catch(() => undefined);
