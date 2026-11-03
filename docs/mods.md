@@ -232,14 +232,26 @@ What the extension does to keep the risk small:
 
 ### What this does NOT cover: opencode's own plugins
 
-opencode itself loads plugins from `.opencode/plugins/` **in the project folder**. That is
-opencode's behaviour, outside this extension's control, and it is separate from mods. With
-`openVsCode.autoStart` on (the default), the extension starts opencode in the folder you opened as
-soon as the window starts, so **opening a repository you do not trust can run code from its
-`.opencode/plugins/`**, even though no mod was involved. Review that folder before you trust a
-repository, or set `openVsCode.autoStart` to `false`: the server then starts only when you start it
-(the Start button, **OpenCode: Restart Server** or your first prompt). VS Code's own Workspace Trust
-also applies: the extension does not run in Restricted Mode.
+opencode itself loads plugins that a project brings: `.ts` and `.js` files in `.opencode/plugin/`
+and `.opencode/plugins/`, and every entry of `plugins` (or `plugin`) in `opencode.json`,
+`opencode.jsonc` and `.opencode/opencode.json(c)`, npm package names included (opencode downloads
+and runs those). It searches the folder you opened and every folder above it. That is opencode's
+behaviour, outside this extension's control, and it is separate from mods.
+
+Since issue #153 the extension asks before it starts opencode in such a folder: a warning with
+**Start anyway** and **Don't start** (the answer is kept per folder, on this machine, and asked
+again when the list of plugins changes), or a modal when you press Start, run **OpenCode: Restart
+Server** or send your first prompt. **OpenCode: Forget Plugin Decision for This Folder** clears it.
+What it does not cover: a plugin added while opencode is already running is hot-reloaded by
+opencode with no warning; a server you connect to with `openVsCode.serverUrl` is not started by the
+extension, so there is nothing to ask; and other project code that opencode runs (local MCP
+servers, formatters) is not checked. The detection replicates what opencode 2.0.32 reads. Checked
+once against a real opencode 2.0.32 on Windows 11: a plugin file in `.opencode/plugins/` was
+imported by the first request that loads the folder's models (`GET /api/model`), not when the
+server started and not by other requests for the folder (the extension makes that request as soon
+as it connects); plugins declared in `opencode.json` were not part of that check. You can still
+set `openVsCode.autoStart` to `false` so the server starts only when you ask. VS Code's own Workspace Trust also applies: the extension does not run in
+Restricted Mode.
 
 ## Blocking or changing a tool call
 
