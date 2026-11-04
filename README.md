@@ -145,8 +145,12 @@ channels are always in English, whatever the language, and so are the channel na
 
 ## Installation
 
-The extension is not on the Marketplace yet; issue #43 will publish it there. Until then, build the
-`.vsix` from the source code (Node 24 and git are needed):
+Search for **OpenCode Station** in the Extensions view of VS Code, or install it from the
+[Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=sergwei.open-vs-code).
+Editors that use [Open VSX](https://open-vsx.org/extension/sergwei/open-vs-code) (VSCodium, Cursor
+and others) find it there under the same name.
+
+To build the `.vsix` from the source code instead (Node 24 and git are needed):
 
 1. Clone the repository: `git clone https://github.com/sergwei/open-vs-code.git`
 2. In the cloned folder, install the dependencies: `npm ci`
