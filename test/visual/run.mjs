@@ -15135,23 +15135,37 @@ try {
     const DARK = 'Default Dark Modern';
     // The fixture writes `<mods root>/../mods-sentinel/hello.ran` when its command runs.
     const sentinel = path.join(vscode.modsHome, '..', 'mods-sentinel', 'hello.ran');
-    // The text the host logged, from every OpenCode.log of the isolated profile of this run.
-    const hostLog = () => {
+    // Every log file called `fileName` in the isolated profile of this run (one per VS Code session).
+    const logFiles = (fileName) => {
       const files = [];
       const walk = (dir) => {
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
           const full = path.join(dir, entry.name);
           if (entry.isDirectory()) walk(full);
-          else if (entry.name === 'OpenCode.log') files.push(full);
+          else if (entry.name === fileName) files.push(full);
         }
       };
       try {
         walk(path.join(vscode.userDataDir, 'logs'));
       } catch {
-        return '';
+        return [];
       }
-      return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+      return files;
     };
+    // The text the host logged, from every OpenCode.log of the isolated profile of this run.
+    const hostLog = () =>
+      logFiles('OpenCode.log')
+        .map((file) => fs.readFileSync(file, 'utf8'))
+        .join('\n');
+    // The "OpenCode Mods" channel. VERIFIED file name on Windows 11 (03/11/2026): the M9d cell
+    // of `--steps 38` passed reading one `OpenCode Mods.log`. If VS Code ever renames it,
+    // `modsLogFiles()` is empty and M9d FAILS, it does not pass empty.
+    const MODS_LOG_FILE = 'OpenCode Mods.log';
+    const modsLogFiles = () => logFiles(MODS_LOG_FILE);
+    const modsLog = () =>
+      modsLogFiles()
+        .map((file) => fs.readFileSync(file, 'utf8'))
+        .join('\n');
     // Boxes and texts of the band, the composer and the "/" popup, in CSS px of the webview.
     const bandState = () =>
       web.inDoc((doc) => {
@@ -15438,6 +15452,41 @@ try {
       await shot('38-palette');
       await page.keyboard.press('Escape');
       await waitFor(quickInputHidden, 2_000, 50);
+
+      // --- M9: station.chat.compose writes into the prompt box and never sends (#169) -----------------
+      // The fixture `compose` command passes the removed `send: true` ONCE (no frequency cap, #1895).
+      await clearPromptBox(150);
+      const beforeCompose = await bandState();
+      await send('/hello-station:compose');
+      const COMPOSED = 'Composed by Hello Station';
+      const readBox = () =>
+        web.inDoc((doc) => doc.querySelector('textarea.prompt-text')?.value ?? '');
+      const written = await waitFor(async () => (await readBox()).includes(COMPOSED), 15_000, 200);
+      const boxText = await readBox();
+      check(
+        written === true,
+        `M9a the compose of the mod wrote its text in the prompt box (${JSON.stringify(boxText)})`,
+      );
+      await sleep(1_000); // a send would have shown as a user message or a turn by now
+      const afterCompose = await bandState();
+      check(
+        afterCompose.users.length === beforeCompose.users.length &&
+          afterCompose.assistants === beforeCompose.assistants &&
+          !afterCompose.busy &&
+          afterCompose.alerts.length === 0,
+        `M9b the compose with send: true sent no prompt and made no turn (${JSON.stringify([afterCompose.users.length, afterCompose.assistants, afterCompose.busy, afterCompose.alerts])})`,
+      );
+      const warnLines = modsLog()
+        .split('\n')
+        .filter((line) => line.includes('chat.compose: "send" no longer exists'));
+      check(
+        modsLogFiles().length > 0 &&
+          warnLines.length === 1 &&
+          warnLines[0].includes(`[${MOD}]`) &&
+          hostLog().includes(`mod ${MOD} composed a prompt`),
+        `M9d the mods log (${MODS_LOG_FILE}, ${String(modsLogFiles().length)} file(s)) has exactly one send warning for [${MOD}] and OpenCode.log says the mod composed a prompt (${JSON.stringify(warnLines)})`,
+      );
+      await clearPromptBox(150);
 
       assertNoWebviewErrors('step 38');
     } finally {

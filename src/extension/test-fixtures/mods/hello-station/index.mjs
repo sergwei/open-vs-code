@@ -7,7 +7,8 @@
 // (it is not secret, unlike the opencode password the host strips).
 //
 // Used by `test/integration/mods.test.ts` (the sentinel) and by `test:visual` step 38 (the band,
-// the "/" entry, the toast, the palette). The command does NOT await the toast: it resolves only
+// the "/" entry, the toast, the palette, and the `compose` command that writes into the prompt box).
+// The command does NOT await the toast: it resolves only
 // when the notification closes, and a command that waits for it would hit the 30 s timeout.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -48,6 +49,16 @@ export function activate(station) {
         mkdirSync(dir, { recursive: true });
         writeFileSync(path.join(dir, 'panel.closed'), 'closed\n');
       });
+    },
+  });
+  // #169: `send` no longer exists, and this plain-JS mod still passes it ONCE on purpose, like an
+  // old mod would: `test:visual` step 38 checks the text lands in the prompt box unsent and that
+  // the log of mods carries exactly one warning. One call: there is no frequency cap (#1895).
+  station.commands.register({
+    name: 'compose',
+    description: 'Writes into the prompt box',
+    run() {
+      station.chat.compose({ text: 'Composed by Hello Station', send: true });
     },
   });
   station.events.on('turn.started', (event) => {

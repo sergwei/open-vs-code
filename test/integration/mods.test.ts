@@ -99,10 +99,10 @@ describe('mods', function () {
   /**
    * The seeded root is the only one read (H8), a good mod becomes active with its command, a mod
    * that throws in `activate` is `failed` with its message, and one that spins forever is
-   * `failed` as hung, while the good one keeps working (its two commands, `hello` and the
-   * phase 4 `panel`, are listed; the panel itself is covered by `test:visual` step 39). VERIFIED: "✔ loads the good mod and contains
-   * the one that throws and the one that hangs" passed in 2113 ms with both commands listed (label `main`, Windows 11,
-   * VS Code 1.144.0, 02/11/2026). macOS and Linux: CI only.
+   * `failed` as hung, while the good one keeps working (its three commands, `hello`, the
+   * phase 4 `panel` and the #169 `compose`, are listed; the panel itself is covered by `test:visual` step 39). VERIFIED: "✔ loads the good mod and contains
+   * the one that throws and the one that hangs" passed in 2130 ms with the three commands listed (label `main`, Windows 11,
+   * VS Code 1.144.1, 03/11/2026). macOS and Linux: CI only.
    */
   it('loads the good mod and contains the one that throws and the one that hangs', async () => {
     await vscode.commands.executeCommand(RELOAD_MODS_COMMAND_ID);
@@ -119,7 +119,7 @@ describe('mods', function () {
     assert.match(byId['hangs']?.error ?? '', /^hung:/);
     assert.deepStrictEqual(
       result.commands.map((c) => `${c.modId}:${c.name}`),
-      ['hello-station:hello', 'hello-station:panel'],
+      ['hello-station:hello', 'hello-station:panel', 'hello-station:compose'],
     );
   });
 

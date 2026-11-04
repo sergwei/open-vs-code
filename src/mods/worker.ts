@@ -264,11 +264,13 @@ function startWorker(port: MessagePort): void {
       panel: { open: openPanel },
     },
     chat: {
+      // `send` is gone from the type (#169), but a plain-JS mod may still pass `true`: it is
+      // forwarded as the legacy wire field only so the host can warn once; the host never sends.
       compose: (options) =>
         post({
           type: 'compose',
           text: options.text,
-          ...(options.send !== undefined ? { send: options.send } : {}),
+          ...('send' in options && options.send === true ? { send: true } : {}),
         }),
     },
   });
