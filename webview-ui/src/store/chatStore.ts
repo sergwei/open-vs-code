@@ -60,6 +60,7 @@
  * VERIFIED by `chatStore.test.ts` with fabricated messages (confirms this logic, not the host
  * contract). UNVERIFIED in a real webview until the F5 of issue #14.
  */
+import * as l10n from '@vscode/l10n';
 import { batch } from 'solid-js';
 import { createStore, produce, reconcile } from 'solid-js/store';
 import type {
@@ -800,8 +801,8 @@ export function createChatStore(): ChatStore {
         } else if (ask !== undefined) {
           addResolved({
             id: ask.id,
-            outcome: m.outcome === 'answered' ? 'Answered' : 'Dismissed',
-            label: ask.kind === 'question' ? 'Question from the agent' : ask.title,
+            outcome: m.outcome === 'answered' ? l10n.t('Answered') : l10n.t('Dismissed'),
+            label: ask.kind === 'question' ? l10n.t('Question from the agent') : ask.title,
           });
         }
         setState('requests', 'forms', (asks) => asks.filter((known) => known.id !== m.formID));

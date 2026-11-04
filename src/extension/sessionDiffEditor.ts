@@ -5,6 +5,7 @@
 // the API. The webview never names a path to VS Code: the controller checks the whitelist and
 // hands this module a `DiffTarget`.
 
+import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
 import { SESSION_DIFF_SCHEME } from './ids';
 import type { ServerLog } from './opencodeServer';
@@ -113,7 +114,9 @@ export function registerSessionDiffProvider(
       if (side === 'empty') return '';
       const sessionID = query.get('session');
       if (sessionID === null || sessionID === '') {
-        return Promise.reject(codedError('DiffNotListed', 'This diff has no session'));
+        return Promise.reject(
+          codedError('DiffNotListed', () => l10n.t('This diff has no session')),
+        );
       }
       const known = served.get(sessionID) ?? [];
       if (!known.some((item) => item.toString() === uri.toString())) {
@@ -164,6 +167,8 @@ export function registerSessionDiffProvider(
  * beside a chat tab, and serves prompts and session.open from tabs" passed: with the sample file
  * in column one and two chat tabs in another, the active diff tab's group was the sample's column
  * and none of the chat columns. Not observed: the `vscode.open` branch (a binary), macOS, Linux.
+ * Its refusal "That file is not on disk any more" (and the provider's "This diff has no session")
+ * go through `l10n.t`; their `code` stays the stable part.
  */
 export async function openSessionDiff(
   target: DiffTarget,
@@ -173,7 +178,9 @@ export async function openSessionDiff(
   const onDisk = await exists(file);
   const columnOption = viewColumn === undefined ? {} : { viewColumn };
   if (target.binary) {
-    if (!onDisk) throw codedError('FileNotFound', 'That file is not on disk any more');
+    if (!onDisk) {
+      throw codedError('FileNotFound', () => l10n.t('That file is not on disk any more'));
+    }
     await vscode.commands.executeCommand('vscode.open', file, { preview: true, ...columnOption });
     return 'file';
   }

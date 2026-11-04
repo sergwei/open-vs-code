@@ -56,6 +56,21 @@ describe('selectForFiles', () => {
     expect(selectForFiles(['src/extension/modsChat.test.ts']).mode).toBe('none');
   });
 
+  // E11-i18n: the language catalogs are read only by the window of step 42, so they select the
+  // `l10n` group and not the full run; the base manifest catalog and the boots stay cross-cutting
+  // (the cross-cutting list below). FABRICATED file lists: this checks `affected.mjs` only.
+  it('maps the language catalogs to the l10n group, not to a full run', () => {
+    for (const file of [
+      'package.nls.es.json',
+      'package.nls.pt-br.json',
+      'l10n/bundle.l10n.es.json',
+      'l10n/bundle.l10n.json',
+    ]) {
+      expect(selectForFiles([file]), file).toMatchObject({ mode: 'groups', groups: ['l10n'] });
+    }
+    expect(selectForFiles(['package.nls.json']).mode).toBe('full');
+  });
+
   it('unites the groups of several files, without repeating one', () => {
     const result = selectForFiles([
       'src/extension/chatTabs.ts',
@@ -72,6 +87,10 @@ describe('selectForFiles', () => {
     'webview-ui/src/App.tsx',
     'src/extension/chatController.ts',
     'package.json',
+    // E11-i18n: the base manifest catalog and the two boots.
+    'package.nls.json',
+    'src/extension/l10nBoot.ts',
+    'webview-ui/src/l10nBoot.ts',
     'src/extension/test-fixtures/fakeServer.ts',
     'test/visual/run.mjs',
   ])('sends the cross-cutting file %s to the full run', (file) => {
@@ -98,6 +117,7 @@ describe('selectForFiles', () => {
       'test/visual/steps.test.mjs',
       'test/visual/compare-runs.mjs',
       'test/visual/fingerprint.mjs',
+      'scripts/l10n.mjs',
       'test/integration/fakeServer.test.ts',
       'test/integration/support/extensionLog.ts',
       '.claude/CLAUDE.md',

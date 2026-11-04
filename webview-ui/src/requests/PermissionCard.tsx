@@ -1,4 +1,6 @@
+import * as l10n from '@vscode/l10n';
 import { createSignal, createUniqueId, For, Show } from 'solid-js';
+import { formatParts, plural } from '../../../src/shared/l10n';
 import type { ErrorInfo, PermissionAsk, PermissionDecision } from '../../../src/shared/model';
 import { useSend } from '../chat/hostContext';
 import { nextRequestId } from '../chat/PromptInput';
@@ -62,7 +64,17 @@ export function PermissionCard(props: {
   const othersRejected = () => Math.max(0, props.sameSessionCount - 1);
   /** The warning that Reject takes the other pending requests of the session with it. */
   const cascadeText = () =>
-    `Rejecting also rejects the ${String(othersRejected())} other pending request${othersRejected() === 1 ? '' : 's'} of this session.`;
+    plural(
+      othersRejected(),
+      l10n.t(
+        'Rejecting also rejects the {0} other pending request of this session.',
+        othersRejected(),
+      ),
+      l10n.t(
+        'Rejecting also rejects the {0} other pending requests of this session.',
+        othersRejected(),
+      ),
+    );
 
   /** Sends the decision and marks the card as waiting for the server. */
   const answer = (decision: PermissionDecision, message?: string): void => {
@@ -96,16 +108,16 @@ export function PermissionCard(props: {
       }}
     >
       <h2 class="request-title" id={titleId}>
-        Permission needed: {actionLabel(props.ask.action)}
+        {l10n.t('Permission needed: {0}', actionLabel(props.ask.action))}
       </h2>
       <div class="request-body" id={bodyId}>
         <Show when={props.origin}>
           {(origin) => (
             <p class="request-origin">
-              From session “{origin().title}”
+              {l10n.t('From session “{0}”', origin().title)}
               <Show when={origin().onOpen !== undefined}>
                 <button type="button" class="secondary" onClick={() => origin().onOpen?.()}>
-                  Open session
+                  {l10n.t('Open session')}
                 </button>
               </Show>
             </p>
@@ -113,13 +125,15 @@ export function PermissionCard(props: {
         </Show>
         <Show when={props.toolName}>
           <p class="request-tool">
-            Requested by the <code>{props.toolName}</code> tool
+            {formatParts(l10n.t('Requested by the {tool} tool'), {
+              tool: <code>{props.toolName}</code>,
+            })}
           </p>
         </Show>
         <Show when={props.ask.message}>
           <p class="request-message">{props.ask.message}</p>
         </Show>
-        <ul class="request-resources" aria-label="Resources">
+        <ul class="request-resources" aria-label={l10n.t('Resources')}>
           <For each={preview().shown}>
             {(resource) => (
               <li>
@@ -128,17 +142,23 @@ export function PermissionCard(props: {
             )}
           </For>
           <Show when={preview().more > 0}>
-            <li class="request-more">+{preview().more} more</li>
+            <li class="request-more">{l10n.t('+{0} more', preview().more)}</li>
           </Show>
         </ul>
       </div>
 
       <Show when={confirmingAlways()}>
-        <div class="request-always" role="group" aria-label="Always allow">
+        <div class="request-always" role="group" aria-label={l10n.t('Always allow')}>
           <p>
-            This saves {saved().rules.length === 1 ? 'this rule' : 'these rules'} for this project.
-            It applies to every session and survives restarts; revoke it later with “OpenCode:
-            Manage Saved Permissions”.
+            {plural(
+              saved().rules.length,
+              l10n.t(
+                'This saves this rule for this project. It applies to every session and survives restarts; revoke it later with “OpenCode: Manage Saved Permissions”.',
+              ),
+              l10n.t(
+                'This saves these rules for this project. They apply to every session and survive restarts; revoke them later with “OpenCode: Manage Saved Permissions”.',
+              ),
+            )}
           </p>
           <ul>
             <For each={saved().rules}>
@@ -151,8 +171,12 @@ export function PermissionCard(props: {
           </ul>
           <Show when={saved().broad}>
             <p class="request-warning">
-              Careful: this rule is broad. opencode will stop asking about ALL of it, for example
-              “Read: *” lets it read any file of the project, <code>.env</code> files included.
+              {formatParts(
+                l10n.t(
+                  'Careful: this rule is broad. opencode will stop asking about ALL of it, for example “Read: *” lets it read any file of the project, {env} files included.',
+                ),
+                { env: <code>.env</code> },
+              )}
             </p>
           </Show>
           <div class="request-actions">
@@ -164,7 +188,7 @@ export function PermissionCard(props: {
                 answer('always');
               }}
             >
-              Yes, always allow
+              {l10n.t('Yes, always allow')}
             </button>
             <button
               type="button"
@@ -172,7 +196,7 @@ export function PermissionCard(props: {
               disabled={props.replying}
               onClick={() => setConfirmingAlways(false)}
             >
-              Back
+              {l10n.t('Back')}
             </button>
             <button
               type="button"
@@ -181,7 +205,7 @@ export function PermissionCard(props: {
                 send({ type: 'permissions.manage' });
               }}
             >
-              Manage saved permissions
+              {l10n.t('Manage saved permissions')}
             </button>
           </div>
         </div>
@@ -190,7 +214,7 @@ export function PermissionCard(props: {
       <Show when={showFeedback()}>
         <div class="request-feedback">
           <label>
-            Tell the agent what to do instead
+            {l10n.t('Tell the agent what to do instead')}
             <textarea
               rows={2}
               value={feedback()}
@@ -206,7 +230,7 @@ export function PermissionCard(props: {
               answer('reject', feedback());
             }}
           >
-            Reject with this feedback
+            {l10n.t('Reject with this feedback')}
           </button>
         </div>
       </Show>
@@ -222,7 +246,7 @@ export function PermissionCard(props: {
             answer('once');
           }}
         >
-          Allow once
+          {l10n.t('Allow once')}
         </button>
         <Show when={canAlways()}>
           <button
@@ -232,7 +256,7 @@ export function PermissionCard(props: {
             aria-expanded={confirmingAlways()}
             onClick={() => setConfirmingAlways((current) => !current)}
           >
-            Always allow…
+            {l10n.t('Always allow…')}
           </button>
         </Show>
         <button
@@ -244,7 +268,7 @@ export function PermissionCard(props: {
             answer('reject');
           }}
         >
-          Reject
+          {l10n.t('Reject')}
         </button>
         <button
           type="button"
@@ -253,7 +277,7 @@ export function PermissionCard(props: {
           aria-expanded={showFeedback()}
           onClick={() => setShowFeedback((current) => !current)}
         >
-          Reject with feedback…
+          {l10n.t('Reject with feedback…')}
         </button>
       </div>
       <Show when={othersRejected() > 0}>
@@ -263,7 +287,7 @@ export function PermissionCard(props: {
       </Show>
       <Show when={props.replying}>
         <p class="request-hint" role="status">
-          Sending…
+          {l10n.t('Sending…')}
         </p>
       </Show>
       <Show when={props.error}>

@@ -5,13 +5,13 @@
 
 import * as vscode from 'vscode';
 import type { HostToWebview, WebviewToHost } from '../shared/protocol';
-import { EMPTY_TITLE } from '../shared/sessionLabel';
 import { readPersistedSessionID } from '../shared/tabState';
 import type { PaneSurface } from './chatPane';
 import type { ChatTabs } from './chatTabs';
 import { chatWebviewOptions, parseWebviewMessage, renderChatWebview } from './chatWebview';
 import { CHAT_PANEL_VIEW_TYPE } from './ids';
 import type { ServerLog } from './opencodeServer';
+import { emptyTitle } from './sessionDisplay';
 
 /** What the panels need from the chat side; `registerChat` wires each one to the controller. */
 export interface ChatPanelsHost {
@@ -158,7 +158,7 @@ export class ChatPanels {
     const viewColumn = column === 'beside' ? vscode.ViewColumn.Beside : column;
     const panel = vscode.window.createWebviewPanel(
       CHAT_PANEL_VIEW_TYPE,
-      EMPTY_TITLE,
+      emptyTitle(),
       { viewColumn, preserveFocus: !focus },
       { ...chatWebviewOptions(this.extensionUri), retainContextWhenHidden: true },
     );
@@ -339,7 +339,7 @@ export class ChatPanels {
   private post(paneId: number, entry: PanelEntry, message: HostToWebview): void {
     if (entry.disposed) return;
     if (this.tabs.observe(paneId, message)) {
-      entry.panel.title = this.tabs.titleOf(paneId) ?? EMPTY_TITLE;
+      entry.panel.title = this.tabs.titleOf(paneId) ?? emptyTitle();
       this.host.onTabSessionChanged?.(paneId);
     }
     if (!this.canDeliver(entry)) return;

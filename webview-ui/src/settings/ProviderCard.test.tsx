@@ -11,7 +11,7 @@ import type {
   ProviderRow,
   SettingsWebviewToHost,
 } from '../../../src/shared/settingsProtocol';
-import { must, mount, type Mounted } from '../testing';
+import { must, mount, useEnglish, useSpanish, type Mounted } from '../testing';
 import { ProviderCard } from './ProviderCard';
 import { anthropic, azure, bedrock, copilot, openai, vertex } from './settingsFixtures';
 import { createSettingsUi } from './settingsUiState';
@@ -341,5 +341,38 @@ describe('security', () => {
     const { container } = setup(row);
     expect(container.querySelector('img')).toBeNull();
     expect(container.textContent).toContain('<img src=x onerror=alert(1)>');
+  });
+});
+
+describe('in Spanish (E11-i18n)', () => {
+  // Protects the Settings tab from a text that skips the catalog: the way to connect, the
+  // hints, the primary button and Cancel must follow the language. Provenance: the REAL shipped
+  // `l10n/bundle.l10n.es.json` read from the file through `useSpanish`, FABRICATED rows in jsdom;
+  // the look and the overflow in Spanish are `test:visual` step 42 (cell F).
+  afterEach(() => {
+    useEnglish();
+  });
+
+  it('reads the expanded card, its remote hint and its buttons from the shipped catalog', () => {
+    useSpanish();
+    const { container } = setup(openai, { open: true, remote: 'ssh-remote' });
+    const text = container.textContent;
+    expect(text).toContain('opencode guarda las credenciales para todos sus proyectos.');
+    expect(text).toContain('En una ventana remota, este inicio de sesión puede no funcionar');
+    expect(buttons(container)).toContain('Cancelar');
+    expect(buttons(container)).not.toContain('Cancel');
+  });
+
+  it('says where each connection comes from and how many ways there are to connect', () => {
+    useSpanish();
+    const stored = setup(anthropic).container;
+    expect(stored.textContent).toContain(
+      'Clave de API · guardada por opencode para todos los proyectos',
+    );
+    expect(buttons(stored)).toContain('Quitar');
+    mounted?.dispose();
+    expect(setup(vertex).container.textContent).toContain('Desde GOOGLE_APPLICATION_CREDENTIALS');
+    mounted?.dispose();
+    expect(setup(openai).container.textContent).toContain('3 formas de conectar');
   });
 });

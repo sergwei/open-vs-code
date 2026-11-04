@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { createEffect, createMemo, createSignal, For, on, Show, untrack } from 'solid-js';
 import type { FormAsk, PermissionAsk } from '../../../src/shared/model';
 import { useSend } from '../chat/hostContext';
@@ -125,12 +126,12 @@ export function RequestDock(props: {
     if (first === undefined) return;
     const text =
       fresh.length > 1
-        ? `${String(fresh.length)} requests from the agent`
+        ? l10n.t('{0} requests from the agent', fresh.length)
         : first.kind === 'permission'
-          ? `Permission requested: ${describeRequest(first.ask)}`
+          ? l10n.t('Permission requested: {0}', describeRequest(first.ask))
           : first.ask.kind === 'question'
-            ? 'Question from the agent'
-            : `Form from the agent: ${first.ask.title}`;
+            ? l10n.t('Question from the agent')
+            : l10n.t('Form from the agent: {0}', first.ask.title);
     flip = !flip;
     setAnnouncement(flip ? text : `${text}${NO_BREAK_SPACE}`);
 
@@ -182,7 +183,7 @@ export function RequestDock(props: {
         <div
           class="request-dock"
           role="region"
-          aria-label="Requests from the agent"
+          aria-label={l10n.t('Requests from the agent')}
           ref={(element) => {
             dock = element;
           }}
@@ -229,7 +230,7 @@ export function RequestDock(props: {
             )}
           </For>
           <Show when={state.resolved.length > 0}>
-            <ul class="request-results" aria-label="Answered requests">
+            <ul class="request-results" aria-label={l10n.t('Answered requests')}>
               <For each={state.resolved}>
                 {(line) => (
                   <li>

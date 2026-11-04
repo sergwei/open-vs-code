@@ -2,6 +2,7 @@
  * What the assistant is doing, derived from state the store already has (issue #16). PURE: no
  * DOM and no Solid, so it is tested with plain objects. No extra events from the host.
  */
+import * as l10n from '@vscode/l10n';
 import type { ErrorInfo, Part, SessionStatus } from '../../../src/shared/model';
 import type { ConnectionState } from '../../../src/shared/protocol';
 
@@ -53,7 +54,14 @@ export function isStopError(error: ErrorInfo | undefined): boolean {
  * corrects it. While `busy`, the last parts of the newest assistant message decide: a reasoning
  * block that is not completed is "Thinking", a tool that is `streaming` or `running` is
  * "Running <tool>" (the newest one wins), a last text part is "Writing", and anything else
- * (between steps, before the first part) is "Working". Parts are read from the end, since the
+ * (between steps, before the first part) is "Working". E11-i18n: every label goes through
+ * `l10n.t`. VERIFIED by `activity.test.ts` for the English text of six labels: "shows the error
+ * with its details" ("Error"), "shows the retry attempt" ("Retrying (attempt 3)"), "is working
+ * before any part exists" ("Working"), "names the running tool, the newest one when several"
+ * ("Running bash"), "is writing when the last part is text" ("Writing") and "is compacting, ahead
+ * of the parts, while busy with the compaction line running" ("Compacting"). HYPOTHESIS: the
+ * English "Thinking" label (that test checks only the `kind`; to check it, assert the label) and
+ * the Spanish text of all of them (no Spanish case exists for this function). Parts are read from the end, since the
  * newest part is the one in progress. HYPOTHESIS: reasoning blocks keep `completed: false` until
  * their `reasoning.ended`, as the translator maps it; not observed in a long real turn.
  * `compacting` (issue #125) is true when the newest visible message is the running compaction line:
@@ -75,22 +83,26 @@ export function deriveActivity(
     return { kind: 'offline', label: '' };
   }
   if (status === undefined || status.type === 'idle') return { kind: 'idle', label: '' };
-  if (status.type === 'error') return { kind: 'error', label: 'Error', error: status.error };
-  if (status.type === 'retry') {
-    return { kind: 'retrying', label: `Retrying (attempt ${String(status.attempt)})` };
+  if (status.type === 'error') {
+    return { kind: 'error', label: l10n.t('Error'), error: status.error };
   }
-  if (compacting) return { kind: 'compacting', label: 'Compacting' };
+  if (status.type === 'retry') {
+    return { kind: 'retrying', label: l10n.t('Retrying (attempt {0})', status.attempt) };
+  }
+  if (compacting) return { kind: 'compacting', label: l10n.t('Compacting') };
   const last = lastAssistantParts.at(-1);
-  if (last?.type === 'reasoning' && !last.completed) return { kind: 'thinking', label: 'Thinking' };
+  if (last?.type === 'reasoning' && !last.completed) {
+    return { kind: 'thinking', label: l10n.t('Thinking') };
+  }
   for (let index = lastAssistantParts.length - 1; index >= 0; index--) {
     const part = lastAssistantParts[index];
     if (
       part?.type === 'tool' &&
       (part.state.status === 'streaming' || part.state.status === 'running')
     ) {
-      return { kind: 'tool', label: `Running ${part.name}` };
+      return { kind: 'tool', label: l10n.t('Running {0}', part.name) };
     }
   }
-  if (last?.type === 'text') return { kind: 'writing', label: 'Writing' };
-  return { kind: 'working', label: 'Working' };
+  if (last?.type === 'text') return { kind: 'writing', label: l10n.t('Writing') };
+  return { kind: 'working', label: l10n.t('Working') };
 }

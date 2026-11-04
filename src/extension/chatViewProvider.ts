@@ -1,4 +1,6 @@
+import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
+import { plural } from '../shared/l10n';
 import type { HostToWebview, WebviewToHost } from '../shared/protocol';
 import { parseWebviewMessage, renderChatWebview } from './chatWebview';
 import { CHAT_VIEW_ID } from './ids';
@@ -74,7 +76,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.applyBadge();
   }
 
-  /** Writes the remembered count into the current view; a no-op without one. */
+  /**
+   * Writes the remembered count into the current view; a no-op without one. The tooltip chooses
+   * its singular or plural text with `plural` and is written in the language of that moment.
+   */
   private applyBadge(): void {
     const view = this.view;
     if (view === undefined) return;
@@ -83,7 +88,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       count > 0
         ? {
             value: count,
-            tooltip: `${String(count)} OpenCode request${count === 1 ? '' : 's'} waiting`,
+            tooltip: plural(
+              count,
+              l10n.t('{0} OpenCode request waiting', count),
+              l10n.t('{0} OpenCode requests waiting', count),
+            ),
           }
         : undefined;
   }

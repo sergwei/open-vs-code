@@ -15,6 +15,7 @@
  * Changes: the three helpers keep their behaviour; the file's quotes/semicolons follow this
  * repository's style, and they are typed. Everything else in this file is ours.
  */
+import * as l10n from '@vscode/l10n';
 import type {
   AgentOption,
   Catalog,
@@ -253,8 +254,8 @@ export function compactTokens(count: number): string {
  */
 export function modelMeta(option: ModelOption): string {
   const fields: string[] = [];
-  if (option.free) fields.push('Free');
-  fields.push(`${compactTokens(option.contextLimit)} context`);
+  if (option.free) fields.push(l10n.t('Free'));
+  fields.push(l10n.t('{0} context', compactTokens(option.contextLimit)));
   if (option.status !== 'active') fields.push(option.status);
   return fields.join(' · ');
 }
@@ -269,8 +270,14 @@ export function agentLabel(catalog: Catalog | undefined, id: string): string {
   return catalog?.agents.find((agent: AgentOption) => agent.id === id)?.name ?? id;
 }
 
-/** Suffix of anything in use that the catalog does not offer. */
-const UNAVAILABLE = ' (unavailable)';
+/**
+ * `name` marked as in use but not offered by the catalog, in the interface language. A function
+ * with the name as a placeholder (not a suffix to concatenate), so a translation can place the
+ * mark where its language wants it.
+ */
+export function unavailableName(name: string): string {
+  return l10n.t('{0} (unavailable)', name);
+}
 
 /**
  * The text of the combined chip of the prompt bar (E2, issue #85, phase 3): "Build · GLM-5.3-Flash
@@ -286,21 +293,22 @@ export function chipLabel(
   agent: string | undefined,
   model: EffectiveModel | undefined,
 ): string {
-  const agentText =
-    agent === undefined
-      ? 'Agent'
-      : `${agentLabel(catalog, agent)}${catalog !== undefined && !isSelectableAgent(catalog, agent) ? UNAVAILABLE : ''}`;
+  let agentText = l10n.t('Agent');
+  if (agent !== undefined) {
+    const name = agentLabel(catalog, agent);
+    agentText =
+      catalog !== undefined && !isSelectableAgent(catalog, agent) ? unavailableName(name) : name;
+  }
   const fields = [agentText];
   if (model === undefined) {
-    fields.push('Model');
+    fields.push(l10n.t('Model'));
   } else {
-    fields.push(
-      `${modelLabel(model.ref, model.option)}${model.option === undefined ? UNAVAILABLE : ''}`,
-    );
+    const name = modelLabel(model.ref, model.option);
+    fields.push(model.option === undefined ? unavailableName(name) : name);
     const variant = model.ref.variant;
     if (variant !== undefined) {
       fields.push(
-        `${variant}${model.option?.variants.includes(variant) === true ? '' : UNAVAILABLE}`,
+        model.option?.variants.includes(variant) === true ? variant : unavailableName(variant),
       );
     }
   }
@@ -337,7 +345,7 @@ export function agentChoices(
   if (effective !== undefined && !isSelectableAgent(catalog, effective)) {
     rows.unshift({
       id: effective,
-      name: `${effective}${UNAVAILABLE}`,
+      name: unavailableName(effective),
       current: true,
       unavailable: true,
     });
@@ -347,7 +355,7 @@ export function agentChoices(
 
 /** "Current · <description>" for a row of the Agent column, as ONE string (lesson #926). */
 export function agentMeta(choice: AgentChoice): string {
-  return [choice.current ? 'Current' : undefined, choice.description]
+  return [choice.current ? l10n.t('Current') : undefined, choice.description]
     .filter((field): field is string => field !== undefined && field !== '')
     .join(' · ');
 }

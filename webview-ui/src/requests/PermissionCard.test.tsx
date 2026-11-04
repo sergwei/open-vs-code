@@ -10,7 +10,7 @@
 import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PermissionAsk } from '../../../src/shared/model';
-import { must, mount, splitRequestId, type Mounted } from '../testing';
+import { must, mount, splitRequestId, useEnglish, useSpanish, type Mounted } from '../testing';
 import { PermissionCard } from './PermissionCard';
 
 const mountedCards: Mounted[] = [];
@@ -220,6 +220,55 @@ describe('while the answer travels', () => {
     setError({ code: 'PermissionNotFoundError', message: 'No such request' });
     expect(button('Allow once').disabled).toBe(false);
     expect(must(container, '[role="alert"]').textContent).toBe('No such request');
+  });
+});
+
+describe('in Spanish (E11-i18n)', () => {
+  // Protects the permission card from a text that skips the catalog: the title with the action, the
+  // buttons, the "Always" confirmation with its broad-rule warning and the cascade hint must all
+  // follow the language, while what the card POSTS stays the same. Provenance: the REAL shipped
+  // `l10n/bundle.l10n.es.json` read from the file through `useSpanish`, the fabricated ask of this
+  // file in jsdom; the look and the overflow in Spanish are `test:visual` step 42 (cell D).
+  afterEach(() => {
+    useEnglish();
+  });
+
+  it('reads the title, the buttons and the cascade hint from the shipped catalog', () => {
+    useSpanish();
+    const { container, button, sent } = setup({ sameSessionCount: 3, toolName: 'read' });
+    expect(must(container, '.request-title').textContent).toBe('Permiso necesario: Leer');
+    expect(must(container, '.request-tool').textContent).toBe('Solicitado por la herramienta read');
+    expect(must(container, '.request-hint').textContent).toBe(
+      'Rechazar también rechaza 2 solicitudes pendientes más de esta sesión.',
+    );
+    expect(must(container, '.request-resources').getAttribute('aria-label')).toBe('Recursos');
+    for (const name of [
+      'Permitir una vez',
+      'Permitir siempre…',
+      'Rechazar',
+      'Rechazar con comentario…',
+    ]) {
+      expect(button(name)).toBeDefined();
+    }
+    button('Permitir una vez').click();
+    expect(splitRequestId(sent[0]).rest).toMatchObject({
+      type: 'permission.reply',
+      decision: 'once',
+    });
+  });
+
+  it('warns about a broad rule in Spanish, with the rule worded in Spanish', () => {
+    useSpanish();
+    const { container, button } = setup();
+    button('Permitir siempre…').click();
+    const always = must(container, '.request-always');
+    expect(always.getAttribute('aria-label')).toBe('Permitir siempre');
+    expect(always.textContent).toContain('Esto guarda esta regla para este proyecto.');
+    expect(always.textContent).toContain('Leer: *');
+    expect(must(container, '.request-warning').textContent).toContain(
+      'Cuidado: esta regla es amplia.',
+    );
+    expect(must(container, '.request-warning code').textContent).toBe('.env');
   });
 });
 

@@ -29,6 +29,7 @@ import { readFileSync } from 'node:fs';
  */
 const REQUIRED = [
   'package.json',
+  'package.nls.json',
   'dist/extension.js',
   'dist/modWorker.js',
   'dist/webview/assets/index.js',
@@ -94,6 +95,41 @@ export function normalizeVsixListing(entries) {
 }
 
 /**
+ * Returns one message per language that ships half of its catalogs (E11-i18n).
+ *
+ * A language is two files, `package.nls.<id>.json` (the manifest texts) and
+ * `l10n/bundle.l10n.<id>.json` (the texts of the code); with only one of them VS Code shows a
+ * half-translated extension and nothing fails. The languages are found by file name, so adding one
+ * needs no change here. Ids are compared as written (case-sensitive, like the lookup on Linux).
+ * Pure. VERIFIED by `vsixCheck.test.ts` ("reports a language that ships only one of its two
+ * catalogs", both directions).
+ */
+export function findLanguagePairProblems(files) {
+  const nls = new Set();
+  const bundle = new Set();
+  for (const file of files) {
+    const manifestMatch = /^package\.nls\.([^./]+)\.json$/.exec(file);
+    if (manifestMatch) nls.add(manifestMatch[1]);
+    const bundleMatch = /^l10n\/bundle\.l10n\.([^./]+)\.json$/.exec(file);
+    if (bundleMatch) bundle.add(bundleMatch[1]);
+  }
+  const problems = [];
+  for (const id of nls) {
+    if (!bundle.has(id))
+      problems.push(
+        `Language "${id}" ships package.nls.${id}.json without l10n/bundle.l10n.${id}.json`,
+      );
+  }
+  for (const id of bundle) {
+    if (!nls.has(id))
+      problems.push(
+        `Language "${id}" ships l10n/bundle.l10n.${id}.json without package.nls.${id}.json`,
+      );
+  }
+  return problems;
+}
+
+/**
  * Returns one message per packaging problem found in a list of packaged paths.
  *
  * Paths are normalized to `/`. Forbidden paths are compared case-insensitively, because Windows
@@ -119,6 +155,7 @@ export function findPackagingProblems(files) {
       problems.push(`Missing from the package: ${required}`);
     }
   }
+  problems.push(...findLanguagePairProblems(normalized));
   normalized.forEach((file, i) => {
     const path = lower[i];
     const base = path.slice(path.lastIndexOf('/') + 1);

@@ -1,5 +1,6 @@
 // Where a chip of the prompt or of the history leads (issue #28/#29): the file to open and the line
 // to open it at, read from the `uri` the host gave. Pure; the click itself sends `editor.open`.
+import * as l10n from '@vscode/l10n';
 
 /** What `editor.open` needs for an attachment: the `file:` URL without query or hash, and a range. */
 export interface AttachmentTarget {
@@ -49,11 +50,11 @@ export function attachmentTarget(uri: string | undefined): AttachmentTarget | un
  * matches the range of the `uri`, so a file legitimately called `a#1.md` keeps its name.
  */
 export function openLabel(name: string, target: AttachmentTarget): string {
-  if (target.line === undefined) return `Open ${name}`;
+  if (target.line === undefined) return l10n.t('Open {0}', name);
   const last = target.endLine ?? target.line;
   const suffix = last === target.line ? `#${target.line}` : `#${target.line}-${last}`;
   const base = name.endsWith(suffix) ? name.slice(0, -suffix.length) : name;
   return last === target.line
-    ? `Open ${base}, line ${target.line}`
-    : `Open ${base}, lines ${target.line}-${last}`;
+    ? l10n.t('Open {0}, line {1}', base, target.line)
+    : l10n.t('Open {0}, lines {1}-{2}', base, target.line, last);
 }

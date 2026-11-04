@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { createEffect, For, Show } from 'solid-js';
 import type { CommandOption } from '../../../src/shared/model';
 import { optionId } from './MentionPopup';
@@ -6,13 +7,23 @@ import { filterCommands } from './slashCommand';
 /** What the popup has to say for a typed `query`. */
 export type CommandStatus = 'list' | 'loading' | 'unavailable' | 'none' | 'empty';
 
-/** The line each non-list status shows, shared by the popup and the "/" menu (decision of 28/10/2026, Engram #1425). */
-export const COMMAND_STATUS_TEXT = {
-  loading: 'Loading commands…',
-  unavailable: 'Commands could not be loaded',
-  none: 'No commands available',
-  empty: 'No commands match',
-} as const;
+/**
+ * The line each non-list status shows, shared by the popup and the "/" menu (decision of
+ * 28/10/2026, Engram #1425). A function and not a constant so every call reads the active language.
+ * VERIFIED by `PromptInput.test.tsx` ("the / popup") for the English lines in jsdom.
+ */
+export function commandStatusText(status: Exclude<CommandStatus, 'list'>): string {
+  switch (status) {
+    case 'loading':
+      return l10n.t('Loading commands…');
+    case 'unavailable':
+      return l10n.t('Commands could not be loaded');
+    case 'none':
+      return l10n.t('No commands available');
+    case 'empty':
+      return l10n.t('No commands match');
+  }
+}
 
 /**
  * Decides what the popup shows. Four statements that must not be confused (lesson
@@ -77,7 +88,7 @@ export function CommandPopup(props: {
 
   return (
     <div class="mention-popup command-popup">
-      <ul id={props.id} class="mention-list" role="listbox" aria-label="Commands">
+      <ul id={props.id} class="mention-list" role="listbox" aria-label={l10n.t('Commands')}>
         <Show when={status() === 'list'}>
           <For each={rows()}>
             {(command, index) => (
@@ -104,7 +115,7 @@ export function CommandPopup(props: {
         {(current) => (
           <Show when={current() !== 'list'}>
             <div class="mention-status">
-              {COMMAND_STATUS_TEXT[current() as Exclude<CommandStatus, 'list'>]}
+              {commandStatusText(current() as Exclude<CommandStatus, 'list'>)}
             </div>
           </Show>
         )}

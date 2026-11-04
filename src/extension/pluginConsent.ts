@@ -3,6 +3,7 @@
 // sits on a `{ get, update }` pair (a `Memento`) and the wording is built here so it is tested.
 // `pluginConsentUi.ts` is the part that talks to VS Code.
 
+import * as l10n from '@vscode/l10n';
 import * as path from 'node:path';
 import { sanitizeLinkText } from './attentionPolicy';
 import { folderKey, type PluginFinding } from './projectPlugins';
@@ -135,15 +136,21 @@ function describeFinding(finding: PluginFinding, folder: string): string {
   const text =
     finding.kind === 'file'
       ? shown(finding.path)
-      : `${finding.spec} (declared in ${shown(finding.config)})`;
+      : l10n.t('{0} (declared in {1})', finding.spec, shown(finding.config));
   // The names come from the repository: they must not open or close a link in a notification.
   return sanitizeLinkText(text);
 }
 
-/** At most {@link MAX_LISTED} lines, then "and N more" when there are more. */
+/**
+ * At most {@link MAX_LISTED} lines, then "and N more" when there are more. The remainder line and
+ * the "(declared in …)" of {@link describeFinding} go through `l10n.t`; file names and plugin specs
+ * come from the repository and are not translated.
+ */
 function listFindings(findings: readonly PluginFinding[], folder: string): string[] {
   const lines = findings.slice(0, MAX_LISTED).map((f) => describeFinding(f, folder));
-  if (findings.length > MAX_LISTED) lines.push(`and ${findings.length - MAX_LISTED} more`);
+  if (findings.length > MAX_LISTED) {
+    lines.push(l10n.t('and {0} more', findings.length - MAX_LISTED));
+  }
   return lines;
 }
 
@@ -152,10 +159,13 @@ function listFindings(findings: readonly PluginFinding[], folder: string): strin
  * go through `sanitizeLinkText` (brackets and parentheses removed; VS Code links
  * `[x](command:…)` inside a notification, see its header). VERIFIED by `pluginConsent.test.ts`
  * ("[x](command:evil).js" leaves no bracket or parenthesis; seven findings list five plus
- * "and 2 more").
+ * "and 2 more"). The sentence goes through `l10n.t` with the list as its one placeholder.
  */
 export function noticeMessage(findings: readonly PluginFinding[], folder: string): string {
-  return `This folder has opencode plugins that will run with your permissions: ${listFindings(findings, folder).join(', ')}.`;
+  return l10n.t(
+    'This folder has opencode plugins that will run with your permissions: {0}.',
+    listFindings(findings, folder).join(', '),
+  );
 }
 
 /**

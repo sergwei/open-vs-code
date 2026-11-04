@@ -50,7 +50,7 @@ import type {
 } from '@opencode/client';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Catalog, ModelRef } from '../shared/model';
 import type { ConnectionState, HostToWebview, Snapshot, WebviewToHost } from '../shared/protocol';
 import type { AttachmentRef, PromptFileRef } from '../shared/protocol';
@@ -76,6 +76,7 @@ import type { PendingSummary } from './pendingRequests';
 import type { ServerConfigSink } from './serverConfig';
 import type { ServerState } from './serverManager';
 import { onePane } from './test-fixtures/onePane';
+import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 
 const SERVER = {
   url: 'http://127.0.0.1:43211',
@@ -3116,6 +3117,9 @@ describe('permissions.manage (saved permissions)', () => {
     ),
   ];
 
+  // The notice picks the singular or plural text by the count (E11-i18n phase 4a): one rule
+  // revoked reads "Revoked 1 saved permission" (it used to say "permission(s)"); the log line keeps
+  // its "(s)" because logs are not translated.
   it('lists the rules, revokes the ones the picker returns and reports how many', async () => {
     const { api, removed } = fakeApi({ saved });
     const { controller, picked, posted, logs } = setup(api, undefined, undefined, () =>
@@ -3131,7 +3135,7 @@ describe('permissions.manage (saved permissions)', () => {
     expect(posted.at(-1)).toMatchObject({
       type: 'notice',
       level: 'info',
-      error: { message: 'Revoked 1 saved permission(s)' },
+      error: { message: 'Revoked 1 saved permission' },
     });
     expect(logs).toContain('info: revoked 1 saved permission(s)');
   });
@@ -6898,5 +6902,37 @@ describe('the settings sink (issue #128)', () => {
     ]);
     // The chat still reloads its catalog on the events it always did.
     expect(calls.filter((call) => call === 'provider.list').length).toBeGreaterThan(0);
+  });
+});
+
+// Protects the translation of the notices the controller sends to the webview (E11-i18n phase 4a):
+// with the shipped Spanish catalog loaded, a refused command reads in Spanish, and the catalog is
+// taken out again after each test so the rest of the file keeps comparing English. Provenance: the
+// same FAKE `ChatApi` as the rest of the file; the Spanish text is read from
+// `l10n/bundle.l10n.es.json`, so this proves the call goes through the catalog, not that the
+// translation is good.
+describe('Spanish notices (E11-i18n)', () => {
+  beforeEach(useSpanish);
+  afterEach(useEnglish);
+
+  it('refuses an unlisted command in Spanish with the Spanish catalog loaded', async () => {
+    const { api } = fakeApi();
+    const { controller, posted } = setup(api);
+    controller.onServerState(RUNNING);
+    await controller.handle({
+      type: 'prompt.send',
+      requestId: 'r1',
+      text: 'x',
+      command: 'nope',
+      delivery: 'queue',
+      files: [],
+    });
+    expect(posted.filter((m) => m.type === 'request.result').at(-1)).toMatchObject({
+      requestId: 'r1',
+      error: {
+        code: 'CommandUnavailable',
+        message: 'El comando /nope no está disponible en este servidor',
+      },
+    });
   });
 });

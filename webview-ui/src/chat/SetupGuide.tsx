@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { For, Show } from 'solid-js';
 import type { Catalog } from '../../../src/shared/model';
 import type { ConnectionState } from '../../../src/shared/protocol';
@@ -6,14 +7,24 @@ import { guideSteps, type StepStatus } from './connectionView';
 import { useSend } from './hostContext';
 import { CheckIcon, CrossIcon, WaitingIcon } from './icons';
 
-/** The word that says the state of a step, so it never depends on colour or icon alone. */
-const STATUS_TEXT: Record<StepStatus, string> = {
-  waiting: 'Waiting',
-  running: 'In progress',
-  done: 'Done',
-  failed: 'Failed',
-  checking: 'Checking…',
-};
+/**
+ * The word that says the state of a step, so it never depends on colour or icon alone. A function
+ * so each render reads the active language.
+ */
+function statusText(status: StepStatus): string {
+  switch (status) {
+    case 'waiting':
+      return l10n.t('Waiting');
+    case 'running':
+      return l10n.t('In progress');
+    case 'done':
+      return l10n.t('Done');
+    case 'failed':
+      return l10n.t({ message: 'Failed', comment: ['Status of a step of the setup guide'] });
+    case 'checking':
+      return l10n.t('Checking…');
+  }
+}
 
 /**
  * The "Set up opencode" guide (E2, issue #85, decisions P1/P2/P14): when the server cannot start
@@ -58,9 +69,9 @@ export function SetupGuide(props: {
     guideSteps(props.connection, props.catalog, props.binaryCheck ?? { kind: 'idle' });
   const announcement = () =>
     props.binaryCheck?.kind === 'checking'
-      ? 'Checking the opencode binary…'
+      ? l10n.t('Checking the opencode binary…')
       : props.connection.state === 'unavailable'
-        ? 'opencode is not available'
+        ? l10n.t('opencode is not available')
         : '';
   return (
     <section class="setup-guide" aria-labelledby="setup-guide-title">
@@ -68,9 +79,11 @@ export function SetupGuide(props: {
         {announcement()}
       </div>
       <h2 id="setup-guide-title" class="setup-title">
-        Set up opencode
+        {l10n.t('Set up opencode')}
       </h2>
-      <p class="setup-subtitle">The chat needs a running opencode v2. One step is missing.</p>
+      <p class="setup-subtitle">
+        {l10n.t('The chat needs a running opencode v2. One step is missing.')}
+      </p>
       <ol class="setup-steps">
         <For each={steps()}>
           {(step, index) => (
@@ -92,7 +105,7 @@ export function SetupGuide(props: {
               <div class="step-body">
                 <p class="step-title">
                   {`${String(index() + 1)}. ${step.title}`}
-                  <span class="step-status">{` — ${STATUS_TEXT[step.status]}`}</span>
+                  <span class="step-status">{` — ${statusText(step.status)}`}</span>
                 </p>
                 <For each={step.lines}>{(line) => <p class="step-line">{line}</p>}</For>
                 <Show when={step.actions.length > 0}>
@@ -133,7 +146,7 @@ export function SetupGuide(props: {
             send({ type: 'logs.show' });
           }}
         >
-          Show logs
+          {l10n.t('Show logs')}
         </button>
       </p>
     </section>

@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { describe, expect, it } from 'vitest';
 import { buildWebviewHtml, createNonce } from './webviewHtml';
 
@@ -21,6 +22,8 @@ function options(overrides: Partial<Parameters<typeof buildWebviewHtml>[0]> = {}
     styleUri: 'https://file+.vscode-resource.vscode-cdn.net/dist/webview/assets/style.css',
     nonce,
     surface: 'view' as const,
+    locale: 'en',
+    l10nBundle: undefined,
     ...overrides,
   };
 }
@@ -96,6 +99,47 @@ describe('buildWebviewHtml', () => {
     expect(html).toContain('src="https://x/a&quot;onload=&quot;alert(1)&amp;b=&lt;c&gt;.js"');
     expect(html).toContain('href="https://x/&quot;s.css"');
     expect(html).not.toContain('onload="alert');
+  });
+
+  it('writes lang and the l10n meta, escaped, and the meta round-trips through the parser', () => {
+    // Protects E11-i18n P2=1: the webview reads its language and bundle from the HTML. The bundle
+    // is fabricated with the four characters that could break an attribute or the document; a
+    // real bundle comes from `vscode.l10n.bundle`, which no unit test can load.
+    const bundle = { 'a "quoted" <b> & \'c\'': 'x "y" <z> & \'w\'' };
+    const html = buildWebviewHtml(options({ locale: 'es', l10nBundle: bundle }));
+
+    expect(html).toContain('<html lang="es">');
+    const match = /<meta name="open-vs-code-l10n" content="([^"]*)">/.exec(html);
+    expect(match).not.toBeNull();
+    expect(match?.[1]).not.toMatch(/[<>]/);
+    const decoded = (match?.[1] ?? '')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&amp;', '&');
+    expect(JSON.parse(decoded)).toEqual(bundle);
+    expect(cspOf(html)).toBe(cspOf(buildWebviewHtml(options())));
+  });
+
+  it('writes an empty bundle and lang en when VS Code is in English', () => {
+    const html = buildWebviewHtml(options());
+
+    expect(html).toContain('<html lang="en">');
+    expect(html).toContain('<meta name="open-vs-code-l10n" content="{}">');
+    expect(html).toContain('<div id="root">Loading...</div>');
+  });
+
+  it('translates the Loading fallback with the configured bundle', () => {
+    // Fabricated Spanish bundle: it proves the call goes through `@vscode/l10n`, not that the
+    // shipped `bundle.l10n.es.json` has the same text (`l10nCatalog.test.ts` ties them).
+    l10n.config({ contents: { 'Loading...': 'Cargando...' } });
+    try {
+      expect(buildWebviewHtml(options({ locale: 'es' }))).toContain(
+        '<div id="root">Cargando...</div>',
+      );
+    } finally {
+      l10n.config({ contents: {} });
+    }
   });
 });
 

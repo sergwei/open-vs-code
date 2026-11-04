@@ -3,13 +3,14 @@
 // `mentionsFor` pairs with a chip, and the diagnostics list of Fix (order, cap, one line each).
 // Provenance: references and diagnostics are FABRICATED by hand; nothing here talks to VS Code or to
 // a model, so it proves the strings, not that the model answers well to them.
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildContextPrompt,
   MAX_DIAGNOSTIC_MESSAGE_LENGTH,
   MAX_PROMPT_DIAGNOSTICS,
   type ContextDiagnostic,
 } from './contextPrompts';
+import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 
 const ref = (name: string) => ({ uri: `file:///ws/${name}`, name });
 
@@ -92,5 +93,32 @@ describe('buildContextPrompt fix', () => {
     });
     const line = text.split('\n').at(-1) ?? '';
     expect(line).toBe(`- Line 1: ${'x'.repeat(MAX_DIAGNOSTIC_MESSAGE_LENGTH - 1)}…`);
+  });
+});
+
+// Protects the translated prompts (E11-i18n, decision P4=1): with the shipped Spanish catalog the
+// sentence, the singular/plural verb, the joined mentions and the diagnostics list all come out in
+// Spanish. Provenance: the same hand-made references and diagnostics; the text is read from
+// `l10n/bundle.l10n.es.json`.
+describe('buildContextPrompt in Spanish', () => {
+  beforeEach(useSpanish);
+  afterEach(useEnglish);
+
+  it('writes the Explain and Fix prompts in Spanish with the Spanish catalog', () => {
+    expect(buildContextPrompt({ action: 'explain', refs: [ref('a.ts')] })).toBe(
+      'Explica qué hace @a.ts.',
+    );
+    expect(
+      buildContextPrompt({ action: 'explain', refs: [ref('a.ts'), ref('b.ts'), ref('c.ts')] }),
+    ).toBe('Explica qué hacen @a.ts, @b.ts y @c.ts.');
+    expect(
+      buildContextPrompt({
+        action: 'fix',
+        refs: [ref('a.ts')],
+        diagnostics: [{ line: 3, message: 'oops', source: 'ts', code: '2304' }],
+      }),
+    ).toBe(
+      'Corrige los problemas en @a.ts.\n\nProblemas notificados por VS Code:\n- Línea 3: oops (ts 2304)',
+    );
   });
 });

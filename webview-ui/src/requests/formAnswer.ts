@@ -8,6 +8,7 @@
  * before the round trip and shown next to the field. Wire-only constraints the protocol dropped
  * (`pattern`, `format`, length limits, `when`, `hidden`) are NOT checked here.
  */
+import * as l10n from '@vscode/l10n';
 import type { FormAnswer, FormAsk, FormField } from '../../../src/shared/model';
 
 /**
@@ -91,13 +92,14 @@ function parseNumber(
   field: Extract<FormField, { type: 'number' }>,
 ): { value: number } | { error: string } {
   const value = Number(raw);
-  if (raw.trim() === '' || !Number.isFinite(value)) return { error: 'Enter a valid number' };
-  if (field.integer && !Number.isInteger(value)) return { error: 'Enter a whole number' };
+  if (raw.trim() === '' || !Number.isFinite(value))
+    return { error: l10n.t('Enter a valid number') };
+  if (field.integer && !Number.isInteger(value)) return { error: l10n.t('Enter a whole number') };
   if (field.minimum !== undefined && value < field.minimum) {
-    return { error: `Must be at least ${String(field.minimum)}` };
+    return { error: l10n.t('Must be at least {0}', field.minimum) };
   }
   if (field.maximum !== undefined && value > field.maximum) {
-    return { error: `Must be at most ${String(field.maximum)}` };
+    return { error: l10n.t('Must be at most {0}', field.maximum) };
   }
   return { value };
 }
@@ -111,6 +113,8 @@ function parseNumber(
  * is not required is left out of the answer; `required`, `minItems` and `maxItems` are enforced;
  * numbers must parse, be whole when `integer`, and sit inside `minimum`/`maximum`; booleans always
  * go; `external` fields are display-only and never go. A key the form does not have is ignored.
+ * The inline error messages are in the interface language (`l10n.t` at the moment of building,
+ * so they follow the locale set at start-up).
  * VERIFIED by `formAnswer.test.ts` with fabricated forms (logic only: how a real opencode
  * validates the answer is UNVERIFIED, the opt-in suite answers a question with a plain `q0`).
  */
@@ -125,17 +129,17 @@ export function buildAnswer(form: Pick<FormAsk, 'fields'>, values: FormValues): 
         if (state.type === 'choice') {
           if (state.value === OTHER) {
             const text = state.other.trim();
-            if (text === '') errors[field.key] = 'Enter your answer';
+            if (text === '') errors[field.key] = l10n.t('Enter your answer');
             else answer[field.key] = text;
           } else if (state.value === '') {
-            if (required) errors[field.key] = 'Choose one option';
+            if (required) errors[field.key] = l10n.t('Choose one option');
           } else {
             answer[field.key] = state.value;
           }
         } else if (state.type === 'text') {
           const text = state.value.trim();
           if (text === '') {
-            if (required) errors[field.key] = 'This field is required';
+            if (required) errors[field.key] = l10n.t('This field is required');
           } else {
             answer[field.key] = text;
           }
@@ -149,19 +153,19 @@ export function buildAnswer(form: Pick<FormAsk, 'fields'>, values: FormValues): 
         if (state.otherChecked) {
           const text = state.other.trim();
           if (text === '') {
-            errors[field.key] = 'Enter your answer or untick Other';
+            errors[field.key] = l10n.t('Enter your answer or untick Other');
             break;
           }
           chosen.push(text);
         }
         if (chosen.length === 0) {
           if (required || (field.minItems !== undefined && field.minItems > 0)) {
-            errors[field.key] = 'Choose at least one';
+            errors[field.key] = l10n.t('Choose at least one');
           }
         } else if (field.minItems !== undefined && chosen.length < field.minItems) {
-          errors[field.key] = `Choose at least ${String(field.minItems)}`;
+          errors[field.key] = l10n.t('Choose at least {0}', field.minItems);
         } else if (field.maxItems !== undefined && chosen.length > field.maxItems) {
-          errors[field.key] = `Choose at most ${String(field.maxItems)}`;
+          errors[field.key] = l10n.t('Choose at most {0}', field.maxItems);
         } else {
           answer[field.key] = chosen;
         }
@@ -173,7 +177,7 @@ export function buildAnswer(form: Pick<FormAsk, 'fields'>, values: FormValues): 
       case 'number': {
         if (state.type !== 'number') break;
         if (state.value.trim() === '') {
-          if (required) errors[field.key] = 'Enter a number';
+          if (required) errors[field.key] = l10n.t('Enter a number');
           break;
         }
         const parsed = parseNumber(state.value, field);

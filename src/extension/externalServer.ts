@@ -4,6 +4,8 @@
 // `vscode` import and no I/O, so Vitest drives all of it. The VS Code wiring (setting, commands,
 // SecretStorage) lives in `serverCredentials.ts`; the state machine in `serverManager.ts`.
 
+import * as l10n from '@vscode/l10n';
+import { logMessageOf } from './l10nEnglish';
 import { ServerInfoError } from './opencodeServer';
 import type { UnavailableReason } from './serverManager';
 
@@ -27,7 +29,8 @@ const ALLOWED_HOSTS: readonly string[] = ['127.0.0.1', '[::1]', 'localhost'];
 export type ServerTarget =
   | { kind: 'spawn' }
   | { kind: 'external'; url: string; password: string | undefined }
-  | { kind: 'external-invalid'; message: string };
+  // `logMessage`: the same text in English for the log (logs stay in English, E11-i18n).
+  | { kind: 'external-invalid'; message: string; logMessage?: string };
 
 /** Result of {@link parseServerUrl}. */
 export type ParsedServerUrl =
@@ -55,33 +58,39 @@ export function parseServerUrl(raw: string): ParsedServerUrl {
   } catch {
     return {
       kind: 'invalid',
-      message: 'openVsCode.serverUrl is not a valid URL; write it like http://127.0.0.1:4096.',
+      message: l10n.t(
+        'openVsCode.serverUrl is not a valid URL; write it like http://127.0.0.1:4096.',
+      ),
     };
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     return {
       kind: 'invalid',
-      message: 'openVsCode.serverUrl must start with http:// or https://.',
+      message: l10n.t('openVsCode.serverUrl must start with http:// or https://.'),
     };
   }
   if (url.username !== '' || url.password !== '') {
     return {
       kind: 'invalid',
-      message:
+      message: l10n.t(
         'openVsCode.serverUrl must not contain a user name or password; run "OpenCode: Set Server Password" instead.',
+      ),
     };
   }
   if (!ALLOWED_HOSTS.includes(url.hostname)) {
     return {
       kind: 'invalid',
-      message:
+      message: l10n.t(
         'openVsCode.serverUrl must point to this machine (127.0.0.1, [::1] or localhost); other hosts are not supported.',
+      ),
     };
   }
   if (url.pathname !== '/' || url.search !== '' || url.hash !== '') {
     return {
       kind: 'invalid',
-      message: 'openVsCode.serverUrl must be just the address, without a path, query or fragment.',
+      message: l10n.t(
+        'openVsCode.serverUrl must be just the address, without a path, query or fragment.',
+      ),
     };
   }
   return { kind: 'ok', origin: url.origin };
@@ -164,9 +173,12 @@ export interface ExternalFailure {
   message: string;
 }
 
-/** Shared text of "the other end is not an opencode v2 server". */
-const NOT_OPENCODE_V2 =
-  'The server at openVsCode.serverUrl did not answer GET /api/info like opencode v2.';
+/** Shared text of "the other end is not an opencode v2 server" (a function: translated per call). */
+function notOpencodeV2(): string {
+  return l10n.t(
+    'The server at openVsCode.serverUrl did not answer GET /api/info like opencode v2.',
+  );
+}
 
 /** A code worth showing the user (`ECONNREFUSED`, `ENOTFOUND`...); anything odd is dropped. */
 const SAFE_CODE = /^[A-Z][A-Z0-9_]{2,39}$/;
@@ -209,30 +221,44 @@ function transportCode(error: unknown): string | undefined {
  */
 export function describeExternalFailure(error: unknown): ExternalFailure {
   if (!(error instanceof ServerInfoError)) {
-    return { reason: 'unreachable', message: 'Could not connect to the external opencode server.' };
+    return {
+      reason: 'unreachable',
+      message: l10n.t('Could not connect to the external opencode server.'),
+    };
   }
   switch (error.kind) {
     case 'unauthorized':
       return {
         reason: 'unauthorized',
-        message:
+        message: l10n.t(
           'The external opencode server rejected the password. Run "OpenCode: Set Server Password" with the right one.',
+        ),
       };
     case 'transport': {
       const code = transportCode(error);
-      const detail = code === undefined ? '' : ` (${code})`;
       return {
         reason: 'unreachable',
-        message: `Could not reach the external opencode server${detail}. Start it, then retry.`,
+        message:
+          code === undefined
+            ? l10n.t('Could not reach the external opencode server. Start it, then retry.')
+            : l10n.t(
+                'Could not reach the external opencode server ({0}). Start it, then retry.',
+                code,
+              ),
       };
     }
     case 'malformed':
-      return { reason: 'unsupported-version', message: NOT_OPENCODE_V2 };
+      return { reason: 'unsupported-version', message: notOpencodeV2() };
     case 'http-status':
-      if (error.status === 404) return { reason: 'unsupported-version', message: NOT_OPENCODE_V2 };
+      if (error.status === 404) {
+        return { reason: 'unsupported-version', message: notOpencodeV2() };
+      }
       return {
         reason: 'unreachable',
-        message: `The external opencode server answered HTTP ${String(error.status)} to GET /api/info.`,
+        message: l10n.t(
+          'The external opencode server answered HTTP {0} to GET /api/info.',
+          String(error.status),
+        ),
       };
   }
 }
@@ -240,7 +266,10 @@ export function describeExternalFailure(error: unknown): ExternalFailure {
 /**
  * The text for the LOG about a failed connection: the error message and the messages of its
  * `cause` chain, which is where `fetch` puts `ECONNREFUSED` and friends. Never reaches the
- * webview. The messages of {@link ServerInfoError} do not contain the password.
+ * webview. The messages of {@link ServerInfoError} do not contain the password. It reads the
+ * English `logMessage` of an error that has one (via `logMessageOf`), because the OutputChannel
+ * stays in English whatever the language of VS Code. VERIFIED by `externalServer.test.ts` ("logs
+ * the English text of a malformed answer while the Spanish catalog is on").
  */
 export function describeFailureCause(error: unknown): string {
   const parts: string[] = [];
@@ -249,7 +278,7 @@ export function describeFailureCause(error: unknown): string {
     if (current instanceof Error) {
       const code =
         'code' in current && typeof current.code === 'string' ? ` [${current.code}]` : '';
-      parts.push(`${current.message}${code}`);
+      parts.push(`${logMessageOf(current)}${code}`);
       current = current.cause;
     } else {
       parts.push(typeof current === 'string' ? current : typeof current);
@@ -259,9 +288,36 @@ export function describeFailureCause(error: unknown): string {
   return parts.join(' <- ');
 }
 
-/** Label of a button on the failure notification; the lifecycle maps each to a command. */
+/**
+ * Stable key of a button on the failure notification; the lifecycle maps each to a command. The
+ * English words are KEYS, not what the user reads: {@link failureActionLabel} translates them.
+ */
 export type FailureAction =
   'Set Password' | 'Open Settings' | 'Retry' | 'Restart Server' | 'Show Logs';
+
+/**
+ * The text of a failure button in the language of the host.
+ *
+ * Kept apart from the key so the notification can offer the translated label and still tell which
+ * action was pressed (the choice comes back as the label). One `l10n.t` per key, written out in
+ * full so the exporter finds each text. VERIFIED by `externalServer.test.ts` "writes each failure
+ * button in Spanish and in English": the same five keys give the Spanish catalog entries and,
+ * with no catalog, their own words.
+ */
+export function failureActionLabel(action: FailureAction): string {
+  switch (action) {
+    case 'Set Password':
+      return l10n.t('Set Password');
+    case 'Open Settings':
+      return l10n.t('Open Settings');
+    case 'Retry':
+      return l10n.t('Retry');
+    case 'Restart Server':
+      return l10n.t('Restart Server');
+    case 'Show Logs':
+      return l10n.t('Show Logs');
+  }
+}
 
 /**
  * Buttons for the error notification of an `unavailable` reason.

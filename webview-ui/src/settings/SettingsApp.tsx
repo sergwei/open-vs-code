@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { createEffect, createSignal, For, Match, on, Show, Switch } from 'solid-js';
 import { WarningIcon } from '../chat/icons';
 import { McpSection } from './McpSection';
@@ -9,11 +10,16 @@ import type { SettingsTab, SettingsUi } from './settingsUiState';
 /** Built from its code point: a literal one in the source trips `no-irregular-whitespace`. */
 const NO_BREAK_SPACE = String.fromCharCode(0xa0);
 
-/** The tabs, in order. */
-const TABS: readonly { id: SettingsTab; label: string }[] = [
-  { id: 'providers', label: 'Providers' },
-  { id: 'mcp', label: 'MCP servers' },
-];
+/**
+ * The tabs, in order, with their labels in the interface language. A function (read once per
+ * component), not a constant built at module level, so the texts follow the locale set at start-up.
+ */
+function settingsTabs(): readonly { id: SettingsTab; label: string }[] {
+  return [
+    { id: 'providers', label: l10n.t('Providers') },
+    { id: 'mcp', label: l10n.t('MCP servers') },
+  ];
+}
 
 /**
  * The OpenCode Settings tab (issue #128, E10; decisions P2=1 and P3=1 of plan B): a centered column
@@ -42,6 +48,7 @@ const TABS: readonly { id: SettingsTab; label: string }[] = [
  */
 export function SettingsApp(props: { store: SettingsStore; send: SendSettings; ui: SettingsUi }) {
   const state = props.store.state;
+  const TABS = settingsTabs();
   const [announcement, setAnnouncement] = createSignal('');
   let flip = false;
   const tabElements: Partial<Record<SettingsTab, HTMLButtonElement>> = {};
@@ -84,16 +91,27 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
   };
 
   const subtitle = (): string => {
-    const version = state.serverVersion === undefined ? '' : ` v${state.serverVersion}`;
-    const folder = state.folder === '' ? '' : ` for ${state.folder}`;
-    return `Providers and MCP servers of the opencode${version} server${folder}.`;
+    // Four whole sentences (with/without version and folder), never fragments glued together.
+    const version = state.serverVersion;
+    if (version === undefined) {
+      return state.folder === ''
+        ? l10n.t('Providers and MCP servers of the opencode server.')
+        : l10n.t('Providers and MCP servers of the opencode server for {0}.', state.folder);
+    }
+    return state.folder === ''
+      ? l10n.t('Providers and MCP servers of the opencode v{0} server.', version)
+      : l10n.t(
+          'Providers and MCP servers of the opencode v{0} server for {1}.',
+          version,
+          state.folder,
+        );
   };
 
   return (
     <div class="settings-root">
       <div class="settings-column">
         <header class="settings-header">
-          <h1 class="settings-title">OpenCode settings</h1>
+          <h1 class="settings-title">{l10n.t('OpenCode settings')}</h1>
           <p class="settings-subtitle">{subtitle()}</p>
         </header>
 
@@ -101,7 +119,7 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
           <Match when={!state.received}>
             <p class="settings-empty" role="status">
               <span class="spinner" aria-hidden="true" />
-              {' Loading…'}
+              {` ${l10n.t('Loading…')}`}
             </p>
           </Match>
           <Match when={state.connection.state !== 'connected'}>
@@ -121,21 +139,23 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
                 <p class="card-title" id="settings-connection-title">
                   <Switch>
                     <Match when={state.connection.state === 'not-started'}>
-                      The opencode server has not started yet.
+                      {l10n.t('The opencode server has not started yet.')}
                     </Match>
                     <Match when={state.connection.state === 'starting'}>
-                      Starting the opencode server…
+                      {l10n.t('Starting the opencode server…')}
                     </Match>
                     <Match when={state.connection.state === 'reconnecting'}>
-                      The connection to the opencode server was lost. Reconnecting…
+                      {l10n.t('The connection to the opencode server was lost. Reconnecting…')}
                     </Match>
                     <Match when={state.connection.state === 'stopped'}>
-                      The opencode server is stopped.
+                      {l10n.t('The opencode server is stopped.')}
                     </Match>
-                    <Match when={true}>The opencode server is not available.</Match>
+                    <Match when={true}>{l10n.t('The opencode server is not available.')}</Match>
                   </Switch>
                 </p>
-                <p class="card-cause">Providers and MCP servers show up once it is running.</p>
+                <p class="card-cause">
+                  {l10n.t('Providers and MCP servers show up once it is running.')}
+                </p>
               </div>
               <Show
                 when={
@@ -150,7 +170,7 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
                       props.send({ type: 'settings.action', action: 'restart' });
                     }}
                   >
-                    Restart server
+                    {l10n.t('Restart server')}
                   </button>
                 </div>
               </Show>
@@ -161,7 +181,7 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
               <div
                 class="settings-tabs"
                 role="tablist"
-                aria-label="Settings sections"
+                aria-label={l10n.t('Settings sections')}
                 onKeyDown={onTabKey}
               >
                 <For each={TABS}>
@@ -193,7 +213,7 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
                   props.send({ type: 'settings.refresh' });
                 }}
               >
-                Refresh
+                {l10n.t('Refresh')}
               </button>
             </div>
             <div
@@ -225,7 +245,7 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
               props.send({ type: 'settings.action', action: 'logs' });
             }}
           >
-            Show logs
+            {l10n.t('Show logs')}
           </button>
           {' · '}
           <button
@@ -235,7 +255,7 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
               props.send({ type: 'settings.action', action: 'extensionSettings' });
             }}
           >
-            Extension settings
+            {l10n.t('Extension settings')}
           </button>
         </p>
         <div class="visually-hidden" role="status" aria-live="polite">

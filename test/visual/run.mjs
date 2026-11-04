@@ -2605,6 +2605,21 @@ try {
   console.log(
     `window ${String(startSize.width)}x${String(startSize.height)} CSS px, DPR ${String(startSize.dpr)}, screen work area ${startSize.screen}`,
   );
+  // E11-i18n guard: every step of the main window compares English texts, so a VS Code that does
+  // not run in English (a profile with a language pack, or a changed `locale`) aborts the run here,
+  // with the reason, instead of failing dozens of unrelated checks. The workbench page carries the
+  // language it resolved in `<html lang>`; this run's profile is new and has no language pack, so it
+  // reads `en` whatever the OS language is. Throws before `started`, so it exits with 2.
+  const mainLanguage = await page
+    .evaluate(() => globalThis.document.documentElement.lang)
+    .catch(() => 'unknown');
+  console.log(`language ${mainLanguage} (test:visual compares English text)`);
+  if (!/^en(-|$)/i.test(mainLanguage)) {
+    throw new Error(
+      `VS Code runs in "${mainLanguage}", not in English: test:visual compares English text ` +
+        '(a language pack in the profile or a --locale would cause it)',
+    );
+  }
   // Data, not a check: whether the window holds the system focus (see `diagnoseAfterFailure`).
   console.log(`system focus ${String(await workbenchHasFocus().catch(() => 'unknown'))}`);
   if (withCopilot) {
@@ -8262,6 +8277,33 @@ try {
             bar.actions.some((label) => label.startsWith('Search Sessions')) &&
             bar.chatFrames === 0,
           `D0 a profile with no chatLocation key starts in editor mode: the host logged "chat location at start: editor" (${String(startedInEditor)}), the OpenCode icon opens the Sessions view with its New Session and Search Sessions buttons (${String(sessionsUp)}) and no chat is in the side bar (${String(bar.chatFrames)} iframe(s)); key in the profile: ${String('openVsCode.chatLocation' in profile)}`,
+        );
+        // E11-i18n: the installed copy carries the catalogs. Without `package.nls.json` next to
+        // `package.json` the palette would list the raw `%command.showLogs.title%`.
+        await other.keyboard.press('F1');
+        await waitFor(
+          () => other.locator('.quick-input-widget input').first().isVisible(),
+          2_000,
+          100,
+        );
+        await other
+          .locator('.quick-input-widget input')
+          .first()
+          .click({ timeout: 2_000 })
+          .catch(() => undefined);
+        await other.keyboard.press('ControlOrMeta+A');
+        await other.keyboard.type('>OpenCode: Show Logs');
+        await sleep(1_000); // the list filters asynchronously
+        const titleRows = await other.evaluate(() =>
+          [...globalThis.document.querySelectorAll('.quick-input-list .monaco-list-row')].map(
+            (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim(),
+          ),
+        );
+        await other.keyboard.press('Escape');
+        check(
+          titleRows.some((row) => row.includes('OpenCode: Show Logs')) &&
+            !titleRows.some((row) => row.includes('%command')),
+          `the installed copy resolves %command.showLogs.title% from package.nls.json: the palette lists "OpenCode: Show Logs" and no raw key (${JSON.stringify(titleRows.slice(0, 3))})`,
         );
         await other
           .screenshot({ path: path.join(shotsDir, '25a-default-editor.png') })
@@ -16342,6 +16384,866 @@ try {
       await setTheme(DARK).catch(() => undefined);
     }
   });
+
+  // E11-i18n step 42: the extension in a VS Code that really runs in Spanish. A window of its own
+  // (like step 25: the main window stays in English and is never touched) started with
+  // `--locale=es` and the MS-CEINTL Spanish language pack (`startVSCode` option `locale`). Cells:
+  // A-wide (the empty chat: `<html lang="es">` of the webview and the placeholder of the prompt box
+  // in Spanish), then A-300 and A-wide complete (header, empty state and composer in Spanish with
+  // no button wider than itself and no sideways scroll, the side bar dragged to 300 and to 900 px)
+  // and C (the "+" menu open at both widths), G (the command palette lists the Spanish titles of eight commands, the manifest
+  // indirection `%command.<id>.title%` + `package.nls.es.json`; in editor mode also the three that
+  // only exist there) and E (the welcome of the Sessions view in editor mode, with an empty folder,
+  // is the Spanish `viewsWelcome.sessions.ready` text with its two buttons) and H (a native
+  // QuickPick of the host, "OpenCode: Manage Mods…", with its Spanish title and rows) and also
+  // B (the agent and model panel open at 300 and wide, chip included), D (the permission
+  // card of a prompt with the trigger of step 5, at 300 and wide, with its "Always allow" panel
+  // open) and F (the OpenCode Settings tab, with a provider card open). The window starts in
+  // `sidebar` mode (the default of `startVSCode`), so A-wide and the first palette run there, and
+  // then the profile's `openVsCode.chatLocation` is written to `editor` for E and F. The expected
+  // texts are read from the catalogs, never typed here.
+  // It sends ONE prompt (cell D), to the fake of ITS OWN window, which keeps its state file in the
+  // work folder of this window. `sendsPrompt` stays false in `steps.mjs` on purpose: it only
+  // decides whether the final check of this file looks for sessions in the state file of the MAIN
+  // window, and this prompt never reaches that one (a `--steps 42` run would fail that check).
+  await step(
+    '42 Spanish VS Code: html lang, empty chat, "+" menu, agent and model panel and permission card at 300 px and wide without overflow, palette titles, a native QuickPick, Sessions welcome and Settings tab (E11-i18n)',
+    async () => {
+      const catalog = (relative) =>
+        JSON.parse(fs.readFileSync(path.join(repoRoot, relative), 'utf8'));
+      const bundle = catalog(path.join('l10n', 'bundle.l10n.es.json'));
+      const nls = catalog('package.nls.es.json');
+      const wantedPlaceholder = bundle['Ask opencode… (Enter to send, Shift+Enter for a new line)'];
+      const wantedTitle = nls['command.showLogs.title'];
+      check(
+        typeof wantedPlaceholder === 'string' && typeof wantedTitle === 'string',
+        'the Spanish catalogs hold the prompt placeholder and the Show Logs title',
+      );
+      const folder = createWorkspace();
+      let instance;
+      let connection;
+      let spanishWeb;
+      let spanishSettings;
+      let spanishChatId;
+      try {
+        instance = await startVSCode({
+          repoRoot,
+          workDir: path.join(repoRoot, '.vscode-test', 'visual-locale-es'),
+          workspace: folder,
+          locale: 'es',
+        });
+        connection = await connectPage(instance.port, 90_000);
+        const other = connection.page;
+        await other
+          .locator('.activitybar [aria-label^="OpenCode"]')
+          .first()
+          .waitFor({ state: 'visible', timeout: 60_000 });
+        const benchLang = await other.evaluate(() => globalThis.document.documentElement.lang);
+        check(
+          benchLang === 'es',
+          `the workbench of the window runs in Spanish (html lang "${benchLang}")`,
+        );
+        await other.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+        spanishWeb = await openWebview(instance.port, [], 40_000);
+        const ready = await waitFor(
+          () =>
+            spanishWeb.inDoc(
+              (doc) => doc.querySelector('.app')?.getAttribute('data-connection') === 'connected',
+            ),
+          60_000,
+        );
+        check(
+          ready === true,
+          'A-wide the chat of the Spanish window connects to the synthetic server',
+        );
+        const chat = await spanishWeb.inDoc((doc) => ({
+          lang: doc.documentElement.lang,
+          placeholder: doc.querySelector('textarea')?.getAttribute('placeholder') ?? '',
+        }));
+        check(chat.lang === 'es', `A-wide the chat document says <html lang="${chat.lang}">`);
+        check(
+          chat.placeholder === wantedPlaceholder,
+          `A-wide the prompt box placeholder is the Spanish one of the catalog ("${chat.placeholder}")`,
+        );
+        // --- A (300 px and wide) and C: the empty chat and the "+" menu in Spanish, without overflow ---
+        // The side bar is dragged with the real mouse to 300 px and to 900 px (the same sash drag as
+        // `setSideBarWidth`, on this window's page). At each width: the header and composer texts are
+        // the Spanish ones of the catalog, no button of the header, the composer, the empty state or
+        // the menu is wider than itself (`scrollWidth <= clientWidth`, the chip of the agent and model
+        // included), and the document does not scroll sideways. Then the "+" menu is
+        // opened (cell C): its four items are the Spanish ones, each fits its button, and the menu
+        // lies inside the view; and the agent and model panel (cell B): its headings, search box and
+        // dialog name are the Spanish ones, its "Current" mark is there, no button or input of it is
+        // wider than itself and it lies inside the view. Texts are read from the catalog, never typed here.
+        const dragSpanishBar = async (width) => {
+          const box = await other.evaluate(() => {
+            const rect = globalThis.document
+              .querySelector('.part.sidebar')
+              ?.getBoundingClientRect();
+            return rect
+              ? { left: rect.left, right: rect.right, top: rect.top, height: rect.height }
+              : null;
+          });
+          if (box === null)
+            throw new Error('the side bar of the Spanish window is not in the page');
+          const y = box.top + box.height / 2;
+          await other.mouse.move(box.right, y);
+          await other.mouse.down();
+          await other.mouse.move(box.left + width, y, { steps: 10 });
+          await other.mouse.up();
+          await other.mouse.move(box.left + Math.max(width, box.right - box.left) + 200, y);
+          let measured = 0;
+          await waitFor(
+            async () => {
+              measured = await other.evaluate(() => {
+                const rect = globalThis.document
+                  .querySelector('.part.sidebar')
+                  ?.getBoundingClientRect();
+                return rect ? rect.right - rect.left : 0;
+              });
+              return Math.abs(measured - width) <= SIZE_TOLERANCE;
+            },
+            5_000,
+            200,
+          );
+          await sleep(500); // the webview follows the new width
+          return measured;
+        };
+        const spanishChat = () =>
+          spanishWeb.inDoc((doc) => {
+            const text = (selector) => doc.querySelector(selector)?.textContent?.trim() ?? '';
+            const attr = (selector, name) => doc.querySelector(selector)?.getAttribute(name) ?? '';
+            const over = [];
+            const scope =
+              '.chat-header button, .prompt-actions button, .empty-state button, .plus-menu button';
+            for (const element of doc.querySelectorAll(scope)) {
+              if (element.scrollWidth > element.clientWidth + 1) {
+                const name =
+                  (element.textContent ?? '').trim() || element.getAttribute('aria-label');
+                over.push(`${name ?? '?'} ${element.scrollWidth}>${element.clientWidth}`);
+              }
+            }
+            return {
+              view: doc.defaultView.innerWidth,
+              headerButtons: [...doc.querySelectorAll('.chat-header button')].map((button) =>
+                (button.textContent ?? '').trim(),
+              ),
+              emptyTitle: text('.empty-title'),
+              suggestions: doc.querySelectorAll('.suggestion').length,
+              promptName: attr('textarea', 'aria-label'),
+              plusName: attr('[data-plus-trigger]', 'aria-label'),
+              slashName: attr('[data-command-trigger]', 'aria-label'),
+              sendName: attr('button.send-button', 'aria-label'),
+              over,
+              sideways: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+              bodySideways: doc.body.scrollWidth - doc.body.clientWidth,
+            };
+          });
+        const spanishMenu = () =>
+          spanishWeb.inDoc((doc) => {
+            const menu = doc.querySelector('[role="menu"].plus-menu');
+            const rect = menu?.getBoundingClientRect();
+            return {
+              open: menu !== null,
+              items: [...doc.querySelectorAll('.plus-menu [role="menuitem"]')].map((item) =>
+                (item.textContent ?? '').trim(),
+              ),
+              name: menu?.getAttribute('aria-label') ?? '',
+              menuOverflow: menu ? menu.scrollWidth - menu.clientWidth : 0,
+              inView:
+                rect !== undefined &&
+                rect.left >= -0.5 &&
+                rect.right <= doc.defaultView.innerWidth + 0.5 &&
+                rect.top >= -0.5 &&
+                rect.bottom <= doc.defaultView.innerHeight + 0.5,
+              view: doc.defaultView.innerWidth,
+            };
+          });
+        const toggleSpanishMenu = () =>
+          spanishWeb.inDoc((doc) => {
+            doc.querySelector('[data-plus-trigger]')?.click();
+          });
+        const toggleSpanishPanel = () =>
+          spanishWeb.inDoc((doc) => {
+            doc.querySelector('.agent-model-chip')?.click();
+          });
+        // What the agent and model panel (cell B) shows and whether it fits.
+        const spanishPanel = () =>
+          spanishWeb.inDoc((doc) => {
+            const panel = doc.querySelector('.agent-model-panel');
+            const rect = panel?.getBoundingClientRect();
+            const text = (selector) => doc.querySelector(selector)?.textContent?.trim() ?? '';
+            const over = [];
+            for (const element of doc.querySelectorAll(
+              '.agent-model-panel button, .agent-model-panel input',
+            )) {
+              if (element.scrollWidth > element.clientWidth + 1) {
+                const name =
+                  (element.textContent ?? '').trim() || element.getAttribute('aria-label');
+                over.push(`${name ?? '?'} ${element.scrollWidth}>${element.clientWidth}`);
+              }
+            }
+            const chip = doc.querySelector('.agent-model-chip');
+            return {
+              open: panel !== null,
+              name: panel?.getAttribute('aria-label') ?? '',
+              agentHeading: text('.agent-model-panel [data-group="agent"] h3'),
+              modelHeading: text('.agent-model-panel [data-group="model"] h3'),
+              search:
+                doc
+                  .querySelector('.agent-model-panel input[type="search"]')
+                  ?.getAttribute('placeholder') ?? '',
+              marks: [...doc.querySelectorAll('.agent-model-panel .model-meta')].map((mark) =>
+                (mark.textContent ?? '').trim(),
+              ),
+              chipName: chip?.getAttribute('aria-label') ?? '',
+              chipText: (chip?.textContent ?? '').trim(),
+              over,
+              panelOverflow: panel ? panel.scrollWidth - panel.clientWidth : 0,
+              inView:
+                rect !== undefined &&
+                rect.left >= -0.5 &&
+                rect.right <= doc.defaultView.innerWidth + 0.5 &&
+                rect.top >= -0.5 &&
+                rect.bottom <= doc.defaultView.innerHeight + 0.5,
+              sideways: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+              view: doc.defaultView.innerWidth,
+            };
+          });
+        for (const [cell, wanted] of [
+          ['300', 300],
+          ['wide', 900],
+        ]) {
+          let bar;
+          try {
+            bar = await dragSpanishBar(wanted);
+          } catch (error) {
+            check(
+              false,
+              `A-${cell} the side bar of the Spanish window goes to ${String(wanted)} px (${error instanceof Error ? error.message : String(error)})`,
+            );
+            continue;
+          }
+          const where = `A-${cell} (bar ${String(Math.round(bar))} px)`;
+          const view = await spanishChat();
+          check(
+            JSON.stringify(view.headerButtons) ===
+              JSON.stringify([bundle['Sessions'], bundle['New session']]),
+            `${where} the header buttons are ${JSON.stringify([bundle['Sessions'], bundle['New session']])} (${JSON.stringify(view.headerButtons)})`,
+          );
+          check(
+            view.emptyTitle === bundle['Ask opencode about your code'] && view.suggestions === 4,
+            `${where} the empty chat says "${bundle['Ask opencode about your code']}" with 4 suggestions ("${view.emptyTitle}", ${String(view.suggestions)})`,
+          );
+          check(
+            view.promptName ===
+              bundle[
+                'Message/Accessible name of the prompt box; "prompt" stays untranslated in Spanish'
+              ] &&
+              view.plusName === bundle['Add context'] &&
+              view.slashName === bundle['Commands'] &&
+              view.sendName === bundle['Send'],
+            `${where} the composer names are Spanish (${JSON.stringify([view.promptName, view.plusName, view.slashName, view.sendName])})`,
+          );
+          check(
+            view.over.length === 0,
+            `${where} no header or composer button is wider than itself (${JSON.stringify(view.over)})`,
+          );
+          check(
+            view.sideways <= 1 && view.bodySideways <= 1,
+            `${where} the document does not scroll sideways (${String(view.sideways)} px, body ${String(view.bodySideways)} px)`,
+          );
+          await other
+            .screenshot({ path: path.join(shotsDir, `42-es-chat-${cell}.png`) })
+            .catch(() => undefined);
+          // C: the "+" menu open.
+          await toggleSpanishMenu();
+          await waitFor(async () => (await spanishMenu()).open, 5_000, 100);
+          const menu = await spanishMenu();
+          const wantedItems = [
+            bundle['Add selection'],
+            bundle['Attach file…'],
+            bundle['Attach image…'],
+            bundle['Mention a file'],
+          ];
+          check(
+            JSON.stringify(menu.items) === JSON.stringify(wantedItems) &&
+              menu.name === bundle['Add context'],
+            `C-${cell} the "+" menu lists ${JSON.stringify(wantedItems)} (${JSON.stringify(menu.items)}, name "${menu.name}")`,
+          );
+          const open = await spanishChat();
+          check(
+            open.over.length === 0 && menu.menuOverflow <= 1,
+            `C-${cell} no item of the "+" menu is wider than itself and the menu does not scroll sideways (${JSON.stringify(open.over)}, ${String(menu.menuOverflow)} px)`,
+          );
+          check(
+            menu.inView,
+            `C-${cell} the "+" menu lies inside the view (${String(menu.view)} px wide)`,
+          );
+          await other
+            .screenshot({ path: path.join(shotsDir, `42-es-plus-menu-${cell}.png`) })
+            .catch(() => undefined);
+          await toggleSpanishMenu();
+          await waitFor(async () => !(await spanishMenu()).open, 5_000, 100);
+          // B: the agent and model panel open.
+          await toggleSpanishPanel();
+          await waitFor(async () => (await spanishPanel()).open, 5_000, 100);
+          const panel = await spanishPanel();
+          const wantedChipName = bundle['Agent and model: {0} ({1})']
+            .replace('{0}', panel.chipText)
+            .replace('{1}', bundle['Connected']);
+          check(
+            panel.open &&
+              panel.name === bundle['Choose agent and model'] &&
+              panel.agentHeading === bundle['Agent'] &&
+              panel.modelHeading === bundle['Model'] &&
+              panel.search === bundle['Search models'],
+            `B-${cell} the agent and model panel is Spanish: dialog "${panel.name}", headings "${panel.agentHeading}" and "${panel.modelHeading}", search "${panel.search}"`,
+          );
+          check(
+            panel.chipName === wantedChipName &&
+              panel.marks.some((mark) => mark.startsWith(bundle['Current'])),
+            `B-${cell} the chip is named "${wantedChipName}" ("${panel.chipName}") and the panel marks what is in use with "${bundle['Current']}" (${JSON.stringify(panel.marks.slice(0, 3))})`,
+          );
+          check(
+            panel.over.length === 0 && panel.panelOverflow <= 1 && panel.sideways <= 1,
+            `B-${cell} no button or input of the panel is wider than itself, the panel does not scroll sideways and neither does the document (${JSON.stringify(panel.over)}, ${String(panel.panelOverflow)} px, ${String(panel.sideways)} px)`,
+          );
+          check(
+            panel.inView,
+            `B-${cell} the agent and model panel lies inside the view (${String(panel.view)} px wide)`,
+          );
+          const chipOpen = await spanishChat();
+          check(
+            chipOpen.over.length === 0,
+            `B-${cell} the chip of the agent and model fits with the panel open (${JSON.stringify(chipOpen.over)})`,
+          );
+          await other
+            .screenshot({ path: path.join(shotsDir, `42-es-model-menu-${cell}.png`) })
+            .catch(() => undefined);
+          await toggleSpanishPanel();
+          await waitFor(async () => !(await spanishPanel()).open, 5_000, 100);
+        }
+        // --- D: the permission card of a prompt, at 300 px and wide ---------------------------------
+        // Defined here with the other cells of the chat but RUN LAST (after F, with the window back
+        // in `sidebar` mode): the prompt makes a session, and cell E needs a folder with none.
+        // The trigger of step 5: a prompt with ASK_PERMISSION makes the synthetic server run a `read`
+        // of `.env` and ask for a permission (action read, `save: ["*"]`, so the Always panel is
+        // there and its broad-rule warning too). The prompt is typed with the real keyboard after a
+        // real click on the box, as `send` does in the main window. The card stays pending while the
+        // side bar goes to 300 and back to 900 px; at each width it is measured, then its Always
+        // panel is opened and measured, and then closed.
+        const checkPermissionCard = async () => {
+          const spanishClickIn = async (selector) => {
+            const box = await spanishWeb.inDoc((doc, sel) => {
+              const element = doc.querySelector(sel);
+              if (!element) return null;
+              element.scrollIntoView({ block: 'nearest' });
+              const rect = element.getBoundingClientRect();
+              return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+            }, selector);
+            if (box === null) return false;
+            // Once the Settings tab is open there are two webview iframes: the chat is the one whose
+            // `name` is the id the connection found it by.
+            const frame = await other
+              .locator(
+                spanishChatId === undefined ? CHAT_FRAME : `${CHAT_FRAME}[name="${spanishChatId}"]`,
+              )
+              .first()
+              .boundingBox({ timeout: 3_000 })
+              .catch(() => null);
+            if (frame === null) return false;
+            await other.mouse.click(frame.x + box.x, frame.y + box.y);
+            return true;
+          };
+          const focused = await waitFor(
+            async () => {
+              await spanishClickIn('textarea');
+              return spanishWeb.inDoc(
+                (doc) => doc.activeElement?.tagName === 'TEXTAREA' && doc.hasFocus(),
+              );
+            },
+            8_000,
+            300,
+          );
+          check(focused === true, 'D the prompt box of the Spanish window keeps the focus to type');
+          await sleep(150); // the first typed character is lost without it (see `send`)
+          await other.keyboard.type(
+            'Use the read tool to read the file .env in the workspace root and tell me its content. ASK_PERMISSION',
+          );
+          await other.keyboard.press('Enter');
+          const cardShown = await waitFor(
+            () => spanishWeb.inDoc((doc) => doc.querySelector('.permission-card') !== null),
+            30_000,
+            200,
+          );
+          check(cardShown === true, 'D the synthetic server asks for the permission to read .env');
+          const spanishCard = () =>
+            spanishWeb.inDoc((doc) => {
+              const card = doc.querySelector('.permission-card');
+              const over = [];
+              for (const element of doc.querySelectorAll(
+                '.permission-card button, .permission-card textarea, .request-card, .request-dock',
+              )) {
+                if (element.scrollWidth > element.clientWidth + 1) {
+                  const name =
+                    (element.textContent ?? '').trim().slice(0, 30) ||
+                    element.getAttribute('class') ||
+                    '?';
+                  over.push(`${name} ${element.scrollWidth}>${element.clientWidth}`);
+                }
+              }
+              const rect = card?.getBoundingClientRect();
+              return {
+                title: (card?.querySelector('.request-title')?.textContent ?? '').trim(),
+                resources:
+                  card?.querySelector('.request-resources')?.getAttribute('aria-label') ?? '',
+                actions: [
+                  ...(card?.querySelectorAll(':scope > .request-actions button') ?? []),
+                ].map((button) => (button.textContent ?? '').trim()),
+                always: (() => {
+                  const panel = card?.querySelector('.request-always');
+                  return panel === null || panel === undefined
+                    ? null
+                    : {
+                        name: panel.getAttribute('aria-label') ?? '',
+                        text: (panel.querySelector('p')?.textContent ?? '').trim(),
+                        warning: (
+                          panel.querySelector('.request-warning')?.textContent ?? ''
+                        ).trim(),
+                        buttons: [...panel.querySelectorAll('button')].map((button) =>
+                          (button.textContent ?? '').trim(),
+                        ),
+                      };
+                })(),
+                over,
+                inView:
+                  rect !== undefined &&
+                  rect.left >= -0.5 &&
+                  rect.right <= doc.defaultView.innerWidth + 0.5,
+                sideways: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+                view: doc.defaultView.innerWidth,
+              };
+            });
+          const toggleAlways = () =>
+            spanishWeb.inDoc((doc) => {
+              // The first button with `aria-expanded` of the card's own actions is "Always allow…".
+              doc
+                .querySelector('.permission-card > .request-actions button[aria-expanded]')
+                ?.click();
+            });
+          const wantedCardTitle = bundle['Permission needed: {0}'].replace('{0}', bundle['Read']);
+          const wantedActions = [
+            bundle['Allow once'],
+            bundle['Always allow…'],
+            bundle['Reject'],
+            bundle['Reject with feedback…'],
+          ];
+          for (const [cell, wanted] of [
+            ['300', 300],
+            ['wide', 900],
+          ]) {
+            let bar;
+            try {
+              bar = await dragSpanishBar(wanted);
+            } catch (error) {
+              check(
+                false,
+                `D-${cell} the side bar of the Spanish window goes to ${String(wanted)} px (${error instanceof Error ? error.message : String(error)})`,
+              );
+              continue;
+            }
+            const where = `D-${cell} (bar ${String(Math.round(bar))} px)`;
+            const card = await spanishCard();
+            check(
+              card.title === wantedCardTitle &&
+                card.resources === bundle['Resources'] &&
+                JSON.stringify(card.actions) === JSON.stringify(wantedActions),
+              `${where} the permission card says "${wantedCardTitle}" with the buttons ${JSON.stringify(wantedActions)} ("${card.title}", ${JSON.stringify(card.actions)})`,
+            );
+            check(
+              card.over.length === 0 && card.sideways <= 1 && card.inView,
+              `${where} nothing of the permission card is wider than itself, it lies inside the view and the document does not scroll sideways (${JSON.stringify(card.over)}, ${String(card.sideways)} px, in view ${String(card.inView)})`,
+            );
+            await other
+              .screenshot({ path: path.join(shotsDir, `42-es-permission-${cell}.png`) })
+              .catch(() => undefined);
+            await toggleAlways();
+            await waitFor(async () => (await spanishCard()).always !== null, 5_000, 100);
+            const opened = await spanishCard();
+            const wantedAlways =
+              bundle[
+                'This saves this rule for this project. It applies to every session and survives restarts; revoke it later with “OpenCode: Manage Saved Permissions”.'
+              ];
+            check(
+              opened.always !== null &&
+                opened.always.name === bundle['Always allow'] &&
+                opened.always.text === wantedAlways &&
+                opened.always.warning.startsWith('Cuidado: esta regla es amplia.') &&
+                opened.always.buttons.includes(bundle['Yes, always allow']),
+              `${where} the "Always allow" panel is Spanish: ${JSON.stringify(opened.always)}`,
+            );
+            check(
+              opened.over.length === 0 && opened.sideways <= 1 && opened.inView,
+              `${where} nothing of the open "Always allow" panel is wider than itself and the document does not scroll sideways (${JSON.stringify(opened.over)}, ${String(opened.sideways)} px)`,
+            );
+            await other
+              .screenshot({ path: path.join(shotsDir, `42-es-permission-always-${cell}.png`) })
+              .catch(() => undefined);
+            await toggleAlways();
+            await waitFor(async () => (await spanishCard()).always === null, 5_000, 100);
+          }
+        };
+        // --- G: the palette lists the Spanish titles ------------------------------------------------
+        // Types `>OpenCode: <title>` (without a trailing ellipsis: the list filters as you type) and
+        // returns the text of the rows. The palette is closed again with Escape before returning,
+        // or, with `accept`, the first row is run with Enter (cell H) and the widget is left to
+        // whatever that command opens.
+        const paletteRows = async (title, shot, accept = false, keepEllipsis = false) => {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            await other.keyboard.press('F1');
+            if (
+              await waitFor(
+                () => other.locator('.quick-input-widget input').first().isVisible(),
+                2_000,
+                100,
+              )
+            )
+              break;
+          }
+          const input = other.locator('.quick-input-widget input').first();
+          await input.click({ timeout: 2_000 }).catch(() => undefined);
+          await other.keyboard.press('ControlOrMeta+A');
+          // `keepEllipsis` tells "Open Settings…" from "Open Extension Settings": the second has none.
+          const query = `>OpenCode: ${keepEllipsis ? title : title.replace(/…$/, '')}`;
+          await other.keyboard.type(query);
+          await waitFor(async () => (await input.inputValue()) === query, 2_000, 50);
+          await sleep(1_000); // the list filters asynchronously
+          const found = await other.evaluate(() =>
+            [...globalThis.document.querySelectorAll('.quick-input-list .monaco-list-row')].map(
+              (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim(),
+            ),
+          );
+          if (shot !== undefined) {
+            await other.screenshot({ path: path.join(shotsDir, shot) }).catch(() => undefined);
+          }
+          if (accept) {
+            await other.keyboard.press('Enter');
+            return found;
+          }
+          await other.keyboard.press('Escape');
+          await sleep(300); // the next F1 must find the palette closed; no signal to wait on
+          return found;
+        };
+        const rows = await paletteRows(wantedTitle, '42-es-palette.png');
+        check(
+          rows.some((row) => row.includes(`OpenCode: ${wantedTitle}`)),
+          `G the palette lists "OpenCode: ${wantedTitle}" for Show Logs (${JSON.stringify(rows.slice(0, 3))})`,
+        );
+        for (const key of [
+          'command.restartServer.title',
+          'command.openChat.title',
+          'command.newSession.title',
+          'command.managePermissions.title',
+          'command.stopResponse.title',
+          'command.manageMods.title',
+          'command.setServerPassword.title',
+        ]) {
+          const title = nls[key];
+          const found = await paletteRows(title);
+          check(
+            found.some((row) => row.includes(`OpenCode: ${title}`)),
+            `G the palette lists "OpenCode: ${title}" (${key}; ${JSON.stringify(found.slice(0, 2))})`,
+          );
+        }
+        // --- H: a native QuickPick of the host, in Spanish ---------------------------------------------
+        // "OpenCode: Manage Mods…" runs `manage` of `modsLifecycle.ts`: a QuickPick of the host that
+        // needs neither the opencode server nor a prompt, and whose last three rows (Reload Mods,
+        // Open Mods Folder, Show Logs) are always there, whatever mods the machine holds. The title
+        // and the rows are the `l10n.t` texts of the Spanish catalog, read from it.
+        const modsTitle = bundle['OpenCode Mods'];
+        const modsRows = [bundle['Reload Mods'], bundle['Open Mods Folder'], bundle['Show Logs']];
+        check(
+          typeof modsTitle === 'string' && modsRows.every((text) => typeof text === 'string'),
+          'the Spanish catalog holds the texts of the Manage Mods QuickPick',
+        );
+        await paletteRows(nls['command.manageMods.title'], undefined, true);
+        const readPick = () =>
+          other.evaluate(() => {
+            const widget = globalThis.document.querySelector('.quick-input-widget');
+            return {
+              title: widget?.querySelector('.quick-input-title')?.textContent?.trim() ?? '',
+              rows: [...(widget?.querySelectorAll('.quick-input-list .monaco-list-row') ?? [])].map(
+                (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim(),
+              ),
+            };
+          });
+        await waitFor(async () => (await readPick()).title === modsTitle, 10_000, 200);
+        const pick = await readPick();
+        await other
+          .screenshot({ path: path.join(shotsDir, '42-es-manage-mods.png') })
+          .catch(() => undefined);
+        await other.keyboard.press('Escape');
+        await sleep(300);
+        check(
+          pick.title === modsTitle,
+          `H Manage Mods… opens a native QuickPick titled "${modsTitle}" (title ${JSON.stringify(pick.title)})`,
+        );
+        check(
+          modsRows.every((text) => pick.rows.some((row) => row.includes(text))),
+          `H the QuickPick lists ${JSON.stringify(modsRows)} in Spanish (rows ${JSON.stringify(pick.rows)})`,
+        );
+        // --- E: the Sessions view in editor mode, empty folder ---------------------------------------
+        // The profile is written to `editor`; the host applies it without a reload (the setting says
+        // so) and the OpenCode container, already open, swaps the chat view for the Sessions view.
+        writeSettings(instance.userDataDir, { 'openVsCode.chatLocation': 'editor' });
+        const welcomeText = (markdown) =>
+          markdown
+            .replace(/\[([^\]]+)\]\(command:[^)]*\)/g, '$1')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const wantedWelcome = welcomeText(nls['viewsWelcome.sessions.ready']);
+        const wantedButtons = [
+          ...nls['viewsWelcome.sessions.ready'].matchAll(/\[([^\]]+)\]\(/g),
+        ].map((match) => match[1]);
+        const readWelcome = () =>
+          other.evaluate(() => {
+            const side = globalThis.document.querySelector('.part.sidebar');
+            return {
+              text: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
+                .replace(/\s+/g, ' ')
+                .trim(),
+              buttons: [
+                ...(side?.querySelectorAll('.welcome-view-content .monaco-button') ?? []),
+              ].map((button) => (button.textContent ?? '').trim()),
+            };
+          });
+        const shown = await waitFor(async () => (await readWelcome()).text !== '', 30_000, 300);
+        const welcome = await readWelcome();
+        check(
+          shown === true &&
+            welcome.text === wantedWelcome &&
+            JSON.stringify(welcome.buttons) === JSON.stringify(wantedButtons),
+          `E the Sessions view of the editor-mode window shows the Spanish welcome ${JSON.stringify(welcome.text)} with the buttons ${JSON.stringify(welcome.buttons)}`,
+        );
+        await other
+          .screenshot({ path: path.join(shotsDir, '42-es-sessions-welcome.png') })
+          .catch(() => undefined);
+        // G again, for the three palette commands that exist only in editor mode.
+        for (const key of [
+          'command.searchSessions.title',
+          'command.newFolder.title',
+          'command.filterSessions.title',
+        ]) {
+          const title = nls[key];
+          const found = await paletteRows(title);
+          check(
+            found.some((row) => row.includes(`OpenCode: ${title}`)),
+            `G in editor mode the palette lists "OpenCode: ${title}" (${key}; ${JSON.stringify(found.slice(0, 2))})`,
+          );
+        }
+        // --- F: the OpenCode Settings tab, wide ------------------------------------------------------
+        // "Open Settings…" (the Spanish title WITH its ellipsis, which tells it from "Open Extension
+        // Settings") opens the tab; its webview is the iframe target whose document says
+        // surface=settings (the same probe as `connectSettings` of step 36). The side bar goes to 300
+        // px first, so the tab has the width it gets in the widest case. The titles, tabs, buttons,
+        // search box and subtitle are the Spanish ones of the catalog; then the first provider card is
+        // opened (its hint and Cancel button), and no button, input or select is wider than itself and
+        // the document does not scroll sideways.
+        let lastSurfaceId;
+        const connectSpanishSurface = async (isWanted, timeoutMs) => {
+          const end = Date.now() + timeoutMs;
+          while (Date.now() < end) {
+            let list;
+            try {
+              list = await (await fetch(`http://127.0.0.1:${String(instance.port)}/json`)).json();
+            } catch {
+              list = [];
+            }
+            for (const entry of list) {
+              if (
+                entry.type !== 'iframe' ||
+                !entry.url.includes('extensionId=sergwei.open-vs-code')
+              )
+                continue;
+              const id = /[?&]id=([^&]+)/.exec(entry.url)?.[1];
+              if (id === undefined) continue;
+              const probe = await openWebview(instance.port, [], 3_000, id).catch(() => undefined);
+              if (probe === undefined) continue;
+              const surface = await probe
+                .inDoc(
+                  (doc) =>
+                    doc
+                      .querySelector('meta[name="open-vs-code-surface"]')
+                      ?.getAttribute('content') ?? null,
+                )
+                .catch(() => null);
+              if (isWanted(surface)) {
+                lastSurfaceId = id;
+                return probe;
+              }
+              probe.close();
+            }
+            await sleep(300);
+          }
+          throw new Error('the wanted OpenCode webview did not appear as a CDP target');
+        };
+        try {
+          await dragSpanishBar(300);
+          await paletteRows(nls['command.openServerSettings.title'], undefined, true, true);
+          spanishSettings = await connectSpanishSurface(
+            (surface) => surface === 'settings',
+            30_000,
+          );
+          const listed = await waitFor(
+            () =>
+              spanishSettings.inDoc(
+                (doc) => doc.querySelectorAll('.settings-providers [data-provider]').length >= 1,
+              ),
+            20_000,
+            200,
+          );
+          check(
+            listed === true,
+            'F the Settings tab of the Spanish window lists the providers of the synthetic server',
+          );
+          const readSettings = () =>
+            spanishSettings.inDoc((doc) => {
+              const text = (selector) => doc.querySelector(selector)?.textContent?.trim() ?? '';
+              const all = (selector) =>
+                [...doc.querySelectorAll(selector)].map((node) => (node.textContent ?? '').trim());
+              const over = [];
+              for (const element of doc.querySelectorAll(
+                '.settings-root button, .settings-root input, .settings-root select',
+              )) {
+                if (element.scrollWidth > element.clientWidth + 1) {
+                  const name =
+                    (element.textContent ?? '').trim().slice(0, 30) ||
+                    element.getAttribute('aria-label') ||
+                    '?';
+                  over.push(`${name} ${element.scrollWidth}>${element.clientWidth}`);
+                }
+              }
+              const openCard = doc.querySelector('.settings-methods');
+              return {
+                lang: doc.documentElement.lang,
+                title: text('.settings-title'),
+                subtitle: text('.settings-subtitle'),
+                tabs: all('.settings-tab'),
+                refresh: all('.settings-toolbar > button'),
+                footer: all('.settings-footer button'),
+                headings: all('.settings-heading'),
+                search:
+                  doc
+                    .querySelector('.settings-providers input[type="search"]')
+                    ?.getAttribute('placeholder') ?? '',
+                hint: (openCard?.querySelector('.settings-hint')?.textContent ?? '').trim(),
+                cancel: all('.settings-methods button.secondary'),
+                mcpHint: text('.settings-mcp .settings-hint'),
+                over,
+                sideways: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+                view: doc.defaultView.innerWidth,
+              };
+            });
+          const closed = await readSettings();
+          const stem = bundle['Providers and MCP servers of the opencode server.'].replace(
+            /\.$/,
+            '',
+          );
+          const searchPattern = new RegExp(
+            `^${bundle['Search {0} providers…'].replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace('\\{0\\}', '\\d+')}$`,
+          );
+          check(
+            closed.lang === 'es' &&
+              closed.title === bundle['OpenCode settings'] &&
+              closed.subtitle.startsWith(stem) &&
+              JSON.stringify(closed.tabs) ===
+                JSON.stringify([bundle['Providers'], bundle['MCP servers']]) &&
+              JSON.stringify(closed.refresh) === JSON.stringify([bundle['Refresh']]) &&
+              JSON.stringify(closed.footer) ===
+                JSON.stringify([bundle['Show logs'], bundle['Extension settings']]),
+            `F the Settings tab is Spanish: title "${closed.title}", subtitle "${closed.subtitle}", tabs ${JSON.stringify(closed.tabs)}, buttons ${JSON.stringify([...closed.refresh, ...closed.footer])}`,
+          );
+          check(
+            closed.headings.includes(bundle['Add a provider']) && searchPattern.test(closed.search),
+            `F the providers list is Spanish: headings ${JSON.stringify(closed.headings)}, search box "${closed.search}"`,
+          );
+          check(
+            closed.mcpHint === bundle['Servers come from mcp.servers in opencode.json.'],
+            `F the MCP panel hint is Spanish ("${closed.mcpHint}")`,
+          );
+          check(
+            closed.over.length === 0 && closed.sideways <= 1,
+            `F (tab ${String(closed.view)} px wide) no button, input or select of the Settings tab is wider than itself and the document does not scroll sideways (${JSON.stringify(closed.over)}, ${String(closed.sideways)} px)`,
+          );
+          await spanishSettings.inDoc((doc) => {
+            doc.querySelector('.settings-providers .settings-toggle')?.click();
+          });
+          await waitFor(
+            () => spanishSettings.inDoc((doc) => doc.querySelector('.settings-methods') !== null),
+            5_000,
+            100,
+          );
+          const expanded = await readSettings();
+          check(
+            expanded.hint === bundle['Credentials are saved by opencode for all your projects.'] &&
+              expanded.cancel.includes(bundle['Cancel']),
+            `F an open provider card is Spanish: hint "${expanded.hint}", buttons ${JSON.stringify(expanded.cancel)}`,
+          );
+          check(
+            expanded.over.length === 0 && expanded.sideways <= 1,
+            `F (tab ${String(expanded.view)} px wide) nothing of the open provider card is wider than itself and the document does not scroll sideways (${JSON.stringify(expanded.over)}, ${String(expanded.sideways)} px)`,
+          );
+          await other
+            .screenshot({ path: path.join(shotsDir, '42-es-settings-wide.png') })
+            .catch(() => undefined);
+        } catch (error) {
+          check(
+            false,
+            `F the Settings tab of the Spanish window could not be driven (${error instanceof Error ? error.message : String(error)})`,
+          );
+        }
+        // --- D, run last: back to the side bar chat, then the permission card ---------------------
+        // The profile goes back to `sidebar` (the host applies it without a reload and the container
+        // swaps the Sessions view for the chat); the chat webview of the first part died with that
+        // view, so it is found again by its surface (any but `settings`) and waited for until it
+        // connects to the synthetic server.
+        try {
+          writeSettings(instance.userDataDir, { 'openVsCode.chatLocation': 'sidebar' });
+          spanishWeb?.close();
+          spanishWeb = await connectSpanishSurface((surface) => surface !== 'settings', 40_000);
+          spanishChatId = lastSurfaceId;
+          const back = await waitFor(
+            () =>
+              spanishWeb.inDoc(
+                (doc) => doc.querySelector('.app')?.getAttribute('data-connection') === 'connected',
+              ),
+            60_000,
+          );
+          check(
+            back === true,
+            'D the chat is back in the side bar and connected to the synthetic server',
+          );
+          await checkPermissionCard();
+        } catch (error) {
+          check(
+            false,
+            `D the permission card of the Spanish window could not be driven (${error instanceof Error ? error.message : String(error)})`,
+          );
+        }
+      } finally {
+        spanishSettings?.close();
+        spanishWeb?.close();
+        await connection?.browser.close().catch(() => undefined);
+        try {
+          await instance?.stop();
+        } finally {
+          // A `stop()` that throws must not leave the temporary workspace behind.
+          fs.rmSync(folder, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;

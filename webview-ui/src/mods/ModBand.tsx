@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { For, Show } from 'solid-js';
 import type { ModBand } from '../../../src/shared/model';
 
@@ -41,7 +42,7 @@ export function ModBands(props: {
 }) {
   return (
     <Show when={props.bands.length > 0}>
-      <section class="mod-bands" aria-label="Mod status">
+      <section class="mod-bands" aria-label={l10n.t('Mod status')}>
         <For each={props.bands}>
           {(band) => (
             <div
@@ -57,7 +58,7 @@ export function ModBands(props: {
                   <button
                     type="button"
                     class="secondary mod-band-action"
-                    aria-label={`Run ${shortCommandName(command())} (${band.modName})`}
+                    aria-label={l10n.t('Run {0} ({1})', shortCommandName(command()), band.modName)}
                     aria-disabled={props.disabled ? 'true' : undefined}
                     onClick={() => {
                       if (!props.disabled) props.onRun(command());

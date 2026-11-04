@@ -8,6 +8,8 @@ import {
   onMount,
   Show,
 } from 'solid-js';
+import * as l10n from '@vscode/l10n';
+import { plural } from '../../../src/shared/l10n';
 import type { Catalog, ModelOption, ModelRef } from '../../../src/shared/model';
 import type { ConnectionState } from '../../../src/shared/protocol';
 import { ChevronIcon } from '../chat/icons';
@@ -20,6 +22,7 @@ import {
   modelMeta,
   pickModel,
   sameModel,
+  unavailableName,
   type AgentChoice,
   type EffectiveModel,
   type VariantChoices,
@@ -34,15 +37,27 @@ const PANEL_ID = 'agent-model-panel';
 /** Marks the chip so a pointer-down on it is not read as "outside" (see `dismissOutside`). */
 const TRIGGER_SELECTOR = '[data-chip]';
 
-/** The status words of the connection dot, so the colour is never the only signal (decision P10=1). */
-const CONNECTION_TEXT: Record<ConnectionState['state'], string> = {
-  starting: 'Starting',
-  connected: 'Connected',
-  reconnecting: 'Reconnecting',
-  unavailable: 'Unavailable',
-  stopped: 'Stopped',
-  'not-started': 'Not started',
-};
+/**
+ * The status words of the connection dot, so the colour is never the only signal (decision P10=1),
+ * in the interface language. A function, not a table built at module level, so the texts follow
+ * the locale set at start-up.
+ */
+function connectionText(state: ConnectionState['state']): string {
+  switch (state) {
+    case 'starting':
+      return l10n.t('Starting');
+    case 'connected':
+      return l10n.t('Connected');
+    case 'reconnecting':
+      return l10n.t('Reconnecting');
+    case 'unavailable':
+      return l10n.t('Unavailable');
+    case 'stopped':
+      return l10n.t('Stopped');
+    case 'not-started':
+      return l10n.t('Not started');
+  }
+}
 
 /** Key of a model in the roving tab stop: provider and catalog id never contain a newline. */
 const keyOf = (model: { providerID: string; id: string }): string =>
@@ -185,8 +200,8 @@ export function AgentModelMenu(props: {
 
   const unusable = () => props.disabled || props.catalog === undefined;
   const label = createMemo(() => chipLabel(props.catalog, props.agent, props.model));
-  const status = () => CONNECTION_TEXT[props.connection];
-  const chipName = () => `Agent and model: ${label()} (${status()})`;
+  const status = () => connectionText(props.connection);
+  const chipName = () => l10n.t('Agent and model: {0} ({1})', label(), status());
 
   const agents = createMemo(() => agentChoices(props.catalog, props.agent));
   const groups = createMemo(() => groupModels(props.catalog, search()));
@@ -199,13 +214,18 @@ export function AgentModelMenu(props: {
   const variantEntries = createMemo<VariantEntry[]>(() => {
     const { options, current, missing } = props.variants;
     const list: VariantEntry[] = [
-      { value: undefined, label: 'Default', current: current === undefined, missing: false },
+      {
+        value: undefined,
+        label: l10n.t('Default'),
+        current: current === undefined,
+        missing: false,
+      },
       ...options.map((id) => ({ value: id, label: id, current: current === id, missing: false })),
     ];
     if (missing !== undefined) {
       list.push({
         value: missing,
-        label: `${missing} (unavailable)`,
+        label: unavailableName(missing),
         current: true,
         missing: true,
       });
@@ -278,14 +298,14 @@ export function AgentModelMenu(props: {
     // The unavailable agent is already the one in use: picking it again changes nothing.
     if (choice.unavailable) return;
     props.onSelectAgent(choice.id);
-    announce(`Agent: ${choice.name}`);
+    announce(l10n.t('Agent: {0}', choice.name));
     refocusRow('agent', choice.id);
   };
 
   /** `keepFocus` is false for the search box, whose focus must not jump to the row. */
   const pickModelOption = (option: ModelOption, keepFocus: boolean): void => {
     props.onSelectModel(pickModel(props.model, option));
-    announce(`Model: ${option.name}`);
+    announce(l10n.t('Model: {0}', option.name));
     if (keepFocus) refocusRow('model', `${option.providerID}/${option.id}`);
   };
 
@@ -301,7 +321,7 @@ export function AgentModelMenu(props: {
     // The missing variant is already the one in use: picking it again changes nothing.
     if (entry.missing) return;
     props.onSelectVariant(entry.value);
-    announce(`Reasoning: ${entry.label}`);
+    announce(l10n.t('Reasoning: {0}', entry.label));
     refocusRow('variant', entry.value ?? 'default');
   };
 
@@ -383,7 +403,9 @@ export function AgentModelMenu(props: {
       ([isOpen, count]) => {
         if (!isOpen) return;
         announce(
-          count === 0 ? 'No models match' : `${String(count)} model${count === 1 ? '' : 's'}`,
+          count === 0
+            ? l10n.t('No models match')
+            : plural(count, l10n.t('{0} model', count), l10n.t('{0} models', count)),
         );
       },
     ),
@@ -432,7 +454,7 @@ export function AgentModelMenu(props: {
           id={PANEL_ID}
           class="model-panel agent-model-panel"
           role="dialog"
-          aria-label="Choose agent and model"
+          aria-label={l10n.t('Choose agent and model')}
           ref={(element) => {
             panel = element;
           }}
@@ -447,8 +469,8 @@ export function AgentModelMenu(props: {
           }}
         >
           <div class="menu-columns" onKeyDown={onListKeyDown}>
-            <section class="menu-column" data-group="agent" aria-label="Agent">
-              <h3 class="session-group-title">Agent</h3>
+            <section class="menu-column" data-group="agent" aria-label={l10n.t('Agent')}>
+              <h3 class="session-group-title">{l10n.t('Agent')}</h3>
               <ul class="model-list">
                 <For each={agents()}>
                   {(choice) => (
@@ -477,13 +499,13 @@ export function AgentModelMenu(props: {
                 </For>
               </ul>
             </section>
-            <section class="menu-column" data-group="model" aria-label="Model">
-              <h3 class="session-group-title">Model</h3>
+            <section class="menu-column" data-group="model" aria-label={l10n.t('Model')}>
+              <h3 class="session-group-title">{l10n.t('Model')}</h3>
               <input
                 type="search"
                 class="session-search"
-                aria-label="Search models"
-                placeholder="Search models"
+                aria-label={l10n.t('Search models')}
+                placeholder={l10n.t('Search models')}
                 ref={(element) => {
                   searchInput = element;
                 }}
@@ -496,7 +518,7 @@ export function AgentModelMenu(props: {
                 {announcement()}
               </div>
               <Show when={total() === 0}>
-                <p class="session-status">No models match</p>
+                <p class="session-status">{l10n.t('No models match')}</p>
               </Show>
               <div class="model-groups">
                 <Show when={missingModel()}>
@@ -515,8 +537,10 @@ export function AgentModelMenu(props: {
                           }}
                           // Already the model in use and not pickable: nothing to do.
                         >
-                          <span class="model-name">{`${missing().providerID}/${missing().id} (unavailable)`}</span>
-                          <span class="model-meta">Current</span>
+                          <span class="model-name">
+                            {unavailableName(`${missing().providerID}/${missing().id}`)}
+                          </span>
+                          <span class="model-meta">{l10n.t('Current')}</span>
                         </button>
                       </li>
                     </ul>
@@ -553,7 +577,7 @@ export function AgentModelMenu(props: {
                                   <span class="model-name">{model.name}</span>
                                   <span class="model-meta">
                                     {isCurrent()
-                                      ? `Current · ${modelMeta(model)}`
+                                      ? l10n.t('Current · {0}', modelMeta(model))
                                       : modelMeta(model)}
                                   </span>
                                 </button>
@@ -567,8 +591,12 @@ export function AgentModelMenu(props: {
                 </For>
               </div>
               <Show when={props.variants.visible}>
-                <section class="menu-reasoning" data-group="variant" aria-label="Reasoning">
-                  <h3 class="session-group-title">Reasoning</h3>
+                <section
+                  class="menu-reasoning"
+                  data-group="variant"
+                  aria-label={l10n.t('Reasoning')}
+                >
+                  <h3 class="session-group-title">{l10n.t('Reasoning')}</h3>
                   <ul class="model-list">
                     <For each={variantEntries()}>
                       {(entry) => (
@@ -591,7 +619,7 @@ export function AgentModelMenu(props: {
                           >
                             <span class="model-name">{entry.label}</span>
                             <Show when={entry.current}>
-                              <span class="model-meta">Current</span>
+                              <span class="model-meta">{l10n.t('Current')}</span>
                             </Show>
                           </button>
                         </li>

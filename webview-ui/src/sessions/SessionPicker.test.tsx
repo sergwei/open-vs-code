@@ -16,12 +16,14 @@ import { createRoot } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionSummary } from '../../../src/shared/model';
 import { createChatStore, type ChatStore } from '../store/chatStore';
-import { must, mount, splitRequestId, type Mounted } from '../testing';
+import { must, mount, splitRequestId, useEnglish, useSpanish, type Mounted } from '../testing';
 import { SEARCH_DEBOUNCE_MS, SessionPicker } from './SessionPicker';
 
 const mounted: Mounted[] = [];
 afterEach(() => {
   vi.useRealTimers();
+  // The Spanish cases switch the catalog; the rest of the file reads English.
+  useEnglish();
   for (const item of mounted.splice(0)) item.dispose();
 });
 
@@ -114,6 +116,49 @@ describe('opening', () => {
     expect(h.view.container.querySelector('.session-status')).toBeNull();
     const empty = open([]);
     expect(must(empty.view.container, '.session-status').textContent).toBe('No sessions yet');
+  });
+});
+
+describe('in Spanish (E11-i18n, phase 5a)', () => {
+  // Protects the session list from texts that skip the catalog: group titles (an English KEY kept
+  // for grouping, translated only where drawn), the untitled title, the count with its plural, the
+  // accessible names with the title inside, and the row time following `currentLocale()`.
+  // Provenance: the REAL shipped `l10n/bundle.l10n.es.json` through `useSpanish`, fabricated rows.
+  it('shows the group titles and the row times in Spanish', () => {
+    useSpanish();
+    const today = row('a', 'One');
+    const h = open([today, row('b', undefined, 2 * 24 * 3600 * 1000)]);
+    const titles = [...h.view.container.querySelectorAll('.session-group-title')].map(
+      (node) => node.textContent,
+    );
+    expect(titles).toEqual(['Hoy', 'Últimos 7 días']);
+    const titlesOfRows = [...h.view.container.querySelectorAll('.session-main .session-title')].map(
+      (node) => node.textContent,
+    );
+    expect(titlesOfRows).toEqual(['One', 'Sesión sin título']);
+    const expected = new Intl.DateTimeFormat('es', { hour: '2-digit', minute: '2-digit' }).format(
+      new Date(today.updatedAt),
+    );
+    expect(must(h.view.container, '.session-time').textContent).toBe(expected);
+  });
+
+  it('reads the labels, placeholder and status from the shipped Spanish catalog', () => {
+    useSpanish();
+    const loading = open();
+    expect(must(loading.view.container, '[role="dialog"]').getAttribute('aria-label')).toBe(
+      'Sesiones',
+    );
+    expect(must(loading.view.container, '.session-status').textContent).toBe('Cargando sesiones…');
+    expect(must(loading.view.container, 'input[type="search"]').getAttribute('placeholder')).toBe(
+      'Buscar por título',
+    );
+    const h = open([row('a', 'One'), row('b', 'Two')]);
+    expect(must(h.view.container, '[role="status"]').textContent?.trim()).toBe('2 sesiones');
+    expect(must(h.view.container, 'button.session-action').getAttribute('aria-label')).toBe(
+      'Renombrar sesión One',
+    );
+    const single = open([row('c', 'Solo')]);
+    expect(must(single.view.container, '[role="status"]').textContent?.trim()).toBe('1 sesión');
   });
 });
 

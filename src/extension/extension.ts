@@ -1,3 +1,5 @@
+// `./l10nBoot` stays the FIRST import: it loads the translations before any other module evaluates.
+import { describeL10n } from './l10nBoot';
 import * as vscode from 'vscode';
 import { registerBinaryDetection } from './binaryDetection';
 import { registerChat } from './chatLifecycle';
@@ -41,6 +43,14 @@ let logChannel: vscode.LogOutputChannel | undefined;
  * icon shows up, "OpenCode: Show Logs" activates the extension and the channel
  * shows `open-vs-code 0.0.1 activated`, in light and dark themes.
  * macOS/Linux UNVERIFIED.
+ *
+ * E11-i18n: after the `activated` line it logs `l10n: locale <language>, bundle <N keys|none>`
+ * (`describeL10n`), the line the `locale-es` suite reads. VERIFIED in English:
+ * `npm run test:integration -- --label main` (Windows 11, VS Code stable, 04/11/2026) passed
+ * "logs the l10n line", which waits for `l10n: locale en, bundle none`. VERIFIED in Spanish:
+ * `--label locale-es` (Windows 11, VS Code 1.145.0, 04/11/2026) passed "logs the host locale es
+ * with the loaded bundle", which waits for `l10n: locale es, bundle <N> keys` with N the entries
+ * of `l10n/bundle.l10n.es.json`. UNVERIFIED on macOS and Linux.
  *
  * E10-mods: `registerMods` runs before the chat (its sink is a parameter of `registerChat`); its
  * first load runs behind activation, and `deactivate` stops the Workers (UNVERIFIED in a real
@@ -103,6 +113,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const { version } = context.extension.packageJSON as { version?: unknown };
   channel.info(`open-vs-code ${String(version)} activated`);
+  channel.info(describeL10n());
 }
 
 /**

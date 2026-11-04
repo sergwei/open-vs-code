@@ -9,6 +9,7 @@
 // runs is covered by `watchServedPlugins` (issue #158, below): opencode runs with its file watcher
 // off, so it does not load the plugin, and the extension stops the server and asks.
 
+import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
 import {
   confirmDetail,
@@ -18,6 +19,7 @@ import {
   noticeMessage,
   type DecisionStore,
 } from './pluginConsent';
+import { inEnglish } from './l10nEnglish';
 import { createPluginRecheck } from './pluginRecheck';
 import {
   folderKey,
@@ -36,10 +38,14 @@ import type {
   ServerState,
 } from './serverManager';
 
-/** Button of the notice and of the modal that allows the plugins of the folder. */
-const START_ANYWAY = 'Start anyway';
-/** Button of the notice that remembers a refusal. */
-const DONT_START = "Don't start";
+/**
+ * Button of the notice and of the modal that allows the plugins of the folder, in the language of
+ * the host. Functions, not constants: the choice comes back as the label, so the code compares
+ * with the same call.
+ */
+const startAnyway = (): string => l10n.t('Start anyway');
+/** Button of the notice that remembers a refusal (see {@link startAnyway}). */
+const dontStart = (): string => l10n.t("Don't start");
 
 /** What {@link createPluginConsent} needs from the rest of the extension. */
 export interface PluginConsentOptions {
@@ -106,6 +112,8 @@ export interface PluginConsent {
  * folder in the forget message (the P7 check matches only its start), macOS and Linux. UNVERIFIED
  * until a visual step aborts a start during the scan.
  * The pure parts are tested by `pluginConsent.test.ts` and `projectPlugins.test.ts`.
+ * The buttons are compared with their translated labels (`startAnyway`, `dontStart`), and the
+ * notice, the modal and the two forget messages go through `l10n.t`; the log lines stay in English.
  */
 export function createPluginConsent(options: PluginConsentOptions): PluginConsent {
   const store: DecisionStore = createDecisionStore(options.memento, PROJECT_PLUGIN_DECISIONS_KEY);
@@ -126,12 +134,12 @@ export function createPluginConsent(options: PluginConsentOptions): PluginConsen
     try {
       const choice = await vscode.window.showWarningMessage(
         noticeMessage(findings, folder),
-        START_ANYWAY,
-        DONT_START,
+        startAnyway(),
+        dontStart(),
       );
-      if (choice === DONT_START) {
+      if (choice === dontStart()) {
         await store.record(folder, 'deny', fingerprint);
-      } else if (choice === START_ANYWAY) {
+      } else if (choice === startAnyway()) {
         await store.record(folder, 'allow', fingerprint);
         const state = options.serverState();
         const served = options.servedFolder();
@@ -160,11 +168,13 @@ export function createPluginConsent(options: PluginConsentOptions): PluginConsen
     fingerprint: string,
   ): Promise<boolean> => {
     const choice = await vscode.window.showWarningMessage(
-      'This folder has opencode plugins that will run with your permissions. Start opencode anyway?',
+      l10n.t(
+        'This folder has opencode plugins that will run with your permissions. Start opencode anyway?',
+      ),
       { modal: true, detail: confirmDetail(findings, folder) },
-      START_ANYWAY,
+      startAnyway(),
     );
-    if (choice !== START_ANYWAY) return false;
+    if (choice !== startAnyway()) return false;
     await store.record(folder, 'allow', fingerprint);
     return true;
   };
@@ -202,7 +212,8 @@ export function createPluginConsent(options: PluginConsentOptions): PluginConsen
         userAsked,
       });
       if (action === 'go') return 'go';
-      options.log.info(describe(folder, scan.findings));
+      // `describe` is synchronous and builds its fragments with `l10n.t`; the log gets English.
+      options.log.info(inEnglish(() => describe(folder, scan.findings)));
       if (action === 'notify') {
         void showNotice(folder, scan.findings, fingerprint);
         return 'hold';
@@ -216,7 +227,7 @@ export function createPluginConsent(options: PluginConsentOptions): PluginConsen
     async forgetServedFolder() {
       const folder = options.servedFolder();
       if (folder === undefined) {
-        void vscode.window.showInformationMessage('OpenCode: no folder is being served.');
+        void vscode.window.showInformationMessage(l10n.t('OpenCode: no folder is being served.'));
         return;
       }
       const removed = await store.forget(folder);
@@ -224,8 +235,8 @@ export function createPluginConsent(options: PluginConsentOptions): PluginConsen
       const shown = sanitizeLinkText(folder);
       void vscode.window.showInformationMessage(
         removed
-          ? `OpenCode will ask again before it starts opencode in ${shown}.`
-          : `No plugin decision is stored for ${shown}.`,
+          ? l10n.t('OpenCode will ask again before it starts opencode in {0}.', shown)
+          : l10n.t('No plugin decision is stored for {0}.', shown),
       );
     },
   };

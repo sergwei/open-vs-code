@@ -1,6 +1,7 @@
 // Pure text logic of the slash commands (issue #33): where the `/command` being typed starts and
 // ends, how the list is filtered, which command a finished prompt runs, and what the prompt text
 // becomes when a command is chosen. No DOM and no Solid: `slashCommand.test.ts` drives it directly.
+import * as l10n from '@vscode/l10n';
 import type { CommandOption, ModCommandOption } from '../../../src/shared/model';
 
 /**
@@ -8,9 +9,12 @@ import type { CommandOption, ModCommandOption } from '../../../src/shared/model'
  * the server has no `compact` command, so `/compact` is a client command like upstream's app
  * (`session.compact`, read in `use-session-commands.tsx@843a6c51`). They go through
  * `session.compact`, never through `prompt.send`.
+ * E11-i18n: the description is read once when the module loads. That is safe in the webview because
+ * `l10nBoot.ts` is the first import of `index.tsx` and the language never changes while a window
+ * lives; tests that switch language mount nothing that reads it.
  */
 export const CLIENT_COMMANDS: readonly CommandOption[] = [
-  { name: 'compact', description: 'Summarize the conversation to free context' },
+  { name: 'compact', description: l10n.t('Summarize the conversation to free context') },
 ];
 
 /**

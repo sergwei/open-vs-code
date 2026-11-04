@@ -16,8 +16,9 @@
 // and the opt-in real-opencode suite check, not this file. Dates are built from LOCAL components
 // and the locale is fixed (`de-DE`, 24-hour clock), so the expected texts do not depend on the
 // machine. The deliberately fixed `NOW` is Wednesday 21 Oct 2026, 15:30.
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SessionStatus, SessionSummary } from '../shared/model';
+import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 import {
   archiveSessions,
   createFolder,
@@ -745,5 +746,33 @@ describe('msUntilNextLocalMidnight', () => {
     expect(msUntilNextLocalMidnight(new Date(2026, 9, 21, 0, 0, 0, 0).getTime())).toBe(
       new Date(2026, 9, 22).getTime() - new Date(2026, 9, 21).getTime(),
     );
+  });
+});
+
+// Protects the translation of the labels the Sessions view paints (E11-i18n phase 4a): the date
+// groups, the sections, the "Show more" row, the untitled session and the state words, with the
+// shipped Spanish catalog. Provenance: the same hand-made rows; the text is read from
+// `l10n/bundle.l10n.es.json`. The group ids keep the English key.
+describe('Spanish labels', () => {
+  beforeEach(useSpanish);
+  afterEach(useEnglish);
+
+  it('paints groups, sections, the more row and the untitled session in Spanish', () => {
+    const rows = [
+      row('today', at(21, 14, 32), { forkOf: 'x' }),
+      row('week', at(16, 9)),
+      { id: 'blank', createdAt: 1, updatedAt: at(21, 9) },
+    ];
+    const tree = loaded(rows, { hasMore: true, statuses: { today: BUSY } });
+    const nodes = tree.project();
+    const groups = nodes.filter((n): n is SessionTreeGroup => n.kind === 'group');
+    expect(groups.map((g) => [g.id, g.label])).toEqual([
+      ['group:Today', 'Hoy'],
+      ['group:Previous 7 days', 'Últimos 7 días'],
+    ]);
+    expect(nodes.at(-1)).toEqual({ kind: 'more', id: 'more', label: 'Mostrar más sesiones' });
+    expect(only(tree, 'blank').label).toBe('Sesión sin título');
+    expect(only(tree, 'today').description).toMatch(/^En ejecución · Bifurcación · /);
+    expect(tree.tooltipOf('today', 'es', 3)).toContain('Archivos modificados: 3');
   });
 });

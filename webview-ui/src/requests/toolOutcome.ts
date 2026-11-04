@@ -8,6 +8,7 @@
  * "Allowed once" against "Always allowed": an allowed tool just completes. That exact decision
  * comes only from the host's record (`RequestResolution`).
  */
+import * as l10n from '@vscode/l10n';
 import type { JsonObject, Part } from '../../../src/shared/model';
 
 type ToolPart = Extract<Part, { type: 'tool' }>;
@@ -62,7 +63,11 @@ function readAnswers(metadata: JsonObject | undefined): string[][] | undefined {
   return result;
 }
 
-/** Header of question `index` from the tool input, falling back to its text and then to a number. */
+/**
+ * Header of question `index` from the tool input, falling back to its text and then to a
+ * numbered "Question N" in the interface language (the header itself comes from the model and is
+ * never translated).
+ */
 function headerOf(input: unknown, index: number): string {
   const questions =
     typeof input === 'object' && input !== null && !Array.isArray(input)
@@ -76,7 +81,7 @@ function headerOf(input: unknown, index: number): string {
       if (typeof value === 'string' && value !== '') return value;
     }
   }
-  return `Question ${String(index + 1)}`;
+  return l10n.t('Question {0}', index + 1);
 }
 
 /**

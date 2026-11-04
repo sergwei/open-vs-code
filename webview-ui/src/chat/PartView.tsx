@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { For, Match, Switch } from 'solid-js';
 import type { Part } from '../../../src/shared/model';
 import { RequestOutcome } from '../requests/RequestOutcome';
@@ -52,7 +53,7 @@ export function PartView(props: {
       <Match when={asReasoning(props.part)}>
         {(part) => (
           <details class="part-reasoning">
-            <summary>Thinking</summary>
+            <summary>{l10n.t('Thinking')}</summary>
             <div class="part-reasoning-text">{part().text}</div>
           </details>
         )}

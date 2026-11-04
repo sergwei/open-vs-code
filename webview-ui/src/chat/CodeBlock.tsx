@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { createMemo, createSignal, onCleanup, Show } from 'solid-js';
 import { highlightCode } from '../markdown/renderMarkdown';
 import { toVscodeLanguage } from '../markdown/languageIds';
@@ -57,27 +58,27 @@ export function CodeBlock(props: {
       <div class="code-header">
         <span class="code-language">{props.language ?? 'text'}</span>
         <span class="code-actions">
-          <button type="button" class="code-action" aria-label="Copy code" onClick={copy}>
-            Copy
+          <button type="button" class="code-action" aria-label={l10n.t('Copy code')} onClick={copy}>
+            {l10n.t('Copy')}
           </button>
           <button
             type="button"
             class="code-action"
-            aria-label="Insert code at cursor"
+            aria-label={l10n.t('Insert code at cursor')}
             onClick={insert}
           >
-            Insert
+            {l10n.t('Insert')}
           </button>
           <button
             type="button"
             class="code-action"
-            aria-label="Open code in a new file"
+            aria-label={l10n.t('Open code in a new file')}
             onClick={newFile}
           >
-            New file
+            {l10n.t('New file')}
           </button>
           <span class="code-copied" role="status">
-            {copied() ? 'Copied' : ''}
+            {copied() ? l10n.t('Copied') : ''}
           </span>
         </span>
       </div>

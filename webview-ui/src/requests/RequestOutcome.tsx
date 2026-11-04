@@ -1,4 +1,21 @@
+import * as l10n from '@vscode/l10n';
 import type { OutcomeView } from './resolutionPlacement';
+
+/**
+ * The visually hidden lead-in a screen reader reads before the line ("Permission: "), in the
+ * interface language. One whole string per kind, with its colon, so a translation can place the
+ * punctuation its own way.
+ */
+function prefixText(prefix: OutcomeView['prefix']): string {
+  switch (prefix) {
+    case 'Permission':
+      return l10n.t('Permission: ');
+    case 'Question':
+      return l10n.t('Question: ');
+    case 'Form':
+      return l10n.t('Form: ');
+  }
+}
 
 /**
  * One line of the history saying what the user answered ("Allowed once · Read .env"), placed under
@@ -15,7 +32,7 @@ import type { OutcomeView } from './resolutionPlacement';
 export function RequestOutcome(props: { view: OutcomeView }) {
   return (
     <p class="request-outcome" data-tone={props.view.tone}>
-      <span class="visually-hidden">{`${props.view.prefix}: `}</span>
+      <span class="visually-hidden">{prefixText(props.view.prefix)}</span>
       {props.view.text}
     </p>
   );

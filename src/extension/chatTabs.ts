@@ -6,7 +6,7 @@
 // (`WebviewPanel`s) only reports events to it and asks it questions.
 
 import type { HostToWebview } from '../shared/protocol';
-import { EMPTY_TITLE, sessionLabel } from '../shared/sessionLabel';
+import { displayLabel, emptyTitle } from './sessionDisplay';
 
 /**
  * An editor column for the VS Code side: a number is a real column (`TextEditor.viewColumn`), and
@@ -31,7 +31,7 @@ interface Tab {
  * Titles come from the messages the host posts to each pane (`snapshot` and `session.upserted`),
  * because the controller publishes to a pane even while its tab is hidden, so the registry sees
  * the session and its title without a callback from the controller (decision T4=1 of Sergio,
- * 29/10/2026). A tab with no session reads {@link EMPTY_TITLE}. The session seen this way lags
+ * 29/10/2026). A tab with no session reads {@link emptyTitle}. The session seen this way lags
  * the controller's, so it serves titles only: "which pane shows session X" is answered by
  * `ChatController.sessionOf`, never by this registry.
  * VERIFIED by `chatTabs.test.ts` with fabricated messages for the registry. HYPOTHESIS for the
@@ -47,14 +47,15 @@ export class ChatTabs {
    *
    * `seed` is for a tab restored after Reload Window: the session it was bound to and the title
    * VS Code persisted, so the tab reads as before until its first real snapshot replaces both
-   * (decision Q4=1 of Sergio, 29/10/2026). A blank seed title falls back to {@link EMPTY_TITLE}.
+   * (decision Q4=1 of Sergio, 29/10/2026). A blank seed title falls back to {@link emptyTitle}, in
+   * the language of the host.
    */
   add(paneId: number, column?: number, seed?: { sessionID?: string; title?: string }): void {
     const seedTitle = seed?.title?.trim();
     this.tabs.set(paneId, {
       paneId,
       sessionID: seed?.sessionID,
-      title: seedTitle === undefined || seedTitle === '' ? EMPTY_TITLE : seedTitle,
+      title: seedTitle === undefined || seedTitle === '' ? emptyTitle() : seedTitle,
       column,
       active: false,
       recency: ++this.clock,
@@ -133,7 +134,7 @@ export class ChatTabs {
 
   /**
    * Updates a tab from a message the host posted to its pane. A `snapshot` sets the session and
-   * the title (no open session reads {@link EMPTY_TITLE}); a `session.upserted` of the tab's own
+   * the title (no open session reads {@link emptyTitle}, translated); a `session.upserted` of the tab's own
    * session renames it; everything else, including the upsert of another session, is ignored. When
    * a snapshot opens a session that the list does not contain (a child session may not be listed)
    * the title it had is kept if the session did not change. Returns `true` when the session or the
@@ -146,12 +147,12 @@ export class ChatTabs {
     if (message.type === 'snapshot') {
       const sessionID = message.snapshot.open?.sessionID;
       const row = message.snapshot.sessions.find((session) => session.id === sessionID);
-      if (sessionID === undefined) tab.title = EMPTY_TITLE;
-      else if (row !== undefined) tab.title = sessionLabel(row);
-      else if (sessionID !== tab.sessionID) tab.title = EMPTY_TITLE;
+      if (sessionID === undefined) tab.title = emptyTitle();
+      else if (row !== undefined) tab.title = displayLabel(row);
+      else if (sessionID !== tab.sessionID) tab.title = emptyTitle();
       tab.sessionID = sessionID;
     } else if (message.type === 'session.upserted' && message.session.id === tab.sessionID) {
-      tab.title = sessionLabel(message.session);
+      tab.title = displayLabel(message.session);
     }
     return before !== `${tab.sessionID ?? ''}\u0000${tab.title}`;
   }

@@ -44,7 +44,47 @@ function readJson<T>(relativePath: string): T {
   return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), 'utf8')) as T;
 }
 
-const manifest = readJson<Manifest>('../../package.json');
+const nls = readJson<Record<string, string>>('../../package.nls.json');
+
+/**
+ * Turns a `%key%` string of package.json into its English text from `package.nls.json`, which is
+ * what a VS Code in English shows; any other string passes through. Throws on a key the file does
+ * not have, so a typo in the manifest fails here and not as a literal `%key%` in the palette.
+ * VERIFIED by "resolves the %key% titles through package.nls.json" below (showLogs resolves to
+ * its English title and an unknown key throws).
+ */
+function resolveNls(text: string): string {
+  const key = /^%([\w.-]+)%$/.exec(text)?.[1];
+  if (key === undefined) return text;
+  const resolved = nls[key];
+  if (resolved === undefined) throw new Error(`package.nls.json has no key "${key}"`);
+  return resolved;
+}
+
+/**
+ * Returns a copy of `node` with every `%key%` string, at any depth, replaced by its English text.
+ *
+ * Mirrors what VS Code does with the manifest (it replaces any exact `%key%` string at any depth),
+ * so the comparisons below keep reading English texts. Throws, through `resolveNls`, on a key the
+ * base catalog lacks. VERIFIED by "resolves the %key% titles through package.nls.json" and by
+ * "gives the Sessions view one welcome per state, with the approved texts and live buttons", whose
+ * welcome texts only match once the nested `contents` are resolved.
+ */
+function resolveDeep<T>(node: T): T {
+  if (typeof node === 'string') return resolveNls(node) as T;
+  if (Array.isArray(node)) return node.map((item: unknown) => resolveDeep(item)) as T;
+  if (node !== null && typeof node === 'object') {
+    return Object.fromEntries(
+      Object.entries(node).map(([key, value]) => [key, resolveDeep(value as unknown)]),
+    ) as T;
+  }
+  return node;
+}
+
+const rawManifest = readJson<Manifest>('../../package.json');
+// The comparisons below are about the English texts, so the manifest is read through the base
+// catalog: every `%key%` of package.json, titles, descriptions and welcome texts included.
+const manifest = resolveDeep(rawManifest);
 const idValues: string[] = Object.values(ids);
 
 /**
@@ -67,6 +107,71 @@ describe('ids.ts matches package.json contributes', () => {
   it('declares the show-logs command', () => {
     const commands = manifest.contributes.commands.map((c) => c.command);
     expect(commands).toContain(ids.SHOW_LOGS_COMMAND_ID);
+  });
+
+  // E11-i18n: the tracer. The raw package.json must hold the key, not the English text,
+  // and the base catalog must resolve it.
+  it('resolves the %key% titles through package.nls.json', () => {
+    const raw = readJson<Manifest>('../../package.json').contributes.commands.find(
+      (c) => c.command === ids.SHOW_LOGS_COMMAND_ID,
+    );
+    expect(raw?.title).toBe('%command.showLogs.title%');
+    expect(resolveNls('%command.showLogs.title%')).toBe('Show Logs');
+    expect(resolveNls('Plain text')).toBe('Plain text');
+    expect(() => resolveNls('%no.such.key%')).toThrow('no.such.key');
+  });
+
+  // E11-i18n: every text the user reads in the manifest is a `%key%`, or VS Code in Spanish would
+  // show it in English. Walks the RAW package.json (top-level `description`, `capabilities` and
+  // `contributes`) and fails on any `title`, `markdownDescription`, `description`, `enumDescriptions`,
+  // `patternErrorMessage`, `name` or `contents` that is not exactly `%key%`. The brand titles are the
+  // only literals, listed by path so a new literal title cannot hide behind the same word; `category`
+  // ("OpenCode") is brand too and is not a checked field. Also requires that every key exists in the
+  // base and in every `package.nls.<id>.json` found by file name (the completeness of each language
+  // is `scripts/l10n.mjs check`, run by `l10nCatalog.test.ts`). Data: the REAL package.json.
+  // UNVERIFIED by mutation: put a literal in a `title`, then run this file; the failure should name the path.
+  it('has a %key% in every visible text, except the brand titles', () => {
+    const VISIBLE = new Set([
+      'title',
+      'markdownDescription',
+      'description',
+      'enumDescriptions',
+      'patternErrorMessage',
+      'name',
+      'contents',
+    ]);
+    const BRAND_PATHS = [
+      'contributes.viewsContainers.activitybar.0.title',
+      'contributes.configuration.title',
+    ];
+    const literal: string[] = [];
+    const seenBrand: string[] = [];
+    const keys = new Set<string>();
+    const visit = (node: unknown, trail: string, visible: boolean): void => {
+      if (typeof node === 'string') {
+        if (!visible) return;
+        const key = /^%([\w.-]+)%$/.exec(node)?.[1];
+        if (key !== undefined) keys.add(key);
+        else if (BRAND_PATHS.includes(trail)) seenBrand.push(trail);
+        else literal.push(`${trail}: ${node.slice(0, 40)}`);
+      } else if (Array.isArray(node)) {
+        node.forEach((item: unknown, index) => visit(item, `${trail}.${String(index)}`, visible));
+      } else if (node !== null && typeof node === 'object') {
+        for (const [name, value] of Object.entries(node)) {
+          visit(value, `${trail}.${name}`.replace(/^\./, ''), VISIBLE.has(name) || visible);
+        }
+      }
+    };
+    const root = rawManifest as unknown as Record<string, unknown>;
+    visit(root['description'], 'description', true);
+    visit(root['capabilities'], 'capabilities', false);
+    visit(root['contributes'], 'contributes', false);
+    expect(literal).toEqual([]);
+    expect(seenBrand.sort()).toEqual([...BRAND_PATHS].sort());
+    expect(keys.size).toBeGreaterThan(40);
+    for (const key of keys) expect(nls[key], key).toBeDefined();
+    const spanish = readJson<Record<string, string>>('../../package.nls.es.json');
+    for (const key of keys) expect(spanish[key], `es ${key}`).toBeDefined();
   });
 
   it('declares the phase 3 commands (restart, select folder, manage permissions)', () => {

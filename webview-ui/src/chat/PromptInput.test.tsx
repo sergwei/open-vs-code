@@ -13,11 +13,12 @@
 // Provenance: key events synthesized in jsdom against a controlled textarea. jsdom has no
 // layout, so auto-grow and real caret movement are UNVERIFIED (F5 point 7); the real mouse and
 // the look of the popup are `test:visual` step 16.
+import * as l10n from '@vscode/l10n';
 import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CommandOption } from '../../../src/shared/model';
 import type { AttachmentRef } from '../../../src/shared/protocol';
-import { must, mount, type Mounted } from '../testing';
+import { must, mount, useEnglish, useSpanish, type Mounted } from '../testing';
 import type { DropContent } from './dropData';
 import type { FileSearchView } from './MentionPopup';
 import { PromptInput } from './PromptInput';
@@ -36,6 +37,8 @@ afterEach(() => {
   mounted = undefined;
   // The focus tests of issue #92 stub `document.hasFocus`, which outlives the mounted component.
   vi.restoreAllMocks();
+  // The Spanish cases switch the catalog; the rest of the file reads English.
+  useEnglish();
 });
 
 /** Mounts a PromptInput whose draft lives in a signal, with spies for every callback. */
@@ -118,7 +121,8 @@ function setup(
     textarea.setSelectionRange(text.length, text.length);
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
   };
-  const plus = must<HTMLButtonElement>(mounted.container, 'button[aria-label="Add context"]');
+  // By its data attribute, not its name, so the Spanish cases can mount the same harness.
+  const plus = must<HTMLButtonElement>(mounted.container, 'button[data-plus-trigger]');
   /** Opens the "+" menu the way the mouse does. */
   const openMenu = (): void => {
     plus.click();
@@ -185,6 +189,65 @@ describe('without a connection (E2, issue #85, P5=2)', () => {
 
   it('keeps the normal placeholder when connected', () => {
     expect(setup().textarea.placeholder).toContain('Ask opencode');
+  });
+
+  it('translates the placeholders with the loaded bundle', () => {
+    // E11-i18n tracer of the webview layer: a fabricated Spanish bundle, configured the way
+    // `l10nBoot.ts` does, and reset in `finally` so the other tests of the file stay in English.
+    l10n.config({
+      contents: {
+        'Waiting for opencode…': 'Esperando a opencode…',
+        'Ask opencode… (Enter to send, Shift+Enter for a new line)':
+          'Pregunte a opencode… (Intro para enviar, Mayús+Intro para una línea nueva)',
+      },
+    });
+    try {
+      expect(setup({ waiting: true }).textarea.placeholder).toBe('Esperando a opencode…');
+      mounted?.dispose();
+      expect(setup().textarea.placeholder).toContain('Pregunte a opencode');
+    } finally {
+      l10n.config({ contents: {} });
+    }
+  });
+});
+
+describe('in Spanish (E11-i18n, phase 5a)', () => {
+  // Protects the prompt bar from a text that skips the catalog: every name, tooltip, placeholder and
+  // live-region count must follow the language. Provenance: the REAL shipped
+  // `l10n/bundle.l10n.es.json` read from the file through `useSpanish`, a fabricated prompt state in
+  // jsdom; the look and the overflow in Spanish are `test:visual` step 42.
+  it('reads its labels, placeholder and live-region counts from the shipped Spanish catalog', () => {
+    useSpanish();
+    const { textarea, type, plus } = setup();
+    const container = mounted?.container ?? document.body;
+    expect(textarea.placeholder).toContain('Pregunte a opencode');
+    expect(textarea.getAttribute('aria-label')).toBe('Prompt');
+    expect(container.querySelector('form')?.getAttribute('aria-label')).toBe('Enviar un prompt');
+    expect(container.querySelector('button[type="submit"]')?.getAttribute('aria-label')).toBe(
+      'Enviar',
+    );
+    expect(plus.getAttribute('aria-label')).toBe('Agregar contexto');
+    expect(
+      container.querySelector('button[data-command-trigger]')?.getAttribute('aria-label'),
+    ).toBe('Comandos');
+    plus.click();
+    expect(menuItem('Adjuntar archivo…')).toBeDefined();
+    expect(menuItem('Mencionar un archivo')).toBeDefined();
+    type('/');
+    const live = container.querySelector('[role="status"]')?.textContent ?? '';
+    expect(live.trim()).toBe('3 comandos');
+    type('/hel');
+    expect(container.querySelector('[role="status"]')?.textContent?.trim()).toBe('1 comando');
+  });
+
+  it('says "Stop" in Spanish while a turn runs', () => {
+    useSpanish();
+    setup({ busy: true });
+    const labels = [...(mounted?.container.querySelectorAll('button') ?? [])].map((b) =>
+      b.getAttribute('aria-label'),
+    );
+    expect(labels).toContain('Detener');
+    expect(labels).not.toContain('Enviar');
   });
 });
 

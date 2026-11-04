@@ -42,6 +42,7 @@
 // an unknown message or block is dropped (deltas are not idempotent, so they cannot be replayed).
 
 import type { SessionMessageInfo, V2Event } from '@opencode/client';
+import * as l10n from '@vscode/l10n';
 import type {
   ErrorInfo,
   JsonObject,
@@ -407,7 +408,9 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
     return [
       upsertMessage(
         sessionID,
-        compactionNotice(live.id, live.createdAt, 'failed', { detail: 'it did not finish' }),
+        compactionNotice(live.id, live.createdAt, 'failed', {
+          detail: l10n.t('it did not finish'),
+        }),
       ),
     ];
   };

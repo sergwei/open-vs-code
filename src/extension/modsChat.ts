@@ -7,7 +7,9 @@
 // `ModCommandOption`). Commands go out under their QUALIFIED name `<modId>:<command>`, the name the
 // user types after the `/` and the one `mod.command.run` carries.
 
+import * as l10n from '@vscode/l10n';
 import type { ModBand, ModCommandOption } from '../shared/model';
+import { translatedError } from './l10nEnglish';
 import type { ModComposeRequest, ModsChat, ModsState } from './modEvents';
 import type { ModCommandInfo, ModStatus, ModStatusLine } from './modHost';
 
@@ -102,7 +104,9 @@ export function createModsChat(
     run: (command, args, sessionID) => {
       const found = source.commands().find((c) => qualify(c.modId, c.name) === command);
       if (found === undefined) {
-        return Promise.reject(new Error(`command "${command}" is not available`));
+        return Promise.reject(
+          translatedError(() => l10n.t('command "{0}" is not available', command)),
+        );
       }
       return source.runCommand(found.modId, found.name, args, sessionID);
     },

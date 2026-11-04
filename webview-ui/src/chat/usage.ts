@@ -19,6 +19,8 @@
  * Differences that are ours: a message whose total is 0 (a step that failed before the model
  * answered) is skipped instead of hiding the line, and the 80 % "high" level is our own threshold.
  */
+import * as l10n from '@vscode/l10n';
+import { currentLocale } from '../../../src/shared/l10n';
 import type {
   Catalog,
   MessageInfo,
@@ -153,9 +155,9 @@ export function formatCost(usd: number): string {
   return USD.format(usd);
 }
 
-/** The exact count with thousands separators ("9,010"), fixed `en-US`. */
+/** The exact count with the thousands separators of the active language ("9,010" in English, "9.010" in Spanish). */
 function exact(count: number): string {
-  return count.toLocaleString('en-US');
+  return count.toLocaleString(currentLocale());
 }
 
 /**
@@ -166,7 +168,9 @@ function exact(count: number): string {
  * Visible: "Context 9K / 200K (5%) · $0.02"; without a known limit "Context 9K · $0.02"; with only a
  * cost "Cost $0.02". Name and tooltip: "Context: 9,010 tokens of 200,000 (5%). Session cost: $0.02,
  * including subagents." The "including subagents" clause appears only when the figure really
- * adds a child session. HYPOTHESIS: a real screen reader was not run; `usage.test.ts` and
+ * adds a child session. E11-i18n: every sentence is a whole `l10n.t` message with placeholders,
+ * the thousands separators follow `currentLocale()` and the USD amount stays fixed `en-US`.
+ * HYPOTHESIS: a real screen reader was not run; `usage.test.ts` and
  * `UsageIndicator.test.tsx` check the strings only.
  */
 export function describeUsage(
@@ -182,19 +186,37 @@ export function describeUsage(
   const text: string[] = [];
   const name: string[] = [];
   if (context !== undefined) {
-    let visible = `Context ${compactTokens(context.tokens)}`;
-    let spoken = `Context: ${exact(context.tokens)} tokens`;
+    // Whole sentences with placeholders, never fragments joined: a language orders them differently.
     if (context.limit !== undefined && context.percent !== undefined) {
-      visible += ` / ${compactTokens(context.limit)} (${String(context.percent)}%)`;
-      spoken += ` of ${exact(context.limit)} (${String(context.percent)}%)`;
+      text.push(
+        l10n.t(
+          'Context {0} / {1} ({2}%)',
+          compactTokens(context.tokens),
+          compactTokens(context.limit),
+          context.percent,
+        ),
+      );
+      name.push(
+        l10n.t(
+          'Context: {0} tokens of {1} ({2}%).',
+          exact(context.tokens),
+          exact(context.limit),
+          context.percent,
+        ),
+      );
+    } else {
+      text.push(l10n.t('Context {0}', compactTokens(context.tokens)));
+      name.push(l10n.t('Context: {0} tokens.', exact(context.tokens)));
     }
-    text.push(visible);
-    name.push(`${spoken}.`);
   }
   if (cost !== undefined && costShown) {
     const amount = formatCost(cost.usd);
-    text.push(context === undefined ? `Cost ${amount}` : amount);
-    name.push(`Session cost: ${amount}${cost.withSubagents ? ', including subagents' : ''}.`);
+    text.push(context === undefined ? l10n.t('Cost {0}', amount) : amount);
+    name.push(
+      cost.withSubagents
+        ? l10n.t('Session cost: {0}, including subagents.', amount)
+        : l10n.t('Session cost: {0}.', amount),
+    );
   }
   const high = context?.percent !== undefined && context.percent >= HIGH_CONTEXT_PERCENT;
   return { text: text.join(' · '), name: name.join(' '), level: high ? 'high' : 'normal' };

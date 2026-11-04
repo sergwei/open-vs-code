@@ -1,8 +1,10 @@
+import * as l10n from '@vscode/l10n';
 import { createMemo, createSignal, Show, untrack } from 'solid-js';
+import { currentLocale } from '../../../src/shared/l10n';
 import type { SessionSummary } from '../../../src/shared/model';
 import { MAX_SESSION_TITLE_LENGTH } from '../../../src/shared/protocol';
 import type { SessionOp } from '../store/chatStore';
-import { formatSessionTime, sessionLabel } from './sessionGroups';
+import { displayLabel, formatSessionTime } from './sessionGroups';
 
 /**
  * One row of the session list (issue #20): the main button that opens the session, and the
@@ -26,6 +28,8 @@ import { formatSessionTime, sessionLabel } from './sessionGroups';
  * deleted by the host is locked with `aria-disabled` and ignores clicks and keys, instead of
  * `disabled`: a button that is disabled
  * while it holds the focus drops the keyboard user onto the page.
+ * E11-i18n: texts go through `l10n.t` and the time is formatted with `currentLocale()` (it used the
+ * `Intl` default before, so with VS Code in English on a Spanish OS the time now follows VS Code).
  * VERIFIED by `SessionPicker.test.tsx` in jsdom; look, hover and focus ring are checked by
  * `npm run test:visual` (step 9) on Windows only.
  */
@@ -49,10 +53,10 @@ export function SessionRow(props: {
   let main: HTMLButtonElement | undefined;
   let input: HTMLInputElement | undefined;
 
-  const label = createMemo(() => sessionLabel(props.row));
+  const label = createMemo(() => displayLabel(props.row));
   const busyText = createMemo(() => {
-    if (props.op?.op === 'renaming') return 'Renaming…';
-    if (props.op?.op === 'deleting') return 'Deleting…';
+    if (props.op?.op === 'renaming') return l10n.t('Renaming…');
+    if (props.op?.op === 'deleting') return l10n.t('Deleting…');
     return '';
   });
   /** "Running · Needs input" or the in-flight text; empty when there is nothing to say. */
@@ -60,9 +64,13 @@ export function SessionRow(props: {
     if (busyText() !== '') return busyText();
     const parts: string[] = [];
     // A fork is titled like its original (or "Untitled session"), so the row says what it is.
-    if (props.row.forkOf !== undefined) parts.push('Fork');
-    if (props.running) parts.push('Running');
-    if (props.needsInput) parts.push('Needs input');
+    if (props.row.forkOf !== undefined) {
+      parts.push(
+        l10n.t({ message: 'Fork', comment: ['A session that was forked from another session'] }),
+      );
+    }
+    if (props.running) parts.push(l10n.t('Running'));
+    if (props.needsInput) parts.push(l10n.t('Needs input'));
     return parts.join(' · ');
   });
   const locked = () => props.op !== undefined;
@@ -140,7 +148,7 @@ export function SessionRow(props: {
               <span class="session-title">{label()}</span>
               <span class="session-meta">
                 <span class="session-time">
-                  {formatSessionTime(props.row.updatedAt, props.now)}
+                  {formatSessionTime(props.row.updatedAt, props.now, currentLocale())}
                 </span>
                 <Show when={badges() !== ''}>
                   <span class="session-badge">{badges()}</span>
@@ -151,24 +159,24 @@ export function SessionRow(props: {
               <button
                 type="button"
                 class="secondary session-action"
-                aria-label={`Rename session ${label()}`}
+                aria-label={l10n.t('Rename session {0}', label())}
                 tabindex={props.tabbable ? 0 : -1}
                 aria-disabled={locked() ? 'true' : undefined}
                 onClick={startEdit}
               >
-                Rename
+                {l10n.t('Rename')}
               </button>
               <button
                 type="button"
                 class="secondary session-action"
-                aria-label={`Delete session ${label()}`}
+                aria-label={l10n.t('Delete session {0}', label())}
                 tabindex={props.tabbable ? 0 : -1}
                 aria-disabled={locked() ? 'true' : undefined}
                 onClick={() => {
                   if (!locked()) props.onDelete();
                 }}
               >
-                Delete
+                {l10n.t('Delete')}
               </button>
             </span>
           </>
@@ -178,7 +186,7 @@ export function SessionRow(props: {
           type="text"
           class="session-rename-input"
           maxlength={MAX_SESSION_TITLE_LENGTH}
-          aria-label={`New title for session ${label()}`}
+          aria-label={l10n.t('New title for session {0}', label())}
           ref={(element) => {
             input = element;
             // Set ONCE, not as a reactive `value=` prop: a `session.renamed` that arrives while the

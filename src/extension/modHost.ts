@@ -32,8 +32,10 @@
 // carry neither).
 
 import { Worker, type WorkerOptions } from 'node:worker_threads';
+import * as l10n from '@vscode/l10n';
 import type { ModEvent, ModJson, ModSeverity } from '../mods/api';
 import { MAX_MOD_COMMAND_ARGS } from '../shared/protocol';
+import { translatedError } from './l10nEnglish';
 import type { DiscoveredMod } from './modDiscovery';
 import {
   MAX_COMMANDS_PER_MOD,
@@ -345,15 +347,21 @@ export class ModHost {
   runCommand(modId: string, name: string, args: string, sessionID?: string): Promise<void> {
     const rec = this.records.get(modId);
     if (rec === undefined || rec.state !== 'active') {
-      return Promise.reject(new Error(`mod "${modId}" is not running`));
+      return Promise.reject(translatedError(() => l10n.t('mod "{0}" is not running', modId)));
     }
     if (!rec.commands.has(name)) {
-      return Promise.reject(new Error(`mod "${modId}" has no command "${name}"`));
+      return Promise.reject(
+        translatedError(() => l10n.t('mod "{0}" has no command "{1}"', modId, name)),
+      );
     }
     if (args.length > MAX_MOD_COMMAND_ARGS) {
       return Promise.reject(
-        new Error(
-          `arguments of "${name}" are too long (at most ${MAX_MOD_COMMAND_ARGS} characters)`,
+        translatedError(() =>
+          l10n.t(
+            'arguments of "{0}" are too long (at most {1} characters)',
+            name,
+            MAX_MOD_COMMAND_ARGS,
+          ),
         ),
       );
     }
@@ -361,7 +369,7 @@ export class ModHost {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         rec.pendingCommands.delete(requestId);
-        reject(new Error(`command "${name}" of mod "${modId}" timed out`));
+        reject(translatedError(() => l10n.t('command "{0}" of mod "{1}" timed out', name, modId)));
       }, this.commandTimeoutMs);
       timer.unref();
       rec.pendingCommands.set(requestId, { resolve, reject, timer });
@@ -768,7 +776,7 @@ export class ModHost {
     rec.statusPending = undefined;
     for (const pending of rec.pendingCommands.values()) {
       clearTimeout(pending.timer);
-      pending.reject(new Error(`mod "${rec.mod.manifest.id}" stopped`));
+      pending.reject(translatedError(() => l10n.t('mod "{0}" stopped', rec.mod.manifest.id)));
     }
     rec.pendingCommands.clear();
     rec.commands.clear();

@@ -8,6 +8,8 @@
 // REST `message.list`, `session.list`, `permission.list`, `session.form.list`). Tests built on
 // those recorded JSON shapes confirm OUR logic, not the contract (see the test headers).
 
+import * as l10n from '@vscode/l10n';
+import { inEnglish, logMessageOf } from './l10nEnglish';
 import type {
   AgentInfo,
   CommandInfo,
@@ -100,14 +102,24 @@ function stringField(record: Record<string, unknown>, key: string): string | und
 }
 
 /**
- * Words for the server errors that arrive without a `message`. Only the ones a user can meet:
- * `SessionBusyError` (stage, clear and commit of a revert while a turn runs, observed with a real
- * opencode 2.0.32 on 23/10/2026) and `MessageNotFoundError` (stage from an unknown id). Our text.
+ * Words for the server errors that arrive without a `message`, or `undefined` for any other tag.
+ * Only the ones a user can meet: `SessionBusyError` (stage, clear and commit of a revert while a
+ * turn runs, observed with a real opencode 2.0.32 on 23/10/2026) and `MessageNotFoundError`
+ * (stage from an unknown id). Our text, translated at call time with `l10n.t` (a function and not
+ * a module constant, so a language set after the import is honoured).
+ * VERIFIED by `wireMapping.test.ts` "translates the words of a tag-only server error": with the
+ * Spanish catalog loaded `SessionBusyError` reads in Spanish.
  */
-const TAG_MESSAGES: Readonly<Record<string, string>> = {
-  SessionBusyError: 'The session is busy with a turn. Try again when it has finished.',
-  MessageNotFoundError: 'That message no longer exists.',
-};
+function tagMessage(tag: string): string | undefined {
+  switch (tag) {
+    case 'SessionBusyError':
+      return l10n.t('The session is busy with a turn. Try again when it has finished.');
+    case 'MessageNotFoundError':
+      return l10n.t('That message no longer exists.');
+    default:
+      return undefined;
+  }
+}
 
 /**
  * Turns anything thrown by the client, or a structured error from an event, into an
@@ -121,12 +133,22 @@ const TAG_MESSAGES: Readonly<Record<string, string>> = {
  * {@link sanitizeText}. The `_tag` and `type` shapes were seen on a real opencode 2.0.32
  * (`SessionNotFoundError`, `provider.no-route`; Windows 11, 2026-10-20); the `ClientError` shape
  * is read from `client-error.d.ts` only (HYPOTHESIS for its text in a real failure).
- * A body with a `_tag` and NO `message` keeps its code and gets the text of {@link TAG_MESSAGES}
+ * A body with a `_tag` and NO `message` keeps its code and gets the text of {@link tagMessage}
  * (or the tag itself): the real `SessionBusyError` of opencode 2.0.32 is `{ _tag, sessionID, name }`
  * with no `message` (issue #32 spike, Windows 11, 23/10/2026), and the user would read "Unknown error".
+ * The message is in the language of VS Code when we wrote it; its English twin (the `logMessage` of
+ * an error or body built by `translatedError`/`refusal`, or a second `inEnglish` evaluation of
+ * {@link tagMessage} and "Unknown error") is remembered for {@link logTextOf}, which is what the log
+ * prints. A text from the server has no twin: it is logged as it came.
  */
 export function toErrorInfo(error: unknown, secrets: ErrorSecrets): ErrorInfo {
   const clean = (text: string): string => sanitizeText(text, secrets);
+  // The English twin of `message` goes to the log through `logTextOf`; it is kept beside the info
+  // (a WeakMap), never in it, so it cannot reach the webview.
+  const withLog = (info: ErrorInfo, english: string | undefined): ErrorInfo => {
+    if (english !== undefined) englishTexts.set(info, clean(english));
+    return info;
+  };
   if (error instanceof Error) {
     const reason = (error as { reason?: unknown }).reason;
     const cause = error.cause instanceof Error ? error.cause.message : undefined;
@@ -135,16 +157,40 @@ export function toErrorInfo(error: unknown, secrets: ErrorSecrets): ErrorInfo {
       message: clean(error.message),
     };
     if (cause !== undefined) info.detail = clean(cause);
-    return info;
+    return withLog(info, logMessageOf(error));
   }
   if (isRecord(error)) {
     const message = stringField(error, 'message');
     const code = stringField(error, '_tag') ?? stringField(error, 'type');
-    if (message !== undefined) return { code: code ?? 'Unknown', message: clean(message) };
+    if (message !== undefined) {
+      return withLog(
+        { code: code ?? 'Unknown', message: clean(message) },
+        stringField(error, 'logMessage'),
+      );
+    }
     const tag = stringField(error, '_tag');
-    if (tag !== undefined) return { code: tag, message: clean(TAG_MESSAGES[tag] ?? tag) };
+    if (tag !== undefined) {
+      return withLog(
+        { code: tag, message: clean(tagMessage(tag) ?? tag) },
+        inEnglish(() => tagMessage(tag) ?? tag),
+      );
+    }
   }
-  return { code: 'Unknown', message: clean(typeof error === 'string' ? error : 'Unknown error') };
+  const produce = (): string => (typeof error === 'string' ? error : l10n.t('Unknown error'));
+  return withLog({ code: 'Unknown', message: clean(produce()) }, inEnglish(produce));
+}
+
+/** English twins of the translated `message` of an {@link ErrorInfo}, for the log only. */
+const englishTexts = new WeakMap<ErrorInfo, string>();
+
+/**
+ * The `message` of `info` in English, for the OutputChannel (decision of Sergio, E11-i18n: the whole
+ * log is English, `ErrorInfo.message` included); `info.message` itself when it was never translated
+ * (a server text, or an info not built by {@link toErrorInfo}).
+ * VERIFIED by `wireMapping.test.ts` ("keeps the English text of a translated error for the log").
+ */
+export function logTextOf(info: ErrorInfo): string {
+  return englishTexts.get(info) ?? info.message;
 }
 
 /** Maps a `SessionStructuredError` of the wire; same scrubbing as {@link toErrorInfo}. */
@@ -486,11 +532,13 @@ export function compactionNotice(
   options: { auto?: boolean; detail?: string } = {},
 ): Extract<MessageInfo, { kind: 'notice' }> {
   let text: string;
-  if (compaction === 'running') text = 'Compacting the conversation…';
+  if (compaction === 'running') text = l10n.t('Compacting the conversation…');
   else if (compaction === 'completed') {
     text =
-      options.auto === true ? 'Conversation compacted automatically' : 'Conversation compacted';
-  } else text = `Compaction failed: ${options.detail ?? 'unknown error'}`;
+      options.auto === true
+        ? l10n.t('Conversation compacted automatically')
+        : l10n.t('Conversation compacted');
+  } else text = l10n.t('Compaction failed: {0}', options.detail ?? l10n.t('unknown error'));
   return { kind: 'notice', id, createdAt, text, compaction };
 }
 

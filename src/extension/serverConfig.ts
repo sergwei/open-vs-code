@@ -12,8 +12,9 @@
 // this mapping must not forward it by accident. `credential.list` is not even part of `ChatApi`.
 // The unit test plants a secret in every such place and looks for it in the serialized snapshot.
 
+import * as l10n from '@vscode/l10n';
 import type { ErrorSecrets } from './wireMapping';
-import { sanitizeText, toErrorInfo } from './wireMapping';
+import { logTextOf, sanitizeText, toErrorInfo } from './wireMapping';
 import type { ChatApi } from './opencodeClient';
 import type { ServerLog } from './opencodeServer';
 import type { ProviderAuthApi } from './providerAuth';
@@ -229,7 +230,7 @@ export function toIntegrationRow(
       methods.push({
         index,
         type: 'key',
-        label: method.label === undefined ? 'API key' : firstLine(method.label),
+        label: method.label === undefined ? l10n.t('API key') : firstLine(method.label),
         fields,
         supported,
       });
@@ -572,7 +573,7 @@ export class ServerConfig implements ServerConfigSink {
   /** One `warn` line `<what> failed: <code>: <message>`, the message scrubbed of URL and password. */
   private warnFailed(what: string, error: unknown): void {
     const info = toErrorInfo(error, this.secrets);
-    this.log.warn(`${what} failed: ${info.code}: ${info.message}`);
+    this.log.warn(`${what} failed: ${info.code}: ${logTextOf(info)}`);
   }
 
   /** One read of `integration.list` for `generation`; a failure keeps the previous rows. */

@@ -28,7 +28,7 @@ import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Catalog, ModelOption, ModelRef } from '../../../src/shared/model';
 import type { ConnectionState } from '../../../src/shared/protocol';
-import { must, mount, type Mounted } from '../testing';
+import { must, mount, useEnglish, useSpanish, type Mounted } from '../testing';
 import { AgentModelMenu } from './AgentModelMenu';
 import { effectiveModel, variantChoices } from './selection';
 
@@ -735,6 +735,46 @@ describe('pointer and focus', () => {
     h.search().focus();
     (h.modelRows()[0] as HTMLElement).focus();
     expect(h.dialog()).not.toBeNull();
+  });
+});
+
+describe('in Spanish (E11-i18n)', () => {
+  // Protects the agent and model menu from a text that skips the catalog: the chip name with the
+  // connection word, the three column headings, the "Current" mark, the model details and the live
+  // region count. Provenance: the REAL shipped `l10n/bundle.l10n.es.json` read from the file
+  // through `useSpanish`, the fabricated catalog of this file in jsdom; the look and the overflow
+  // at 300 px are `test:visual` step 42 (cell B).
+  afterEach(() => {
+    useEnglish();
+  });
+
+  it('names the chip and the columns, and details the models, from the shipped catalog', () => {
+    useSpanish();
+    const h = start({ model: GLM });
+    expect(h.chip().getAttribute('aria-label')).toBe(
+      'Agente y modelo: Build · GLM-5.3-Flash Free (Conectado)',
+    );
+    h.open();
+    expect(must(h.view.container, '[data-group="agent"] h3').textContent).toBe('Agente');
+    expect(must(h.view.container, '[data-group="model"] h3').textContent).toBe('Modelo');
+    expect(must(h.view.container, '[data-group="variant"] h3').textContent).toBe('Razonamiento');
+    expect(h.search().placeholder).toBe('Buscar modelos');
+    const current = h.modelRows().find((row) => row.getAttribute('aria-current') === 'true');
+    expect(current?.querySelector('.model-meta')?.textContent).toBe(
+      'Actual · Gratis · 200K de contexto',
+    );
+    expect(h.agentRows()[0]?.querySelector('.model-meta')?.textContent).toBe('Actual');
+  });
+
+  it('marks what the catalog lacks as "(no disponible)" and counts the models in Spanish', () => {
+    useSpanish();
+    const h = start({ model: { providerID: 'gone', id: 'old' }, agent: 'ghost' });
+    expect(h.chip().textContent).toBe('ghost (no disponible) · gone/old (no disponible)');
+    h.open();
+    expect(h.view.container.textContent).toContain('3 modelos');
+    h.search().value = 'zzz';
+    h.search().dispatchEvent(new Event('input', { bubbles: true }));
+    expect(h.view.container.textContent).toContain('Ningún modelo coincide');
   });
 });
 

@@ -5,6 +5,7 @@
 // `node_modules`): `test:visual` drives "Choose binary…" with the simple file dialog (see the
 // header of `createSetupActions` for what was and was not observed).
 
+import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
 import type { SetupCommands } from './chatController';
 import {
@@ -18,12 +19,15 @@ import {
 
 /**
  * Filters of the "Choose binary" dialog on Windows: executables first, "All files" so a shim or an
- * unusual name is never blocked (the detection decides whether it works).
+ * unusual name is never blocked (the detection decides whether it works). A function, not a
+ * constant: the two names go through `l10n.t` in the language of the moment the dialog opens.
  */
-const WINDOWS_BINARY_FILTERS: { [name: string]: string[] } = {
-  Executables: ['exe', 'cmd', 'bat'],
-  'All files': ['*'],
-};
+function windowsBinaryFilters(): { [name: string]: string[] } {
+  return {
+    [l10n.t('Executables')]: ['exe', 'cmd', 'bat'],
+    [l10n.t('All files')]: ['*'],
+  };
+}
 
 /**
  * Builds the {@link SetupCommands} over the real VS Code API.
@@ -46,7 +50,8 @@ const WINDOWS_BINARY_FILTERS: { [name: string]: string[] } = {
  * `@opencode/cli` in the browser (decision P4) and `openFolder` runs
  * `workbench.action.files.openFolder` (decision P15).
  * VERIFIED for the dialog and the Global write (the former `chooseBinary`) on Windows 11, VS Code
- * 1.143.1 (27/10/2026): the visual checks "Choose binary… is pressed with the real mouse" and "Choose
+ * 1.143.1 (27/10/2026, before the dialog texts went through `l10n.t`; in an English window they are
+ * the same words): the visual checks "Choose binary… is pressed with the real mouse" and "Choose
  * binary… through the real file dialog wrote the setting and step 1 is done" (the simple file
  * dialog, a local window). UNVERIFIED, never driven in a real window: `openBinarySettings`,
  * `openServerSettings`, `setServerPassword`, `openInstallGuide` and `openFolder` (they open
@@ -60,9 +65,9 @@ export function createSetupActions(redetect: () => void = () => undefined): Setu
         canSelectMany: false,
         canSelectFiles: true,
         canSelectFolders: false,
-        openLabel: 'Use this binary',
-        title: 'Choose the opencode v2 binary',
-        ...(process.platform === 'win32' ? { filters: WINDOWS_BINARY_FILTERS } : {}),
+        openLabel: l10n.t('Use this binary'),
+        title: l10n.t('Choose the opencode v2 binary'),
+        ...(process.platform === 'win32' ? { filters: windowsBinaryFilters() } : {}),
       });
       return picked?.[0]?.fsPath;
     },

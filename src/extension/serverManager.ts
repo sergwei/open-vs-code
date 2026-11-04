@@ -16,6 +16,8 @@
 // `unavailable/unreachable` until the user retries (decision of Sergio, 2026-10-22, Engram
 // `E1-external-server/decisions/no-auto-retry`).
 
+import * as l10n from '@vscode/l10n';
+import { bothTexts, inEnglish, logMessageOf } from './l10nEnglish';
 import {
   describeExternalFailure,
   describeFailureCause,
@@ -23,7 +25,12 @@ import {
   type ServerTarget,
 } from './externalServer';
 import type { BinaryDiagnosis, NotStartedReason } from '../shared/protocol';
-import { describeDetection, diagnoseDetection, type DetectionResult } from './opencodeBinary';
+import {
+  describeDetection,
+  describeDetectionForLog,
+  diagnoseDetection,
+  type DetectionResult,
+} from './opencodeBinary';
 import {
   checkServerVersion,
   safeLog,
@@ -114,6 +121,12 @@ export type ServerState =
       kind: 'unavailable';
       reason: UnavailableReason;
       message: string;
+      /**
+       * `message` in English, for the log line (`describeServerState`): the user reads `message`
+       * in the language of VS Code, the OutputChannel stays in English (decision of Sergio,
+       * E11-i18n). Absent when `message` is already English.
+       */
+      logMessage?: string;
       retryInMs?: number;
       attempt?: number;
       /**
@@ -127,7 +140,8 @@ export type ServerState =
 
 /** Outcome of choosing the workspace folder to serve. */
 export type FolderChoice =
-  { folder: string; ignored: string[] } | { reason: 'no-workspace'; message: string };
+  | { folder: string; ignored: string[] }
+  | { reason: 'no-workspace'; message: string; logMessage?: string };
 
 /**
  * How {@link ServerManager.restart} ended; only `attempted` means a new start was tried.
@@ -201,8 +215,9 @@ export interface FolderLike {
  * with none on disk there is no workspace. The other folders go to `ignored` for the log. The
  * server serves ONE folder (plan decision: a server per folder was too much for the MVP). Before
  * phase 3 only the first folder was considered, and a virtual first folder meant no workspace.
- * Accepts the structural shape of `vscode.WorkspaceFolder`. VERIFIED by unit tests with literal
- * objects (synthetic).
+ * Accepts the structural shape of `vscode.WorkspaceFolder`. The `no-workspace` choice carries its
+ * `message` in the language of VS Code and the same text in English as `logMessage` (for the log).
+ * VERIFIED by unit tests with literal objects (synthetic).
  */
 export function pickWorkspaceFolder(
   folders: readonly FolderLike[] | undefined,
@@ -210,7 +225,10 @@ export function pickWorkspaceFolder(
 ): FolderChoice {
   const first = folders?.[0];
   if (folders === undefined || first === undefined) {
-    return { reason: 'no-workspace', message: 'no workspace folder is open' };
+    return {
+      reason: 'no-workspace',
+      ...bothTexts(() => l10n.t('no workspace folder is open')),
+    };
   }
   const onDisk = folders.filter((folder) => folder.uri.scheme === 'file');
   const chosen =
@@ -220,7 +238,13 @@ export function pickWorkspaceFolder(
   if (chosen === undefined) {
     return {
       reason: 'no-workspace',
-      message: `the workspace folder "${first.name}" is not on disk (scheme ${first.uri.scheme})`,
+      ...bothTexts(() =>
+        l10n.t(
+          'the workspace folder "{0}" is not on disk (scheme {1})',
+          first.name,
+          first.uri.scheme,
+        ),
+      ),
     };
   }
   return {
@@ -231,7 +255,12 @@ export function pickWorkspaceFolder(
 
 /**
  * Describes a state for the log: level and text. Texts are built here, in English, so tests can
- * pin them (same idea as `describeDetection`). The ready line carries url, version and pid and
+ * pin them (same idea as `describeDetection`). The reason of an `unavailable` state is the one
+ * part that is translated for the user (`state.message`, in the language of VS Code), but the log
+ * line repeats its English twin `state.logMessage` (decision of Sergio, E11-i18n: logs stay in
+ * English), falling back to `message` for a state built with a plain English text. VERIFIED by
+ * `serverManager.test.ts` ("logs the English reason of an unavailable state while the user text
+ * is Spanish"). The ready line carries url, version and pid and
  * never the password. The restart lines are STABLE: the opt-in integration test waits for
  * `restarting the server (<reason>)` and `server exited unexpectedly; restarting in <s> s
  * (attempt <i> of 3)`; the two `not-started` lines are stable too (`test:visual` step 32 looks for
@@ -303,7 +332,10 @@ export function describeServerState(state: ServerState): {
           : state.reason === 'no-workspace'
             ? 'info'
             : 'warn';
-      return { level, message: `server not available (${state.reason}): ${state.message}` };
+      return {
+        level,
+        message: `server not available (${state.reason}): ${state.logMessage ?? state.message}`,
+      };
     }
     case 'stopping':
       return { level: 'info', message: 'stopping the server' };
@@ -505,7 +537,12 @@ export class ServerManager {
         void this.restart('folder-changed');
       } else {
         this.cancelRetryTimer();
-        this.setState({ kind: 'unavailable', reason: 'no-workspace', message: choice.message });
+        this.setState({
+          kind: 'unavailable',
+          reason: 'no-workspace',
+          message: choice.message,
+          logMessage: choice.logMessage,
+        });
       }
       return;
     }
@@ -638,6 +675,7 @@ export class ServerManager {
         kind: 'unavailable',
         reason: result.kind === 'unsupported' ? 'unsupported-version' : 'binary-missing',
         message: describeDetection(result).message,
+        logMessage: describeDetectionForLog(result).message,
         binary: diagnoseDetection(result, result.kind === 'invalid-setting' ? result.value : ''),
       });
     } else if (kind === 'running') {
@@ -752,7 +790,9 @@ export class ServerManager {
       this.setState({
         kind: 'unavailable',
         reason: 'no-workspace',
-        message: choice === undefined ? 'no workspace folder is open' : choice.message,
+        ...(choice === undefined
+          ? bothTexts(() => l10n.t('no workspace folder is open'))
+          : { message: choice.message, logMessage: choice.logMessage }),
       });
       return 'no-workspace';
     }
@@ -877,16 +917,18 @@ export class ServerManager {
       const info = await this.deps.fetchInfo(started.url, started.password, controller.signal);
       if (this.disposed || controller.signal.aborted) return await this.stopQuietly(started);
       const check = checkServerVersion(info.version);
+      const logged = inEnglish(() => checkServerVersion(info.version)).message;
       if (check.kind === 'unsupported') {
         await this.stopQuietly(started);
-        this.deps.log.error(check.message);
+        this.deps.log.error(logged);
         this.setState({
           kind: 'unavailable',
           reason: 'unsupported-version',
           message: check.message,
+          logMessage: logged,
         });
       } else {
-        if (check.kind === 'warn') this.deps.log.warn(check.message);
+        if (check.kind === 'warn') this.deps.log.warn(logged);
         const server = started;
         this.running = server;
         this.runningSince = this.now();
@@ -914,10 +956,14 @@ export class ServerManager {
       if (started !== undefined) await this.stopQuietly(started);
       if (!this.disposed && !controller.signal.aborted) {
         const detail = error instanceof Error ? error.message : String(error);
+        const logDetail = logMessageOf(error);
+        const say = (reason: string): string =>
+          l10n.t('Could not start the opencode server: {0}', reason);
         this.setState({
           kind: 'unavailable',
           reason: 'start-failed',
-          message: `Could not start the opencode server: ${detail}`,
+          message: say(detail),
+          logMessage: inEnglish(() => say(logDetail)),
         });
       }
     } finally {
@@ -1013,16 +1059,26 @@ export class ServerManager {
   private async connect(target: ServerTarget, folder: string): Promise<void> {
     this.pendingPath = undefined;
     if (target.kind === 'external-invalid') {
-      this.setState({ kind: 'unavailable', reason: 'invalid-url', message: target.message });
+      this.setState({
+        kind: 'unavailable',
+        reason: 'invalid-url',
+        message: target.message,
+        logMessage: target.logMessage,
+      });
       return;
     }
     if (target.kind !== 'external') return;
     if (target.password === undefined) {
+      const text = bothTexts(() =>
+        l10n.t(
+          'No password is stored for the external opencode server. Run "OpenCode: Set Server Password".',
+        ),
+      );
       this.setState({
         kind: 'unavailable',
         reason: 'unauthorized',
-        message:
-          'No password is stored for the external opencode server. Run "OpenCode: Set Server Password".',
+        message: text.message,
+        logMessage: text.logMessage,
       });
       return;
     }
@@ -1033,16 +1089,18 @@ export class ServerManager {
       const info = await this.deps.fetchInfo(target.url, target.password, controller.signal);
       if (this.disposed || controller.signal.aborted) return;
       const check = checkServerVersion(info.version);
+      const logged = inEnglish(() => checkServerVersion(info.version)).message;
       if (check.kind === 'unsupported') {
-        this.deps.log.error(check.message);
+        this.deps.log.error(logged);
         this.setState({
           kind: 'unavailable',
           reason: 'unsupported-version',
           message: check.message,
+          logMessage: logged,
         });
         return;
       }
-      if (check.kind === 'warn') this.deps.log.warn(check.message);
+      if (check.kind === 'warn') this.deps.log.warn(logged);
       this.setState({
         kind: 'running',
         server: {
@@ -1061,7 +1119,12 @@ export class ServerManager {
       this.deps.log.error(
         `could not connect to the external server at ${target.url}: ${describeFailureCause(error)}`,
       );
-      this.setState({ kind: 'unavailable', reason: failure.reason, message: failure.message });
+      this.setState({
+        kind: 'unavailable',
+        reason: failure.reason,
+        message: failure.message,
+        logMessage: inEnglish(() => describeExternalFailure(error)).message,
+      });
     } finally {
       if (this.abort === controller) this.abort = undefined;
     }
@@ -1107,20 +1170,26 @@ export class ServerManager {
     const lived = this.runningSince === undefined ? 0 : this.now() - this.runningSince;
     this.runningSince = undefined;
     if (lived >= STABLE_RUN_MS) this.crashAttempts = 0;
-    const message = `The opencode server exited unexpectedly (code ${String(code)}, signal ${String(signal)})`;
+    const texts = bothTexts(() =>
+      l10n.t(
+        'The opencode server exited unexpectedly (code {0}, signal {1})',
+        String(code),
+        String(signal),
+      ),
+    );
     const delay = AUTO_RESTART_DELAYS_MS[this.crashAttempts];
     if (delay === undefined) {
       this.deps.log.error(
         `giving up restarting the server after ${String(AUTO_RESTART_DELAYS_MS.length)} attempts`,
       );
-      this.setState({ kind: 'unavailable', reason: 'exited', message });
+      this.setState({ kind: 'unavailable', reason: 'exited', ...texts });
       return;
     }
     this.crashAttempts += 1;
     this.setState({
       kind: 'unavailable',
       reason: 'exited',
-      message,
+      ...texts,
       retryInMs: delay,
       attempt: this.crashAttempts,
     });

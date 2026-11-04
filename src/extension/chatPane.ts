@@ -10,6 +10,7 @@
 // generation of its snapshots, its file search and session-list cursor, and its own "Changed files"
 // and revert state.
 
+import * as l10n from '@vscode/l10n';
 import type { HostToWebview, Sender, UiCommand } from '../shared/protocol';
 import type { ServerLog } from './opencodeServer';
 import type { SessionBrowser } from './sessionBrowser';
@@ -379,7 +380,7 @@ export class ChatPane {
           level: 'info',
           error: {
             code: 'ComposeExpired',
-            message: 'The prompt waited too long: it is in the box',
+            message: l10n.t('The prompt waited too long: it is in the box'),
           },
         });
       }

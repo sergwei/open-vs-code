@@ -1,5 +1,7 @@
+import * as l10n from '@vscode/l10n';
 import { createSignal, createUniqueId, For, Show, untrack } from 'solid-js';
 import { createStore } from 'solid-js/store';
+import { formatParts } from '../../../src/shared/l10n';
 import type { ErrorInfo, FormAsk, FormField } from '../../../src/shared/model';
 import { useSend } from '../chat/hostContext';
 import { nextRequestId } from '../chat/PromptInput';
@@ -42,7 +44,7 @@ function FieldView(props: {
         {fieldTitle(props.field)}
         <Show when={props.field.required === true}>
           <span aria-hidden="true"> *</span>
-          <span class="visually-hidden"> (required)</span>
+          <span class="visually-hidden"> {l10n.t('(required)')}</span>
         </Show>
       </legend>
       <Show when={props.field.description}>
@@ -94,12 +96,12 @@ function FieldView(props: {
                         })
                       }
                     />
-                    <span>Other</span>
+                    <span>{l10n.t('Other')}</span>
                   </label>
                   <input
                     type="text"
                     class="form-text"
-                    aria-label={`Other answer for ${fieldTitle(props.field)}`}
+                    aria-label={l10n.t('Other answer for {0}', fieldTitle(props.field))}
                     value={choice()?.other ?? ''}
                     onInput={(event) =>
                       props.onChange({
@@ -176,12 +178,12 @@ function FieldView(props: {
                       props.onChange({ ...current, otherChecked: event.currentTarget.checked });
                     }}
                   />
-                  <span>Other</span>
+                  <span>{l10n.t('Other')}</span>
                 </label>
                 <input
                   type="text"
                   class="form-text"
-                  aria-label={`Other answer for ${fieldTitle(props.field)}`}
+                  aria-label={l10n.t('Other answer for {0}', fieldTitle(props.field))}
                   value={multi()?.other ?? ''}
                   onInput={(event) => {
                     const current = multi() ?? {
@@ -212,7 +214,7 @@ function FieldView(props: {
               props.onChange({ type: 'boolean', value: event.currentTarget.checked })
             }
           />
-          <span>Yes</span>
+          <span>{l10n.t('Yes')}</span>
         </label>
       </Show>
 
@@ -236,7 +238,9 @@ function FieldView(props: {
       <Show when={externalField()}>
         {(field) => (
           <p class="field-description">
-            Open this link in your browser: <code>{field().url}</code>
+            {formatParts(l10n.t('Open this link in your browser: {url}'), {
+              url: <code>{field().url}</code>,
+            })}
           </p>
         )}
       </Show>
@@ -334,16 +338,16 @@ export function FormCard(props: {
       }}
     >
       <h2 class="request-title" id={titleId}>
-        {props.ask.kind === 'question' ? 'Question from the agent' : props.ask.title}
+        {props.ask.kind === 'question' ? l10n.t('Question from the agent') : props.ask.title}
       </h2>
       <div class="request-body" id={bodyId}>
         <Show when={props.origin}>
           {(origin) => (
             <p class="request-origin">
-              From session “{origin().title}”
+              {l10n.t('From session “{0}”', origin().title)}
               <Show when={origin().onOpen !== undefined}>
                 <button type="button" class="secondary" onClick={() => origin().onOpen?.()}>
-                  Open session
+                  {l10n.t('Open session')}
                 </button>
               </Show>
             </p>
@@ -394,7 +398,7 @@ export function FormCard(props: {
         <Show when={ownWords()}>
           <div class="request-feedback">
             <label>
-              Your answer in your own words
+              {l10n.t('Your answer in your own words')}
               <textarea
                 rows={2}
                 value={feedback()}
@@ -410,14 +414,14 @@ export function FormCard(props: {
                 cancel(feedback());
               }}
             >
-              Send as feedback
+              {l10n.t('Send as feedback')}
             </button>
           </div>
         </Show>
 
         <div class="request-actions">
           <button type="submit" class="primary" disabled={props.replying}>
-            Submit
+            {l10n.t('Submit')}
           </button>
           <button
             type="button"
@@ -427,7 +431,7 @@ export function FormCard(props: {
               cancel();
             }}
           >
-            Dismiss (stops the agent)
+            {l10n.t('Dismiss (stops the agent)')}
           </button>
           <button
             type="button"
@@ -436,13 +440,13 @@ export function FormCard(props: {
             aria-expanded={ownWords()}
             onClick={() => setOwnWords((current) => !current)}
           >
-            Answer in my own words…
+            {l10n.t('Answer in my own words…')}
           </button>
         </div>
       </form>
       <Show when={props.replying}>
         <p class="request-hint" role="status">
-          Sending…
+          {l10n.t('Sending…')}
         </p>
       </Show>
     </section>

@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { createMemo, createSignal, createUniqueId, Show } from 'solid-js';
 import type { Part } from '../../../src/shared/model';
 import { subagentOf } from '../sessions/lineage';
@@ -126,19 +127,23 @@ export function ToolCard(props: {
           </Show>
         </button>
         <Show when={summary().open}>
-          {(target) => <PathLink path={target().path} line={target().line} text="Open" />}
+          {(target) => <PathLink path={target().path} line={target().line} text={l10n.t('Open')} />}
         </Show>
         <Show when={link()}>
           {(child) => (
             <button
               type="button"
               class="secondary subagent-link"
-              aria-label={`Open subagent session ${child().description ?? ''}`.trim()}
+              aria-label={
+                child().description === undefined || child().description === ''
+                  ? l10n.t('Open subagent session')
+                  : l10n.t('Open subagent session {0}', child().description ?? '')
+              }
               onClick={() => {
                 props.onOpenSession(child().sessionID);
               }}
             >
-              Open subagent session
+              {l10n.t('Open subagent session')}
             </button>
           )}
         </Show>

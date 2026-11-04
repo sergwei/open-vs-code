@@ -96,6 +96,8 @@
 // diff open refused: not listed|session not open`; and `prompt accepted for <sid> (input <id>)`.
 
 import type { V2Event } from '@opencode/client';
+import * as l10n from '@vscode/l10n';
+import { plural } from '../shared/l10n';
 import type { Catalog, ErrorInfo, ModelRef, SessionStatus, SessionSummary } from '../shared/model';
 import {
   dispatch,
@@ -131,6 +133,7 @@ import type { ChatApi } from './opencodeClient';
 import { safeLog, type ServerLog } from './opencodeServer';
 import { createPendingRequests, type PendingSummary } from './pendingRequests';
 import { createRequestResolutions } from './requestResolutions';
+import { bothTexts, logErrorOf, translatedError } from './l10nEnglish';
 import type { ModsSink } from './modEvents';
 import type { ServerConfigSink } from './serverConfig';
 import type { RunningServerInfo, ServerState } from './serverManager';
@@ -140,6 +143,7 @@ import { createSessionLineage, MAX_LINEAGE_DEPTH } from './sessionLineage';
 import { createSessionReverts } from './sessionRevert';
 import {
   lastCompactionAt,
+  logTextOf,
   toAgentOptions,
   toCommandOption,
   toErrorInfo,
@@ -861,7 +865,7 @@ export class ChatController {
       const { bands, commands } = chat.state();
       message = { type: 'mods.state', bands, commands };
     } catch (error) {
-      this.log.warn(`mods state failed: ${String(error)}`);
+      this.log.warn(`mods state failed: ${logErrorOf(error)}`);
       return;
     }
     if (only !== undefined) only.post(message);
@@ -889,10 +893,11 @@ export class ChatController {
     const { requestId, name, args, sessionID } = message;
     if (chat?.state().commands.some((command) => command.name === name) !== true) {
       this.log.warn(`mod command ${requestId} rejected: CommandUnavailable`);
-      return this.result(pane, requestId, {
-        _tag: 'CommandUnavailable',
-        message: `The command /${name} is not available`,
-      });
+      return this.result(
+        pane,
+        requestId,
+        refusal('CommandUnavailable', () => l10n.t('The command /{0} is not available', name)),
+      );
     }
     try {
       await chat.run(name, args, sessionID);
@@ -919,11 +924,15 @@ export class ChatController {
    */
   composeFromMod(paneId: number, modId: string, text: string): ComposeOutcome {
     const pane = this.paneById(paneId);
-    if (pane === undefined) return this.refusedMod(modId, new Error('The chat is not available'));
+    if (pane === undefined)
+      return this.refusedMod(
+        modId,
+        translatedError(() => l10n.t('The chat is not available')),
+      );
     if (!isComposeInBounds({ text, files: [] })) {
       return this.refusedMod(
         modId,
-        codedError('ComposeRefused', 'The mod composed an empty prompt'),
+        codedError('ComposeRefused', () => l10n.t('The mod composed an empty prompt')),
       );
     }
     this.log.info(`mod ${modId} composed a prompt`);
@@ -1201,7 +1210,7 @@ export class ChatController {
         try {
           found = toSessionSummary(await client.session.get({ sessionID: missing }));
         } catch (error) {
-          this.log.debug(`could not read an ancestor session row: ${String(error)}`);
+          this.log.debug(`could not read an ancestor session row: ${logErrorOf(error)}`);
           break;
         }
         if (this.disposed || epoch !== this.lineageEpoch || client !== this.client) return;
@@ -1525,7 +1534,7 @@ export class ChatController {
       },
       signal: controller.signal,
     }).catch((error: unknown) => {
-      this.log.error(`event stream loop crashed: ${String(error)}`);
+      this.log.error(`event stream loop crashed: ${logErrorOf(error)}`);
     });
   }
 
@@ -1588,7 +1597,7 @@ export class ChatController {
       try {
         this.deps.mods?.event(event, this.secrets);
       } catch (error) {
-        this.log.warn(`mods sink failed on ${event.type}: ${String(error)}`);
+        this.log.warn(`mods sink failed on ${event.type}: ${logErrorOf(error)}`);
       }
       if (event.type === 'server.connected') {
         this.log.info('event stream connected');
@@ -1653,7 +1662,7 @@ export class ChatController {
         void this.resync();
       }
     } catch (error) {
-      this.log.error(`handling event ${event.type} failed: ${String(error)}`);
+      this.log.error(`handling event ${event.type} failed: ${logErrorOf(error)}`);
     }
   }
 
@@ -1801,7 +1810,7 @@ export class ChatController {
           level: 'info',
           error: {
             code: 'SessionDeleted',
-            message: 'The open session was deleted outside this view',
+            message: l10n.t('The open session was deleted outside this view'),
           },
         });
       }
@@ -1824,7 +1833,7 @@ export class ChatController {
     try {
       await this.deps.memory.set(folder, undefined);
     } catch (error) {
-      this.log.warn(`forgetting the remembered session failed: ${String(error)}`);
+      this.log.warn(`forgetting the remembered session failed: ${logErrorOf(error)}`);
     }
   }
 
@@ -2152,7 +2161,7 @@ export class ChatController {
           : // Cosmetic for the chat: a failure here must not fail the snapshot of the panes.
             client.session.list(treeQuery.input).catch((error: unknown) => {
               this.log.warn(
-                `sessions tree read failed: ${toErrorInfo(error, this.secrets).message}`,
+                `sessions tree read failed: ${logTextOf(toErrorInfo(error, this.secrets))}`,
               );
               return undefined;
             }),
@@ -2235,10 +2244,10 @@ export class ChatController {
         // The server is unreachable (it died or is restarting): the connection banner already
         // says so, and a notice on top would only be noise (W4 of the review; seen in the log
         // of the real-opencode run when the test killed the server mid-snapshot).
-        this.log.warn(`snapshot failed (server unreachable): ${info.message}`);
+        this.log.warn(`snapshot failed (server unreachable): ${logTextOf(info)}`);
         return;
       }
-      this.log.error(`snapshot failed: ${info.code}: ${info.message}`);
+      this.log.error(`snapshot failed: ${info.code}: ${logTextOf(info)}`);
       for (const pane of stillCurrent()) pane.post({ type: 'notice', level: 'error', error: info });
     } finally {
       this.resyncing -= 1;
@@ -2342,7 +2351,7 @@ export class ChatController {
             openRow = await client.session.get({ sessionID: openID });
             sessions.push(toSessionSummary(openRow));
           } catch (error) {
-            this.log.debug(`could not read the open session row: ${String(error)}`);
+            this.log.debug(`could not read the open session row: ${logErrorOf(error)}`);
           }
         }
         const revertState =
@@ -2472,7 +2481,7 @@ export class ChatController {
         level: 'info',
         error: {
           code: 'SessionDeleted',
-          message: 'This session no longer exists. Your next prompt starts a new one.',
+          message: l10n.t('This session no longer exists. Your next prompt starts a new one.'),
         },
       });
     }
@@ -2505,7 +2514,7 @@ export class ChatController {
       });
       return answer.data.map(toSessionSummary).filter((row) => row.parentID === parentID);
     } catch (error) {
-      this.log.debug(`could not read the children of the open session: ${String(error)}`);
+      this.log.debug(`could not read the children of the open session: ${logErrorOf(error)}`);
       return [];
     }
   }
@@ -2538,7 +2547,7 @@ export class ChatController {
         try {
           return toSessionSummary(await client.session.get({ sessionID: relative }));
         } catch (error) {
-          this.log.debug(`could not read a related session row: ${String(error)}`);
+          this.log.debug(`could not read a related session row: ${logErrorOf(error)}`);
           return undefined;
         }
       }),
@@ -2649,7 +2658,7 @@ export class ChatController {
         client.model.default(),
         client.command.list().catch((error: unknown) => {
           const info = toErrorInfo(error, this.secrets);
-          return { failure: `${info.code}: ${info.message}` };
+          return { failure: `${info.code}: ${logTextOf(info)}` };
         }),
       ]);
       if (epoch !== this.catalogEpoch || this.disposed) return;
@@ -2681,7 +2690,7 @@ export class ChatController {
     } catch (error) {
       if (epoch !== this.catalogEpoch) return;
       const info = toErrorInfo(error, this.secrets);
-      this.log.warn(`catalog load failed: ${info.code}: ${info.message}`);
+      this.log.warn(`catalog load failed: ${info.code}: ${logTextOf(info)}`);
     }
   }
 
@@ -2754,7 +2763,7 @@ export class ChatController {
     } catch (error) {
       if (stale()) return;
       const info = toErrorInfo(error, this.secrets);
-      this.log.warn(`command list retry failed: ${info.code}: ${info.message}`);
+      this.log.warn(`command list retry failed: ${info.code}: ${logTextOf(info)}`);
     }
   }
 
@@ -2805,8 +2814,14 @@ export class ChatController {
         code: 'DefaultModelIgnored',
         message:
           ignored.reason === 'invalid'
-            ? `openVsCode.defaultModel “${shown}” is not written provider/model, so it is ignored`
-            : `The model “${shown}” of openVsCode.defaultModel is not offered by the server, so it is ignored`,
+            ? l10n.t(
+                'openVsCode.defaultModel “{0}” is not written provider/model, so it is ignored',
+                shown,
+              )
+            : l10n.t(
+                'The model “{0}” of openVsCode.defaultModel is not offered by the server, so it is ignored',
+                shown,
+              ),
       },
     });
   }
@@ -2855,24 +2870,22 @@ export class ChatController {
         (candidate) => candidate.providerID === model.providerID && candidate.id === model.id,
       );
       if (option === undefined) {
-        return {
-          _tag: 'ModelUnavailable',
-          message: 'That model is not offered by the server any more. Choose another one.',
-        };
+        return refusal('ModelUnavailable', () =>
+          l10n.t('That model is not offered by the server any more. Choose another one.'),
+        );
       }
       if (model.variant !== undefined && !option.variants.includes(model.variant)) {
-        return {
-          _tag: 'VariantUnavailable',
-          message:
+        return refusal('VariantUnavailable', () =>
+          l10n.t(
             'That reasoning level is not offered for this model any more. Choose another one.',
-        };
+          ),
+        );
       }
     }
     if (agent !== undefined && !catalog.agents.some((candidate) => candidate.id === agent)) {
-      return {
-        _tag: 'AgentUnavailable',
-        message: 'That agent is not available any more. Choose another one.',
-      };
+      return refusal('AgentUnavailable', () =>
+        l10n.t('That agent is not available any more. Choose another one.'),
+      );
     }
     return undefined;
   }
@@ -2938,7 +2951,7 @@ export class ChatController {
       return;
     }
     const info: ErrorInfo = toErrorInfo(error, this.secrets);
-    this.log.warn(`request ${requestId} failed: ${info.code}: ${info.message}`);
+    this.log.warn(`request ${requestId} failed: ${info.code}: ${logTextOf(info)}`);
     pane.post({ type: 'request.result', requestId, error: info });
   }
 
@@ -3010,7 +3023,7 @@ export class ChatController {
       await action();
     } catch (error) {
       const info = toErrorInfo(error, this.secrets);
-      this.log.warn(`${type} failed: ${info.code}: ${info.message}`);
+      this.log.warn(`${type} failed: ${info.code}: ${logTextOf(info)}`);
       pane.post({ type: 'notice', level: 'warning', error: info });
     }
   }
@@ -3078,7 +3091,7 @@ export class ChatController {
       picked = await setup.pickBinary();
     } catch (error) {
       const info = toErrorInfo(error, this.secrets);
-      this.log.warn(`setup.action failed: ${info.code}: ${info.message}`);
+      this.log.warn(`setup.action failed: ${info.code}: ${logTextOf(info)}`);
       this.log.info('binary choice: failed');
       pane.post({ type: 'setup.binary', outcome: 'failed' });
       pane.post({ type: 'notice', level: 'warning', error: info });
@@ -3099,7 +3112,7 @@ export class ChatController {
       await setup.writeBinaryPath(picked);
     } catch (error) {
       const info = toErrorInfo(error, this.secrets);
-      this.log.warn(`setup.action failed: ${info.code}: ${info.message}`);
+      this.log.warn(`setup.action failed: ${info.code}: ${logTextOf(info)}`);
       this.log.info('binary choice: failed');
       pane.post({ type: 'setup.binary', outcome: 'failed' });
       pane.post({ type: 'notice', level: 'warning', error: info });
@@ -3134,7 +3147,7 @@ export class ChatController {
         level: 'warning',
         error: {
           code: 'DiffNotListed',
-          message: 'That file is not in the changed files of this session any more',
+          message: l10n.t('That file is not in the changed files of this session any more'),
         },
       });
       return;
@@ -3152,7 +3165,7 @@ export class ChatController {
           level: 'info',
           error: {
             code: 'NoTextDiff',
-            message: 'There is no text diff for this file, so the file itself was opened',
+            message: l10n.t('There is no text diff for this file, so the file itself was opened'),
           },
         });
       }
@@ -3179,7 +3192,7 @@ export class ChatController {
         level: 'warning',
         error: {
           code: 'DiffNotListed',
-          message: 'That file is not among the files of the revert any more',
+          message: l10n.t('That file is not among the files of the revert any more'),
         },
       });
       return;
@@ -3197,7 +3210,7 @@ export class ChatController {
           level: 'info',
           error: {
             code: 'NoTextDiff',
-            message: 'There is no text diff for this file, so the file itself was opened',
+            message: l10n.t('There is no text diff for this file, so the file itself was opened'),
           },
         });
       }
@@ -3213,7 +3226,7 @@ export class ChatController {
     const pane = this.panesOf(sessionID)[0];
     if (pane === undefined) {
       return Promise.reject(
-        codedError('DiffNotListed', 'That file is not among the files of the revert'),
+        codedError('DiffNotListed', () => l10n.t('That file is not among the files of the revert')),
       );
     }
     return pane.reverts.original(sessionID, shown);
@@ -3251,19 +3264,21 @@ export class ChatController {
     if (client === undefined) return this.result(pane, requestId, unavailable());
     if (sessionID !== pane.sessionID) {
       this.log.warn('revert refused: session not open');
-      return this.result(pane, requestId, {
-        _tag: 'SessionNotOpen',
-        message: 'Only the open session can be reverted',
-      });
+      return this.result(
+        pane,
+        requestId,
+        refusal('SessionNotOpen', () => l10n.t('Only the open session can be reverted')),
+      );
     }
     try {
       const target = await client.session.message.get({ sessionID, messageID });
       if (target.type !== 'user') {
         this.log.warn('revert refused: not a user message');
-        return this.result(pane, requestId, {
-          _tag: 'NotAUserMessage',
-          message: 'You can only revert from a message you sent',
-        });
+        return this.result(
+          pane,
+          requestId,
+          refusal('NotAUserMessage', () => l10n.t('You can only revert from a message you sent')),
+        );
       }
       const revert = await client.session.revert.stage({ sessionID, messageID });
       if (client !== this.client) return this.result(pane, requestId, unavailable());
@@ -3294,10 +3309,11 @@ export class ChatController {
     if (client === undefined) return this.result(pane, requestId, unavailable());
     if (sessionID !== pane.sessionID) {
       this.log.warn('revert refused: session not open');
-      return this.result(pane, requestId, {
-        _tag: 'SessionNotOpen',
-        message: 'Only the open session can be restored',
-      });
+      return this.result(
+        pane,
+        requestId,
+        refusal('SessionNotOpen', () => l10n.t('Only the open session can be restored')),
+      );
     }
     try {
       await client.session.revert.clear({ sessionID });
@@ -3331,10 +3347,11 @@ export class ChatController {
     if (client === undefined) return this.result(pane, requestId, unavailable());
     if (sessionID !== pane.sessionID) {
       this.log.warn('revert refused: session not open');
-      return this.result(pane, requestId, {
-        _tag: 'SessionNotOpen',
-        message: 'Only the open session can be discarded',
-      });
+      return this.result(
+        pane,
+        requestId,
+        refusal('SessionNotOpen', () => l10n.t('Only the open session can be discarded')),
+      );
     }
     try {
       if (!(await this.deps.sessions.confirmRevertDiscard())) {
@@ -3362,7 +3379,9 @@ export class ChatController {
     const pane = this.panesOf(sessionID)[0];
     if (pane === undefined) {
       return Promise.reject(
-        codedError('DiffNotListed', 'That file is not in the changed files of this session'),
+        codedError('DiffNotListed', () =>
+          l10n.t('That file is not in the changed files of this session'),
+        ),
       );
     }
     return pane.diffs.original(sessionID, shown);
@@ -3467,7 +3486,6 @@ export class ChatController {
         `dropped files added: ${String(refs.length)}, skipped: ${String(skipped)} (${String(folders)} folder(s), ${String(outside)} outside, ${String(remote)} remote, ${String(missing)} missing, ${String(ignored)} ignored)`,
       );
       if (skipped > 0) {
-        const items = skipped === 1 ? 'item was' : 'items were';
         // The Explorer command neither drops nor filters ignored files: its own text (decision of
         // Sergio, 23/10/2026, Engram `E7-drop-paste/decisions/cierre`).
         send({
@@ -3476,8 +3494,28 @@ export class ChatController {
           error: {
             code: 'DroppedItemsSkipped',
             message: verify
-              ? `${String(skipped)} dropped ${items} not added: folders, ignored files and files outside the workspace folder cannot be attached`
-              : `${String(skipped)} selected ${items} not added: folders and files outside the workspace folder cannot be attached`,
+              ? plural(
+                  skipped,
+                  l10n.t(
+                    '{0} dropped item was not added: folders, ignored files and files outside the workspace folder cannot be attached',
+                    skipped,
+                  ),
+                  l10n.t(
+                    '{0} dropped items were not added: folders, ignored files and files outside the workspace folder cannot be attached',
+                    skipped,
+                  ),
+                )
+              : plural(
+                  skipped,
+                  l10n.t(
+                    '{0} selected item was not added: folders and files outside the workspace folder cannot be attached',
+                    skipped,
+                  ),
+                  l10n.t(
+                    '{0} selected items were not added: folders and files outside the workspace folder cannot be attached',
+                    skipped,
+                  ),
+                ),
           },
         });
       }
@@ -3534,7 +3572,11 @@ export class ChatController {
     uri?: string,
   ): Promise<ComposeOutcome> {
     const pane = this.paneById(paneId);
-    if (pane === undefined) return this.refused(action, new Error('The chat is not available'));
+    if (pane === undefined)
+      return this.refused(
+        action,
+        translatedError(() => l10n.t('The chat is not available')),
+      );
     let context: EditorContext;
     try {
       context = await this.deps.editor.editorContext(this.server?.folder, {
@@ -3557,7 +3599,7 @@ export class ChatController {
         level: 'warning',
         error: {
           code: 'UnsavedChanges',
-          message: 'Unsaved changes: the model reads the saved version',
+          message: l10n.t('Unsaved changes: the model reads the saved version'),
         },
       });
     }
@@ -3599,7 +3641,11 @@ export class ChatController {
     uris: readonly string[],
   ): Promise<ComposeOutcome> {
     const pane = this.paneById(paneId);
-    if (pane === undefined) return this.refused(action, new Error('The chat is not available'));
+    if (pane === undefined)
+      return this.refused(
+        action,
+        translatedError(() => l10n.t('The chat is not available')),
+      );
     let dropped: DroppedFiles;
     try {
       dropped = await this.deps.editor.droppedFiles(
@@ -3624,7 +3670,17 @@ export class ChatController {
         level: 'warning',
         error: {
           code: 'DroppedItemsSkipped',
-          message: `${String(skipped)} selected ${skipped === 1 ? 'item was' : 'items were'} not added: folders and files outside the workspace folder cannot be attached`,
+          message: plural(
+            skipped,
+            l10n.t(
+              '{0} selected item was not added: folders and files outside the workspace folder cannot be attached',
+              skipped,
+            ),
+            l10n.t(
+              '{0} selected items were not added: folders and files outside the workspace folder cannot be attached',
+              skipped,
+            ),
+          ),
         },
       });
     }
@@ -3655,7 +3711,11 @@ export class ChatController {
    */
   async addEditorToChat(paneId: number, uri?: string): Promise<ComposeOutcome> {
     const pane = this.paneById(paneId);
-    if (pane === undefined) return this.refused('add', new Error('The chat is not available'));
+    if (pane === undefined)
+      return this.refused(
+        'add',
+        translatedError(() => l10n.t('The chat is not available')),
+      );
     let context: EditorContext;
     try {
       context = await this.deps.editor.editorContext(this.server?.folder, {
@@ -3680,7 +3740,7 @@ export class ChatController {
         level: 'warning',
         error: {
           code: 'UnsavedChanges',
-          message: 'Unsaved changes: the model reads the saved version',
+          message: l10n.t('Unsaved changes: the model reads the saved version'),
         },
       });
     }
@@ -3760,7 +3820,7 @@ export class ChatController {
           level: 'warning',
           error: {
             code: 'UnsavedChanges',
-            message: 'Unsaved changes: the model reads the saved version',
+            message: l10n.t('Unsaved changes: the model reads the saved version'),
           },
         });
       }
@@ -3948,7 +4008,9 @@ export class ChatController {
       return undefined;
     } catch (error) {
       const info = toErrorInfo(error, this.secrets);
-      this.log.warn(`permission reply for ${permissionID} failed: ${info.code}: ${info.message}`);
+      this.log.warn(
+        `permission reply for ${permissionID} failed: ${info.code}: ${logTextOf(info)}`,
+      );
       await this.healIfStale(error);
       return info;
     }
@@ -4044,16 +4106,14 @@ export class ChatController {
   ): { _tag: string; message: string } | undefined {
     const known = this.pending.find(kind, id);
     if (known?.sessionID !== sessionID) {
-      return {
-        _tag: 'RequestNotPending',
-        message: 'That request is no longer waiting for an answer',
-      };
+      return refusal('RequestNotPending', () =>
+        l10n.t('That request is no longer waiting for an answer'),
+      );
     }
     if (always && known.canAlways !== true) {
-      return {
-        _tag: 'AlwaysNotAvailable',
-        message: 'This request has no rules to save, so “always” is not available',
-      };
+      return refusal('AlwaysNotAvailable', () =>
+        l10n.t('This request has no rules to save, so “always” is not available'),
+      );
     }
     return undefined;
   }
@@ -4087,7 +4147,10 @@ export class ChatController {
         pane.post({
           type: 'notice',
           level: 'info',
-          error: { code: 'NoSavedPermissions', message: 'This project has no saved permissions' },
+          error: {
+            code: 'NoSavedPermissions',
+            message: l10n.t('This project has no saved permissions'),
+          },
         });
         return;
       }
@@ -4110,14 +4173,18 @@ export class ChatController {
           level: 'info',
           error: {
             code: 'SavedPermissionsRevoked',
-            message: `Revoked ${String(removed)} saved permission(s)`,
+            message: plural(
+              removed,
+              l10n.t('Revoked {0} saved permission', removed),
+              l10n.t('Revoked {0} saved permissions', removed),
+            ),
           },
         });
       }
     } catch (error) {
       const info = toErrorInfo(error, this.secrets);
       this.log.warn(
-        `managing saved permissions failed after ${String(removed)} removal(s): ${info.code}: ${info.message}`,
+        `managing saved permissions failed after ${String(removed)} removal(s): ${info.code}: ${logTextOf(info)}`,
       );
       pane.post({ type: 'notice', level: 'warning', error: info });
     }
@@ -4457,9 +4524,8 @@ export class ChatController {
     if (client === undefined) throw unavailableError();
     const title = rawTitle.trim();
     if (title === '' || title.length > MAX_SESSION_TITLE_LENGTH) {
-      throw codedError(
-        'InvalidTitle',
-        `A session title needs 1 to ${String(MAX_SESSION_TITLE_LENGTH)} characters`,
+      throw codedError('InvalidTitle', () =>
+        l10n.t('A session title needs 1 to {0} characters', MAX_SESSION_TITLE_LENGTH),
       );
     }
     try {
@@ -4741,7 +4807,7 @@ export class ChatController {
     } catch (error) {
       if (isSessionNotFound(error)) return;
       this.log.warn(
-        `could not read forked session ${sessionID}: ${toErrorInfo(error, this.secrets).message}`,
+        `could not read forked session ${sessionID}: ${logTextOf(toErrorInfo(error, this.secrets))}`,
       );
     } finally {
       this.refreshing.delete(sessionID);
@@ -4849,10 +4915,11 @@ export class ChatController {
       )
     ) {
       this.log.warn(`prompt ${requestId} rejected: an attachment was not emitted by the host`);
-      return this.result(pane, requestId, {
-        _tag: 'AttachmentRejected',
-        message: 'Only files chosen in the chat can be sent',
-      });
+      return this.result(
+        pane,
+        requestId,
+        refusal('AttachmentRejected', () => l10n.t('Only files chosen in the chat can be sent')),
+      );
     }
     try {
       const { agent, command } = message;
@@ -4862,20 +4929,23 @@ export class ChatController {
         catalog = await this.ensureCatalog();
         if (client !== this.client) return this.result(pane, requestId, unavailable());
         if (catalog === undefined) {
-          return this.result(pane, requestId, {
-            _tag: 'CatalogUnavailable',
-            message:
-              'The models and agents of the server could not be read. Try again in a moment.',
-          });
+          return this.result(
+            pane,
+            requestId,
+            refusal('CatalogUnavailable', () =>
+              l10n.t(
+                'The models and agents of the server could not be read. Try again in a moment.',
+              ),
+            ),
+          );
         }
         // Issue #33: the webview parsed the name against ITS catalog; the host checks its own, and
         // an unlisted one never reaches the server nor creates an empty session.
         const problem =
           command !== undefined && catalog.commands?.some((c) => c.name === command) !== true
-            ? {
-                _tag: 'CommandUnavailable',
-                message: `The command /${command} is not available on this server`,
-              }
+            ? refusal('CommandUnavailable', () =>
+                l10n.t('The command /{0} is not available on this server', command),
+              )
             : this.checkSelection(catalog, model, agent);
         if (problem !== undefined) {
           this.log.warn(`prompt ${requestId} rejected: ${problem._tag}`);
@@ -4964,7 +5034,7 @@ export class ChatController {
       await this.deps.preferences.setLastModel(model);
       this.onPreferencesChanged();
     } catch (error) {
-      this.log.warn(`remembering the last model failed: ${String(error)}`);
+      this.log.warn(`remembering the last model failed: ${logErrorOf(error)}`);
     }
   }
 
@@ -5000,9 +5070,22 @@ function sameMention(mention: PromptMention | undefined, text: string): PromptMe
   return { start: mention.start, end: mention.end, text: mention.text };
 }
 
+/**
+ * An error body `{ _tag, message }` for a refused request. `message` is in the language of VS Code;
+ * the English twin of the same `produce` rides in a non-enumerable `logMessage` that `toErrorInfo`
+ * keeps for the log (decision of Sergio, E11-i18n: the log is all English) and that never reaches
+ * the webview.
+ */
+function refusal(tag: string, produce: () => string): { _tag: string; message: string } {
+  const text = bothTexts(produce);
+  const body = { _tag: tag, message: text.message };
+  Object.defineProperty(body, 'logMessage', { value: text.logMessage, enumerable: false });
+  return body;
+}
+
 /** Error body for a request that arrives while there is no running server. */
 function unavailable(): { _tag: string; message: string } {
-  return { _tag: 'ServerUnavailable', message: 'The opencode server is not running' };
+  return refusal('ServerUnavailable', () => l10n.t('The opencode server is not running'));
 }
 
 /**
@@ -5010,6 +5093,5 @@ function unavailable(): { _tag: string; message: string } {
  * (`toErrorInfo` reads the same `ServerUnavailable` code and text from both).
  */
 function unavailableError(): Error {
-  const body = unavailable();
-  return codedError(body._tag, body.message);
+  return codedError('ServerUnavailable', () => l10n.t('The opencode server is not running'));
 }

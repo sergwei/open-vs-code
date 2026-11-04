@@ -1,15 +1,28 @@
+import * as l10n from '@vscode/l10n';
 import { For, Show } from 'solid-js';
+import { plural } from '../../../src/shared/l10n';
 import type { SettingsMcpServerRow, SettingsState } from '../../../src/shared/settingsProtocol';
 import { CheckIcon, CrossIcon, WarningIcon, WaitingIcon } from '../chat/icons';
 
 /** The word that says the state of a server, so it never depends on colour or icon alone. */
-const STATUS_WORD: Record<SettingsMcpServerRow['status'], string> = {
-  connected: 'connected',
-  pending: 'connecting',
-  disabled: 'disabled',
-  failed: 'failed',
-  needs_auth: 'needs sign-in',
-};
+/**
+ * The status as a word, in the interface language. A function, not a table built at module level,
+ * so the texts follow the locale set at start-up.
+ */
+function statusWord(status: SettingsMcpServerRow['status']): string {
+  switch (status) {
+    case 'connected':
+      return l10n.t('connected');
+    case 'pending':
+      return l10n.t('connecting');
+    case 'disabled':
+      return l10n.t('disabled');
+    case 'failed':
+      return l10n.t('failed');
+    case 'needs_auth':
+      return l10n.t('needs sign-in');
+  }
+}
 
 /** The `data-status` of the step styles for a server status. */
 const STATUS_TONE: Record<SettingsMcpServerRow['status'], string> = {
@@ -25,8 +38,16 @@ export function countsText(server: SettingsMcpServerRow): string {
   const parts: string[] = [];
   const resources = server.resources.length;
   const templates = server.templates.length;
-  if (resources > 0) parts.push(`${String(resources)} resource${resources === 1 ? '' : 's'}`);
-  if (templates > 0) parts.push(`${String(templates)} template${templates === 1 ? '' : 's'}`);
+  if (resources > 0) {
+    parts.push(
+      plural(resources, l10n.t('{0} resource', resources), l10n.t('{0} resources', resources)),
+    );
+  }
+  if (templates > 0) {
+    parts.push(
+      plural(templates, l10n.t('{0} template', templates), l10n.t('{0} templates', templates)),
+    );
+  }
   return parts.join(' · ');
 }
 
@@ -62,15 +83,15 @@ export function McpSection(props: { mcp: SettingsState['mcp'] }) {
                 fallback={
                   <>
                     <span class="spinner" aria-hidden="true" />
-                    {' Reading the MCP servers…'}
+                    {` ${l10n.t('Reading the MCP servers…')}`}
                   </>
                 }
               >
-                No MCP servers are configured.
+                {l10n.t('No MCP servers are configured.')}
               </Show>
             }
           >
-            Could not read the MCP servers from the server. Try Refresh.
+            {l10n.t('Could not read the MCP servers from the server. Try Refresh.')}
           </Show>
         </p>
       </Show>
@@ -103,19 +124,24 @@ export function McpSection(props: { mcp: SettingsState['mcp'] }) {
                 <div class="step-body">
                   <p class="step-title">
                     {server.name}
-                    <span class="step-status">{` — ${STATUS_WORD[server.status]}`}</span>
+                    <span class="step-status">{` — ${statusWord(server.status)}`}</span>
                   </p>
                   <Show when={server.error}>
                     {(error) => <p class="step-line settings-error">{error()}</p>}
                   </Show>
                   <Show when={server.status === 'needs_auth'}>
-                    <p class="step-line">Sign in with the opencode CLI; this view is read-only.</p>
+                    <p class="step-line">
+                      {l10n.t('Sign in with the opencode CLI; this view is read-only.')}
+                    </p>
                   </Show>
                   <Show when={countsText(server) !== ''}>
                     <p class="step-line step-status">{countsText(server)}</p>
                   </Show>
                   <Show when={server.resources.length > 0}>
-                    <ul class="settings-resources" aria-label={`Resources of ${server.name}`}>
+                    <ul
+                      class="settings-resources"
+                      aria-label={l10n.t('Resources of {0}', server.name)}
+                    >
                       <For each={server.resources}>
                         {(resource) => (
                           <li title={resource.description}>
@@ -129,7 +155,10 @@ export function McpSection(props: { mcp: SettingsState['mcp'] }) {
                     </ul>
                   </Show>
                   <Show when={server.templates.length > 0}>
-                    <ul class="settings-resources" aria-label={`Templates of ${server.name}`}>
+                    <ul
+                      class="settings-resources"
+                      aria-label={l10n.t('Templates of {0}', server.name)}
+                    >
                       <For each={server.templates}>
                         {(template) => (
                           <li title={template.description}>
@@ -146,7 +175,7 @@ export function McpSection(props: { mcp: SettingsState['mcp'] }) {
           </For>
         </ul>
       </Show>
-      <p class="settings-hint">Servers come from mcp.servers in opencode.json.</p>
+      <p class="settings-hint">{l10n.t('Servers come from mcp.servers in opencode.json.')}</p>
     </div>
   );
 }

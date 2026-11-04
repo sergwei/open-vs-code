@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { Show } from 'solid-js';
 import { useSend } from '../chat/hostContext';
 
@@ -23,7 +24,11 @@ export function PathLink(props: { path: string; line?: number; text?: string }) 
     <button
       type="button"
       class="tool-path"
-      aria-label={`Open ${props.path}${props.line === undefined ? '' : ` at line ${String(props.line)}`}`}
+      aria-label={
+        props.line === undefined
+          ? l10n.t('Open {0}', props.path)
+          : l10n.t('Open {0} at line {1}', props.path, props.line)
+      }
       onClick={() => {
         send({
           type: 'editor.open',

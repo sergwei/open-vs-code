@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { createMemo, createSignal, onCleanup, Show } from 'solid-js';
 import { useSend } from '../chat/hostContext';
 import { toVscodeLanguage } from '../markdown/languageIds';
@@ -50,10 +51,16 @@ export function OutputBlock(props: {
   const notice = createMemo(() => {
     const view = clipped();
     if (view.hidden === 0 && !view.truncatedLine) return undefined;
-    const which = props.from === 'tail' ? 'last' : 'first';
-    return view.hidden > 0
-      ? `Showing the ${which} ${String(view.lines.length)} of ${String(view.total)} lines.`
-      : `Showing the ${which} ${String(MAX_CHARS)} characters of a long line.`;
+    // Whole sentences per case (first/last), never a translated "first"/"last" glued in.
+    const tail = props.from === 'tail';
+    if (view.hidden > 0) {
+      return tail
+        ? l10n.t('Showing the last {0} of {1} lines.', view.lines.length, view.total)
+        : l10n.t('Showing the first {0} of {1} lines.', view.lines.length, view.total);
+    }
+    return tail
+      ? l10n.t('Showing the last {0} characters of a long line.', MAX_CHARS)
+      : l10n.t('Showing the first {0} characters of a long line.', MAX_CHARS);
   });
   const name = (): string => props.label.toLowerCase();
 
@@ -65,7 +72,7 @@ export function OutputBlock(props: {
           <button
             type="button"
             class="code-action"
-            aria-label={`Copy ${name()}`}
+            aria-label={l10n.t('Copy {0}', name())}
             onClick={() => {
               send({ type: 'clipboard.write', text: props.text });
               setCopied(true);
@@ -73,12 +80,12 @@ export function OutputBlock(props: {
               timer = setTimeout(() => setCopied(false), COPIED_MS);
             }}
           >
-            Copy
+            {l10n.t('Copy')}
           </button>
           <button
             type="button"
             class="code-action"
-            aria-label={`Open ${name()} in an editor`}
+            aria-label={l10n.t('Open {0} in an editor', name())}
             onClick={() => {
               const language = toVscodeLanguage(props.language);
               send({
@@ -88,10 +95,10 @@ export function OutputBlock(props: {
               });
             }}
           >
-            Open in editor
+            {l10n.t('Open in editor')}
           </button>
           <span class="code-copied" role="status">
-            {copied() ? 'Copied' : ''}
+            {copied() ? l10n.t('Copied') : ''}
           </span>
         </span>
       </div>

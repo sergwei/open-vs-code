@@ -31,6 +31,7 @@ import {
   type RunningServer,
   type ServerLog,
 } from './opencodeServer';
+import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 
 const FIXTURE = fileURLToPath(new URL('./test-fixtures/fake-opencode.mjs', import.meta.url));
 
@@ -476,6 +477,30 @@ describe('against the synthetic fixture (real processes)', () => {
       }),
     ).rejects.toMatchObject({ code: 'folder-missing' });
     expect(lines.some((line) => line.startsWith('launching'))).toBe(false);
+  });
+
+  // Protects the decision of Sergio on the E11-i18n review (logs stay in English): with the Spanish
+  // catalog on, the error shows Spanish to the user and carries the English twin for the log.
+  // SYNTHETIC: a folder that does not exist; the Spanish text is read from the shipped catalog.
+  it('keeps the log text of a start failure in English while the message is Spanish', async () => {
+    useSpanish();
+    try {
+      const folder = path.join(os.tmpdir(), 'ovsc-serve-es-missing-' + String(Date.now()));
+      const failure: unknown = await startServer({
+        command: process.execPath,
+        prefixArgs: [FIXTURE],
+        folder,
+        port: 0,
+        log: captureLog().log,
+      }).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ServerStartError);
+      const error = failure as ServerStartError;
+      expect(error.logMessage).toBe(`the workspace folder does not exist: ${folder}`);
+      expect(error.message).not.toBe(error.logMessage);
+      expect(error.message).toContain(folder);
+    } finally {
+      useEnglish();
+    }
   });
 
   it('an aborted signal during startup rejects with "aborted" and the child dies', async () => {

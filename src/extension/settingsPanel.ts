@@ -3,6 +3,7 @@
 // the panel; what to show and what to do with a request is `settingsController.ts` (pure, tested
 // by Vitest), reached through {@link SettingsPanelHandlers}.
 
+import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
 import {
   isSettingsWebviewToHost,
@@ -12,9 +13,6 @@ import {
 import { chatWebviewOptions, renderChatWebview } from './chatWebview';
 import { SETTINGS_PANEL_VIEW_TYPE } from './ids';
 import type { ServerLog } from './opencodeServer';
-
-/** Title of the tab. */
-const SETTINGS_TITLE = 'OpenCode Settings';
 
 /** What the panel reports to the controller. */
 export interface SettingsPanelHandlers {
@@ -61,7 +59,10 @@ export class SettingsPanel implements vscode.Disposable {
     private readonly handlers: SettingsPanelHandlers,
   ) {}
 
-  /** Opens the tab in the active column, or reveals it when it is already open. */
+  /**
+   * Opens the tab in the active column, or reveals it when it is already open. The tab title goes
+   * through `l10n.t` when the tab is created.
+   */
   show(): void {
     if (this.panel !== undefined) {
       this.panel.reveal(vscode.ViewColumn.Active);
@@ -69,7 +70,7 @@ export class SettingsPanel implements vscode.Disposable {
     }
     const panel = vscode.window.createWebviewPanel(
       SETTINGS_PANEL_VIEW_TYPE,
-      SETTINGS_TITLE,
+      l10n.t('OpenCode Settings'),
       vscode.ViewColumn.Active,
       chatWebviewOptions(this.extensionUri),
     );

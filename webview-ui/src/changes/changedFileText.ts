@@ -1,15 +1,25 @@
+import * as l10n from '@vscode/l10n';
 import type { ChangedFile } from '../../../src/shared/model';
 
-/** Words for the status of a changed file; a file with no text diff is just "Binary". */
-const STATUS_WORD: Record<ChangedFile['status'], string> = {
-  added: 'Added',
-  modified: 'Modified',
-  deleted: 'Deleted',
-};
+/**
+ * Words for the status of a changed file, in the interface language; a file with no text diff is
+ * just "Binary". A function, not a table built at module level, so the texts follow the locale
+ * set at start-up.
+ */
+function statusText(status: ChangedFile['status']): string {
+  switch (status) {
+    case 'added':
+      return l10n.t('Added');
+    case 'modified':
+      return l10n.t('Modified');
+    case 'deleted':
+      return l10n.t('Deleted');
+  }
+}
 
 /** The text of the summary that opens the list: "Changed files (3)". */
 export function changedFilesSummary(count: number): string {
-  return `Changed files (${String(count)})`;
+  return l10n.t('Changed files ({0})', count);
 }
 
 /**
@@ -19,9 +29,9 @@ export function changedFilesSummary(count: number): string {
  * patch for size but sent the counts).
  */
 export function statusWord(file: ChangedFile): string {
-  if (file.binary) return 'Binary';
-  if (file.tooLarge) return 'Too large to diff';
-  return STATUS_WORD[file.status];
+  if (file.binary) return l10n.t('Binary');
+  if (file.tooLarge) return l10n.t('Too large to diff');
+  return statusText(file.status);
 }
 
 /**
@@ -51,9 +61,21 @@ export function metaText(file: ChangedFile): string {
  * HYPOTHESIS: a real screen reader was not run; `ChangedFilesList.test.tsx` checks the string.
  */
 export function openName(file: ChangedFile): string {
-  if (file.binary) return `Open ${file.path}, ${statusWord(file)}`;
+  if (file.binary) return l10n.t('Open {0}, {1}', file.path, statusWord(file));
   if (file.tooLarge) {
-    return `Open ${file.path}, ${statusWord(file)}, ${String(file.additions)} added, ${String(file.deletions)} deleted`;
+    return l10n.t(
+      'Open {0}, {1}, {2} added, {3} deleted',
+      file.path,
+      statusWord(file),
+      file.additions,
+      file.deletions,
+    );
   }
-  return `Open diff of ${file.path}, ${statusWord(file)}, ${String(file.additions)} added, ${String(file.deletions)} deleted`;
+  return l10n.t(
+    'Open diff of {0}, {1}, {2} added, {3} deleted',
+    file.path,
+    statusWord(file),
+    file.additions,
+    file.deletions,
+  );
 }
