@@ -13,8 +13,6 @@ import { describe, expect, it } from 'vitest';
 //   environment on both publish jobs, and nowhere else";
 // - pinning `actions/setup-node` to `@v7`: "pins every `uses:` to a 40-hex commit SHA with the tag
 //   in a comment";
-// - moving `VSCE_PAT` to the job-level `env:` of `publish-marketplace`: "references only VSCE_PAT
-//   and OVSX_PAT, each in its own job and in a step-level env";
 // - `${{ github.head_ref }}` inside the multi-line `run:` of the Summary step: "puts the tag name
 //   in an env var, never inside a `run:` script";
 // - removing `persist-credentials: false` from the package checkout: "never persists the
@@ -32,6 +30,18 @@ import { describe, expect, it } from 'vitest';
 //   on main in the package job";
 // - dropping `--from-vsix` from the `node scripts/check-vsix.mjs` line: "lists the .vsix with
 //   unzip and normalizes it with --from-vsix, under `shell: bash`".
+// Third round, Marketplace trusted publishing (`vsce publish --oidc`, no PAT), same method
+// (Windows 11, 2026-11-04), RED by title:
+// - `id-token: write` at workflow level: "grants `id-token: write` only to publish-marketplace, in
+//   its job-level permissions" (and "starts with empty permissions…");
+// - `id-token: write` added to `publish-open-vsx`: the same "grants `id-token: write` only…";
+// - `permissions: write-all` on `package`: the same "grants `id-token: write` only…";
+// - dropping `--oidc` from the publish command: "publishes to the Marketplace with --oidc and no
+//   other credential";
+// - `VSCE_PAT: ${{ secrets.VSCE_PAT }}` back in the `env:` of the Marketplace publish step: "does
+//   not let the dry run or the Marketplace job read a secret…", "references only OVSX_PAT…" and
+//   "publishes to the Marketplace with --oidc…";
+// - `"@vscode/vsce": "4.0.0"` in package.json: "pins @vscode/vsce exactly at 4.1.0 or later…".
 // macOS and Linux UNVERIFIED until the CI matrix runs this file.
 
 const WORKFLOWS_DIR = new URL('../../.github/workflows/', import.meta.url);
@@ -80,6 +90,30 @@ function splitJobs(text: string): Map<string, string> {
 /** Lines of `text` that are not comments. */
 function codeLines(text: string): string[] {
   return text.split(/\r?\n/).filter((l) => !/^\s*#/.test(l));
+}
+
+/**
+ * Compares two `MAJOR.MINOR.PATCH` strings numerically and says whether `version` is at least
+ * `minimum`.
+ *
+ * Numeric on purpose: a string comparison puts `4.10.0` before `4.9.0`. Only plain three-part
+ * versions are accepted (the pin test checks that shape first), so there is no pre-release
+ * handling. Throws on any other shape instead of guessing.
+ */
+function versionAtLeast(version: string, minimum: string): boolean {
+  const parse = (v: string): number[] => {
+    const parts = /^(\d+)\.(\d+)\.(\d+)$/.exec(v);
+    if (!parts) throw new Error(`not a MAJOR.MINOR.PATCH version: ${v}`);
+    return parts.slice(1).map(Number);
+  };
+  const a = parse(version);
+  const b = parse(minimum);
+  for (let i = 0; i < 3; i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return true;
 }
 
 /** The `if:` of a publish job, at job level (four spaces: job name 2, key 4). */
@@ -184,29 +218,74 @@ describe('workflows: release.yml', () => {
     expect(codeLines(text).filter((l) => /^\s+name: release$/.test(l))).toHaveLength(2);
   });
 
-  it('does not let the dry run read a secret: `secrets.` appears only in the publish jobs', () => {
+  it('does not let the dry run or the Marketplace job read a secret: `secrets.` is only in publish-open-vsx', () => {
+    // Defends against a token creeping back into the OIDC job (where it would be dead weight and
+    // an exfiltration target) or into the dry run (which also runs on pull requests).
     expect(jobs.get('package')).not.toContain('secrets.');
-    for (const name of publishJobs) {
-      expect(jobs.get(name), name).toContain('secrets.');
+    expect(jobs.get('publish-marketplace')).not.toContain('secrets.');
+    expect(jobs.get('publish-open-vsx')).toContain('secrets.');
+  });
+
+  it('references only OVSX_PAT, only in publish-open-vsx and in a step-level env; VSCE_PAT nowhere', () => {
+    // Defends against a PAT flow coming back for the Marketplace (Azure DevOps PATs retire on
+    // 2026-12-01) and against a job-level `env:` that would expose the token to every step.
+    const lines = codeLines(jobs.get('publish-open-vsx') ?? '').filter((l) =>
+      l.includes('secrets.'),
+    );
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      // Ten spaces: the `env:` of a step (job name 2, `steps:` 4, `- name` 6, `env:` 8, key 10).
+      // A job-level `env:` would put the key at six and expose the token to every step.
+      expect(line).toMatch(/^ {10}OVSX_PAT: \$\{\{ secrets\.OVSX_PAT \}\}$/);
+    }
+    expect(codeLines(text).filter((l) => l.includes('VSCE_PAT'))).toEqual([]);
+    expect(
+      codeLines(text).filter((l) => l.includes('secrets.') && !l.includes('OVSX_PAT')),
+    ).toEqual([]);
+  });
+
+  it('grants `id-token: write` only to publish-marketplace, in its job-level permissions', () => {
+    // `id-token: write` lets a job ask GitHub for an OIDC token; the Marketplace policy matches
+    // repository + workflow + environment, not the job, so every job in the `release` environment
+    // that held it could mint a Marketplace credential. Hence exactly one grant, in one job, and
+    // never at workflow level or through `write-all`.
+    const code = codeLines(text);
+    expect(code.filter((l) => l.includes('id-token'))).toHaveLength(1);
+    expect(jobs.get('publish-marketplace')).toContain(
+      '    permissions:\n      contents: read\n      id-token: write\n',
+    );
+    expect(jobs.get('package')).not.toContain('id-token');
+    expect(jobs.get('publish-open-vsx')).not.toContain('id-token');
+    expect(code.filter((l) => /\b(write-all|read-all)\b/.test(l))).toEqual([]);
+  });
+
+  it('publishes to the Marketplace with --oidc and no other credential', () => {
+    // Defends against dropping `--oidc` (vsce would then ask for a PAT that no longer exists) and
+    // against a second credential: vsce rejects `--oidc` combined with `--pat`/`--azure-credential`.
+    const job = codeLines(jobs.get('publish-marketplace') ?? '').join('\n');
+    expect(job).toContain('npx --no-install vsce publish --oidc --packagePath "$VSIX"');
+    for (const forbidden of ['--pat', '--azure-credential', 'verify-pat', 'VSCE_PAT']) {
+      expect(job, forbidden).not.toContain(forbidden);
     }
   });
 
-  it('references only VSCE_PAT and OVSX_PAT, each in its own job and in a step-level env', () => {
-    const expected: Record<string, string> = {
-      'publish-marketplace': 'VSCE_PAT',
-      'publish-open-vsx': 'OVSX_PAT',
+  it('pins @vscode/vsce exactly at 4.1.0 or later (4.0.0 cannot exchange the OIDC token)', () => {
+    // vsce 4.0.0 exchanges the token with `Authorization: Bearer` and no api-version; the
+    // Marketplace answers 400. 4.1.0 (microsoft/vscode-vsce#1337, confirmed in #1275) sends
+    // `FederatedToken` and `api-version=7.2-preview.1`. Going back would only fail on the day of
+    // the tag. Read from the real package.json and lock, not fabricated.
+    const pkg = JSON.parse(
+      readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+    ) as {
+      devDependencies: Record<string, string>;
     };
-    for (const [name, token] of Object.entries(expected)) {
-      const lines = codeLines(jobs.get(name) ?? '').filter((l) => l.includes('secrets.'));
-      expect(lines.length, name).toBeGreaterThan(0);
-      for (const line of lines) {
-        // Ten spaces: the `env:` of a step (job name 2, `steps:` 4, `- name` 6, `env:` 8, key 10).
-        // A job-level `env:` would put the key at six and expose the token to every step.
-        expect(line, name).toMatch(
-          new RegExp(`^ {10}${token}: \\$\\{\\{ secrets\\.${token} \\}\\}$`),
-        );
-      }
-    }
+    const lock = JSON.parse(
+      readFileSync(new URL('../../package-lock.json', import.meta.url), 'utf8'),
+    ) as { packages: Record<string, { version: string }> };
+    const declared = pkg.devDependencies['@vscode/vsce'] ?? '';
+    expect(declared).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(versionAtLeast(declared, '4.1.0'), declared).toBe(true);
+    expect(lock.packages['node_modules/@vscode/vsce']?.version).toBe(declared);
   });
 
   it('never passes a token on a command line or interpolates a secret in `run:`', () => {
@@ -225,11 +304,10 @@ describe('workflows: release.yml', () => {
     expect(jobs.get('publish-open-vsx')).toContain('needs: [package, publish-marketplace]');
   });
 
-  it('has no pre-release flag, no skip-duplicate and no OIDC permission (PAT flow)', () => {
+  it('has no pre-release flag and no skip-duplicate', () => {
     const code = codeLines(text).join('\n');
     expect(code).not.toContain('--pre-release');
     expect(code).not.toContain('--skip-duplicate');
-    expect(code).not.toContain('id-token');
   });
 
   it('installs dependencies without scripts in the jobs that hold a token', () => {

@@ -19,15 +19,29 @@
 #   --packagePath` does not re-run `vscode:prepublish` nor re-package.
 # - Stable releases only (decision of issue #43): no `--pre-release` anywhere. The Marketplace
 #   rejects semver suffixes, so tags are `vMAJOR.MINOR.PATCH`.
-# - Tokens (`VSCE_PAT`, `OVSX_PAT`) are environment secrets, appear only in the `env:` of the steps
-#   that use them (the token check and the publish step of each job) and never on a command line
-#   (vsce and ovsx read them from the environment). Dependencies are installed with
-#   `--ignore-scripts` in the jobs that hold a token, and without the npm cache, so a cache
-#   written by another run cannot reach a job that holds a token. The package job passes the
+# - The Marketplace is published with trusted publishing (`vsce publish --oidc`), so there is no
+#   Marketplace secret: sources are the official publishing doc (code.visualstudio.com/api/
+#   working-with-extensions/publishing-extension), microsoft/vscode-vsce#1337 and vsce 4.1.0,
+#   the first version that speaks the final token-exchange contract (4.0.0 does not; a test pins
+#   it). The only secret is `OVSX_PAT`, an environment secret that appears only in the `env:` of
+#   the steps of the Open VSX job and never on a command line (ovsx reads it from the
+#   environment). Open VSX needs a PAT because its first version cannot use trusted publishing.
+#   Dependencies are installed with `--ignore-scripts` in the jobs that publish, and without the
+#   npm cache, so a cache written by another run cannot reach them. The package job passes the
 #   sha256 of the .vsix as an output and each publish step checks it before publishing.
+# - `id-token: write` is granted to `publish-marketplace` only, in its job-level permissions:
+#   never at workflow level, never in `package` (which the dry run also runs) and never in
+#   `publish-open-vsx`. The Marketplace policy matches repository, workflow and environment, not
+#   the job, and both publish jobs are in the `release` environment, so a second job holding the
+#   permission could mint a Marketplace credential too.
+# - The Marketplace policy MUST name the `release` environment: it has no ref, branch or tag
+#   field, so without the environment any run of this file that has `id-token` (a branch of this
+#   repository that edits the workflow) would match. The environment must exist, protected,
+#   before the first tag, or GitHub creates it unprotected on the fly.
 # - The Open VSX job needs the Marketplace job: if the Marketplace rejects the package (for
 #   instance the display name), nothing is published to Open VSX and the two listings never
-#   diverge. It has no `id-token: write`, or ovsx would try trusted publishing instead of the PAT.
+#   diverge. It has no `id-token: write` for the reason above. In ovsx 1.3.0 a PAT takes
+#   precedence over trusted publishing, so that is not why the permission is absent.
 # - Actions are pinned to a commit SHA with the tag in a comment, like ci.yml. This workflow does
 #   not call ci.yml: the gates are check-types and lint (through `vscode:prepublish`), format
 #   check and unit tests on Linux, plus the check that the tagged commit is on `main`, where CI
@@ -35,8 +49,11 @@
 #
 # UNVERIFIED until the first run: the dry run on the pull request (and then on `main`) is the
 # only part exercised before a tag. Never exercised without publishing: the environment and its
-# approval, the validity of the tokens, that `vsce publish --packagePath` and `ovsx publish`
-# accept the .vsix, and whether the Marketplace accepts the display name.
+# approval, the validity of `OVSX_PAT`, that `vsce publish --oidc --packagePath` and `ovsx
+# publish` accept the .vsix, and whether the Marketplace accepts the display name. Also seen only
+# at the first tag: the OIDC token exchange, that the trusted publishing policy matches, and that
+# the Marketplace creates a NEW extension with an OIDC credential (no source says it does; the
+# fallback is in docs/RELEASING.md). A failure there publishes nothing.
 
 name: Release
 
@@ -187,6 +204,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      id-token: write
     environment:
       name: release
       url: https://marketplace.visualstudio.com/items?itemName=sergwei.open-vs-code
@@ -210,25 +228,16 @@ jobs:
           name: release-vsix
           path: ${{ runner.temp }}/vsix
 
-      - name: Check the token
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: |
-          if [ -z "$VSCE_PAT" ]; then
-            echo "::error::VSCE_PAT is not set in the release environment"
-            exit 1
-          fi
-          npx --no-install vsce verify-pat sergwei
-
+      # No token: `--oidc` exchanges the job's GitHub OIDC token for a short-lived Marketplace
+      # credential, which needs the trusted publishing policy of the publisher (docs/RELEASING.md).
       - name: Publish to the VS Code Marketplace
         shell: bash
         env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
           VSIX: ${{ runner.temp }}/vsix/${{ needs.package.outputs.vsix }}
           SHA256: ${{ needs.package.outputs.sha256 }}
         run: |
           echo "$SHA256  $VSIX" | sha256sum -c -
-          npx --no-install vsce publish --packagePath "$VSIX"
+          npx --no-install vsce publish --oidc --packagePath "$VSIX"
 
   publish-open-vsx:
     name: publish-open-vsx
