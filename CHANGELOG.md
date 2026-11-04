@@ -9,6 +9,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Spanish and a way to add languages**: the manifest (commands, settings, views), the notices and
+  dialogs of the extension host, the chat and the Settings tab follow the display language of VS
+  Code; Spanish ships with the extension. VS Code needs the matching language pack installed,
+  otherwise it reports English. A new language is two files named after the pack's language id
+  (`package.nls.<id>.json`, `l10n/bundle.l10n.<id>.json`) checked by `npm run l10n:check`; see
+  `docs/i18n.md`. Visible changes: dates in the chat's session list follow the language of VS Code
+  (before, the system's), and the prompt that **Explain** and **Fix with OpenCode** write is in
+  the language of VS Code, so the model answers in it. Logs and channel names stay in English.
 - **Plugin consent**: before the extension starts opencode in a folder whose opencode config brings
   plugins (files in `.opencode/plugin(s)/`, or `plugins` / `plugin` entries in `opencode.json(c)`,
   npm names included, in the folder or any folder above it) it shows a warning with **Start
