@@ -132,6 +132,17 @@ affiliated with opencode or with Microsoft.
   - Homebrew: `brew install anomalyco/tap/opencode-v2`.
 - A provider and model configured in opencode.
 
+## Languages
+
+The extension is in English and Spanish, and follows the display language of VS Code: the command
+titles, settings, notices, dialogs and both webviews. **VS Code only switches to Spanish if the
+[Spanish Language Pack](https://marketplace.visualstudio.com/items?itemName=MS-CEINTL.vscode-language-pack-es)
+is installed**; without it everything stays in English. To pick the language, install the pack and run
+**Configure Display Language** from the Command Palette (`Ctrl+Shift+P`), choose `Español` and restart
+VS Code; choose `English` to go back. The log lines in the "OpenCode" and "OpenCode Mods" output
+channels are always in English, whatever the language, and so are the channel names. Adding a language and the translation guide:
+[docs/i18n.md](docs/i18n.md).
+
 ## Installation
 
 The extension is not on the Marketplace yet; issue #43 will publish it there. Until then, build the
