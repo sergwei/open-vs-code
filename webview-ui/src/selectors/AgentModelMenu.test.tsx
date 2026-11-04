@@ -743,7 +743,7 @@ describe('in Spanish (E11-i18n)', () => {
   // connection word, the three column headings, the "Current" mark, the model details and the live
   // region count. Provenance: the REAL shipped `l10n/bundle.l10n.es.json` read from the file
   // through `useSpanish`, the fabricated catalog of this file in jsdom; the look and the overflow
-  // at 300 px are `test:visual` step 42 (cell B).
+  // at 300 px in Spanish are checked by no test (the Spanish window of `test:visual` was removed).
   afterEach(() => {
     useEnglish();
   });

@@ -27,7 +27,7 @@ describe('activation', () => {
       vscode.env.language,
       'en',
       `vscode.env.language is "${vscode.env.language}": the integration suites compare English ` +
-        'texts, so this label must start VS Code without a language pack (locale-es is the one that does).',
+        'texts, so this label must start VS Code without a language pack.',
     );
   });
 
@@ -63,8 +63,8 @@ describe('activation', () => {
   /**
    * The host writes its language and the size of the loaded bundle (`l10n: locale en, bundle
    * none`): in English VS Code loads no bundle. Protects the wiring of `l10nBoot.ts` (a missing
-   * or throwing boot would stop the activation line too). The Spanish counterpart is the
-   * `locale-es` label ("logs the host locale es with the loaded bundle").
+   * or throwing boot would stop the activation line too). There is no Spanish counterpart: the
+   * `locale-es` label that had one was removed on 04/11/2026.
    */
   it('logs the l10n line', async () => {
     const extension = vscode.extensions.getExtension(EXTENSION_ID);

@@ -126,9 +126,11 @@ export function hashedFiles(root) {
     files.push(rel);
   }
   files.push(...walk(root, 'media'));
-  // E11-i18n: the catalogs change the texts the run sees (step 42 reads the Spanish ones, and the
-  // installed copy of step 25 carries them), so they count: `package.nls*.json` at the root and
-  // everything under `l10n/`. Text files, hashed with normalised line endings.
+  // E11-i18n: only `package.nls.json` changes the texts an English run sees; the language catalogs
+  // (`package.nls.<id>.json`, `l10n/`) count too out of caution, because the installed copy of
+  // step 25 carries them. So a change to translations alone makes `--check` say the run is stale
+  // while `selectForFiles` (affected.mjs) says none: the run still holds. Text files, hashed with
+  // normalised line endings.
   if (fs.existsSync(root)) {
     for (const name of fs.readdirSync(root)) {
       if (/^package\.nls(\.[^.]+)?\.json$/.test(name)) files.push(name);

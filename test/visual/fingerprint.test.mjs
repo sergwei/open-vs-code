@@ -120,9 +120,10 @@ describe('fingerprint', () => {
   });
 
   /**
-   * Protects the decision of E11-i18n (04/11/2026): the translation catalogs change the texts that
-   * step 42 and the installed copy of step 25 show, so `package.nls*.json` and `l10n/**` move the
-   * fingerprint, with line endings normalised. Fabricated files in a temporary tree.
+   * Protects the decision of E11-i18n (04/11/2026): `package.nls*.json` and `l10n/**` move the
+   * fingerprint, with line endings normalised. Only `package.nls.json` changes what an English
+   * run sees; the language catalogs count out of caution, because the installed copy of step 25
+   * carries them. Fabricated files in a temporary tree.
    */
   it('hashes package.nls*.json and l10n/, with normalised line endings', () => {
     put('package.nls.json', '{\n  "a": "Show"\n}\n');

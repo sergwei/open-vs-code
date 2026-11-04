@@ -45,12 +45,11 @@ let logChannel: vscode.LogOutputChannel | undefined;
  * macOS/Linux UNVERIFIED.
  *
  * E11-i18n: after the `activated` line it logs `l10n: locale <language>, bundle <N keys|none>`
- * (`describeL10n`), the line the `locale-es` suite reads. VERIFIED in English:
- * `npm run test:integration -- --label main` (Windows 11, VS Code stable, 04/11/2026) passed
- * "logs the l10n line", which waits for `l10n: locale en, bundle none`. VERIFIED in Spanish:
- * `--label locale-es` (Windows 11, VS Code 1.145.0, 04/11/2026) passed "logs the host locale es
- * with the loaded bundle", which waits for `l10n: locale es, bundle <N> keys` with N the entries
- * of `l10n/bundle.l10n.es.json`. UNVERIFIED on macOS and Linux.
+ * (`describeL10n`). VERIFIED in English: `npm run test:integration -- --label main` (Windows 11,
+ * VS Code stable, 04/11/2026) passed "logs the l10n line", which waits for `l10n: locale en,
+ * bundle none`. Seen once in a Spanish VS Code on 04/11/2026 (Windows 11, VS Code 1.145.0): the line
+ * read `l10n: locale es, bundle <N> keys`, with a test since removed; no test keeps it. UNVERIFIED
+ * on macOS and Linux.
  *
  * E10-mods: `registerMods` runs before the chat (its sink is a parameter of `registerChat`); its
  * first load runs behind activation, and `deactivate` stops the Workers (UNVERIFIED in a real

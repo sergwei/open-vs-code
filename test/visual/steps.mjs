@@ -103,19 +103,9 @@
  * `autoStart` off and sends no prompt. Its `budgetS` of 15 is the criterion above applied to the
  * full run of 04/11/2026 (Windows 11, VS Code 1.144.1, 819.2 s, its only FAIL the F2 of step 36,
  * #171): "41    11.7 s", times 1.25 is 14.6, rounded up to 15. It replaces the estimate of 30.
- * The step 42 (the extension in a Spanish VS Code, E11-i18n) came after it too: it needs nothing
- * (like the 25 it starts a VS Code window of its own, with `--locale=es` and the Spanish language
- * pack, and never touches the main one). It sends one prompt (the permission card of its cell D),
- * but to the fake of ITS OWN window, which keeps its state file in that window's work folder; its
- * `sendsPrompt` stays false because the final check of `run.mjs` reads the state file of the MAIN
- * window, where a `--steps 42` run would find no session. Its `budgetS` of 50 comes from the full
- * run of 04/11/2026 before the fix rounds (Windows 11, VS Code 1.145.0, 863.1 s, "all visual checks
- * passed"): "42    36.9 s", times 1.25 is 46.1, rounded up to 50. It replaces the estimate of 60.
- * The full run on the final tree, the same day (857.2 s, "all visual checks passed"), measured
- * "42    37.5 s": times 1.25 is 46.9, so 50 holds. The first run on a
- * checkout also downloads and registers the language pack, which this figure does not include
- * (`--steps 42` alone took 36.8 s the same day with the pack cached).
- * Every step after the 1 needs the 1, except the 25 and the 42:
+ * There was a step 42 (the extension in a Spanish VS Code, E11-i18n); it was removed on 04/11/2026
+ * by decision of Sergio, and its id is not reused.
+ * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
  * (Windows 11): without the 1 every step threw "Cannot read properties of undefined (reading
@@ -171,7 +161,6 @@ export const STEPS = [
   { id: '39', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 20 },
   { id: '40', needs: ['1'], sendsPrompt: false, groups: ['setup'], budgetS: 40 },
   { id: '41', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
-  { id: '42', needs: [], sendsPrompt: false, groups: ['l10n'], budgetS: 50 },
 ];
 
 /** Every valid id, in canonical order. */
