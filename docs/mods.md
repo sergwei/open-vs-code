@@ -44,7 +44,9 @@ turns every mod off.
 What a mod logs goes to the **OpenCode Mods** output channel, prefixed with its id. Lines about its
 life (`mod x loaded`, `mod x failed: …`) go to the **OpenCode** channel. A mod gets at most 50 lines
 per second in its channel, counting the warnings the extension writes about what the mod sends; the
-rest are dropped, with one warning per second in which something was dropped.
+rest are dropped, with one warning per second in which something was dropped (that warning does not
+count). Also outside the count: the warning about the removed `send` option of
+`station.chat.compose`, written once per load.
 
 ## The format
 
@@ -116,7 +118,7 @@ code-server has reported "Creating workers from remote extensions is currently n
 | `station.commands.register({ name, description?, run })` | Adds a command. Returns a `Disposable` |
 | `station.ui.status.set({ text, tooltip?, severity?, command? })` and `.clear()` | The band above the prompt box |
 | `station.ui.toast({ message, severity?, actions? })` | A native notification. Returns a promise of the button pressed, or `undefined` |
-| `station.chat.compose({ text, send? })` | Puts text in the prompt box of the chat; with `send: true` it also sends it |
+| `station.chat.compose({ text })` | Puts text in the prompt box of the chat; it never sends it: the user does |
 | `station.ui.panel.open({ title, html, scripts?, styles? })` | A panel in an editor tab beside the chat. Returns `{ postMessage, onMessage, onDidClose, dispose }` |
 
 ### Events
@@ -176,7 +178,17 @@ characters, and one toast every 2 seconds per mod (the rest are dropped with a w
 ### Composing text
 
 `station.chat.compose` writes into the prompt box of the chat in front (opening one if there is none).
-It never attaches files. With `send: true` the text is sent as if the user had pressed Send.
+It never attaches files and it never sends: the user reads the text and presses Send.
+
+The `send` option was removed before 1.0. A mod that still passes `send: true` (plain JS; in
+TypeScript it no longer compiles) has its text written, not sent, and gets one warning per load in
+the **OpenCode Mods** channel.
+
+Accepted risk (decision of 03/11/2026, issue #169): compose has **no frequency limit**. A mod with a
+bug that composes in a loop can keep appending text to the draft (up to 20 000 characters per call)
+and pull the chat into view each time, taking the focus from what the user was doing. Unlike a toast
+(one every 2 seconds), nothing throttles it. If that shows up in practice, the answer is a cap like
+the toast one, in its own issue.
 
 ### Panels
 
