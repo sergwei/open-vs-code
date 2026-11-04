@@ -1183,7 +1183,7 @@ export function registerChat(
   mods?.chat?.bindCompose((request) => {
     const target = targetPane(false);
     void finishContextAction(
-      controller.composeFromMod(target.paneId, request.modId, request.text, request.send),
+      controller.composeFromMod(target.paneId, request.modId, request.text),
       target,
     );
   });

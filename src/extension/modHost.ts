@@ -20,7 +20,8 @@
 // stops, fails or reloads, so a dead mod never leaves a tab behind.
 // Flood limits (E10-mods-limits, #155): everything a mod makes the host write to the "OpenCode Mods"
 // channel is capped at {@link LOG_LINES_PER_SECOND} (plus at most one "limit reached" line per
-// window, which `admit` writes itself and does not count), and the `panel.message` it relays to its
+// window, which `admit` writes itself and does not count, and the once-per-load `send` warning of
+// `composeText` (#169), which does not count either), and the `panel.message` it relays to its
 // panels at {@link PANEL_MESSAGES_PER_SECOND}. The cap lives here and not in `worker.ts` because a
 // Worker runs arbitrary code and can post to the parent port without going through the bootstrap.
 //
@@ -79,7 +80,8 @@ export interface ModUi {
     modId: string,
     toast: { message: string; severity?: ModSeverity; actions?: string[] },
   ): Promise<string | undefined>;
-  compose(modId: string, request: { text: string; send?: boolean }): void;
+  /** Puts text in the prompt box; it is never sent (#169). */
+  compose(modId: string, request: { text: string }): void;
 }
 
 /** What a mod asked `station.ui.panel.open` for; paths are relative to {@link ModPanelRequest.dir}. */
@@ -197,6 +199,8 @@ interface ModRecord {
   statusTimer?: NodeJS.Timeout;
   hasStatus: boolean;
   lastToastAt: number;
+  /** True once this load of the mod got the "send no longer exists" warning (see `composeText`). */
+  sendWarned: boolean;
   /** Ids of the panels this mod has open. */
   panels: Set<string>;
   /** Window of {@link LOG_LINES_PER_SECOND}. */
@@ -423,6 +427,7 @@ export class ModHost {
       statusLastAt: 0,
       hasStatus: false,
       lastToastAt: 0,
+      sendWarned: false,
       panels: new Set(),
       logWindow: newRateWindow(),
       panelWindow: newRateWindow(),
@@ -517,7 +522,7 @@ export class ModHost {
   /**
    * Writes a line to the mod's log channel, counted against {@link LOG_LINES_PER_SECOND}. Every host
    * write about what the mod sends goes through here except the one "limit reached" line per window
-   * that `admit` writes directly.
+   * that `admit` writes directly, and the once-per-load `send` warning of `composeText` (#169).
    */
   private log(rec: ModRecord, level: LogLevel, text: string): void {
     if (this.admit(rec, rec.logWindow, LOG_LINES_PER_SECOND, 'log lines')) {
@@ -540,11 +545,42 @@ export class ModHost {
   }
 
   /**
+   * Hands a mod's compose to {@link ModUi.compose} as text only: the host never sends a prompt for
+   * a mod (issue #169, decision #1887). A message that still carries the legacy `send: true` gets
+   * its text written anyway plus ONE `warn` per load of the mod, because the author's cycle is
+   * edit then Reload Mods and must see the warning again if the call is still there.
+   * The warning goes straight to `logMod` and not through `log`: with the 50 lines per second
+   * budget spent, `log` would drop it while the flag is already set, and it would be lost for the
+   * whole load. One line per load cannot flood. No frequency cap by decision (`sin-tope`, #1895):
+   * a mod looping on compose can keep appending to the draft and pulling the chat into view.
+   * The check lives here and not in the Worker, which runs arbitrary code.
+   * VERIFIED on Windows 11 (03/11/2026) by `modHost.test.ts` "writes a compose that asks to send
+   * without sending it, and warns once per load" and "the send warning is written even when the
+   * log budget is spent"; each went red when mutated (the line `rec.sendWarned = true` removed;
+   * `logMod` replaced by `this.log`), and the real-Worker case "passes toasts, composes and status
+   * updates to the UI…" crosses Worker to host. In a real window, `test:visual` step 38 "ok   M9d
+   * the mods log (OpenCode Mods.log, 1 file(s)) has exactly one send warning for [hello-station]…".
+   * Not observed: macOS and Linux, a third-party mod, a compose loop (no cap by decision).
+   */
+  private composeText(rec: ModRecord, message: Extract<WorkerToHost, { type: 'compose' }>): void {
+    const id = rec.mod.manifest.id;
+    if (message.send === true && !rec.sendWarned) {
+      rec.sendWarned = true;
+      this.options.logMod(
+        id,
+        'warn',
+        'chat.compose: "send" no longer exists; the text was written to the prompt box and was not sent (the user sends it). Said once per load.',
+      );
+    }
+    this.options.ui.compose(id, { text: message.text });
+  }
+
+  /**
    * Acts on one validated message: `ready` makes the mod `active`, `failed` fails it, `pong`
    * resets the heartbeat, `command.*` keep the command table and settle pending runs, and the UI
    * messages go to {@link ModUi} (status coalesced, toast rate-limited, log lines and
-   * `panel.message` flood-limited). Commands registered during `activate` are accepted before
-   * `ready`.
+   * `panel.message` flood-limited, compose text-only via {@link composeText}, not limited).
+   * Commands registered during `activate` are accepted before `ready`.
    */
   private handle(rec: ModRecord, message: WorkerToHost): void {
     const id = rec.mod.manifest.id;
@@ -603,10 +639,7 @@ export class ModHost {
         this.showToast(rec, message);
         return;
       case 'compose':
-        this.options.ui.compose(id, {
-          text: message.text,
-          ...(message.send !== undefined ? { send: message.send } : {}),
-        });
+        this.composeText(rec, message);
         return;
       case 'panel.open':
         this.openPanel(rec, message);

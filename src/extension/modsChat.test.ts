@@ -114,7 +114,7 @@ describe('createModsChat', () => {
     expect(source.run).toHaveBeenCalledTimes(1);
   });
 
-  it('hands a compose to the bound handler (send defaults to false) and reports an unbound one', () => {
+  it('hands a compose to the bound handler as modId and text only, and reports an unbound one', () => {
     const unbound = vi.fn();
     const chat = createModsChat(fakeSource([HELLO], [HELLO_CMD]), unbound);
     chat.compose('hello-station', { text: 'lost' });
@@ -122,10 +122,10 @@ describe('createModsChat', () => {
     const handler = vi.fn();
     chat.bindCompose(handler);
     chat.compose('hello-station', { text: 'a' });
-    chat.compose('hello-station', { text: 'b', send: true });
+    chat.compose('hello-station', { text: 'b' });
     expect(handler.mock.calls).toEqual([
-      [{ modId: 'hello-station', text: 'a', send: false }],
-      [{ modId: 'hello-station', text: 'b', send: true }],
+      [{ modId: 'hello-station', text: 'a' }],
+      [{ modId: 'hello-station', text: 'b' }],
     ]);
     chat.bindCompose(undefined);
     chat.compose('hello-station', { text: 'c' });

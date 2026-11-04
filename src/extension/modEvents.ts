@@ -59,11 +59,10 @@ export interface ModsState {
   commands: ModCommandOption[];
 }
 
-/** What a mod asked the chat to compose (`station.chat.compose`). */
+/** What a mod asked the chat to compose (`station.chat.compose`): text for the prompt box, never sent (#169). */
 export interface ModComposeRequest {
   modId: string;
   text: string;
-  send: boolean;
 }
 
 /**

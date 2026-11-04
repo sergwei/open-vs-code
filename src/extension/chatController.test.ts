@@ -1175,26 +1175,29 @@ describe('mods (E10-mods phase 3)', () => {
     });
   });
 
-  it('composeFromMod hands the pane a prompt.compose with no files and refuses a blank text', () => {
+  /**
+   * Protects #169: a mod's compose reaches the pane as `prompt.compose` with `send: false`, so a
+   * mod can never send a prompt. Fabricated pane; passed on Windows 11 (03/11/2026). The
+   * real-window side is `test:visual` step 38 M9a/M9b.
+   */
+  it('composeFromMod hands the pane a prompt.compose with no files and send false, and refuses a blank text', () => {
     const { controller, posted, logs } = setup(fakeApi().api);
-    expect(controller.composeFromMod(controller.pane.id, 'hello-station', 'Say hi', true)).toEqual({
+    expect(controller.composeFromMod(controller.pane.id, 'hello-station', 'Say hi')).toEqual({
       status: 'composed',
     });
     expect(posted).toContainEqual({
       type: 'prompt.compose',
       text: 'Say hi',
       files: [],
-      send: true,
+      send: false,
     });
-    expect(logs).toContain('info: mod hello-station composed a prompt (send true)');
+    expect(logs).toContain('info: mod hello-station composed a prompt');
     expect(logs.join(' | ')).not.toContain('Say hi');
-    expect(
-      controller.composeFromMod(controller.pane.id, 'hello-station', '   ', true),
-    ).toMatchObject({
+    expect(controller.composeFromMod(controller.pane.id, 'hello-station', '   ')).toMatchObject({
       status: 'rejected',
       error: { code: 'ComposeRefused' },
     });
-    expect(controller.composeFromMod(999, 'hello-station', 'x', false)).toMatchObject({
+    expect(controller.composeFromMod(999, 'hello-station', 'x')).toMatchObject({
       status: 'rejected',
     });
   });

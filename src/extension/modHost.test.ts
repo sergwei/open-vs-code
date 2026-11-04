@@ -91,7 +91,7 @@ interface Harness {
   lifecycle: string[];
   statuses: Array<[string, ModStatusLine | undefined]>;
   toasts: Array<{ message: string; actions?: string[] }>;
-  composes: Array<{ text: string; send?: boolean }>;
+  composes: Array<{ text: string }>;
   /** One entry per Worker created; `exited` resolves when it ends. */
   workers: Array<{ worker: Worker; exited: Promise<number> }>;
 }
@@ -322,6 +322,12 @@ describe('ModHost with a real Worker', () => {
     }
   });
 
+  /**
+   * Also protects #169 across the REAL Worker to host boundary: the mod passes the removed
+   * `send: true` (plain JS), the host receives the legacy wire field, writes the text WITHOUT a
+   * `send` key and logs the one warning. Real Worker compiled from `src/mods/worker.ts` by this
+   * file; fabricated mod; passed on Windows 11 (03/11/2026).
+   */
   it('passes toasts, composes and status updates to the UI, and drops a second toast within 2 s', async () => {
     const h = harness();
     const mod = await makeMod(
@@ -329,7 +335,7 @@ describe('ModHost with a real Worker', () => {
       `export function activate(station) {
          station.events.on('turn.started', async () => {
            station.ui.status.set({ text: 'Working', severity: 'info' });
-           station.chat.compose({ text: 'hello', send: false });
+           station.chat.compose({ text: 'hello', send: true });
            const first = await station.ui.toast({ message: 'one', actions: ['Yes', 'No'] });
            const second = await station.ui.toast({ message: 'two' });
            station.log.info('answers=' + first + ',' + second);
@@ -342,7 +348,10 @@ describe('ModHost with a real Worker', () => {
     h.host.dispatch({ type: 'turn.started', sessionID: 's1' });
     await waitFor(() => h.logs.includes('ui|info|answers=Yes,undefined'), 'both toast answers');
     expect(h.toasts).toEqual([{ message: 'one', actions: ['Yes', 'No'] }]);
-    expect(h.composes).toEqual([{ text: 'hello', send: false }]);
+    expect(h.composes).toEqual([{ text: 'hello' }]);
+    expect(
+      h.logs.filter((l) => l.startsWith('ui|warn|chat.compose: "send" no longer exists')),
+    ).toHaveLength(1);
     expect(h.logs.some((l) => l.startsWith('ui|warn|toast dropped'))).toBe(true);
     await waitFor(() => h.statuses.length === 2, 'status set and clear');
     expect(h.statuses.map(([, line]) => line?.text)).toEqual(['Working', undefined]);
@@ -523,6 +532,7 @@ describe('ModHost with a fake Worker and fake timers', () => {
   let host: ModHost;
   let uiStatus: Array<ModStatusLine | undefined>;
   let uiToast: ReturnType<typeof vi.fn>;
+  let uiComposes: Array<{ text: string }>;
   let logs: string[];
   const mod: DiscoveredMod = {
     manifest: { id: 'f', name: 'F', version: '1', apiVersion: 1, main: 'i.mjs' },
@@ -533,6 +543,7 @@ describe('ModHost with a fake Worker and fake timers', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     fake = new FakeWorker();
+    uiComposes = [];
     uiStatus = [];
     uiToast = vi.fn(() => Promise.resolve(undefined));
     logs = [];
@@ -544,7 +555,7 @@ describe('ModHost with a fake Worker and fake timers', () => {
       ui: {
         status: (_id, line) => void uiStatus.push(line),
         toast: uiToast as never,
-        compose: () => undefined,
+        compose: (_id, request) => void uiComposes.push(request),
       },
       logLifecycle: () => undefined,
       logMod: (_id, level, text) => void logs.push(`${level}|${text}`),
@@ -678,6 +689,44 @@ describe('ModHost with a fake Worker and fake timers', () => {
     expect(
       uiToast.mock.calls.map((call) => (call as [string, { message: string }])[1].message),
     ).toEqual(['a', 'c']);
+  });
+
+  /**
+   * Protects #169 and the decision #1887: a compose never carries `send` to the UI, a legacy
+   * `send: true` warns exactly once per LOAD of the mod (the flag lives in the record, so Reload
+   * Mods warns again), and a compose without `send` or with `false` does not warn. Fabricated
+   * messages through a fake Worker and fake timers, Windows 11.
+   * MUTATION (03/11/2026, Windows 11): deleting `rec.sendWarned = true` in `composeText` made this
+   * case fail; reverted afterwards.
+   */
+  it('writes a compose that asks to send without sending it, and warns once per load', async () => {
+    const warns = (): string[] => logs.filter((l) => l.startsWith('warn|chat.compose: "send"'));
+    fake.say({ type: 'compose', text: 'plain' });
+    fake.say({ type: 'compose', text: 'no', send: false });
+    expect(warns()).toHaveLength(0);
+    fake.say({ type: 'compose', text: 'a', send: true });
+    await vi.advanceTimersByTimeAsync(2000);
+    fake.say({ type: 'compose', text: 'b', send: true });
+    expect(uiComposes).toEqual([{ text: 'plain' }, { text: 'no' }, { text: 'a' }, { text: 'b' }]);
+    expect(warns()).toHaveLength(1);
+    const reloading = host.reload([mod]);
+    await vi.advanceTimersByTimeAsync(300);
+    await reloading;
+    fake.say({ type: 'ready' });
+    fake.say({ type: 'compose', text: 'c', send: true });
+    expect(warns()).toHaveLength(2);
+    expect(uiComposes.at(-1)).toEqual({ text: 'c' });
+  });
+
+  /**
+   * Defends writing the send warning with `logMod` directly: through `log` the spent budget would
+   * drop it. Fabricated messages, Windows 11. MUTATION (03/11/2026): replacing `logMod` by
+   * `this.log` in `composeText` made this case fail; reverted afterwards.
+   */
+  it('the send warning is written even when the log budget is spent', () => {
+    for (let i = 0; i < 60; i += 1) fake.say({ type: 'log', level: 'info', text: `l${i}` });
+    fake.say({ type: 'compose', text: 'x', send: true });
+    expect(logs.some((l) => l.startsWith('warn|chat.compose: "send" no longer exists'))).toBe(true);
   });
 
   it('ignores an invalid message and keeps the mod active', () => {

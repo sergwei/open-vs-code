@@ -40,6 +40,7 @@ describe('isWorkerToHost', () => {
     [{ type: 'status.set', text: 'Running', tooltip: 'more', severity: 'warning', command: 'go' }],
     [{ type: 'status.clear' }],
     [{ type: 'toast', requestId: 't1', message: 'done', severity: 'error', actions: ['OK'] }],
+    // Legacy `send` (#169): kept accepted so a hand-posted `send: true` is written, not rejected.
     [{ type: 'compose', text: 'hello', send: true }],
     [{ type: 'pong', n: 3 }],
   ])('accepts %j', (message) => {

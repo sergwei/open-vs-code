@@ -89,6 +89,8 @@ export type WorkerToHost =
       severity?: ModSeverity;
       actions?: string[];
     }
+  // `send` is a legacy field (#169): the API no longer has it, the guard still accepts it so a
+  // hand-posted `send: true` is written (not sent) instead of rejected; the host only warns.
   | { type: 'compose'; text: string; send?: boolean }
   | {
       type: 'panel.open';

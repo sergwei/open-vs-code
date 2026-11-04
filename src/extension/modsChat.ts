@@ -27,7 +27,7 @@ export interface ModsChatController extends ModsChat {
    * Hands a compose of a mod to the bound handler; with none bound (the chat is not registered
    * yet) it calls the `unbound` callback instead so the mod's log says why nothing happened.
    */
-  compose(modId: string, request: { text: string; send?: boolean }): void;
+  compose(modId: string, request: { text: string }): void;
 }
 
 /**
@@ -119,7 +119,7 @@ export function createModsChat(
         unbound(modId, request.text);
         return;
       }
-      handler({ modId, text: request.text, send: request.send === true });
+      handler({ modId, text: request.text });
     },
   };
 }

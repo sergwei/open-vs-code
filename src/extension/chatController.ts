@@ -906,16 +906,18 @@ export class ChatController {
 
   /**
    * Hands what a mod composed (`station.chat.compose`, E10-mods phase 3) to pane `paneId` as a
-   * `prompt.compose` with no files, to be sent when `send` is true. Same outcome contract as
+   * `prompt.compose` with no files and `send: false` always (issue #169, decision #1887): a mod
+   * writes into the prompt box and the user sends it. Same outcome contract as
    * {@link composeFromEditor}: `rejected` with the error when the text is blank or the pane is
    * gone (nothing is composed), `composed` otherwise; the VS Code side shows a rejection natively.
    * A mod can only compose TEXT: it has no file references, so none enters `pickedUris`. Logs the
-   * mod id and whether it sends, never the text. VERIFIED by `chatController.test.ts`
-   * "composeFromMod hands the pane a prompt.compose with no files and refuses a blank text"
-   * (fabricated pane, Windows 11, 02/11/2026). Not observed: a compose from a real
-   * mod reaching a real prompt box (the fixture mod never calls it).
+   * mod id, never the text. VERIFIED on Windows 11 (03/11/2026) by `chatController.test.ts`
+   * "composeFromMod hands the pane a prompt.compose with no files and send false, and refuses a
+   * blank text" (fabricated pane) and, from a real mod into a real prompt box, by `test:visual`
+   * step 38 "ok   M9a the compose of the mod wrote its text in the prompt box" and "ok   M9b the
+   * compose with send: true sent no prompt and made no turn". Not observed: macOS and Linux.
    */
-  composeFromMod(paneId: number, modId: string, text: string, send: boolean): ComposeOutcome {
+  composeFromMod(paneId: number, modId: string, text: string): ComposeOutcome {
     const pane = this.paneById(paneId);
     if (pane === undefined) return this.refusedMod(modId, new Error('The chat is not available'));
     if (!isComposeInBounds({ text, files: [] })) {
@@ -924,8 +926,8 @@ export class ChatController {
         codedError('ComposeRefused', 'The mod composed an empty prompt'),
       );
     }
-    this.log.info(`mod ${modId} composed a prompt (send ${String(send)})`);
-    pane.compose({ type: 'prompt.compose', text, files: [], send });
+    this.log.info(`mod ${modId} composed a prompt`);
+    pane.compose({ type: 'prompt.compose', text, files: [], send: false });
     return { status: 'composed' };
   }
 

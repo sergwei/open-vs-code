@@ -152,11 +152,13 @@ export interface ModPanel {
   dispose(): void;
 }
 
-/** Text for the chat composer. */
+/**
+ * Text for the chat composer (issue #169). A mod only writes into the prompt box; the user is the
+ * one who sends it. There was a `send` option before 1.0 and it was removed: a mod that still
+ * passes it (plain JS) has its text written, not sent, and one warning per load in its log.
+ */
 export interface ComposeOptions {
   text: string;
-  /** Send it instead of only filling the composer. */
-  send?: boolean;
 }
 
 /** Everything a mod receives in `activate(station)`. */
