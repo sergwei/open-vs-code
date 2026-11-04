@@ -30,10 +30,11 @@
 // lists are gone); older loaded rows stay, because the REST did not look at them. When the page is
 // the whole list (`hasMore` false) nothing is kept.
 
+import * as l10n from '@vscode/l10n';
 import type { ModelRef, SessionStatus, SessionSummary, SessionUsage } from '../shared/model';
 import type { HostToWebview } from '../shared/protocol';
 import { formatSessionTime, groupSessions, type GroupLabel } from '../shared/sessionGroups';
-import { sessionLabel } from '../shared/sessionLabel';
+import { displayLabel } from './sessionDisplay';
 import {
   childFolders,
   emptyOrganization,
@@ -61,11 +62,14 @@ export interface SessionTreeIcon {
   color?: string;
 }
 
-/** One date group of the tree ("Today", ...); its children are session rows. */
+/**
+ * One date group of the tree ("Today", ...); its children are session rows. `id` keeps the
+ * English {@link GroupLabel} as a stable key; `label` is that key translated by {@link groupTitle}.
+ */
 export interface SessionTreeGroup {
   kind: 'group';
   id: string;
-  label: GroupLabel;
+  label: string;
   children: SessionTreeSession[];
 }
 
@@ -116,7 +120,48 @@ export interface SessionTreeSession {
 export interface SessionTreeMore {
   kind: 'more';
   id: 'more';
-  label: 'Show more sessions';
+  label: string;
+}
+
+/**
+ * The title of a date group in the language of the host. A {@link GroupLabel} stays an English KEY
+ * (ids and grouping use it); only the text shown goes through the catalog, here.
+ *
+ * Written twice (here and in `webview-ui/src/sessions/sessionGroups.ts`) because the catalog
+ * exporter does not read `src/shared` and a shared module may not import `@vscode/l10n`. The
+ * exhaustive `switch` in both makes a new {@link GroupLabel} variant fail `tsc` in each copy.
+ */
+export function groupTitle(label: GroupLabel): string {
+  switch (label) {
+    case 'Today':
+      return l10n.t('Today');
+    case 'Yesterday':
+      return l10n.t('Yesterday');
+    case 'Previous 7 days':
+      return l10n.t('Previous 7 days');
+    case 'Older':
+      return l10n.t('Older');
+  }
+}
+
+/**
+ * The state words a session row shows next to its title, translated, in the order needs input,
+ * running, failed, tab, fork. `tabWord` is the form for the tab: capitalised in the row
+ * description, lower case in the tooltip sentence.
+ */
+function stateWords(
+  flags: { needsInput: boolean; running: boolean; failed: boolean; tab: boolean; fork: boolean },
+  tabWord: string,
+): string[] {
+  return [
+    ...(flags.needsInput ? [l10n.t('Needs input')] : []),
+    ...(flags.running ? [l10n.t('Running')] : []),
+    ...(flags.failed ? [l10n.t('Failed')] : []),
+    ...(flags.tab ? [tabWord] : []),
+    ...(flags.fork
+      ? [l10n.t({ message: 'Fork', comment: ['A session that was forked from another session'] })]
+      : []),
+  ];
 }
 
 /** A node of the projection; sessions only appear as children of a section, folder or group. */
@@ -309,7 +354,12 @@ function countText(count: number, locale: string | undefined): string {
 
 /** The cost and tokens line of the tooltip: input and output only, cache and reasoning left out. */
 function usageLine(usage: SessionUsage, locale: string | undefined): string {
-  return `Cost: ${costText(usage.cost, locale)} · Tokens: ${countText(usage.tokens.input, locale)} in · ${countText(usage.tokens.output, locale)} out`;
+  return l10n.t(
+    'Cost: {0} · Tokens: {1} in · {2} out',
+    costText(usage.cost, locale),
+    countText(usage.tokens.input, locale),
+    countText(usage.tokens.output, locale),
+  );
 }
 
 /** `provider/model`, the way the tooltip names a model. */
@@ -362,6 +412,10 @@ function iconOf(state: SessionTreeState): SessionTreeIcon {
  * the usage of a row moves" pass. The rows and events are FABRICATED: that proves the logic, not
  * what a real server sends (the shapes come from `chatController.e2e.test.ts`). `fail` is the state
  * of a first page that could not be read.
+ * Every text it produces (group and section titles, state words, the "Show more" row, the tooltip
+ * and the filter line) goes through `l10n.t`; the ids keep the English keys. VERIFIED by
+ * `sessionTree.test.ts` "paints groups, sections, the more row and the untitled session in
+ * Spanish" (Windows 11, 04/11/2026): the group ids stay `group:Today` while the label reads `Hoy`.
  * HYPOTHESIS: keeping `error` statuses across a `reset` (REST only says "active or not", so a
  * "Failed" mark would otherwise vanish at every reconnection); to check, fail a turn, reconnect
  * and see whether the row still says Failed until the next run.
@@ -439,15 +493,12 @@ export function createSessionTree(options: SessionTreeOptions = {}): SessionTree
         : failed
           ? 'failed'
           : 'idle';
-    const words = [
-      ...(needsInput ? ['Needs input'] : []),
-      ...(running ? ['Running'] : []),
-      ...(failed ? ['Failed'] : []),
-      ...(tab ? ['Tab'] : []),
-      ...(fork ? ['Fork'] : []),
-    ];
+    const words = stateWords(
+      { needsInput, running, failed, tab, fork },
+      l10n.t({ message: 'Tab', comment: ['An editor tab that shows this session'] }),
+    );
     const time = formatSessionTime(row.updatedAt, now, locale);
-    const label = sessionLabel(row);
+    const label = displayLabel(row);
     const pinned = isPinned(organization, row.id);
     const archived = isArchived(organization, row.id);
     const foldered = folderOf(organization, row.id) !== undefined;
@@ -557,27 +608,27 @@ export function createSessionTree(options: SessionTreeOptions = {}): SessionTree
     const nodes: SessionTreeNode[] = [
       ...section(
         'attention',
-        'Needs attention',
+        l10n.t('Needs attention'),
         attention.map((row) => sessionNode(row, undefined, marked, now, locale, true)),
       ),
       ...section(
         'pinned',
-        'Pinned',
+        l10n.t('Pinned'),
         pinnedRows.map((row) => home(row)),
       ),
       ...folders,
       ...groupSessions(loose, now).map((group): SessionTreeGroup => ({
         kind: 'group',
         id: `group:${group.label}`,
-        label: group.label,
+        label: groupTitle(group.label),
         children: group.rows.map((row) => home(row, group.label)),
       })),
     ];
-    if (hasMore) nodes.push({ kind: 'more', id: 'more', label: 'Show more sessions' });
+    if (hasMore) nodes.push({ kind: 'more', id: 'more', label: l10n.t('Show more sessions') });
     nodes.push(
       ...section(
         'archived',
-        'Archived',
+        l10n.t('Archived'),
         archivedRows.map((row) => home(row)),
       ),
     );
@@ -753,11 +804,11 @@ export function createSessionTree(options: SessionTreeOptions = {}): SessionTree
     filterDescription() {
       if (!filtering()) return undefined;
       const names = [
-        ...(filters.running ? ['Running'] : []),
-        ...(filters.needsInput ? ['Needs input'] : []),
-        ...(filters.tab ? ['Open in a tab'] : []),
+        ...(filters.running ? [l10n.t('Running')] : []),
+        ...(filters.needsInput ? [l10n.t('Needs input')] : []),
+        ...(filters.tab ? [l10n.t('Open in a tab')] : []),
       ];
-      return `Filtered: ${names.join(' · ')}`;
+      return l10n.t('Filtered: {0}', names.join(' · '));
     },
 
     filteredEmpty() {
@@ -775,27 +826,24 @@ export function createSessionTree(options: SessionTreeOptions = {}): SessionTree
       const row = rows.find((held) => held.id === sessionID);
       if (row === undefined) return undefined;
       const { needsInput, running, failed, tab, fork } = flagsOf(row, needsInputIds());
-      const stateLine = [
-        ...(needsInput ? ['Needs input'] : []),
-        ...(running ? ['Running'] : []),
-        ...(failed ? ['Failed'] : []),
-        ...(tab ? ['open in a tab'] : []),
-        ...(fork ? ['Fork'] : []),
-      ].join(' · ');
+      const stateLine = stateWords(
+        { needsInput, running, failed, tab, fork },
+        l10n.t('open in a tab'),
+      ).join(' · ');
       const selection = [row.agent, row.model === undefined ? undefined : modelText(row.model)]
         .filter((part): part is string => part !== undefined)
         .join(' · ');
       const where = folderOf(organization, row.id);
       const path = where === undefined ? [] : folderPath(organization, where);
       return [
-        sessionLabel(row),
+        displayLabel(row),
         ...(stateLine === '' ? [] : [stateLine]),
-        `Last activity: ${fullDate(row.updatedAt, locale)}`,
-        `Created: ${fullDate(row.createdAt, locale)}`,
+        l10n.t('Last activity: {0}', fullDate(row.updatedAt, locale)),
+        l10n.t('Created: {0}', fullDate(row.createdAt, locale)),
         ...(selection === '' ? [] : [selection]),
         ...(row.usage === undefined ? [] : [usageLine(row.usage, locale)]),
-        ...(changedFiles === undefined ? [] : [`Changed files: ${String(changedFiles)}`]),
-        ...(path.length === 0 ? [] : [`Folder: ${path.join(' / ')}`]),
+        ...(changedFiles === undefined ? [] : [l10n.t('Changed files: {0}', changedFiles)]),
+        ...(path.length === 0 ? [] : [l10n.t('Folder: {0}', path.join(' / '))]),
       ].join('\n');
     },
   };

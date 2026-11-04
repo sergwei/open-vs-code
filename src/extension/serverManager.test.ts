@@ -18,7 +18,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 import type { ServerTarget } from './externalServer';
 import type { DetectionResult } from './opencodeBinary';
 import {
@@ -153,6 +154,28 @@ async function reach(manager: ServerManager, kind: ServerState['kind']): Promise
 
 const folderChoice = { folder: '/work/project', ignored: [] };
 
+// Protects the translation of the reasons the manager shows (E11-i18n phase 4a): with the shipped
+// Spanish catalog a window with no folder, or with a folder that is not on disk, reads in Spanish.
+// Provenance: literal folders; the text is read from `l10n/bundle.l10n.es.json`.
+describe('pickWorkspaceFolder in Spanish', () => {
+  beforeEach(useSpanish);
+  afterEach(useEnglish);
+
+  it('reports the missing folder in Spanish with the Spanish catalog', () => {
+    expect(pickWorkspaceFolder(undefined)).toEqual({
+      reason: 'no-workspace',
+      message: 'no hay ninguna carpeta del área de trabajo abierta',
+      logMessage: 'no workspace folder is open',
+    });
+    const virtual = [{ uri: { scheme: 'vscode-vfs', fsPath: '/x' }, name: 'remote' }];
+    expect(pickWorkspaceFolder(virtual)).toEqual({
+      reason: 'no-workspace',
+      message: 'la carpeta del área de trabajo "remote" no está en el disco (esquema vscode-vfs)',
+      logMessage: 'the workspace folder "remote" is not on disk (scheme vscode-vfs)',
+    });
+  });
+});
+
 describe('pickWorkspaceFolder', () => {
   it('reports no workspace for undefined, an empty list and a virtual scheme', () => {
     expect(pickWorkspaceFolder(undefined)).toMatchObject({ reason: 'no-workspace' });
@@ -245,6 +268,7 @@ describe('ServerManager', () => {
       label: 'opencode2' as const,
       outcome: 'not-on-path' as const,
       detail: 'no opencode2 in PATH',
+      logDetail: 'no opencode2 in PATH',
     };
     const { manager } = harness();
     manager.setFolder(folderChoice);
@@ -262,6 +286,7 @@ describe('ServerManager', () => {
       kind: 'invalid-setting',
       value: '/nope/opencode',
       reason: 'the file does not exist',
+      logReason: 'the file does not exist',
       attempts: [],
     });
     expect(setting.manager.state).toMatchObject({ binary: { settingPath: '/nope/opencode' } });
@@ -996,6 +1021,31 @@ describe('ServerManager with an external target', () => {
     manager.setTarget(ext());
     await reach(manager, 'unavailable');
     expect(manager.state).toMatchObject({ kind: 'unavailable', reason: 'unsupported-version' });
+  });
+
+  // Protects the decision of Sergio on the E11-i18n review (logs stay in English): with the
+  // Spanish catalog on, the user text of the state is Spanish but the log lines (the checked
+  // version line and `describeServerState`) are English. SYNTHETIC: fake `/api/info`, Spanish
+  // text read from `l10n/bundle.l10n.es.json`.
+  it('logs the English reason of an unavailable state while the user text is Spanish', async () => {
+    useSpanish();
+    try {
+      const { manager, messages } = harness({ fetchInfo: () => info('1.19.3') });
+      manager.setFolder(folderChoice);
+      manager.setTarget(ext());
+      await reach(manager, 'unavailable');
+      const english = 'open-vs-code requires opencode v2 but the server reports 1.19.3';
+      expect(manager.state).toMatchObject({ kind: 'unavailable', logMessage: english });
+      if (manager.state.kind !== 'unavailable') throw new Error('not unavailable');
+      expect(manager.state.message).not.toBe(english);
+      expect(manager.state.message).toContain('1.19.3');
+      expect(messages).toContain(english);
+      expect(describeServerState(manager.state).message).toBe(
+        `server not available (unsupported-version): ${english}`,
+      );
+    } finally {
+      useEnglish();
+    }
   });
 
   it('a different 2.x only warns in the log and still connects', async () => {

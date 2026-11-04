@@ -3,7 +3,7 @@
 
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   confirmDetail,
   createDecisionStore,
@@ -15,6 +15,7 @@ import {
   type StoredDecision,
 } from './pluginConsent';
 import { pluginFingerprint, type PluginFinding } from './projectPlugins';
+import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 
 const folder = path.resolve(os.tmpdir(), 'repo');
 const file = (name: string, inside = true): PluginFinding => ({
@@ -168,5 +169,28 @@ describe('the texts', () => {
     expect(noticeMessage(one, folder)).toMatch(
       /^This folder has opencode plugins that will run with your permissions: /,
     );
+  });
+
+  // E11-i18n. SYNTHETIC: fabricated findings; the Spanish text is read from
+  // `l10n/bundle.l10n.es.json`. It protects that the notice, "(declared in …)" and "and N more"
+  // are translated while the file names and plugin specs from the repository are not. The
+  // parentheses of "(declared in …)" are gone, as in English: the sanitizing removes them.
+  describe('in Spanish', () => {
+    afterEach(useEnglish);
+
+    it('translates the sentence, the declaration and the remainder, not the names', () => {
+      useSpanish();
+      const declared: PluginFinding = {
+        kind: 'declared',
+        spec: 'my-plugin',
+        config: path.join(folder, 'opencode.json'),
+        inside: true,
+      };
+      const seven = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((n) => file(`${n}.js`));
+      expect(noticeMessage([declared], folder)).toBe(
+        'Esta carpeta tiene plugins de opencode que se ejecutarán con sus permisos: my-plugin declarado en opencode.json.',
+      );
+      expect(confirmDetail(seven, folder).split('\n')[5]).toBe('y 2 más');
+    });
   });
 });

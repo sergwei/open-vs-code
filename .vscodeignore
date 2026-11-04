@@ -5,7 +5,9 @@
 # package.json: vsce aborts when both exist.
 # CI checks the result with scripts/check-vsix.mjs: any new file that must ship needs its `!`
 # line here AND, if it is essential, an entry in that script's required list.
-# Ships: the two bundles, the two media files the manifest points at, LICENSE and CHANGELOG.
+# Ships: the two bundles, the two media files the manifest points at, LICENSE and CHANGELOG, and the
+# language catalogs (package.nls*.json and l10n/): vsce adds only package.json and the README by
+# itself, so without these lines the extension would ship in English only (E11-i18n).
 # media/icon.svg is the SOURCE of media/icon.png and stays out; README images live in
 # docs/images/ (not packaged: vsce rewrites their relative links to GitHub raw URLs).
 # Regenerate the icon (resvg-js-cli, version pinned, not a devDependency; 256 px wide):
@@ -14,6 +16,9 @@
 !dist/extension.js
 !dist/modWorker.js
 !dist/webview/**
+!package.nls.json
+!package.nls.*.json
+!l10n/**
 !media/activity.svg
 !media/chat-tab-light.svg
 !media/chat-tab-dark.svg

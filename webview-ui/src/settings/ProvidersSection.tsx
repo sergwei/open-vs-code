@@ -1,4 +1,6 @@
+import * as l10n from '@vscode/l10n';
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js';
+import { plural } from '../../../src/shared/l10n';
 import type { ProviderRow } from '../../../src/shared/settingsProtocol';
 import {
   createFocusTrace,
@@ -295,17 +297,17 @@ export function ProvidersSection(props: {
             fallback={
               <>
                 <span class="spinner" aria-hidden="true" />
-                {' Loading the providers…'}
+                {` ${l10n.t('Loading the providers…')}`}
               </>
             }
           >
-            Could not read the providers from the server. Try Refresh.
+            {l10n.t('Could not read the providers from the server. Try Refresh.')}
           </Show>
         </p>
       </Show>
       <Show when={props.state.providers.loaded}>
         <Show when={top().length > 0}>
-          <h2 class="settings-heading">Connected</h2>
+          <h2 class="settings-heading">{l10n.t('Connected')}</h2>
           <ul class="setup-steps" role="list">
             <For each={top()}>
               {(row) => (
@@ -322,12 +324,16 @@ export function ProvidersSection(props: {
             </For>
           </ul>
         </Show>
-        <h2 class="settings-heading">Add a provider</h2>
+        <h2 class="settings-heading">{l10n.t('Add a provider')}</h2>
         <input
           type="search"
           class="settings-input"
-          aria-label="Search providers"
-          placeholder={`Search ${String(addable().length)} providers…`}
+          aria-label={l10n.t('Search providers')}
+          placeholder={plural(
+            addable().length,
+            l10n.t('Search {0} provider…', addable().length),
+            l10n.t('Search {0} providers…', addable().length),
+          )}
           autocomplete="off"
           spellcheck={false}
           ref={(element) => {
@@ -342,8 +348,8 @@ export function ProvidersSection(props: {
           fallback={
             <p class="settings-empty">
               {addable().length === 0
-                ? 'The server lists no other providers.'
-                : `No provider matches “${props.ui.search().trim()}”.`}
+                ? l10n.t('The server lists no other providers.')
+                : l10n.t('No provider matches “{0}”.', props.ui.search().trim())}
             </p>
           }
         >

@@ -3,7 +3,9 @@
 // (`attention.ts`) only executes the plan this module returns, so the rules are testable without
 // a window. No `vscode` import.
 
+import * as l10n from '@vscode/l10n';
 import { REPLY_PERMISSION_COMMAND_ID, SHOW_REQUEST_COMMAND_ID } from './ids';
+import { emptyTitle } from './sessionDisplay';
 import type { PendingSummary } from './pendingRequests';
 
 /**
@@ -114,9 +116,6 @@ function commandLink(label: string, command: string, argument: object): string {
  */
 export const MAX_LABEL_LENGTH = 40;
 
-/** What the label says for a session with no title yet. */
-const UNTITLED_LABEL = 'Untitled session';
-
 /**
  * Heading of the notification (the `title` of `withProgress`): what is being asked, in one line.
  * The title can carry server text (a form title, an action name), hence {@link sanitizeLinkText}.
@@ -139,7 +138,7 @@ export function notificationTitle(summary: PendingSummary, label?: string): stri
   const clean = sanitizeLinkText(label).replace(/\s+/g, ' ').trim();
   const shown =
     clean === ''
-      ? UNTITLED_LABEL
+      ? emptyTitle()
       : clean.length <= MAX_LABEL_LENGTH
         ? clean
         : `${clean.slice(0, MAX_LABEL_LENGTH - 1)}…`;
@@ -160,7 +159,7 @@ export function notificationTitle(summary: PendingSummary, label?: string): stri
  */
 export function notificationMessage(summary: PendingSummary): string {
   const target = { sessionID: summary.sessionID, id: summary.id, kind: summary.kind };
-  const links = [commandLink('Open chat', SHOW_REQUEST_COMMAND_ID, target)];
+  const links = [commandLink(l10n.t('Open chat'), SHOW_REQUEST_COMMAND_ID, target)];
   if (summary.kind === 'permission') {
     const reply = (decision: 'once' | 'reject') => ({
       sessionID: summary.sessionID,
@@ -168,8 +167,8 @@ export function notificationMessage(summary: PendingSummary): string {
       decision,
     });
     links.push(
-      commandLink('Allow once', REPLY_PERMISSION_COMMAND_ID, reply('once')),
-      commandLink('Reject', REPLY_PERMISSION_COMMAND_ID, reply('reject')),
+      commandLink(l10n.t('Allow once'), REPLY_PERMISSION_COMMAND_ID, reply('once')),
+      commandLink(l10n.t('Reject'), REPLY_PERMISSION_COMMAND_ID, reply('reject')),
     );
   }
   const detail = summary.detail === '' ? '' : `${sanitizeLinkText(summary.detail)} — `;

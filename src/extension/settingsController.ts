@@ -10,6 +10,7 @@
 // that integration's connections and always after a native confirmation. Nothing here carries or
 // logs a key: the key is asked by `ProviderAuth` in a native InputBox.
 
+import * as l10n from '@vscode/l10n';
 import type { ProviderAuth } from './providerAuth';
 import type { ServerConfig } from './serverConfig';
 import type { ServerLog } from './opencodeServer';
@@ -209,13 +210,17 @@ export class SettingsController {
       .integrations.rows.find((candidate) => candidate.id === integrationID);
     if (row === undefined) {
       this.refused('settings.connect', 'unknown integration');
-      this.notice({ integrationID, kind: 'failed', message: 'Unknown provider' });
+      this.notice({ integrationID, kind: 'failed', message: l10n.t('Unknown provider') });
       return;
     }
     const method = row.methods.find((candidate) => candidate.index === methodIndex);
     if (method === undefined) {
       this.refused('settings.connect', 'unknown method');
-      this.notice({ integrationID, kind: 'failed', message: `Unknown method for ${row.name}` });
+      this.notice({
+        integrationID,
+        kind: 'failed',
+        message: l10n.t('Unknown method for {0}', row.name),
+      });
       return;
     }
     const declared = new Set(method.fields.map((field) => field.key));
@@ -228,13 +233,17 @@ export class SettingsController {
     const result = await this.deps.auth.connect(row, methodIndex, clean);
     switch (result.kind) {
       case 'connected':
-        this.notice({ integrationID, kind: 'connected', message: `Connected to ${row.name}` });
+        this.notice({
+          integrationID,
+          kind: 'connected',
+          message: l10n.t('Connected to {0}', row.name),
+        });
         return;
       case 'cancelled':
         this.notice({ integrationID, kind: 'cancelled' });
         return;
       case 'expired':
-        this.notice({ integrationID, kind: 'expired', message: 'The sign-in expired' });
+        this.notice({ integrationID, kind: 'expired', message: l10n.t('The sign-in expired') });
         return;
       case 'failed':
         this.notice({ integrationID, kind: 'failed', message: result.message });
@@ -260,12 +269,16 @@ export class SettingsController {
       ) === true;
     if (row === undefined || !owns) {
       this.refused('settings.disconnect', 'credential not in this integration');
-      this.notice({ integrationID, kind: 'failed', message: 'Unknown credential' });
+      this.notice({ integrationID, kind: 'failed', message: l10n.t('Unknown credential') });
       return;
     }
     const result = await this.deps.auth.disconnect(row, credentialID);
     if (result.kind === 'removed') {
-      this.notice({ integrationID, kind: 'removed', message: `Removed from ${row.name}` });
+      this.notice({
+        integrationID,
+        kind: 'removed',
+        message: l10n.t('Removed from {0}', row.name),
+      });
     } else if (result.kind === 'failed') {
       this.notice({ integrationID, kind: 'failed', message: result.message });
     }

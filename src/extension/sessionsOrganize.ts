@@ -9,10 +9,11 @@
 // `workspaceState` through the serial queue of the store. The commands do nothing outside the
 // `editor` mode (the Sessions tree is not shown in `sidebar`, and no command may act there).
 
+import * as l10n from '@vscode/l10n';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
+import { plural } from '../shared/l10n';
 import type { SessionSummary } from '../shared/model';
-import { sessionLabel } from '../shared/sessionLabel';
 import {
   ARCHIVE_SESSION_COMMAND_ID,
   CLEAR_FILTERS_COMMAND_ID,
@@ -29,6 +30,7 @@ import {
 } from './ids';
 import type { ServerLog } from './opencodeServer';
 import { createOrganizationStore, type MementoLike } from './organizationStore';
+import { displayLabel } from './sessionDisplay';
 import {
   applyDrop,
   archiveSessions,
@@ -144,17 +146,21 @@ function folderIDOf(raw: unknown): FolderID | undefined {
     : undefined;
 }
 
-/** The text of the input-box error or of the warning for an operation that was refused. */
+/**
+ * The text of the input-box error or of the warning for an operation that was refused, in the
+ * language of the host when it is written (the `l10n.t` calls are inside the function, not
+ * constants of the module).
+ */
 function problemText(problem: OrganizationProblem): string {
   switch (problem) {
     case 'length':
-      return `A folder name needs 1 to ${String(MAX_FOLDER_NAME_LENGTH)} characters`;
+      return l10n.t('A folder name needs 1 to {0} characters', MAX_FOLDER_NAME_LENGTH);
     case 'duplicate':
-      return 'A folder with this name already exists here';
+      return l10n.t('A folder with this name already exists here');
     case 'missingFolder':
-      return 'That folder no longer exists';
+      return l10n.t('That folder no longer exists');
     case 'cycle':
-      return 'A folder cannot go inside itself or one of its subfolders';
+      return l10n.t('A folder cannot go inside itself or one of its subfolders');
   }
 }
 
@@ -180,7 +186,9 @@ function problemText(problem: OrganizationProblem): string {
  * puts Org34B under Pinned", "B5 Archive takes Org34A out of its folder into Archived" and "B6 Delete
  * Folder asks in the modal". The integration cases drive the commands with
  * `TEST_SESSION_ANSWERS_COMMAND_ID`. NOT observed: Pin or Archive on several selected rows with the
- * mouse, macOS and Linux.
+ * mouse, macOS and Linux. The dialog prompts, the refusal warnings, the "Move to" title (with an
+ * untitled session as the translated {@link displayLabel}) and the "Archived" place go through
+ * `l10n.t`; the stable log lines stay in English.
  */
 export function registerSessionsOrganize(options: SessionsOrganizeOptions): SessionsOrganize {
   const { tree, view, log, answers } = options;
@@ -221,7 +229,7 @@ export function registerSessionsOrganize(options: SessionsOrganizeOptions): Sess
   /** Applies a result that may have been refused; a refusal is a native warning. */
   const applyResult = (result: OrganizationResult): boolean => {
     if (result.ok) return apply(result.org);
-    void vscode.window.showWarningMessage(`OpenCode: ${problemText(result.reason)}`);
+    void vscode.window.showWarningMessage(l10n.t('OpenCode: {0}', problemText(result.reason)));
     return false;
   };
 
@@ -270,7 +278,7 @@ export function registerSessionsOrganize(options: SessionsOrganizeOptions): Sess
   /** Creates a folder after asking its name; resolves its id, or `undefined` if cancelled/refused. */
   const newFolder = async (parent: FolderID | undefined): Promise<FolderID | undefined> => {
     const name = await askName(
-      parent === undefined ? 'Name of the new folder' : 'Name of the new subfolder',
+      parent === undefined ? l10n.t('Name of the new folder') : l10n.t('Name of the new subfolder'),
       '',
       parent,
     );
@@ -332,7 +340,7 @@ export function registerSessionsOrganize(options: SessionsOrganizeOptions): Sess
       const id = targetFolder(clicked);
       const folder = id === undefined ? undefined : store.current().folders[id];
       if (id === undefined || folder === undefined) return;
-      const name = await askName('New name for the folder', folder.name, folder.parent, id);
+      const name = await askName(l10n.t('New name for the folder'), folder.name, folder.parent, id);
       if (name !== undefined) applyResult(renameFolder(store.current(), id, name));
     }),
     guarded(DELETE_FOLDER_COMMAND_ID, async (clicked) => {
@@ -355,7 +363,8 @@ export function registerSessionsOrganize(options: SessionsOrganizeOptions): Sess
       }
       const result = deleteFolder(store.current(), id);
       if (result.ok) apply(result.org);
-      else void vscode.window.showWarningMessage(`OpenCode: ${problemText(result.reason)}`);
+      else
+        void vscode.window.showWarningMessage(l10n.t('OpenCode: {0}', problemText(result.reason)));
     }),
     guarded(MOVE_TO_FOLDER_COMMAND_ID, async (clicked, selected) => {
       const ids = targetSessions(clicked, selected);
@@ -364,8 +373,12 @@ export function registerSessionsOrganize(options: SessionsOrganizeOptions): Sess
       const row = tree.rowOf(first);
       const title =
         ids.length === 1 && row !== undefined
-          ? `Move “${sessionLabel(row)}” to`
-          : `Move ${String(ids.length)} sessions to`;
+          ? l10n.t('Move “{0}” to', displayLabel(row))
+          : plural(
+              ids.length,
+              l10n.t('Move {0} session to', ids.length),
+              l10n.t('Move {0} sessions to', ids.length),
+            );
       const chosen = await chooseFolder(title);
       if (chosen !== undefined) applyResult(moveSessions(store.current(), ids, chosen.folderID));
     }),
@@ -452,7 +465,7 @@ export function registerSessionsOrganize(options: SessionsOrganizeOptions): Sess
 
     placeOf(sessionID) {
       const org = store.current();
-      if (isArchived(org, sessionID)) return 'Archived';
+      if (isArchived(org, sessionID)) return l10n.t('Archived');
       const where = folderOf(org, sessionID);
       return where === undefined ? undefined : folderPath(org, where).join(' / ');
     },

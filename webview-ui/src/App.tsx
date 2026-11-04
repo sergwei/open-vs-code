@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { createEffect, createMemo, createSignal, on, onCleanup, Show, untrack } from 'solid-js';
 import {
   isComposeInBounds,
@@ -118,6 +119,8 @@ interface LastRevert {
  * `nextGuideLatch`); with a conversation the {@link ConnectionCard} sits at the end of the log; with
  * neither (reconnecting, or no folder) the card takes the place of the empty state. While there
  * is no connection the prompt box stays editable with the placeholder "Waiting for opencode…"
+ * (E11-i18n: every notice, announcement and error text this component raises goes through
+ * `l10n.t`; VERIFIED in English by `App.test.tsx`, which asserts those literals)
  * (P5=2). Exception (issue #124): in `not-started` (autoStart off) Send is enabled and starts the
  * server with the prompt, while attachments, `/` and the selectors stay disabled. `.app` carries `data-connection` (the state) for the tests and is a size container for
  * the CSS. VERIFIED in jsdom by `App.test.tsx` ("setup guide and connection card").
@@ -506,11 +509,13 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       (current, previous) => {
         if (previous !== 'busy' && previous !== 'retry') return;
         let text: string | undefined;
-        if (current === 'idle') text = stopRequested ? 'Stopped' : 'Response complete';
+        if (current === 'idle') {
+          text = stopRequested ? l10n.t('Stopped') : l10n.t('Response complete');
+        }
         const session = status();
         if (current === 'error' && session?.type === 'error') {
           // A status error is always announced as an error, `aborted` included (see isStopError).
-          text = `Error: ${session.error.message}`;
+          text = l10n.t('Error: {0}', session.error.message);
         }
         if (text === undefined) return;
         stopRequested = false;
@@ -657,7 +662,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     if (sessionID === undefined || !messages().some((message) => message.kind === 'user')) {
       props.store.notify('info', {
         code: 'NothingToCompact',
-        message: 'There is nothing to compact yet',
+        message: l10n.t('There is nothing to compact yet'),
       });
       return;
     }
@@ -682,7 +687,11 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     if (args.length > MAX_MOD_COMMAND_ARGS) {
       props.store.notify('info', {
         code: 'ModCommandArgsTooLong',
-        message: `The arguments of /${name} are too long (at most ${String(MAX_MOD_COMMAND_ARGS)} characters)`,
+        message: l10n.t(
+          'The arguments of /{0} are too long (at most {1} characters)',
+          name,
+          MAX_MOD_COMMAND_ARGS,
+        ),
       });
       return false;
     }
@@ -799,7 +808,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     if (model !== undefined && !model.images) {
       props.store.notify('warning', {
         code: 'ModelCannotReadImages',
-        message: 'The selected model cannot read images: it will be told so',
+        message: l10n.t('The selected model cannot read images: it will be told so'),
       });
     }
     for (const file of files) {
@@ -833,7 +842,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       if (uris.length === 0) {
         props.store.notify('warning', {
           code: 'DropNotSupported',
-          message: 'None of the dropped items could be attached',
+          message: l10n.t('None of the dropped items could be attached'),
         });
         return;
       }
@@ -847,7 +856,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     if (images.length < content.files.length) {
       props.store.notify('warning', {
         code: 'DropNotSupported',
-        message: 'Drop files from the VS Code Explorer, or use the + menu',
+        message: l10n.t('Drop files from the VS Code Explorer, or use the + menu'),
       });
     }
   };
@@ -891,7 +900,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
             else
               props.store.notify('info', {
                 code: 'NothingToStop',
-                message: 'No response is running',
+                message: l10n.t('No response is running'),
               });
             break;
         }
@@ -928,7 +937,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     if (!isComposeInBounds(compose)) {
       props.store.notify('warning', {
         code: 'ComposeRefused',
-        message: 'The prompt from the context menu could not be used',
+        message: l10n.t('The prompt from the context menu could not be used'),
       });
       return;
     }
@@ -942,8 +951,8 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       props.store.notify('info', {
         code: 'ComposeInDraft',
         message: connected()
-          ? 'OpenCode is busy: the prompt is in the box'
-          : 'OpenCode is not connected yet: the prompt is in the box',
+          ? l10n.t('OpenCode is busy: the prompt is in the box')
+          : l10n.t('OpenCode is not connected yet: the prompt is in the box'),
       });
     }
     focusInput?.();

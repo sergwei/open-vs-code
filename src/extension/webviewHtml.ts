@@ -1,4 +1,6 @@
+import * as l10n from '@vscode/l10n';
 import { randomBytes } from 'node:crypto';
+import type { L10nBundle } from '../shared/l10n';
 
 /** Inputs of {@link buildWebviewHtml}. All URIs are already passed through `asWebviewUri`. */
 export interface WebviewHtmlOptions {
@@ -17,6 +19,17 @@ export interface WebviewHtmlOptions {
    * message.
    */
   surface: ChatSurface;
+  /**
+   * `vscode.env.language`: written as `<html lang>`, and read back by `webview-ui/src/l10nBoot.ts`
+   * as the language of the plural rules.
+   */
+  locale: string;
+  /**
+   * `vscode.l10n.bundle` (undefined in English): written as `<meta name="open-vs-code-l10n">` so
+   * the webview translates before its first render, without a protocol message (decision P2=1 of
+   * E11-i18n).
+   */
+  l10nBundle: L10nBundle | undefined;
 }
 
 /**
@@ -74,6 +87,18 @@ function escapeAttribute(value: string): string {
  * Code 1.144.0, 30/10/2026, 0 FAIL): "ok   B7 the chat in a tab has no Sessions button and keeps
  * New session (surface "tab", Sessions button false, New session true)" and "ok   B7 the chat in
  * the side bar view keeps its Sessions button (surface "view", Sessions button true)".
+ * E11-i18n: `<html lang>` carries `locale` and a second meta carries the bundle as JSON, both
+ * escaped as attributes. The CSP is untouched because a `<meta>` is not a script. The "Loading..."
+ * fallback is translated with the host's `@vscode/l10n` configuration, so it needs `l10nBoot.ts`
+ * to have run (it has, as first import of `extension.ts`).
+ * VERIFIED by the unit tests "writes lang and the l10n meta, escaped, and the meta round-trips
+ * through the parser" (`"`, `<`, `&` and `'` in the bundle, same exact CSP as without a bundle) and
+ * "translates the Loading fallback with the configured bundle", both with fabricated input. In a
+ * real Spanish window (Windows 11, VS Code 1.145.0, 04/11/2026) `test:visual` step 42 passed "A-wide
+ * the chat document says <html lang="es">" and "A-wide the prompt box placeholder is the Spanish
+ * one of the catalog", so the `lang` attribute and the meta bundle reach the webview. NOT observed
+ * in a real window: the translated "Loading..." fallback and the escaping of a bundle with
+ * quotes. UNVERIFIED on macOS and Linux.
  */
 export function buildWebviewHtml(options: WebviewHtmlOptions): string {
   const { cspSource, nonce } = options;
@@ -88,16 +113,17 @@ export function buildWebviewHtml(options: WebviewHtmlOptions): string {
   ].join('; ');
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${escapeAttribute(options.locale)}">
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="${escapeAttribute(csp)}">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="open-vs-code-surface" content="${escapeAttribute(options.surface)}">
+  <meta name="open-vs-code-l10n" content="${escapeAttribute(JSON.stringify(options.l10nBundle ?? {}))}">
   <link rel="stylesheet" href="${escapeAttribute(options.styleUri)}">
 </head>
 <body>
-  <div id="root">Loading...</div>
+  <div id="root">${escapeAttribute(l10n.t('Loading...'))}</div>
   <script type="module" nonce="${escapeAttribute(nonce)}" src="${escapeAttribute(options.scriptUri)}"></script>
 </body>
 </html>`;

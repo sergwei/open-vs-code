@@ -4,10 +4,11 @@
 // seen by the main thread on Windows 11, 31/10/2026: "○ OpenCode: not started", "✓ OpenCode: Big
 // Pickle"); `loading~spin`, `circle-slash` and `error` stay HYPOTHESIS until a capture shows them.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { Catalog } from '../shared/model';
 import type { ConnectionState } from '../shared/protocol';
 import { describeServerStatus, statusModelLabel } from './serverStatus';
+import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 
 const model = (id: string, name: string) => ({
   providerID: 'opencode',
@@ -109,5 +110,30 @@ describe('describeServerStatus', () => {
     expect(off.tooltip).toContain('openVsCode.autoStart is off');
     expect(plugins.tooltip).toContain('opencode plugins');
     expect(plugins.tooltip).not.toContain('autoStart');
+  });
+
+  // E11-i18n. SYNTHETIC: fabricated states; the Spanish text is read from
+  // `l10n/bundle.l10n.es.json`. It protects that the item follows the language of the host and
+  // that the brand-only text (`OpenCode`) and the codicon stay as they are.
+  describe('in Spanish', () => {
+    afterEach(useEnglish);
+
+    it('writes the label, the tooltip and the screen-reader text in Spanish', () => {
+      useSpanish();
+      const connected = describeServerStatus(
+        { state: 'connected', serverVersion: '2.0.32' },
+        withModel,
+      );
+      expect(connected.text).toBe('$(check) OpenCode: Model A');
+      expect(connected.tooltip).toBe(
+        'Servidor de OpenCode en ejecución (opencode 2.0.32).\nModelo: Model A\nHaga clic para abrir el chat.',
+      );
+      const stopped = describeServerStatus({ state: 'stopped' }, undefined);
+      expect(stopped.text).toBe('$(circle-slash) OpenCode: detenido');
+      expect(stopped.ariaLabel).toBe('OpenCode: detenido. Haga clic para abrir el chat.');
+      expect(describeServerStatus({ state: 'starting' }, undefined).text).toBe(
+        '$(loading~spin) OpenCode',
+      );
+    });
   });
 });

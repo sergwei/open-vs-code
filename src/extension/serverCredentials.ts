@@ -1,4 +1,6 @@
+import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
+import { plural } from '../shared/l10n';
 import {
   CLEAR_SERVER_PASSWORD_COMMAND_ID,
   CONFIG_SECTION,
@@ -14,9 +16,8 @@ import {
   serverPasswordKey,
   type ServerTarget,
 } from './externalServer';
+import { inEnglish } from './l10nEnglish';
 import type { ServerLog } from './opencodeServer';
-
-const OPEN_SETTINGS = 'Open Settings';
 
 /** Raw value of `openVsCode.serverUrl`, as the user wrote it. */
 function readServerUrlSetting(): string {
@@ -28,7 +29,7 @@ function readServerUrlSetting(): string {
  * is a usable address, the password stored for that origin.
  *
  * Empty setting -> `spawn`; unusable -> `external-invalid` with the fixed message of
- * `parseServerUrl`; usable -> `external` with the password from `context.secrets` (`undefined`
+ * `parseServerUrl` (translated, plus its English `logMessage` for the log); usable -> `external` with the password from `context.secrets` (`undefined`
  * when none is stored, which the manager reports as `unauthorized` without a request). A
  * `secrets.get` that rejects is logged and treated as "no password": the target must always
  * resolve, or the manager would wait forever. The password never reaches a log line.
@@ -48,9 +49,18 @@ export async function readServerTarget(
   log: ServerLog,
   forgotten: ForgottenPasswords,
 ): Promise<ServerTarget> {
-  const parsed = parseServerUrl(readServerUrlSetting());
+  const raw = readServerUrlSetting();
+  const parsed = parseServerUrl(raw);
   if (parsed.kind === 'none') return { kind: 'spawn' };
-  if (parsed.kind === 'invalid') return { kind: 'external-invalid', message: parsed.message };
+  if (parsed.kind === 'invalid') {
+    // The same setting parsed again in English, for the log line of the manager.
+    const english = inEnglish(() => parseServerUrl(raw));
+    return {
+      kind: 'external-invalid',
+      message: parsed.message,
+      logMessage: english.kind === 'invalid' ? english.message : parsed.message,
+    };
+  }
   const key = serverPasswordKey(parsed.origin);
   let stored: string | undefined;
   try {
@@ -97,6 +107,9 @@ export async function readServerTarget(
  * every Set (the command or the test-only one) lifts the mark of its origin BEFORE storing, so
  * the read that the store triggers is not discarded. The mark is what keeps a Forget made soon
  * after a Set from being undone by VS Code (see {@link ForgottenPasswords}).
+ * The input box (title, prompt, validation message), the "set the setting first" warning with its
+ * button (compared by its translated label) and the Forget notification (singular or plural) go
+ * through `l10n.t`; the command is the same in any language.
  * UNVERIFIED in a real window: the input box itself (a human or `test:visual` must look at it),
  * and which exact keys the secret store lists in `keys()` for another window.
  */
@@ -120,20 +133,21 @@ export function registerServerCredentials(
         const message =
           parsed.kind === 'invalid'
             ? parsed.message
-            : 'Set openVsCode.serverUrl to the address of the server first.';
-        const choice = await vscode.window.showWarningMessage(message, OPEN_SETTINGS);
-        if (choice === OPEN_SETTINGS) {
+            : l10n.t('Set openVsCode.serverUrl to the address of the server first.');
+        const openSettings = l10n.t('Open Settings');
+        const choice = await vscode.window.showWarningMessage(message, openSettings);
+        if (choice === openSettings) {
           await vscode.commands.executeCommand('workbench.action.openSettings', SERVER_URL_SETTING);
         }
         return;
       }
       const password = await vscode.window.showInputBox({
-        title: 'OpenCode: server password',
-        prompt: 'Password of the opencode server. The user name is always "opencode".',
+        title: l10n.t('OpenCode: server password'),
+        prompt: l10n.t('Password of the opencode server. The user name is always "opencode".'),
         password: true,
         ignoreFocusOut: true,
         validateInput: (value) =>
-          value.length === 0 ? 'The password cannot be empty.' : undefined,
+          value.length === 0 ? l10n.t('The password cannot be empty.') : undefined,
       });
       if (password === undefined) return; // cancelled: nothing changes
       await store(parsed.origin, password);
@@ -155,10 +169,12 @@ export function registerServerCredentials(
       log.info(`server password removed (${String(keys.length)} key(s))`);
       void vscode.window.showInformationMessage(
         keys.length === 0
-          ? 'OpenCode: there was no stored server password.'
-          : `OpenCode: removed ${String(keys.length)} stored server ${
-              keys.length === 1 ? 'password' : 'passwords'
-            }.`,
+          ? l10n.t('OpenCode: there was no stored server password.')
+          : plural(
+              keys.length,
+              l10n.t('OpenCode: removed {0} stored server password.', keys.length),
+              l10n.t('OpenCode: removed {0} stored server passwords.', keys.length),
+            ),
       );
       onChange();
     }),

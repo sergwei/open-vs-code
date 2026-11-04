@@ -34,6 +34,8 @@
 //  - Raw (line endings normalised): `package.json`, `package-lock.json`, `esbuild.mjs`,
 //    `webview-ui/build.mjs`, `webview-ui/vite.config.mts` and `webview-ui/index.html` when it exists
 //    (today it does not: Vite's HTML is generated).
+//  - `package.nls*.json` and `l10n/**` (E11-i18n: the translation catalogs; text files with
+//    normalised line endings, so a changed translation makes a run stale).
 //  - `media/**` (the icons the run captures), without compiling: text files (`.svg`, `.json`,
 //    `.html`, `.txt`) with normalised line endings, anything else as raw bytes.
 //
@@ -124,6 +126,15 @@ export function hashedFiles(root) {
     files.push(rel);
   }
   files.push(...walk(root, 'media'));
+  // E11-i18n: the catalogs change the texts the run sees (step 42 reads the Spanish ones, and the
+  // installed copy of step 25 carries them), so they count: `package.nls*.json` at the root and
+  // everything under `l10n/`. Text files, hashed with normalised line endings.
+  if (fs.existsSync(root)) {
+    for (const name of fs.readdirSync(root)) {
+      if (/^package\.nls(\.[^.]+)?\.json$/.test(name)) files.push(name);
+    }
+  }
+  files.push(...walk(root, 'l10n'));
   for (const rel of RAW_FILES) if (fs.existsSync(path.join(root, rel))) files.push(rel);
   return [...new Set(files)].sort();
 }

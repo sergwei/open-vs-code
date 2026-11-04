@@ -8,6 +8,7 @@
  * says (`toolOutcome.ts`: feedback text, answers). The record wins; the block adds the detail the
  * host deliberately does not keep.
  */
+import * as l10n from '@vscode/l10n';
 import type { MessageInfo, Part, RequestResolution } from '../../../src/shared/model';
 import { actionLabel, describeRequest, outcomeLabel } from './permissionText';
 import { deriveToolOutcome, type DerivedOutcome } from './toolOutcome';
@@ -17,10 +18,21 @@ type ToolPart = Extract<Part, { type: 'tool' }>;
 /** Longest quoted feedback in a line; the rest is cut with an ellipsis. Our own choice for a narrow view. */
 export const MAX_FEEDBACK_SHOWN = 200;
 
-/** Name shown for the question tool's form, which has no title worth reading. */
-const QUESTION_SUBJECT = 'Question from the agent';
+/** Name shown for the question tool's form, which has no title worth reading (in the interface language). */
+function questionSubject(): string {
+  return l10n.t('Question from the agent');
+}
 
-/** One line of the history: `prefix` is read by screen readers only, `tone` drives the colour. */
+/** The line is "<what happened> · <about what>"; each side is translated on its own. */
+function joinLine(label: string, about: string): string {
+  return `${label} · ${about}`;
+}
+
+/**
+ * One line of the history: `prefix` is read by screen readers only, `tone` drives the colour.
+ * `prefix` is a code, not a text: `RequestOutcome` translates it where it is shown, so the
+ * placement logic and its tests do not depend on the language.
+ */
 export interface OutcomeView {
   /** Stable key for the list: the request id, or `derived:<partID>` for a line read from a block. */
   key: string;
@@ -120,7 +132,7 @@ export function outcomeView(
     const feedback = derived?.kind === 'permission' && derived.verdict === 'rejected-feedback';
     const label =
       resolution.decision === 'reject' && resolution.withFeedback
-        ? 'Rejected with feedback'
+        ? l10n.t('Rejected with feedback')
         : outcomeLabel(resolution.decision);
     const about = describeRequest({
       action: resolution.action,
@@ -129,19 +141,19 @@ export function outcomeView(
     return {
       key: resolution.id,
       prefix: 'Permission',
-      text: `${label} · ${about}${feedback ? quote(derived.feedback) : ''}`,
+      text: `${joinLine(label, about)}${feedback ? quote(derived.feedback) : ''}`,
       tone: resolution.decision === 'reject' ? 'rejected' : 'allowed',
     };
   }
   if (resolution?.kind === 'form') {
     const prefix = resolution.formKind === 'question' ? 'Question' : 'Form';
-    const about = resolution.formKind === 'question' ? QUESTION_SUBJECT : resolution.title;
+    const about = resolution.formKind === 'question' ? questionSubject() : resolution.title;
     if (resolution.outcome === 'answered') {
       const answers = derived?.kind === 'question' && derived.verdict === 'answered';
       return {
         key: resolution.id,
         prefix,
-        text: `Answered · ${answers ? describeAnswers(derived) : about}`,
+        text: joinLine(l10n.t('Answered'), answers ? describeAnswers(derived) : about),
         tone: 'allowed',
       };
     }
@@ -149,7 +161,7 @@ export function outcomeView(
     return {
       key: resolution.id,
       prefix,
-      text: `Dismissed · ${about}${words ? quote(derived.message) : ''}`,
+      text: `${joinLine(l10n.t('Dismissed'), about)}${words ? quote(derived.message) : ''}`,
       tone: 'rejected',
     };
   }
@@ -160,42 +172,42 @@ export function outcomeView(
       return {
         key: derivedKey,
         prefix: 'Permission',
-        text: `Rejected · ${subject}`,
+        text: joinLine(l10n.t('Rejected'), subject),
         tone: 'rejected',
       };
     case 'rejected-feedback':
       return {
         key: derivedKey,
         prefix: 'Permission',
-        text: `Rejected with feedback · ${subject}${quote(derived.feedback)}`,
+        text: `${joinLine(l10n.t('Rejected with feedback'), subject)}${quote(derived.feedback)}`,
         tone: 'rejected',
       };
     case 'blocked':
       return {
         key: derivedKey,
         prefix: 'Permission',
-        text: `Blocked by a permission rule · ${subject}`,
+        text: joinLine(l10n.t('Blocked by a permission rule'), subject),
         tone: 'rejected',
       };
     case 'answered':
       return {
         key: derivedKey,
         prefix: 'Question',
-        text: `Answered · ${describeAnswers(derived)}`,
+        text: joinLine(l10n.t('Answered'), describeAnswers(derived)),
         tone: 'allowed',
       };
     case 'dismissed':
       return {
         key: derivedKey,
         prefix: 'Question',
-        text: `Dismissed · ${QUESTION_SUBJECT}`,
+        text: joinLine(l10n.t('Dismissed'), questionSubject()),
         tone: 'rejected',
       };
     case 'own-words':
       return {
         key: derivedKey,
         prefix: 'Question',
-        text: `Dismissed · ${QUESTION_SUBJECT}${quote(derived.message)}`,
+        text: `${joinLine(l10n.t('Dismissed'), questionSubject())}${quote(derived.message)}`,
         tone: 'rejected',
       };
   }

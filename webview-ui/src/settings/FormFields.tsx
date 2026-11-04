@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { For, Show, untrack } from 'solid-js';
 import type { SettingsFieldRow } from '../../../src/shared/settingsProtocol';
 import { isFieldVisible, type FieldValues } from './formWhen';
@@ -42,7 +43,7 @@ export function FormFields(props: {
               <label class="settings-label" for={id}>
                 {field.title ?? field.key}
                 <Show when={!field.required}>
-                  <span class="step-status">{' (optional)'}</span>
+                  <span class="step-status">{` ${l10n.t('(optional)')}`}</span>
                 </Show>
               </label>
               <Show when={field.description !== undefined && field.description !== ''}>
@@ -81,7 +82,7 @@ export function FormFields(props: {
                   >
                     <Show when={!field.required}>
                       <option value="" selected={(props.values[field.key] ?? '') === ''}>
-                        None
+                        {l10n.t('None')}
                       </option>
                     </Show>
                     <For each={options()}>

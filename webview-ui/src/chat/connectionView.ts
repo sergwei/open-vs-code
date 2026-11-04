@@ -2,6 +2,7 @@
 // of the error card and the rule that decides when the guide is on screen. No DOM and no Solid, so
 // the texts and the rules are unit-tested. The texts are product copy: step 1 keeps one line per
 // attempt (Sergio's decision of 27/10/2026, Engram #1315), not the literal P12 sentences of #1300.
+import * as l10n from '@vscode/l10n';
 import type { Catalog } from '../../../src/shared/model';
 import type { BinaryChoice } from '../store/chatStore';
 import type {
@@ -53,7 +54,16 @@ const setup = (label: string, action: SetupAction): ViewAction => ({
   message: { type: 'setup.action', action },
 });
 const restart = (label: string): ViewAction => ({ label, message: { type: 'server.restart' } });
-const showLogs: ViewAction = { label: 'Show logs', message: { type: 'logs.show' } };
+// E11-i18n: every label and sentence below goes through `l10n.t` at call time (no module-level
+// text), so the guide and the card follow the language the tests switch.
+// VERIFIED by the checks "writes the steps, lines and actions of the guide in Spanish" and
+// "writes the cards, buttons and connection text in Spanish, with the number in place" of
+// `connectionView.test.ts` (the "Show logs" button as "Mostrar registros" in the second).
+/** The "Show logs" button; a function so each call reads the active language. */
+const showLogs = (): ViewAction => ({
+  label: l10n.t('Show logs'),
+  message: { type: 'logs.show' },
+});
 
 /** Reasons that only exist when the server is external (`openVsCode.serverUrl`). */
 function isExternalReason(reason: Unavailable['reason']): boolean {
@@ -90,28 +100,39 @@ export function nextGuideLatch(
   }
 }
 
-const OUTCOME_TEXT: Record<BinaryCheck['outcome'], string> = {
-  ok: 'found',
-  duplicate: 'already checked',
-  'not-on-path': 'not on PATH',
-  invalid: 'the file does not exist or cannot be used',
-  'run-failed': 'it did not run',
-  'unknown-version': 'it did not report a version',
-  unsupported: 'this is not opencode v2; open-vs-code needs v2',
-  skipped: 'skipped',
-};
+/** What each outcome of a binary check says; a function so each call reads the active language. */
+function outcomeText(outcome: BinaryCheck['outcome']): string {
+  switch (outcome) {
+    case 'ok':
+      return l10n.t('found');
+    case 'duplicate':
+      return l10n.t('already checked');
+    case 'not-on-path':
+      return l10n.t('not on PATH');
+    case 'invalid':
+      return l10n.t('the file does not exist or cannot be used');
+    case 'run-failed':
+      return l10n.t('it did not run');
+    case 'unknown-version':
+      return l10n.t('it did not report a version');
+    case 'unsupported':
+      return l10n.t('this is not opencode v2; open-vs-code needs v2');
+    case 'skipped':
+      return l10n.t('skipped');
+  }
+}
 
 /** One line per check that explains the failure; `ok` and `duplicate` checks say nothing new. */
 function checkLine(check: BinaryCheck): string | undefined {
   if (check.outcome === 'ok' || check.outcome === 'duplicate') return undefined;
   const who =
     check.source === 'setting'
-      ? `openVsCode.opencodePath: ${check.path ?? '(not set)'}`
+      ? `openVsCode.opencodePath: ${check.path ?? l10n.t('(not set)')}`
       : `${check.source}${check.path === undefined ? '' : ` ${check.path}`}`;
   // An `invalid` check's detail already says why ("the file does not exist"): it replaces the
   // generic text instead of repeating it in parentheses (review W3).
   if (check.outcome === 'invalid' && check.detail !== '') return `${who}: ${check.detail}`;
-  const what = OUTCOME_TEXT[check.outcome];
+  const what = outcomeText(check.outcome);
   return check.detail === '' ? `${who}: ${what}` : `${who}: ${what} (${check.detail})`;
 }
 
@@ -125,7 +146,7 @@ function binaryLines(binary: BinaryDiagnosis | undefined, fallback: string): str
   const lines = binary.checks.map(checkLine).filter((line): line is string => line !== undefined);
   const settingTried = binary.checks.some((c) => c.source === 'setting');
   if (binary.settingPath === undefined && !settingTried) {
-    lines.push('openVsCode.opencodePath is not set.');
+    lines.push(l10n.t('openVsCode.opencodePath is not set.'));
   }
   return lines.length === 0 ? [fallback] : lines;
 }
@@ -154,9 +175,9 @@ export function guideSteps(
 ): GuideStep[] {
   const modelStep: GuideStep = {
     id: 'model',
-    title: 'Pick a model',
+    title: l10n.t('Pick a model'),
     status: (catalog?.models.length ?? 0) > 0 ? 'done' : 'waiting',
-    lines: ['Free models work without an account.'],
+    lines: [l10n.t('Free models work without an account.')],
     actions: [],
   };
 
@@ -164,15 +185,15 @@ export function guideSteps(
     return [
       {
         id: 'connect',
-        title: 'Connect to the server in openVsCode.serverUrl',
+        title: l10n.t('Connect to the server in openVsCode.serverUrl'),
         status: 'failed',
         lines: [connection.error.message],
         actions: [
           ...(connection.reason === 'unauthorized'
-            ? [setup('Set password', 'server.password')]
+            ? [setup(l10n.t('Set password'), 'server.password')]
             : []),
-          setup('Open settings', 'server.settings'),
-          restart('Retry'),
+          setup(l10n.t('Open settings'), 'server.settings'),
+          restart(l10n.t('Retry')),
         ],
       },
       modelStep,
@@ -189,30 +210,33 @@ export function guideSteps(
   const busy = binaryFailed && binaryCheck.kind !== 'idle';
   const binary: GuideStep = {
     id: 'binary',
-    title: 'Find the opencode binary',
+    title: l10n.t('Find the opencode binary'),
     status: binaryFailed ? (binaryCheck.kind === 'checking' ? 'checking' : 'failed') : 'done',
     lines: binaryFailed
       ? binaryCheck.kind === 'checking'
-        ? [`Checking ${binaryCheck.path}…`]
+        ? [l10n.t('Checking {0}…', binaryCheck.path)]
         : binaryLines(failure.binary, failure.error.message)
       : [],
     actions: binaryFailed
       ? [
-          { ...setup('Choose binary…', 'binary.choose'), ...(busy ? { disabled: true } : {}) },
-          setup('Install guide', 'install.guide'),
+          {
+            ...setup(l10n.t('Choose binary…'), 'binary.choose'),
+            ...(busy ? { disabled: true } : {}),
+          },
+          setup(l10n.t('Install guide'), 'install.guide'),
         ]
       : [],
   };
   const server: GuideStep = {
     id: 'server',
-    title: 'Start the server',
+    title: l10n.t('Start the server'),
     status: binaryFailed ? 'waiting' : serverFailed ? 'failed' : 'running',
     lines: binaryFailed
-      ? ['Starts on its own after step 1.']
+      ? [l10n.t('Starts on its own after step 1.')]
       : failure !== undefined
         ? [failure.error.message]
-        : ['Starting…'],
-    actions: serverFailed ? [restart('Restart'), showLogs] : [],
+        : [l10n.t('Starting…')],
+    actions: serverFailed ? [restart(l10n.t('Restart')), showLogs()] : [],
   };
   return [binary, server, modelStep];
 }
@@ -233,19 +257,21 @@ export function guideSteps(
 export function describeProblem(connection: ConnectionState): ProblemView | undefined {
   if (connection.state === 'reconnecting') {
     return {
-      title: `Reconnecting to opencode (attempt ${String(connection.attempt)})…`,
-      actions: [showLogs],
+      title: l10n.t('Reconnecting to opencode (attempt {0})…', connection.attempt),
+      actions: [showLogs()],
       role: 'status',
     };
   }
   if (connection.state === 'not-started') {
     return {
-      title: 'opencode is not running',
+      title: l10n.t('opencode is not running'),
       cause:
         connection.reason === 'project-plugins'
-          ? 'This folder has opencode plugins that would run with your permissions. Press Start to review them.'
-          : 'openVsCode.autoStart is off. Send a prompt or press Start.',
-      actions: [restart('Start')],
+          ? l10n.t(
+              'This folder has opencode plugins that would run with your permissions. Press Start to review them.',
+            )
+          : l10n.t('openVsCode.autoStart is off. Send a prompt or press Start.'),
+      actions: [restart(l10n.t('Start'))],
       role: 'status',
     };
   }
@@ -254,58 +280,62 @@ export function describeProblem(connection: ConnectionState): ProblemView | unde
   switch (connection.reason) {
     case 'exited':
       return {
-        title: 'opencode stopped',
-        cause: 'The server exited unexpectedly. Your conversation is kept.',
-        actions: [restart('Restart'), showLogs],
+        title: l10n.t('opencode stopped'),
+        cause: l10n.t('The server exited unexpectedly. Your conversation is kept.'),
+        actions: [restart(l10n.t('Restart')), showLogs()],
         role: 'alert',
       };
     case 'start-failed':
       return {
-        title: 'opencode could not start',
+        title: l10n.t('opencode could not start'),
         cause,
-        actions: [restart('Restart'), showLogs],
+        actions: [restart(l10n.t('Restart')), showLogs()],
         role: 'alert',
       };
     case 'unsupported-version':
       return {
-        title: 'This opencode is not supported',
+        title: l10n.t('This opencode is not supported'),
         cause,
-        actions: [setup('Choose binary…', 'binary.choose'), showLogs],
+        actions: [setup(l10n.t('Choose binary…'), 'binary.choose'), showLogs()],
         role: 'alert',
       };
     case 'binary-missing':
       return {
-        title: 'opencode was not found',
+        title: l10n.t('opencode was not found'),
         cause,
-        actions: [setup('Choose binary…', 'binary.choose'), showLogs],
+        actions: [setup(l10n.t('Choose binary…'), 'binary.choose'), showLogs()],
         role: 'alert',
       };
     case 'unreachable':
       return {
-        title: 'Cannot reach the opencode server',
+        title: l10n.t('Cannot reach the opencode server'),
         cause,
-        actions: [restart('Retry'), setup('Open settings', 'server.settings'), showLogs],
+        actions: [
+          restart(l10n.t('Retry')),
+          setup(l10n.t('Open settings'), 'server.settings'),
+          showLogs(),
+        ],
         role: 'alert',
       };
     case 'unauthorized':
       return {
-        title: 'The server needs a password',
+        title: l10n.t('The server needs a password'),
         cause,
-        actions: [setup('Set password', 'server.password'), showLogs],
+        actions: [setup(l10n.t('Set password'), 'server.password'), showLogs()],
         role: 'alert',
       };
     case 'invalid-url':
       return {
-        title: 'The server address is not valid',
+        title: l10n.t('The server address is not valid'),
         cause,
-        actions: [setup('Open settings', 'server.settings')],
+        actions: [setup(l10n.t('Open settings'), 'server.settings')],
         role: 'alert',
       };
     case 'no-workspace':
       return {
-        title: 'Open a folder to start',
-        cause: 'opencode needs a folder to work in.',
-        actions: [setup('Open folder', 'folder.open')],
+        title: l10n.t('Open a folder to start'),
+        cause: l10n.t('opencode needs a folder to work in.'),
+        actions: [setup(l10n.t('Open folder'), 'folder.open')],
         role: 'alert',
       };
   }
@@ -315,16 +345,16 @@ export function describeProblem(connection: ConnectionState): ProblemView | unde
 export function describeConnection(connection: ConnectionState): string {
   switch (connection.state) {
     case 'starting':
-      return 'Starting…';
+      return l10n.t('Starting…');
     case 'connected':
-      return 'Connected';
+      return l10n.t('Connected');
     case 'reconnecting':
-      return `Reconnecting (${String(connection.attempt)})`;
+      return l10n.t('Reconnecting ({0})', connection.attempt);
     case 'unavailable':
-      return `Unavailable: ${connection.error.message}`;
+      return l10n.t('Unavailable: {0}', connection.error.message);
     case 'stopped':
-      return 'Stopped';
+      return l10n.t('Stopped');
     case 'not-started':
-      return 'Not started';
+      return l10n.t('Not started');
   }
 }

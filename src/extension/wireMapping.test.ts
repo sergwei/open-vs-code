@@ -8,7 +8,7 @@
 // `@opencode/client@2.0.32`; ids and texts are made up and the tool, permission and form cases
 // come from the TYPES only, never from a running server. These tests confirm OUR mapping logic,
 // not the contract with the server.
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type {
   AgentInfo,
   FormInfo,
@@ -18,8 +18,13 @@ import type {
   SessionInfo,
   SessionMessageInfo,
 } from '@opencode/client';
+import * as l10n from '@vscode/l10n';
+import { translatedError } from './l10nEnglish';
+import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 import {
+  compactionNotice,
   lastCompactionAt,
+  logTextOf,
   sanitizeText,
   toAgentOptions,
   toErrorInfo,
@@ -552,5 +557,60 @@ describe('toProviderOption keeps no secret', () => {
     for (const secret of ['sk-planted-api-key', 'hdr-planted-token', 'at-planted-access']) {
       expect(json).not.toContain(secret);
     }
+  });
+});
+
+// Protects the translation of the texts this module writes (E11-i18n phase 4a): the words of a
+// server error that arrives with only a `_tag`, the fallback of an unknown thrown value and the
+// compaction lines. Provenance: fabricated errors; the Spanish is read from
+// `l10n/bundle.l10n.es.json`, so this proves the calls go through the catalog.
+describe('Spanish texts', () => {
+  beforeEach(useSpanish);
+  afterEach(useEnglish);
+
+  it('translates the words of a tag-only server error', () => {
+    expect(toErrorInfo({ _tag: 'SessionBusyError' }, SECRETS)).toEqual({
+      code: 'SessionBusyError',
+      message: 'La sesión está ocupada con un turno. Inténtelo de nuevo cuando haya terminado.',
+    });
+    expect(toErrorInfo(42, SECRETS).message).toBe('Error desconocido');
+  });
+
+  // Protects the pass-2 review (W2, decision of Sergio): the user reads the Spanish `message` and
+  // the log gets its English twin, for the three origins of a translated text (a tag-only body,
+  // the "Unknown error" fallback and an error built by `translatedError`). Fabricated errors.
+  it('keeps the English text of a translated error for the log', () => {
+    const busy = toErrorInfo({ _tag: 'SessionBusyError' }, SECRETS);
+    expect(busy.message).toContain('La sesión está ocupada');
+    expect(logTextOf(busy)).toBe(
+      'The session is busy with a turn. Try again when it has finished.',
+    );
+
+    const unknown = toErrorInfo(42, SECRETS);
+    expect(unknown.message).toBe('Error desconocido');
+    expect(logTextOf(unknown)).toBe('Unknown error');
+
+    const coded = toErrorInfo(
+      translatedError(() => l10n.t('The opencode server is not running'), 'ServerUnavailable'),
+      SECRETS,
+    );
+    expect(coded.message).toBe('El servidor de opencode no se está ejecutando');
+    expect(logTextOf(coded)).toBe('The opencode server is not running');
+    // Nothing of the twin travels with the info that goes to the webview.
+    expect(JSON.stringify(coded)).not.toContain('The opencode server is not running');
+
+    // A text from the server has no twin: it is logged as it came.
+    expect(logTextOf(toErrorInfo({ _tag: 'X', message: 'from the server' }, SECRETS))).toBe(
+      'from the server',
+    );
+  });
+
+  it('writes the compaction lines in Spanish', () => {
+    expect(compactionNotice('i', 1, 'completed', { auto: true }).text).toBe(
+      'Conversación compactada automáticamente',
+    );
+    expect(compactionNotice('i', 1, 'failed', { detail: 'x' }).text).toBe(
+      'Falló la compactación: x',
+    );
   });
 });

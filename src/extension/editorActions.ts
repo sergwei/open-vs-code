@@ -7,6 +7,7 @@
 // Privacy: the text to copy or insert is code from the model and may contain secrets from the
 // user's files, so it is never logged. What is logged is a rejected path (truncated).
 
+import * as l10n from '@vscode/l10n';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
@@ -16,6 +17,7 @@ import type { ChatTabs } from './chatTabs';
 import type { ContextDiagnostic } from './contextPrompts';
 import { classifyDropped } from './droppedFiles';
 import { isInServedFolder, selectionLines, toEditorRef } from './fileMentions';
+import { bothTexts } from './l10nEnglish';
 import type { ServerLog } from './opencodeServer';
 import {
   hasImageExtension,
@@ -31,12 +33,16 @@ const LOG_PATH_MAX = 200;
 
 /**
  * An expected failure of an editor action. `name` is the stable code the webview shows
- * (`ErrorInfo.code`) and `message` is written for the user, in English.
+ * (`ErrorInfo.code`) and `message` is written for the user, in the language of VS Code. `produce`
+ * is evaluated twice ({@link bothTexts}); the English result rides in a non-enumerable
+ * `logMessage`, which `toErrorInfo` keeps for the log.
  */
 class EditorActionError extends Error {
-  constructor(code: string, message: string) {
-    super(message);
+  constructor(code: string, produce: () => string) {
+    const text = bothTexts(produce);
+    super(text.message);
     this.name = code;
+    Object.defineProperty(this, 'logMessage', { value: text.logMessage, enumerable: false });
   }
 }
 
@@ -103,6 +109,9 @@ function workspaceFolder(): string | undefined {
  * at column 0 of line 4. NOT observed: a document of another non-`file` scheme (only `untitled`),
  * a symlink inside the folder pointing outside it (the check is lexical, so it passes), a
  * notebook cell, the refusal notice in the webview, macOS and Linux.
+ * The refusal messages go through `l10n.t`; the `code` of each (`NoActiveEditor`, `NoFileOnDisk`,
+ * `OutsideWorkspace`) stays the stable part, so the English wording above is what an English
+ * window shows.
  */
 function readEditorContext(
   folder: string | undefined,
@@ -112,18 +121,19 @@ function readEditorContext(
   const editor =
     editorForMenu(options.uri) ?? vscode.window.activeTextEditor ?? lastEditor?.current();
   if (editor === undefined) {
-    throw new EditorActionError('NoActiveEditor', 'Open a file in the editor to add it');
+    throw new EditorActionError('NoActiveEditor', () =>
+      l10n.t('Open a file in the editor to add it'),
+    );
   }
   const { document } = editor;
   if (document.uri.scheme !== 'file') {
-    throw new EditorActionError('NoFileOnDisk', 'Save the file first');
+    throw new EditorActionError('NoFileOnDisk', () => l10n.t('Save the file first'));
   }
   const fsPath = document.uri.fsPath;
   if (!isInServedFolder(folder, fsPath)) {
     // Not logged with the path: it is a file the user has open, and may be private.
-    throw new EditorActionError(
-      'OutsideWorkspace',
-      'Only files inside the workspace folder can be added',
+    throw new EditorActionError('OutsideWorkspace', () =>
+      l10n.t('Only files inside the workspace folder can be added'),
     );
   }
   const selections = editor.selections.filter((selection) => !selection.isEmpty);
@@ -314,6 +324,9 @@ export function targetColumn(placement: EditorPlacement): vscode.ViewColumn | un
  * {@link targetColumn} instead of the active group (which would be the chat's), and `insert`
  * falls back to the last text editor when `activeTextEditor` is `undefined`, as
  * {@link readEditorContext} does. Without `placement`, or with no tab open, nothing changes.
+ * The refusal messages of `open`, `insert` and `droppedFiles`, the labels of the "Attach" dialog and
+ * its "Images" filter name go through `l10n.t` when they are raised or shown; the error `code`
+ * is unchanged.
  */
 export function createEditorActions(
   log: ServerLog,
@@ -323,7 +336,9 @@ export function createEditorActions(
     async open(target, line, column, servedFolder) {
       const folder = servedFolder ?? workspaceFolder();
       if (folder === undefined) {
-        throw new EditorActionError('NoWorkspace', 'Open a folder to open files from the chat');
+        throw new EditorActionError('NoWorkspace', () =>
+          l10n.t('Open a folder to open files from the chat'),
+        );
       }
       const resolved = resolveInsideFolder(folder, target);
       if (resolved === undefined) {
@@ -332,18 +347,19 @@ export function createEditorActions(
         log.warn(
           `refused to open a path outside the workspace: ${JSON.stringify(target.slice(0, LOG_PATH_MAX))}`,
         );
-        throw new EditorActionError(
-          'OutsideWorkspace',
-          'That file is outside the workspace folder, so it was not opened',
+        throw new EditorActionError('OutsideWorkspace', () =>
+          l10n.t('That file is outside the workspace folder, so it was not opened'),
         );
       }
       let document: vscode.TextDocument;
       try {
         document = await vscode.workspace.openTextDocument(vscode.Uri.file(resolved));
       } catch {
-        throw new EditorActionError(
-          'FileNotFound',
-          `Could not open ${path.basename(resolved)}: it does not exist or is not a text file`,
+        throw new EditorActionError('FileNotFound', () =>
+          l10n.t(
+            'Could not open {0}: it does not exist or is not a text file',
+            path.basename(resolved),
+          ),
         );
       }
       const position = new vscode.Position(
@@ -369,15 +385,14 @@ export function createEditorActions(
     async insert(text) {
       const editor = vscode.window.activeTextEditor ?? placement.lastEditor?.current();
       if (editor === undefined) {
-        throw new EditorActionError('NoActiveEditor', 'Open a file to insert code');
+        throw new EditorActionError('NoActiveEditor', () => l10n.t('Open a file to insert code'));
       }
       const applied = await editor.edit((builder) => {
         for (const selection of editor.selections) builder.replace(selection, text);
       });
       if (!applied) {
-        throw new EditorActionError(
-          'InsertFailed',
-          'The editor refused the edit (read-only file?)',
+        throw new EditorActionError('InsertFailed', () =>
+          l10n.t('The editor refused the edit (read-only file?)'),
         );
       }
     },
@@ -407,9 +422,8 @@ export function createEditorActions(
 
     async droppedFiles(folder, uris) {
       if (folder === undefined) {
-        throw new EditorActionError(
-          'OutsideWorkspace',
-          'Only files inside the workspace folder can be added',
+        throw new EditorActionError('OutsideWorkspace', () =>
+          l10n.t('Only files inside the workspace folder can be added'),
         );
       }
       const { candidates, outside, remote } = classifyDropped(folder, uris);
@@ -437,8 +451,8 @@ export function createEditorActions(
         canSelectMany: true,
         canSelectFiles: true,
         canSelectFolders: false,
-        openLabel: images ? 'Attach image' : 'Attach',
-        ...(images ? { filters: { Images: [...IMAGE_EXTENSIONS] } } : {}),
+        openLabel: images ? l10n.t('Attach image') : l10n.t('Attach'),
+        ...(images ? { filters: { [l10n.t('Images')]: [...IMAGE_EXTENSIONS] } } : {}),
         ...(folder === undefined ? {} : { defaultUri: vscode.Uri.file(folder) }),
       });
       if (picked === undefined) return [];

@@ -3,34 +3,44 @@
  * resources it touches, what "Always allow" would store, and how a decision is worded afterwards.
  * Pure: no DOM, no Solid, so Vitest drives it directly.
  */
+import * as l10n from '@vscode/l10n';
 import type { PermissionAsk, PermissionDecision } from '../../../src/shared/model';
 
 /** Most resources a card lists before folding the rest into "N more". Our own choice for a narrow view. */
 export const MAX_RESOURCES_SHOWN = 5;
 
-/** Wire action name to the verb a person reads; unknown actions are shown as the server named them. */
-const ACTION_LABELS: Record<string, string> = {
-  read: 'Read',
-  edit: 'Edit',
-  write: 'Edit',
-  shell: 'Run command',
-  external_directory: 'Access outside the folder',
-  webfetch: 'Fetch URL',
-  websearch: 'Search the web',
-  question: 'Ask you questions',
-};
-
 /**
- * Wording for the action of a permission request.
+ * Wording for the action of a permission request, in the language of the interface.
  *
  * `read`, `shell`, `external_directory`, `question`, `webfetch` and `websearch` are action names
  * read in the opencode v2.0.32 sources (`file-access.ts`, the `question` tool, the agent rules);
  * VERIFIED against a real server only for `read` (the opt-in `realOpencode.test.ts` asked to read
  * `.env`). `edit` and `write` are HYPOTHESIS (the names of the v1 permissions; not seen in v2).
- * An action not in the table comes back unchanged, so a new server action still renders.
+ * An action the switch does not know comes back unchanged (as the server named it), so a new
+ * server action still renders. It is a function, not a table built at module level, so the
+ * texts follow the locale set at start-up. VERIFIED by the Spanish case of `PermissionCard.test.tsx`
+ * ("Permiso necesario: Leer").
  */
 export function actionLabel(action: string): string {
-  return Object.hasOwn(ACTION_LABELS, action) ? (ACTION_LABELS[action] ?? action) : action;
+  switch (action) {
+    case 'read':
+      return l10n.t('Read');
+    case 'edit':
+    case 'write':
+      return l10n.t('Edit');
+    case 'shell':
+      return l10n.t('Run command');
+    case 'external_directory':
+      return l10n.t('Access outside the folder');
+    case 'webfetch':
+      return l10n.t('Fetch URL');
+    case 'websearch':
+      return l10n.t('Search the web');
+    case 'question':
+      return l10n.t('Ask you questions');
+    default:
+      return action;
+  }
 }
 
 /** Resources to list, and how many were folded away. */
@@ -63,15 +73,15 @@ export function describeSave(
   };
 }
 
-/** Past-tense wording of a decision, for the result line that stays after the card is gone. */
+/** Past-tense wording of a decision (in the interface language), for the result line that stays after the card is gone. */
 export function outcomeLabel(decision: PermissionDecision): string {
   switch (decision) {
     case 'once':
-      return 'Allowed once';
+      return l10n.t('Allowed once');
     case 'always':
-      return 'Always allowed';
+      return l10n.t('Always allowed');
     case 'reject':
-      return 'Rejected';
+      return l10n.t('Rejected');
   }
 }
 

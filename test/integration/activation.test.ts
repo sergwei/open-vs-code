@@ -14,6 +14,24 @@ const EXTENSION_ID = 'sergwei.open-vs-code';
 
 describe('activation', () => {
   /**
+   * Guard of E11-i18n (H2): the integration suites compare English texts, so a VS Code that starts
+   * in another language must fail here, with the reason, and not in dozens of unrelated checks.
+   * `vscode.env.language` is `en` when no language pack is installed in the profile, whatever the
+   * operating system says: the test profile is new and has no pack (read in microsoft/vscode
+   * `base/node/nls.ts`). VERIFIED on Windows 11 (04/11/2026): `--label main` passed
+   * "runs in an English VS Code (the suites compare English texts)". macOS and Linux UNVERIFIED
+   * until CI.
+   */
+  it('runs in an English VS Code (the suites compare English texts)', () => {
+    assert.strictEqual(
+      vscode.env.language,
+      'en',
+      `vscode.env.language is "${vscode.env.language}": the integration suites compare English ` +
+        'texts, so this label must start VS Code without a language pack (locale-es is the one that does).',
+    );
+  });
+
+  /**
    * The extension is installed from the development path and activates without error.
    *
    * UNVERIFIED until the first run in a real VS Code. HYPOTHESIS that `--disable-extensions`
@@ -40,6 +58,20 @@ describe('activation', () => {
     const log = await openLogFromStart();
     // 8000 ms is our own choice (margin for a slow CI; with the 8000 ms of the log lookup it stays under the 20 s Mocha timeout), not a VS Code value.
     await log.waitFor(`open-vs-code ${version} activated`, 8000);
+  });
+
+  /**
+   * The host writes its language and the size of the loaded bundle (`l10n: locale en, bundle
+   * none`): in English VS Code loads no bundle. Protects the wiring of `l10nBoot.ts` (a missing
+   * or throwing boot would stop the activation line too). The Spanish counterpart is the
+   * `locale-es` label ("logs the host locale es with the loaded bundle").
+   */
+  it('logs the l10n line', async () => {
+    const extension = vscode.extensions.getExtension(EXTENSION_ID);
+    assert.ok(extension);
+    await extension.activate();
+    const log = await openLogFromStart();
+    await log.waitFor('l10n: locale en, bundle none', 8000);
   });
 
   /**

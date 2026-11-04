@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { dismissOutside } from '../selectors/dismissOutside';
 import { PlusIcon } from './icons';
@@ -11,16 +12,28 @@ const TRIGGER_SELECTOR = '[data-plus-trigger]';
 /** The four actions of the menu, in the order they are listed (decision P11=1 for the image one). */
 type Action = 'selection' | 'file' | 'image' | 'mention';
 
-const ITEMS: readonly { action: Action; label: string; hint?: string }[] = [
-  {
-    action: 'selection',
-    label: 'Add selection',
-    hint: 'Add the selected lines of the active editor, or the whole file when nothing is selected',
-  },
-  { action: 'file', label: 'Attach file…', hint: 'Hold Shift to drop files from the Explorer' },
-  { action: 'image', label: 'Attach image…' },
-  { action: 'mention', label: 'Mention a file' },
-];
+/**
+ * The items of the menu with their translated label and hint. A function, not a constant, so each
+ * render reads the active language.
+ */
+function menuItems(): readonly { action: Action; label: string; hint?: string }[] {
+  return [
+    {
+      action: 'selection',
+      label: l10n.t('Add selection'),
+      hint: l10n.t(
+        'Add the selected lines of the active editor, or the whole file when nothing is selected',
+      ),
+    },
+    {
+      action: 'file',
+      label: l10n.t('Attach file…'),
+      hint: l10n.t('Hold Shift to drop files from the Explorer'),
+    },
+    { action: 'image', label: l10n.t('Attach image…') },
+    { action: 'mention', label: l10n.t('Mention a file') },
+  ];
+}
 
 /**
  * The "+" button of the prompt bar and its menu (E2, issue #85, phase 4): Add selection, Attach
@@ -176,8 +189,8 @@ export function PlusMenu(props: {
         aria-expanded={open()}
         aria-controls={MENU_ID}
         aria-disabled={props.disabled ? 'true' : undefined}
-        aria-label="Add context"
-        title="Add context: selection, files, images or a mention"
+        aria-label={l10n.t('Add context')}
+        title={l10n.t('Add context: selection, files, images or a mention')}
         ref={(element) => {
           trigger = element;
         }}
@@ -196,7 +209,7 @@ export function PlusMenu(props: {
           id={MENU_ID}
           class="plus-menu"
           role="menu"
-          aria-label="Add context"
+          aria-label={l10n.t('Add context')}
           ref={(element) => {
             menu = element;
           }}
@@ -207,7 +220,7 @@ export function PlusMenu(props: {
             close(false);
           }}
         >
-          <For each={ITEMS}>
+          <For each={menuItems()}>
             {(item, index) => (
               <button
                 type="button"

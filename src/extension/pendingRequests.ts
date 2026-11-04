@@ -7,6 +7,7 @@
 // `permission.resolved`, `form.asked`, `form.resolved`) and with the REST snapshot (`replaceAll`),
 // so there is one translation of the wire and one source of truth for "what is pending".
 
+import * as l10n from '@vscode/l10n';
 import type { FormAsk, PermissionAsk } from '../shared/model';
 import type { HostToWebview } from '../shared/protocol';
 
@@ -61,12 +62,12 @@ function truncate(text: string): string {
 /** Summary of a permission: the action, and the first resource with a count of the rest. */
 function summarizePermission(ask: PermissionAsk): PendingSummary {
   const [first, ...others] = ask.resources;
-  const more = others.length > 0 ? ` (+${String(others.length)} more)` : '';
+  const more = others.length > 0 ? ` ${l10n.t('(+{0} more)', others.length)}` : '';
   return {
     kind: 'permission',
     id: ask.id,
     sessionID: ask.sessionID,
-    title: truncate(`Permission requested: ${ask.action}`),
+    title: truncate(l10n.t('Permission requested: {0}', ask.action)),
     detail: first === undefined ? '' : truncate(`${first}${more}`),
     canAlways: ask.save.length > 0,
   };
@@ -78,7 +79,7 @@ function summarizeForm(ask: FormAsk): PendingSummary {
     kind: 'form',
     id: ask.id,
     sessionID: ask.sessionID,
-    title: truncate(ask.kind === 'question' ? 'The agent has a question' : ask.title),
+    title: truncate(ask.kind === 'question' ? l10n.t('The agent has a question') : ask.title),
     detail: ask.kind === 'question' ? truncate(ask.title) : '',
   };
 }

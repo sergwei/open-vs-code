@@ -9,6 +9,7 @@
 // logged; neither is any server `message`. The log carries the integration id, the kind of method,
 // the host of a sign-in link and an error CODE.
 
+import * as l10n from '@vscode/l10n';
 import type { ChatApi } from './opencodeClient';
 import type { ServerLog } from './opencodeServer';
 import type { FieldRow, IntegrationRow, MethodRow } from './serverConfig';
@@ -109,8 +110,11 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
 /** Percent-escapes of `&`, `+` and `=` in a query: the ones VS Code decodes (see {@link linkChangesWhenOpened}). */
 const QUERY_ESCAPES_THAT_CHANGE = /%(?:26|2b|3d)/i;
 /** Shown with the "Copy link" button when the link is not opened (decision P1=3 of Sergio, 02/11/2026). */
-export const LINK_NOT_OPENED_NOTICE =
-  'This sign-in link would change if opened from VS Code. Copy it and open it in your browser.';
+export function linkNotOpenedNotice(): string {
+  return l10n.t(
+    'This sign-in link would change if opened from VS Code. Copy it and open it in your browser.',
+  );
+}
 
 /**
  * True when handing `url` to `vscode.env.openExternal(Uri.parse(url))` would change what the
@@ -144,7 +148,7 @@ export function linkChangesWhenOpened(url: string): boolean {
 
 /** The message for a method the tab cannot drive: upstream's terminal login covers it. */
 export function unsupportedMessage(name: string): string {
-  return `Use \`opencode auth login\` in a terminal for ${name}`;
+  return l10n.t('Use `opencode auth login` in a terminal for {0}', name);
 }
 
 /**
@@ -195,11 +199,14 @@ export function buildAnswer(
     const own = Object.hasOwn(given, field.key) ? given[field.key] : undefined;
     const raw = own !== undefined && own.trim() !== '' ? own.trim() : field.default;
     if (raw === undefined || raw === '') {
-      if (field.required) return { ok: false, message: `${label} is required` };
+      if (field.required) return { ok: false, message: l10n.t('{0} is required', label) };
       continue;
     }
     if (field.options !== undefined && !field.options.some((option) => option.value === raw)) {
-      return { ok: false, message: `${label} is not one of the available options` };
+      return {
+        ok: false,
+        message: l10n.t('{0} is not one of the available options', label),
+      };
     }
     values.set(field.key, raw);
     answer[field.key] = raw;
@@ -302,12 +309,16 @@ export class ProviderAuth {
     answer: Readonly<Record<string, string>>,
   ): Promise<AuthResult> {
     const api = this.api;
-    if (api === undefined) return { kind: 'failed', message: 'The opencode server is not running' };
+    if (api === undefined) {
+      return { kind: 'failed', message: l10n.t('The opencode server is not running') };
+    }
     if (this.active !== undefined) {
-      return { kind: 'failed', message: 'Another sign-in is already in progress' };
+      return { kind: 'failed', message: l10n.t('Another sign-in is already in progress') };
     }
     const method = resolveMethod(row, methodIndex);
-    if (method === undefined) return { kind: 'failed', message: `Unknown method for ${row.name}` };
+    if (method === undefined) {
+      return { kind: 'failed', message: l10n.t('Unknown method for {0}', row.name) };
+    }
     if (!method.supported) return { kind: 'unsupported', message: unsupportedMessage(row.name) };
     const built = buildAnswer(method.fields, answer);
     if (!built.ok) return { kind: 'failed', message: built.message };
@@ -370,16 +381,22 @@ export class ProviderAuth {
    */
   async disconnect(row: IntegrationRow, credentialID: string): Promise<RemoveResult> {
     const api = this.api;
-    if (api === undefined) return { kind: 'failed', message: 'The opencode server is not running' };
+    if (api === undefined) {
+      return { kind: 'failed', message: l10n.t('The opencode server is not running') };
+    }
     const connection = row.connections.find(
       (candidate) => candidate.kind === 'credential' && candidate.id === credentialID,
     );
     if (connection?.kind !== 'credential') {
-      return { kind: 'failed', message: `Unknown credential for ${row.name}` };
+      return { kind: 'failed', message: l10n.t('Unknown credential for {0}', row.name) };
     }
     const confirmed = await this.ui.confirm({
-      message: `Remove the "${connection.label}" credential of ${row.name}? opencode stores it for all your projects.`,
-      action: 'Remove',
+      message: l10n.t(
+        'Remove the "{0}" credential of {1}? opencode stores it for all your projects.',
+        connection.label,
+        row.name,
+      ),
+      action: l10n.t('Remove'),
     });
     if (!confirmed) return { kind: 'cancelled' };
     try {
@@ -399,13 +416,13 @@ export class ProviderAuth {
     answer: Record<string, string>,
   ): Promise<AuthResult> {
     const secret = await this.ui.askSecret({
-      title: `API key for ${row.name}`,
-      placeholder: 'Paste the API key',
+      title: l10n.t('API key for {0}', row.name),
+      placeholder: l10n.t('Paste the API key'),
       signal: attempt.abort.signal,
     });
     if (this.active !== attempt || secret === undefined) return { kind: 'cancelled' };
     const key = secret.trim();
-    if (key === '') return { kind: 'failed', message: 'The API key is empty' };
+    if (key === '') return { kind: 'failed', message: l10n.t('The API key is empty') };
     try {
       await attempt.api.integration.connect.key({
         integrationID: row.id,
@@ -427,7 +444,7 @@ export class ProviderAuth {
     answer: Record<string, string>,
   ): Promise<AuthResult> {
     if (method.id === undefined) {
-      return { kind: 'failed', message: `Unknown method for ${row.name}` };
+      return { kind: 'failed', message: l10n.t('Unknown method for {0}', row.name) };
     }
     try {
       await attempt.api.integration.connect.external({
@@ -457,7 +474,7 @@ export class ProviderAuth {
     answer: Record<string, string>,
   ): Promise<AuthResult> {
     if (method.id === undefined) {
-      return { kind: 'failed', message: `Unknown method for ${row.name}` };
+      return { kind: 'failed', message: l10n.t('Unknown method for {0}', row.name) };
     }
     let started;
     try {
@@ -485,14 +502,14 @@ export class ProviderAuth {
       await this.serverCancel(attempt, started.attemptID);
       return {
         kind: 'failed',
-        message: 'The sign-in link is not a secure (https) address; it was not opened',
+        message: l10n.t('The sign-in link is not a secure (https) address; it was not opened'),
       };
     }
     const cleaned = cleanInstructions(started.instructions);
     const code = extractDeviceCode(cleaned);
     // A link VS Code would rewrite is not opened: the notice tells the user and "Copy link" offers it.
     const keepLink = linkChangesWhenOpened(started.url);
-    const instructions = keepLink ? `${cleaned} ${LINK_NOT_OPENED_NOTICE}`.trim() : cleaned;
+    const instructions = keepLink ? `${cleaned} ${linkNotOpenedNotice()}`.trim() : cleaned;
     if (keepLink) attempt.link = started.url;
     attempt.view = {
       integrationID: row.id,
@@ -501,7 +518,7 @@ export class ProviderAuth {
       ...(code === undefined ? {} : { code }),
     };
     const view: AuthProgressView = {
-      title: `Sign in to ${row.name}`,
+      title: l10n.t('Sign in to {0}', row.name),
       instructions,
       ...(code === undefined ? {} : { code }),
       ...(keepLink ? { copyLink: true } : {}),
@@ -526,8 +543,8 @@ export class ProviderAuth {
     attemptID: string,
   ): Promise<AuthResult> {
     const code = await this.ui.askCode({
-      title: `Code for ${row.name}`,
-      placeholder: 'Paste the code from the browser',
+      title: l10n.t('Code for {0}', row.name),
+      placeholder: l10n.t('Paste the code from the browser'),
       signal: attempt.abort.signal,
     });
     if (this.active !== attempt) return { kind: 'cancelled' };

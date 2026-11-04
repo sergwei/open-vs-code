@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
 import { CHAT_SHOW_GRACE_MS, notifyUnlessChatShows, type ChatSurfaceGate } from './chatSurfaceGate';
 import type { DetectionResult } from './opencodeBinary';
@@ -12,7 +13,12 @@ import {
   SERVER_URL_SETTING,
   SET_SERVER_PASSWORD_COMMAND_ID,
 } from './ids';
-import { failureActions, ForgottenPasswords } from './externalServer';
+import {
+  failureActionLabel,
+  failureActions,
+  ForgottenPasswords,
+  type FailureAction,
+} from './externalServer';
 import { createPluginConsent, watchServedPlugins } from './pluginConsentUi';
 import { readServerTarget, registerServerCredentials } from './serverCredentials';
 import {
@@ -40,17 +46,20 @@ const SERVED_FOLDER_KEY = 'openVsCode.servedFolder';
  * Resolves after the restart attempt settled; the outcome of the new start is the manager's
  * state, not this function's. `no-binary` (no detection accepted an opencode v2 yet) and
  * `no-workspace` (no folder on disk) are the two cases the manager refuses; both show a warning
- * that points at the log. UNVERIFIED in a real window (the warning text and its placement).
+ * that points at the log; their texts go through `l10n.t`. UNVERIFIED in a real window (the
+ * warning text and its placement).
  */
 export async function restartServerWithFeedback(manager: ServerManager): Promise<void> {
   const result = await manager.restart('command');
   if (result === 'no-binary') {
     void vscode.window.showWarningMessage(
-      'OpenCode cannot restart the server: no opencode v2 executable has been found. Set "openVsCode.opencodePath" or install opencode v2.',
+      l10n.t(
+        'OpenCode cannot restart the server: no opencode v2 executable has been found. Set "openVsCode.opencodePath" or install opencode v2.',
+      ),
     );
   } else if (result === 'no-workspace') {
     void vscode.window.showWarningMessage(
-      'OpenCode cannot restart the server: open a folder from disk first.',
+      l10n.t('OpenCode cannot restart the server: open a folder from disk first.'),
     );
   }
 }
@@ -58,16 +67,18 @@ export async function restartServerWithFeedback(manager: ServerManager): Promise
 /**
  * Runs the button the user pressed on a server-failure notification (`failureActions`). `undefined`
  * means the notification was dismissed. Retry and Restart Server are the same action: the
- * manager restarts its own server, or reconnects to the external one. UNVERIFIED in a real window
+ * manager restarts its own server, or reconnects to the external one. The notification shows
+ * translated labels and VS Code hands back the label, so `action` is the key found by comparing
+ * with each offered label (the switch never sees a translated word). UNVERIFIED in a real window
  * (no test API for notification buttons); the underlying commands are the ones the integration
  * suites call.
  */
 async function runFailureAction(
-  choice: string | undefined,
+  action: FailureAction | undefined,
   manager: ServerManager,
   channel: vscode.LogOutputChannel,
 ): Promise<void> {
-  switch (choice) {
+  switch (action) {
     case 'Show Logs':
       channel.show();
       break;
@@ -162,6 +173,8 @@ async function runFailureAction(
  * `ExtensionMode.Development` with that variable plus `OPEN_VS_CODE_VISUAL_FAKE=1`, which only
  * `npm run test:visual` sets), `start` runs a `.mjs` binary as `node <mjs> serve ...`
  * (`testLaunch.ts`); otherwise, and always in production, it is `startServer` itself.
+ * The failure buttons are shown with `failureActionLabel` (translated) and mapped back to their
+ * key before they run; the Select Workspace Folder list and its notice go through `l10n.t`.
  */
 export function registerServerLifecycle(
   context: vscode.ExtensionContext,
@@ -241,9 +254,16 @@ export function registerServerLifecycle(
           log.info(`server failure: ${message}`);
         },
         notify: () => {
+          const actions = failureActions(reason);
           void vscode.window
-            .showErrorMessage(failure, ...failureActions(reason))
-            .then((choice) => runFailureAction(choice, manager, channel));
+            .showErrorMessage(failure, ...actions.map(failureActionLabel))
+            .then((choice) =>
+              runFailureAction(
+                actions.find((action) => failureActionLabel(action) === choice),
+                manager,
+                channel,
+              ),
+            );
         },
       });
     }
@@ -281,7 +301,7 @@ export function registerServerLifecycle(
       );
       if (folders.length < 2) {
         void vscode.window.showInformationMessage(
-          'OpenCode: only one folder is open, so there is nothing to choose.',
+          l10n.t('OpenCode: only one folder is open, so there is nothing to choose.'),
         );
         return;
       }
@@ -291,10 +311,16 @@ export function registerServerLifecycle(
         folders.map((folder) => ({
           label: folder.name,
           description: folder.uri.fsPath,
-          detail: folder.uri.fsPath === servedPath ? 'Currently served' : undefined,
+          detail: folder.uri.fsPath === servedPath ? l10n.t('Currently served') : undefined,
           fsPath: folder.uri.fsPath,
         })),
-        { title: 'OpenCode: choose the folder to serve', placeHolder: 'Folder' },
+        {
+          title: l10n.t('OpenCode: choose the folder to serve'),
+          placeHolder: l10n.t({
+            message: 'Folder',
+            comment: ['Placeholder of the list of workspace folders, a noun (not a verb)'],
+          }),
+        },
       );
       if (picked === undefined) return;
       await context.workspaceState.update(SERVED_FOLDER_KEY, picked.fsPath);

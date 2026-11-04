@@ -14,12 +14,13 @@ import {
   cleanInstructions,
   extractDeviceCode,
   linkChangesWhenOpened,
-  LINK_NOT_OPENED_NOTICE,
+  linkNotOpenedNotice,
   type AuthProgressView,
   type AuthUi,
   type ProviderAuthApi,
 } from './providerAuth';
 import type { FieldRow, IntegrationRow, MethodRow } from './serverConfig';
+import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 import type { AuthAttemptView } from '../shared/settingsProtocol';
 
 const LOCATION = { directory: 'C:\\work' };
@@ -626,11 +627,11 @@ describe('connect: OAuth auto', () => {
     expect(t.ui.openExternal).not.toHaveBeenCalled();
     expect(t.views[0]).toEqual({
       title: 'Sign in to Acme',
-      instructions: `Enter code: ABCD-1234 ${LINK_NOT_OPENED_NOTICE}`,
+      instructions: `Enter code: ABCD-1234 ${linkNotOpenedNotice()}`,
       code: 'ABCD-1234',
       copyLink: true,
     });
-    expect(LINK_NOT_OPENED_NOTICE).toBe(
+    expect(linkNotOpenedNotice()).toBe(
       'This sign-in link would change if opened from VS Code. Copy it and open it in your browser.',
     );
     expect(JSON.stringify(t.auth.attempt())).not.toContain('scope=');
@@ -727,5 +728,30 @@ describe('disconnect', () => {
     t.state.confirm = false;
     expect(await t.auth.disconnect(row([], connections), 'cred_1')).toEqual({ kind: 'cancelled' });
     expect(t.mocks.remove).not.toHaveBeenCalled();
+  });
+});
+
+// Protects the translation of the sign-in texts (E11-i18n phase 4a): the refusals the settings tab
+// shows and the title of the native input, with the shipped Spanish catalog. Provenance: the same
+// fakes as above; the text is read from `l10n/bundle.l10n.es.json`.
+describe('Spanish sign-in texts', () => {
+  beforeEach(useSpanish);
+  afterEach(useEnglish);
+
+  it('refuses in Spanish with the Spanish catalog and titles the key input in Spanish', async () => {
+    const t = setup();
+    expect(await t.auth.connect(row([KEY_METHOD]), 3, {})).toEqual({
+      kind: 'failed',
+      message: 'Método desconocido para Acme',
+    });
+    expect(await t.auth.connect(row([{ ...KEY_METHOD, supported: false }]), 0, {})).toEqual({
+      kind: 'unsupported',
+      message: 'Use `opencode auth login` en un terminal para Acme',
+    });
+    t.auth.detach();
+    expect(await t.auth.connect(row([KEY_METHOD]), 0, {})).toEqual({
+      kind: 'failed',
+      message: 'El servidor de opencode no se está ejecutando',
+    });
   });
 });

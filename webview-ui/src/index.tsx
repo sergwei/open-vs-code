@@ -1,3 +1,5 @@
+// `./l10nBoot` stays the FIRST import: it loads the translations before App or SettingsApp evaluate.
+import './l10nBoot';
 import { createRoot } from 'solid-js';
 import { render } from 'solid-js/web';
 import { App } from './App';

@@ -2,10 +2,11 @@
 // searches session TITLES on the server, so it finds sessions older than the pages the tree has
 // loaded. The tree's own find (type-to-find) only sees loaded rows; this is the complement.
 
+import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
 import { formatSessionTime } from '../shared/sessionGroups';
-import { sessionLabel } from '../shared/sessionLabel';
 import type { SessionSearchResult } from './chatController';
+import { displayLabel } from './sessionDisplay';
 
 /**
  * Quiet time before a search goes to the server, in ms. The same 250 ms as `SEARCH_DEBOUNCE_MS` of
@@ -14,9 +15,6 @@ import type { SessionSearchResult } from './chatController';
  * "fast enough to feel live, slow enough not to send a request per key"; not measured.
  */
 export const SESSION_SEARCH_DEBOUNCE_MS = 250;
-
-/** The label of the single item shown when the server finds nothing. */
-const NO_MATCH_LABEL = 'No sessions match';
 
 /** What the search needs from the wiring. */
 export interface SessionsSearchHost {
@@ -53,15 +51,18 @@ interface SearchItem extends vscode.QuickPickItem {
  * answer. The description starts with `host.placeOf` (`Archived`, a folder path) when the user
  * organized the session, so an archived result says so; opening it does NOT unarchive it. Picking a
  * result calls `host.open`. A failing search shows a native warning and leaves
- * the picker usable. An answer that arrives after the picker closed is dropped.
+ * the picker usable. An answer that arrives after the picker closed is dropped. The title, the
+ * placeholder, the "No sessions match" item and the warning go through `l10n.t` (so they are
+ * written when the picker opens, in the language of that moment), and an untitled result shows the
+ * translated {@link displayLabel}.
  * VERIFIED by a full `test:visual` (Windows 11, VS Code 1.144.0, 30/10/2026, 0 FAIL): "ok   B4
  * Search Sessions… lists "Seed29 0711:13 AM" for "Seed29 07" and opens it in a tab (3 -> 4 tabs)". Not
  * observed: a failing search, an answer after the picker closed (unit and integration only).
  */
 export async function showSessionsSearch(host: SessionsSearchHost): Promise<void> {
   const picker = vscode.window.createQuickPick<SearchItem>();
-  picker.title = 'OpenCode: Search Sessions';
-  picker.placeholder = 'Search sessions by title';
+  picker.title = l10n.t('OpenCode: Search Sessions');
+  picker.placeholder = l10n.t('Search sessions by title');
   picker.matchOnDescription = false;
   picker.keepScrollPosition = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -75,9 +76,9 @@ export async function showSessionsSearch(host: SessionsSearchHost): Promise<void
       const now = Date.now();
       picker.items =
         result.rows.length === 0
-          ? [{ label: NO_MATCH_LABEL, alwaysShow: true }]
+          ? [{ label: l10n.t('No sessions match'), alwaysShow: true }]
           : result.rows.map((row) => ({
-              label: sessionLabel(row),
+              label: displayLabel(row),
               description: [
                 host.placeOf?.(row.id),
                 formatSessionTime(row.updatedAt, now, host.locale),
@@ -92,7 +93,10 @@ export async function showSessionsSearch(host: SessionsSearchHost): Promise<void
       if (!closed) {
         picker.items = [];
         void vscode.window.showWarningMessage(
-          `OpenCode could not search the sessions: ${error instanceof Error ? error.message : String(error)}`,
+          l10n.t(
+            'OpenCode could not search the sessions: {0}',
+            error instanceof Error ? error.message : String(error),
+          ),
         );
       }
     } finally {

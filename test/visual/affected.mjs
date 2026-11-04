@@ -20,6 +20,9 @@ const NO_EFFECT = [
   /^test\/integration\//,
   /^\.claude\//,
   /^test\/visual\/(compare-runs|fingerprint)\.mjs$/,
+  // E11-i18n: the catalog exporter and checker is a build-time tool; the texts it writes are the
+  // `l10n/` files below, which do count.
+  /^scripts\/l10n\.mjs$/,
 ];
 
 /**
@@ -36,6 +39,12 @@ const TRANSVERSAL = [
   /^webview-ui\/src\/(App\.tsx|index\.css|index\.tsx|host\.ts|uiState\.ts|vscode\.ts|testing\.tsx)$/,
   /^src\/extension\/(chatController|chatViewProvider|chatWebview|eventTranslator|eventStream|extension|webviewHtml|wireMapping|ids)\.ts$/,
   /^package(-lock)?\.json$/,
+  // E11-i18n: the base manifest catalog and the two boots feed every surface. The language
+  // catalogs (`l10n/`, `package.nls.<id>.json`) are NOT here: only the window of step 42 reads
+  // them, so they map to the `l10n` group below.
+  /^package\.nls\.json$/,
+  /^src\/extension\/l10nBoot\.ts$/,
+  /^webview-ui\/src\/l10nBoot\.ts$/,
   /^src\/extension\/test-fixtures\//,
   /^test\/visual\/[^/]+\.mjs$/,
 ];
@@ -49,6 +58,10 @@ const TRANSVERSAL = [
  * the chosen groups means the rule is too narrow, so widen it or make the file cross-cutting.
  */
 export const AFFECTED_RULES = [
+  // E11-i18n: the translation catalogs, the base bundle `l10n/bundle.l10n.json` included. Only a
+  // window started in another language reads them (step 42); the English steps never load a
+  // language catalog, and the base bundle is only loaded when VS Code runs in a language with one.
+  { pattern: /^l10n\/|^package\.nls\.[a-z0-9-]+\.json$/, groups: ['l10n'] },
   // E10-mods: the mods code, its host half and the band component (step 38). `src/shared/`,
   // `chatController.ts` and `test-fixtures/` (where the mod fixtures live) are cross-cutting already.
   {

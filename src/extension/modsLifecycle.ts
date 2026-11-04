@@ -14,6 +14,7 @@
 // routes every write to the two channels through that flag, because VS Code releases a channel on
 // deactivate and a released channel throws.
 
+import * as l10n from '@vscode/l10n';
 import { mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import * as vscode from 'vscode';
@@ -31,7 +32,7 @@ import {
 } from './ids';
 import { globalModsRoot, discoverMods } from './modDiscovery';
 import { createModsSink, type ModsSink } from './modEvents';
-import { ModHost, type ModUi } from './modHost';
+import { ModHost, type ModState, type ModUi } from './modHost';
 import { createModPanels } from './modPanels';
 import { createModsChat } from './modsChat';
 import { createModsLoader } from './modsLoader';
@@ -60,6 +61,38 @@ interface ManageItem extends vscode.QuickPickItem {
 function readEnabled(): boolean {
   const value = vscode.workspace.getConfiguration(CONFIG_SECTION).get<unknown>(MODS_ENABLED_KEY);
   return value !== false;
+}
+
+/**
+ * The word the Manage Mods list shows for the state of a mod, in the language of the host. One
+ * `l10n.t` per state (with a comment: each is a single lowercase word that a translator could not
+ * place without it).
+ */
+function modStateLabel(state: ModState): string {
+  // The comment of each call is a LITERAL array: the exporter (`l10n-dev`) skips, without a
+  // word, a call whose `comment` is a variable, and the text would then never reach the catalog.
+  switch (state) {
+    case 'starting':
+      return l10n.t({
+        message: 'starting',
+        comment: ['State of a mod, shown after its version in the Manage Mods list'],
+      });
+    case 'active':
+      return l10n.t({
+        message: 'active',
+        comment: ['State of a mod, shown after its version in the Manage Mods list'],
+      });
+    case 'failed':
+      return l10n.t({
+        message: 'failed',
+        comment: ['State of a mod, shown after its version in the Manage Mods list'],
+      });
+    case 'stopped':
+      return l10n.t({
+        message: 'stopped',
+        comment: ['State of a mod, shown after its version in the Manage Mods list'],
+      });
+  }
 }
 
 /**
@@ -109,6 +142,9 @@ function showToast(
  * does, because an integration suite cannot deactivate the extension in the middle of a run; the
  * guard logic is covered with a fabricated host by `modsLoader.test.ts`. Look at the extension
  * host log for "Channel has been closed" if a mod's `deactivate()` errors ever go missing.
+ * The texts of the Manage Mods list, the "no command" notice and the failure of Run Mod Command
+ * go through `l10n.t` when they are shown; the channel names, the log lines and whatever a mod
+ * writes (names, descriptions, messages) are not translated.
  */
 export function registerMods(
   context: vscode.ExtensionContext,
@@ -190,7 +226,7 @@ export function registerMods(
     const items: ManageItem[] = host.statuses().map((status) => {
       const item: ManageItem = {
         label: `${status.state === 'active' ? '$(check)' : status.state === 'failed' ? '$(error)' : '$(circle-outline)'} ${status.name}`,
-        description: `${status.id} ${status.version} · ${status.state}`,
+        description: `${status.id} ${status.version} · ${modStateLabel(status.state)}`,
       };
       if (status.error !== undefined) item.detail = status.error;
       return item;
@@ -198,18 +234,21 @@ export function registerMods(
     for (const problem of loader.problems()) {
       items.push({
         label: `$(warning) ${problem.folder}`,
-        description: 'skipped',
+        description: l10n.t({
+          message: 'skipped',
+          comment: ['Description of a mod folder that was not loaded, in the Manage Mods list'],
+        }),
         detail: problem.reason,
       });
     }
-    if (items.length === 0) items.push({ label: 'No mods found', description: root });
+    if (items.length === 0) items.push({ label: l10n.t('No mods found'), description: root });
     items.push(
       { label: '', kind: vscode.QuickPickItemKind.Separator },
-      { label: '$(refresh) Reload Mods', action: 'reload' },
-      { label: '$(folder-opened) Open Mods Folder', action: 'folder' },
-      { label: '$(output) Show Logs', action: 'logs' },
+      { label: `$(refresh) ${l10n.t('Reload Mods')}`, action: 'reload' },
+      { label: `$(folder-opened) ${l10n.t('Open Mods Folder')}`, action: 'folder' },
+      { label: `$(output) ${l10n.t('Show Logs')}`, action: 'logs' },
     );
-    const picked = await vscode.window.showQuickPick(items, { title: 'OpenCode Mods' });
+    const picked = await vscode.window.showQuickPick(items, { title: l10n.t('OpenCode Mods') });
     if (picked?.action === 'reload') await vscode.commands.executeCommand(RELOAD_MODS_COMMAND_ID);
     else if (picked?.action === 'folder') {
       await vscode.commands.executeCommand(OPEN_MODS_FOLDER_COMMAND_ID);
@@ -228,7 +267,9 @@ export function registerMods(
       const commands = host.commands();
       if (commands.length === 0) {
         void vscode.window.showInformationMessage(
-          'No mod has registered a command. Mods live in the folder that "OpenCode: Open Mods Folder" opens.',
+          l10n.t(
+            'No mod has registered a command. Mods live in the folder that "OpenCode: Open Mods Folder" opens.',
+          ),
         );
         return;
       }
@@ -239,7 +280,7 @@ export function registerMods(
           modId: c.modId,
           name: c.name,
         })),
-        { title: 'Run Mod Command' },
+        { title: l10n.t('Run Mod Command') },
       );
       if (picked === undefined) return;
       target = { modId: picked.modId, name: picked.name, args: '' };
@@ -248,7 +289,9 @@ export function registerMods(
       await host.runCommand(target.modId, target.name, target.args);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      void vscode.window.showErrorMessage(sanitizeLinkText(`Mod command failed: ${message}`));
+      void vscode.window.showErrorMessage(
+        sanitizeLinkText(l10n.t('Mod command failed: {0}', message)),
+      );
     }
   };
 

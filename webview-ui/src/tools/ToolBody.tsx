@@ -1,4 +1,6 @@
+import * as l10n from '@vscode/l10n';
 import { createMemo, For, Index, Match, Show, Switch } from 'solid-js';
+import { plural } from '../../../src/shared/l10n';
 import { DiffView } from './DiffView';
 import { MAX_LINES, OutputBlock } from './OutputBlock';
 import { PathLink } from './PathLink';
@@ -86,7 +88,11 @@ export function ToolBody(props: { part: ToolPart }) {
                   </ul>
                   <Show when={clamped().hidden > 0}>
                     <p class="tool-notice">
-                      {`Showing the first ${String(clamped().items.length)} of ${String(paths().paths.length)} files.`}
+                      {l10n.t(
+                        'Showing the first {0} of {1} files.',
+                        clamped().items.length,
+                        paths().paths.length,
+                      )}
                     </p>
                   </Show>
                 </div>
@@ -121,7 +127,11 @@ export function ToolBody(props: { part: ToolPart }) {
                   </For>
                   <Show when={clamped().hidden > 0}>
                     <p class="tool-notice">
-                      {`${String(clamped().hidden)} more matches are not shown.`}
+                      {plural(
+                        clamped().hidden,
+                        l10n.t('{0} more match is not shown.', clamped().hidden),
+                        l10n.t('{0} more matches are not shown.', clamped().hidden),
+                      )}
                     </p>
                   </Show>
                 </div>

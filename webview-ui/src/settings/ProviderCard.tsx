@@ -1,5 +1,7 @@
+import * as l10n from '@vscode/l10n';
 import { createEffect, For, onMount, Show, untrack } from 'solid-js';
 import { createStore } from 'solid-js/store';
+import { formatParts } from '../../../src/shared/l10n';
 import type {
   AuthAttemptView,
   ProviderRow,
@@ -20,30 +22,35 @@ export type SendSettings = (message: SettingsWebviewToHost) => void;
  * says "may not work" because it is not known whether `remote.autoForwardPorts` saves the callback
  * (HYPOTHESIS), and it also shows on device-code methods, which do work remotely.
  */
-export const REMOTE_OAUTH_HINT =
-  'In a remote window this sign-in may not work if it sends you back from the browser: opencode waits for it on the remote machine.';
+export function remoteOauthHint(): string {
+  return l10n.t(
+    'In a remote window this sign-in may not work if it sends you back from the browser: opencode waits for it on the remote machine.',
+  );
+}
 
 /** The label of the primary button of a method: what pressing it starts, by method type. */
 export function primaryLabel(type: SettingsMethodRow['type']): string {
-  if (type === 'key') return 'Enter API key…';
-  if (type === 'oauth') return 'Sign in…';
-  return 'Connect';
+  if (type === 'key') return l10n.t('Enter API key…');
+  if (type === 'oauth') return l10n.t('Sign in…');
+  return l10n.t('Connect');
 }
 
 /** The short line under the name of a provider that is not connected yet. */
 export function methodSummary(methods: readonly SettingsMethodRow[]): string {
   const first = methods[0];
-  if (first === undefined) return 'Not available here';
-  if (methods.length > 1) return `${String(methods.length)} ways to connect`;
-  return first.type === 'key' ? 'API key' : first.label;
+  if (first === undefined) return l10n.t('Not available here');
+  if (methods.length > 1) return l10n.t('{0} ways to connect', methods.length);
+  return first.type === 'key' ? l10n.t('API key') : first.label;
 }
 
 /** What a connection says about itself, as plain text. */
 function connectionText(connection: SettingsConnectionRow): string {
-  if (connection.kind === 'env') return `From ${connection.name}`;
-  if (connection.method === 'key') return 'API key · saved by opencode for all projects';
-  if (connection.method === 'oauth') return 'Signed in · saved by opencode for all projects';
-  return 'External · saved by opencode for all projects';
+  if (connection.kind === 'env') return l10n.t('From {0}', connection.name);
+  if (connection.method === 'key') return l10n.t('API key · saved by opencode for all projects');
+  if (connection.method === 'oauth') {
+    return l10n.t('Signed in · saved by opencode for all projects');
+  }
+  return l10n.t('External · saved by opencode for all projects');
 }
 
 /** The credential behind a connection, or `undefined` for an environment variable. */
@@ -63,7 +70,7 @@ function credentialOf(
  * `disabled`, so a focus it holds is not thrown to the body (solid-webview section 7). The typed
  * values live in a local store and are copied to `ui` for `setState`; the drafts of the several
  * methods of one provider are kept apart by the method index. In a remote window (`remote` set)
- * an `oauth` method carries {@link REMOTE_OAUTH_HINT} before its actions, described by the button;
+ * an `oauth` method carries {@link remoteOauthHint} before its actions, described by the button;
  * `key` and `external` methods and a local window show none. VERIFIED by `ProviderCard.test.tsx`
  * (jsdom, fabricated rows and a made-up `remote`): the hint is there for `oauth` with `remote`, and
  * absent without `remote` and for `key`/`external`. UNVERIFIED in a real remote window.
@@ -108,7 +115,7 @@ function MethodPanel(props: {
         when={props.method.supported}
         fallback={
           <p class="step-line">
-            This method needs the opencode CLI: run opencode auth login in a terminal.
+            {l10n.t('This method needs the opencode CLI: run opencode auth login in a terminal.')}
           </p>
         }
       >
@@ -123,14 +130,17 @@ function MethodPanel(props: {
         />
         <Show when={missing().length > 0}>
           <p class="settings-hint" id={hintId}>
-            {`Fill in ${missing()
-              .map((field) => field.title ?? field.key)
-              .join(', ')} to continue.`}
+            {l10n.t(
+              'Fill in {0} to continue.',
+              missing()
+                .map((field) => field.title ?? field.key)
+                .join(', '),
+            )}
           </p>
         </Show>
         <Show when={remoteHint()}>
           <p class="settings-hint" id={remoteHintId}>
-            {REMOTE_OAUTH_HINT}
+            {remoteOauthHint()}
           </p>
         </Show>
         <div class="step-actions">
@@ -154,7 +164,7 @@ function MethodPanel(props: {
           <Show when={props.onCancel}>
             {(cancel) => (
               <button type="button" class="secondary" onClick={cancel()}>
-                Cancel
+                {l10n.t('Cancel')}
               </button>
             )}
           </Show>
@@ -289,7 +299,7 @@ export function ProviderCard(props: {
             <div class="settings-connection">
               <p class="step-line">{connectionText(connection)}</p>
               <Show when={connection.needsAuth}>
-                {(message) => <p class="step-line">{`Needs sign-in: ${message()}`}</p>}
+                {(message) => <p class="step-line">{l10n.t('Needs sign-in: {0}', message())}</p>}
               </Show>
               <Show when={credentialOf(connection)}>
                 {(credential) => (
@@ -297,7 +307,7 @@ export function ProviderCard(props: {
                     <button
                       type="button"
                       class="secondary"
-                      aria-label={`Remove ${props.row.name} (${credential().label})`}
+                      aria-label={l10n.t('Remove {0} ({1})', props.row.name, credential().label)}
                       aria-disabled={props.busy ? 'true' : undefined}
                       onClick={() => {
                         if (props.busy) return;
@@ -308,7 +318,7 @@ export function ProviderCard(props: {
                         });
                       }}
                     >
-                      Remove
+                      {l10n.t('Remove')}
                     </button>
                   </div>
                 )}
@@ -321,10 +331,12 @@ export function ProviderCard(props: {
           {(attempt) => (
             <div class="settings-attempt" data-phase={attempt().phase}>
               <Show when={attempt().phase === 'starting'}>
-                <p class="step-line">Starting sign-in…</p>
+                <p class="step-line">{l10n.t('Starting sign-in…')}</p>
               </Show>
               <Show when={attempt().phase === 'waiting'}>
-                <p class="step-line">{attempt().instructions ?? 'Waiting for the browser…'}</p>
+                <p class="step-line">
+                  {attempt().instructions ?? l10n.t('Waiting for the browser…')}
+                </p>
                 <Show
                   when={
                     attempt().code !== undefined &&
@@ -332,13 +344,14 @@ export function ProviderCard(props: {
                   }
                 >
                   <p class="step-line">
-                    {'Code: '}
-                    <code class="settings-code">{attempt().code}</code>
+                    {formatParts(l10n.t('Code: {code}'), {
+                      code: <code class="settings-code">{attempt().code}</code>,
+                    })}
                   </p>
                 </Show>
               </Show>
               <Show when={attempt().phase === 'finishing'}>
-                <p class="step-line">Finishing the sign-in…</p>
+                <p class="step-line">{l10n.t('Finishing the sign-in…')}</p>
               </Show>
               <div class="step-actions">
                 <Show when={attempt().phase === 'waiting' && attempt().code !== undefined}>
@@ -349,7 +362,7 @@ export function ProviderCard(props: {
                       props.send({ type: 'settings.copyCode', integrationID: props.row.id });
                     }}
                   >
-                    Copy code
+                    {l10n.t('Copy code')}
                   </button>
                 </Show>
                 <button
@@ -361,7 +374,7 @@ export function ProviderCard(props: {
                     props.send({ type: 'settings.cancel', integrationID: props.row.id });
                   }}
                 >
-                  Cancel
+                  {l10n.t('Cancel')}
                 </button>
               </div>
             </div>
@@ -374,12 +387,15 @@ export function ProviderCard(props: {
               when={props.row.methods.length > 0}
               fallback={
                 <p class="step-line">
-                  No sign-in method of this provider works from this tab. Use opencode auth login in
-                  a terminal, or set its environment variable.
+                  {l10n.t(
+                    'No sign-in method of this provider works from this tab. Use opencode auth login in a terminal, or set its environment variable.',
+                  )}
                 </p>
               }
             >
-              <p class="settings-hint">Credentials are saved by opencode for all your projects.</p>
+              <p class="settings-hint">
+                {l10n.t('Credentials are saved by opencode for all your projects.')}
+              </p>
               <For each={props.row.methods}>
                 {(method) => (
                   <MethodPanel
@@ -397,7 +413,7 @@ export function ProviderCard(props: {
               <Show when={props.row.methods.length > 1}>
                 <div class="step-actions">
                   <button type="button" class="secondary" onClick={collapse}>
-                    Cancel
+                    {l10n.t('Cancel')}
                   </button>
                 </div>
               </Show>

@@ -12,10 +12,11 @@
 // cases prove its rules with literal values, while the race itself is only reproduced by the
 // integration case "Forget Server Password ... stays refused".
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   describeExternalFailure,
   describeFailureCause,
+  failureActionLabel,
   failureActions,
   ForgottenPasswords,
   parseServerUrl,
@@ -24,7 +25,8 @@ import {
   serverPasswordKey,
   type ServerTarget,
 } from './externalServer';
-import { ServerInfoError } from './opencodeServer';
+import { fetchServerInfo, ServerInfoError } from './opencodeServer';
+import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 
 describe('parseServerUrl', () => {
   it('treats an empty or blank value as "no external server"', () => {
@@ -222,6 +224,25 @@ describe('describeFailureCause', () => {
     );
     expect(describeFailureCause('plain')).toBe('plain');
   });
+
+  // Protects the decision of Sergio on the E11-i18n review (logs stay in English). SYNTHETIC: a
+  // fake `fetch` answering a body that is not JSON; the Spanish text comes from the shipped catalog.
+  it('logs the English text of a malformed answer while the Spanish catalog is on', async () => {
+    useSpanish();
+    try {
+      const notJson = (): Promise<Response> => Promise.resolve(new Response('<html>'));
+      const error: unknown = await fetchServerInfo('http://127.0.0.1:1', 'pw', notJson).catch(
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(ServerInfoError);
+      expect((error as ServerInfoError).message).not.toBe(
+        'GET /api/info returned a body that is not JSON',
+      );
+      expect(describeFailureCause(error)).toBe('GET /api/info returned a body that is not JSON');
+    } finally {
+      useEnglish();
+    }
+  });
 });
 
 describe('failureActions', () => {
@@ -232,6 +253,30 @@ describe('failureActions', () => {
     for (const reason of ['start-failed', 'exited', 'unsupported-version'] as const) {
       expect(failureActions(reason)).toEqual(['Restart Server', 'Show Logs']);
     }
+  });
+});
+
+// Protects the translated failure buttons (E11-i18n): the notification shows
+// `failureActionLabel` and maps the answer back to the key, so a label that drifted from its key
+// would run the wrong action. Provenance: literal keys; the Spanish text is read from
+// `l10n/bundle.l10n.es.json`, not copied here. SYNTHETIC: it says nothing about how VS Code draws
+// the buttons.
+describe('failureActionLabel', () => {
+  afterEach(useEnglish);
+
+  it('writes each failure button in Spanish and in English', () => {
+    const keys = ['Set Password', 'Open Settings', 'Retry', 'Restart Server', 'Show Logs'] as const;
+    expect(keys.map(failureActionLabel)).toEqual([...keys]);
+    useSpanish();
+    expect(keys.map(failureActionLabel)).toEqual([
+      'Establecer contraseña',
+      'Abrir configuración',
+      'Reintentar',
+      'Reiniciar servidor',
+      'Mostrar registros',
+    ]);
+    useEnglish();
+    expect(failureActionLabel('Retry')).toBe('Retry');
   });
 });
 

@@ -1,4 +1,6 @@
+import * as l10n from '@vscode/l10n';
 import { createEffect, createSignal, For, on, onCleanup, Show, type JSX } from 'solid-js';
+import { plural } from '../../../src/shared/l10n';
 import type { AttachmentRef } from '../../../src/shared/protocol';
 import type { CommandOption } from '../../../src/shared/model';
 import { AttachmentOpenButton } from './AttachmentOpenButton';
@@ -60,6 +62,10 @@ export function nextRequestId(): string {
  * Without a connection (`waiting`, E2 P5=2) the textarea stays editable and its placeholder reads
  * "Waiting for opencode…"; VERIFIED by `PromptInput.test.tsx` ("shows the waiting placeholder
  * and stays editable without a connection").
+ * E11-i18n: every visible text, `aria-label`, `title` and placeholder goes through `l10n.t`, and
+ * the live-region counts ("N files", "N commands") through `plural`.
+ * VERIFIED by `PromptInput.test.tsx` "translates the placeholders with the loaded bundle" and
+ * "reads its labels, placeholder and live-region counts from the shipped Spanish catalog".
  * The action bar (E2, issue #85, phases 3 and 4) reads, left to right: the "+" button ({@link PlusMenu}:
  * Add selection, Attach file…, Attach image… and Mention a file; `insertMention` writes the `@` and
  * opens the popup by the same path as typing it),
@@ -370,11 +376,15 @@ export function PromptInput(props: {
     let text = '';
     if (typed !== undefined) {
       const rowCount = slashRows().length;
-      if (rowCount > 0) text = `${String(rowCount)} ${rowCount === 1 ? 'command' : 'commands'}`;
-      else if (commandStatus(typed.query, props.commands) === 'empty') text = 'No commands match';
-    } else if (current === 'list') text = `${String(count)} ${count === 1 ? 'file' : 'files'}`;
-    else if (current === 'empty') text = 'No files match';
-    else if (current === 'error') text = 'File search failed';
+      if (rowCount > 0) {
+        text = plural(rowCount, l10n.t('{0} command', rowCount), l10n.t('{0} commands', rowCount));
+      } else if (commandStatus(typed.query, props.commands) === 'empty') {
+        text = l10n.t('No commands match');
+      }
+    } else if (current === 'list') {
+      text = plural(count, l10n.t('{0} file', count), l10n.t('{0} files', count));
+    } else if (current === 'empty') text = l10n.t('No files match');
+    else if (current === 'error') text = l10n.t('File search failed');
     if (text === '') {
       setAnnouncement('');
       return;
@@ -579,7 +589,10 @@ export function PromptInput(props: {
   return (
     <form
       class="prompt"
-      aria-label="Send a message"
+      aria-label={l10n.t({
+        message: 'Send a message',
+        comment: ['Accessible name of the prompt form; "prompt" stays untranslated in Spanish'],
+      })}
       data-drop={dropActive() ? 'active' : undefined}
       onSubmit={(event) => {
         event.preventDefault();
@@ -600,10 +613,10 @@ export function PromptInput(props: {
       }}
     >
       <Show when={dropActive()}>
-        <p class="drop-hint">Hold Shift to drop files from the Explorer</p>
+        <p class="drop-hint">{l10n.t('Hold Shift to drop files from the Explorer')}</p>
       </Show>
       <Show when={props.files.length > 0}>
-        <ul class="chips" aria-label="Attached files">
+        <ul class="chips" aria-label={l10n.t('Attached files')}>
           <For each={props.files}>
             {(file) => (
               <li class="chip">
@@ -614,7 +627,7 @@ export function PromptInput(props: {
                 <button
                   type="button"
                   class="chip-remove"
-                  aria-label={`Remove ${file.name}`}
+                  aria-label={l10n.t('Remove {0}', file.name)}
                   onClick={() => props.onRemoveFile(file.uri)}
                 >
                   ×
@@ -653,7 +666,10 @@ export function PromptInput(props: {
         }}
         class="prompt-text"
         rows={1}
-        aria-label="Message"
+        aria-label={l10n.t({
+          message: 'Message',
+          comment: ['Accessible name of the prompt box; "prompt" stays untranslated in Spanish'],
+        })}
         aria-autocomplete="list"
         aria-controls={slashOpen() ? COMMAND_LIST_ID : mentionOpen() ? MENTION_LIST_ID : undefined}
         aria-activedescendant={
@@ -667,8 +683,8 @@ export function PromptInput(props: {
         }
         placeholder={
           props.waiting
-            ? 'Waiting for opencode…'
-            : 'Ask opencode… (Enter to send, Shift+Enter for a new line)'
+            ? l10n.t('Waiting for opencode…')
+            : l10n.t('Ask opencode… (Enter to send, Shift+Enter for a new line)')
         }
         value={props.draft}
         onInput={(event) => {
@@ -739,8 +755,8 @@ export function PromptInput(props: {
               class="primary send-button"
               type="submit"
               disabled={props.sendDisabled}
-              aria-label="Send"
-              title="Send"
+              aria-label={l10n.t('Send')}
+              title={l10n.t('Send')}
             >
               <SendIcon />
             </button>
@@ -749,8 +765,8 @@ export function PromptInput(props: {
           <button
             class="primary send-button"
             type="button"
-            aria-label="Stop"
-            title="Stop"
+            aria-label={l10n.t('Stop')}
+            title={l10n.t('Stop')}
             onClick={() => props.onStop()}
           >
             <StopIcon />

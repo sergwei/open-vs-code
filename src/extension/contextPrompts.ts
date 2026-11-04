@@ -7,7 +7,9 @@
 // convention of the `@` popup (Q1 of #28/#29), so the history and the automatic session title say
 // which file is meant, and the chip travels next to it.
 
+import * as l10n from '@vscode/l10n';
 import type { AttachmentRef } from '../shared/protocol';
+import { plural } from '../shared/l10n';
 
 /** What a context menu entry asks the model for. */
 export type ContextAction = 'explain' | 'fix';
@@ -36,13 +38,14 @@ export const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 300;
 
 /**
  * Joins mentions the way P3=1 words them: one alone, `a and b`, and from three on `a, b and c`.
+ * The "and" is the catalog text `{0} and {1}`, so the sentence reads in the language of the host.
  */
 function joinMentions(refs: readonly AttachmentRef[]): string {
   const mentions = refs.map((ref) => `@${ref.name}`);
   const last = mentions[mentions.length - 1];
   if (last === undefined) return '';
   if (mentions.length === 1) return last;
-  return `${mentions.slice(0, -1).join(', ')} and ${last}`;
+  return l10n.t('{0} and {1}', mentions.slice(0, -1).join(', '), last);
 }
 
 /** One diagnostic as a list line: `- Line 12: message (ts 2304)`, the message on a single line. */
@@ -55,7 +58,9 @@ function diagnosticLine(diagnostic: ContextDiagnostic): string {
   const origin = [diagnostic.source, diagnostic.code]
     .filter((part): part is string => part !== undefined && part !== '')
     .join(' ');
-  return `- Line ${String(diagnostic.line)}: ${message}${origin === '' ? '' : ` (${origin})`}`;
+  return origin === ''
+    ? l10n.t('- Line {0}: {1}', diagnostic.line, message)
+    : l10n.t('- Line {0}: {1} ({2})', diagnostic.line, message, origin);
 }
 
 /**
@@ -68,8 +73,15 @@ function diagnosticLine(diagnostic: ContextDiagnostic): string {
  * is ignored for `explain`. With no references it returns the generic sentence without a mention
  * (`Explain what this does.`): the controller never calls it that way, but the function must not
  * produce `Explain what  does.`.
+ *
+ * Every sentence goes through `l10n.t` (decision P4=1 of Sergio, Engram #1921), so
+ * with a language catalog loaded the PROMPT TEXT is in that language and the model is asked in it;
+ * the singular and plural forms of "does/do" are two catalog entries chosen by `plural`, and the
+ * `@name` mentions are never translated.
  * VERIFIED by `contextPrompts.test.ts` (hand-made references and diagnostics, Windows 11,
- * 29/10/2026): the exact strings above. What a real model answers to them is not tested.
+ * 29/10/2026): the exact strings above. VERIFIED in Spanish by `contextPrompts.test.ts` "writes
+ * the Explain and Fix prompts in Spanish with the Spanish catalog" (Windows 11, 04/11/2026). What
+ * a real model answers to them, in either language, is not tested.
  */
 export function buildContextPrompt(input: {
   action: ContextAction;
@@ -78,17 +90,24 @@ export function buildContextPrompt(input: {
 }): string {
   const { action, refs } = input;
   if (action === 'explain') {
-    if (refs.length === 0) return 'Explain what this does.';
-    return `Explain what ${joinMentions(refs)} ${refs.length === 1 ? 'does' : 'do'}.`;
+    if (refs.length === 0) return l10n.t('Explain what this does.');
+    const mentions = joinMentions(refs);
+    return plural(
+      refs.length,
+      l10n.t('Explain what {0} does.', mentions),
+      l10n.t('Explain what {0} do.', mentions),
+    );
   }
   const head =
-    refs.length === 0 ? 'Fix the problems.' : `Fix the problems in ${joinMentions(refs)}.`;
+    refs.length === 0
+      ? l10n.t('Fix the problems.')
+      : l10n.t('Fix the problems in {0}.', joinMentions(refs));
   const diagnostics = [...(input.diagnostics ?? [])].sort(
     (a, b) => a.line - b.line || a.message.localeCompare(b.message),
   );
   if (diagnostics.length === 0) return head;
   const lines = diagnostics.slice(0, MAX_PROMPT_DIAGNOSTICS).map(diagnosticLine);
   const more = diagnostics.length - MAX_PROMPT_DIAGNOSTICS;
-  if (more > 0) lines.push(`- … and ${String(more)} more`);
-  return `${head}\n\nProblems reported by VS Code:\n${lines.join('\n')}`;
+  if (more > 0) lines.push(l10n.t('- … and {0} more', more));
+  return `${head}\n\n${l10n.t('Problems reported by VS Code:')}\n${lines.join('\n')}`;
 }

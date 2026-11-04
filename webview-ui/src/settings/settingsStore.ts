@@ -1,5 +1,6 @@
 // The store of the OpenCode Settings tab (issue #128, E10): applies the host's `settings.state` and
 // queues its `settings.notice`. Logic only, no DOM, so it is tested without rendering.
+import * as l10n from '@vscode/l10n';
 import { batch } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import type { ConnectionState } from '../../../src/shared/protocol';
@@ -103,16 +104,16 @@ export function noticeText(notice: SettingsNotice, name: string): string {
   const detail = notice.message === undefined || notice.message === '' ? '' : ` ${notice.message}`;
   switch (notice.kind) {
     case 'connected':
-      return `Connected to ${name}.`;
+      return l10n.t('Connected to {0}.', name);
     case 'removed':
-      return `Removed the connection to ${name}.`;
+      return l10n.t('Removed the connection to {0}.', name);
     case 'failed':
-      return `Sign-in to ${name} failed.${detail}`;
+      return `${l10n.t('Sign-in to {0} failed.', name)}${detail}`;
     case 'expired':
-      return `Sign-in to ${name} expired.`;
+      return l10n.t('Sign-in to {0} expired.', name);
     case 'cancelled':
-      return `Sign-in to ${name} was cancelled.`;
+      return l10n.t('Sign-in to {0} was cancelled.', name);
     case 'unsupported':
-      return `${name} cannot be set up here. Use opencode auth login in a terminal.${detail}`;
+      return `${l10n.t('{0} cannot be set up here. Use opencode auth login in a terminal.', name)}${detail}`;
   }
 }

@@ -2,17 +2,20 @@
 // unit-testable and the Windows/POSIX branches can be exercised on any OS by passing the
 // platform in. The VS Code side (setting, log, notifications) lives in `binaryDetection.ts`.
 
+import * as l10n from '@vscode/l10n';
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { BinaryCheck, BinaryDiagnosis } from '../shared/protocol';
+import { bothTexts, inEnglish, type BothTexts } from './l10nEnglish';
 
 /** Where the chosen executable came from. */
 export type BinarySource = 'setting' | 'opencode2' | 'opencode';
 
 /** Result of running `<binary> --version`; failures carry text for the log, never throw. */
-export type VersionRun = { ok: true; stdout: string } | { ok: false; detail: string };
+export type VersionRun =
+  { ok: true; stdout: string } | { ok: false; detail: string; logDetail?: string };
 
 /**
  * Everything the detection touches in the outside world, injected so tests can use fakes.
@@ -45,7 +48,10 @@ export interface DetectionAttempt {
     | 'unknown-version'
     | 'ok'
     | 'unsupported';
+  /** In the language of VS Code: what the chat's setup guide prints. */
   detail: string;
+  /** The same text in English: what the OutputChannel prints. */
+  logDetail: string;
 }
 
 /** What was chosen. `version` is absent only when the output had no `x.y.z`. */
@@ -70,7 +76,15 @@ export type DetectionResult =
       attempts: DetectionAttempt[];
     }
   | { kind: 'not-found'; attempts: DetectionAttempt[] }
-  | { kind: 'invalid-setting'; value: string; reason: string; attempts: DetectionAttempt[] };
+  | {
+      kind: 'invalid-setting';
+      value: string;
+      /** In the language of VS Code, for the user. */
+      reason: string;
+      /** The same reason in English, for the log. */
+      logReason: string;
+      attempts: DetectionAttempt[];
+    };
 
 /** How the UI layer should present a result. */
 export interface DetectionDescription {
@@ -134,8 +148,9 @@ export function resolveCmdShim(shimPath: string, shimText: string): string | und
 /**
  * Looks `name` up in PATH the way a terminal would, without a shell.
  *
- * Returns the first hit (same semantics as the user's terminal) plus notes for the log
- * about candidates that were skipped. Empty and relative PATH entries are ignored, since a
+ * Returns the first hit (same semantics as the user's terminal) plus notes about candidates that
+ * were skipped, in the language of VS Code (`notes`) and in English for the log (`logNotes`, same
+ * order and length). Empty and relative PATH entries are ignored, since a
  * `.` entry would execute something from the current directory. Windows: tries PATHEXT
  * extensions in order, takes `.exe`/`.com` as they are, resolves `.cmd`/`.bat` shims to
  * their `.exe` (discarding the candidate if that fails) and ignores extensionless files
@@ -148,10 +163,11 @@ export function resolveCmdShim(shimPath: string, shimText: string): string | und
 export async function findOnPath(
   name: string,
   deps: BinaryDeps,
-): Promise<{ path?: string; notes: string[] }> {
+): Promise<{ path?: string; notes: string[]; logNotes: string[] }> {
   const win = deps.platform === 'win32';
   const p = win ? path.win32 : path.posix;
   const notes: string[] = [];
+  const logNotes: string[] = [];
   const dirs = (deps.env.PATH ?? '')
     .split(win ? ';' : ':')
     .map((entry) => entry.trim().replace(/^"(.*)"$/, '$1'))
@@ -165,20 +181,26 @@ export async function findOnPath(
       const candidate = p.join(dir, name + ext);
       if (!(await deps.isFile(candidate))) continue;
       if (!win) {
-        if (await deps.isExecutable(candidate)) return { path: candidate, notes };
-        notes.push(`${candidate} is not executable`);
+        if (await deps.isExecutable(candidate)) return { path: candidate, notes, logNotes };
+        const note = bothTexts(() => l10n.t('{0} is not executable', candidate));
+        notes.push(note.message);
+        logNotes.push(note.logMessage);
         continue;
       }
       const lower = ext.toLowerCase();
-      if (lower === '.exe' || lower === '.com') return { path: candidate, notes };
+      if (lower === '.exe' || lower === '.com') return { path: candidate, notes, logNotes };
       if (lower === '.cmd' || lower === '.bat') {
         const resolved = await resolveShimFile(candidate, deps);
-        if (resolved !== undefined) return { path: resolved, notes };
-        notes.push(`${candidate} is a shim without a resolvable .exe; discarded`);
+        if (resolved !== undefined) return { path: resolved, notes, logNotes };
+        const note = bothTexts(() =>
+          l10n.t('{0} is a shim without a resolvable .exe; discarded', candidate),
+        );
+        notes.push(note.message);
+        logNotes.push(note.logMessage);
       }
     }
   }
-  return { notes };
+  return { notes, logNotes };
 }
 
 /** Reads a shim and returns its `.exe` only if that file exists; undefined otherwise. */
@@ -209,7 +231,13 @@ async function resolveShimFile(shimPath: string, deps: BinaryDeps): Promise<stri
  * placeholder `npm i --ignore-scripts` leaves) is recorded and skipped. A relative or
  * missing setting yields `invalid-setting`, and so does a setting whose binary exists but
  * cannot be run (the text must not tell the user to set what is already set). Never throws and has no side effects beyond the
- * injected `deps`; nothing is cached.
+ * injected `deps`; nothing is cached. Every text it stores is written twice with `bothTexts`: the
+ * `detail` of each attempt and the `reason` of an invalid setting in the language of VS Code (the
+ * chat's setup guide and the warning print them), and their `logDetail` / `logReason` in English
+ * (the OutputChannel prints those). VERIFIED by `opencodeBinary.test.ts` ("keeps a Spanish detail
+ * for the user and an English logDetail for the log" and "describes an invalid setting in Spanish
+ * for the user and in English for the log"); only the `not-on-path` attempt and the `invalid-setting`
+ * reason are exercised in Spanish, the other twins are written the same way.
  * VERIFIED with fake dependencies and, on this Windows host, real child processes
  * (`node.exe` standing in for opencode). VERIFIED against a real opencode 2.0.32 install (npm
  * @opencode/cli, Windows 11, spike on 2026-10-20): detection through `opencode2` on PATH and
@@ -226,33 +254,64 @@ export async function detectOpencodeBinary(
 
   if (options.settingPath !== '') {
     const value = options.settingPath;
-    const invalid = (reason: string): DetectionResult => {
-      attempts.push({ label: 'setting', path: value, outcome: 'invalid', detail: reason });
-      return { kind: 'invalid-setting', value, reason, attempts };
+    const invalid = (text: BothTexts): DetectionResult => {
+      attempts.push({
+        label: 'setting',
+        path: value,
+        outcome: 'invalid',
+        detail: text.message,
+        logDetail: text.logMessage,
+      });
+      return {
+        kind: 'invalid-setting',
+        value,
+        reason: text.message,
+        logReason: text.logMessage,
+        attempts,
+      };
     };
-    if (!p.isAbsolute(value)) return invalid('the path is not absolute');
-    if (!(await deps.isFile(value))) return invalid('the file does not exist');
+    if (!p.isAbsolute(value)) return invalid(bothTexts(() => l10n.t('the path is not absolute')));
+    if (!(await deps.isFile(value)))
+      return invalid(bothTexts(() => l10n.t('the file does not exist')));
     let target = value;
     if (deps.platform === 'win32' && /\.(cmd|bat)$/i.test(value)) {
       const resolved = await resolveShimFile(value, deps);
       if (resolved === undefined)
-        return invalid('a .cmd/.bat shim cannot be launched; point to the .exe behind it');
+        return invalid(
+          bothTexts(() =>
+            l10n.t('a .cmd/.bat shim cannot be launched; point to the .exe behind it'),
+          ),
+        );
       target = resolved;
     }
     candidates.push({ source: 'setting', path: target });
   } else {
     for (const name of ['opencode2', 'opencode'] as const) {
       const found = await findOnPath(name, deps);
-      for (const note of found.notes)
-        attempts.push({ label: name, outcome: 'skipped', detail: note });
+      found.notes.forEach((note, i) =>
+        attempts.push({
+          label: name,
+          outcome: 'skipped',
+          detail: note,
+          logDetail: found.logNotes[i] ?? note,
+        }),
+      );
       if (found.path === undefined) {
-        attempts.push({ label: name, outcome: 'not-on-path', detail: `no ${name} in PATH` });
+        const text = bothTexts(() => l10n.t('no {0} in PATH', name));
+        attempts.push({
+          label: name,
+          outcome: 'not-on-path',
+          detail: text.message,
+          logDetail: text.logMessage,
+        });
       } else if (candidates.some((c) => c.path === found.path)) {
+        const text = bothTexts(() => l10n.t('same file as an earlier candidate'));
         attempts.push({
           label: name,
           path: found.path,
           outcome: 'duplicate',
-          detail: 'same file as an earlier candidate',
+          detail: text.message,
+          logDetail: text.logMessage,
         });
       } else {
         candidates.push({ source: name, path: found.path });
@@ -271,25 +330,30 @@ export async function detectOpencodeBinary(
         path: candidate.path,
         outcome: 'run-failed',
         detail: run.detail,
+        logDetail: run.logDetail ?? run.detail,
       });
       continue;
     }
     const parsed = parseOpencodeVersion(run.stdout);
     if (parsed === undefined) {
       const output = run.stdout.trim();
+      const text = bothTexts(() => l10n.t('no x.y.z in output: {0}', JSON.stringify(output)));
       attempts.push({
         label: candidate.source,
         path: candidate.path,
         outcome: 'unknown-version',
-        detail: `no x.y.z in output: ${JSON.stringify(output)}`,
+        detail: text.message,
+        logDetail: text.logMessage,
       });
       firstUnknown ??= { binary: { path: candidate.path, source: candidate.source }, output };
     } else if (parsed.major === 2) {
+      const text = bothTexts(() => l10n.t('version {0}', parsed.version));
       attempts.push({
         label: candidate.source,
         path: candidate.path,
         outcome: 'ok',
-        detail: `version ${parsed.version}`,
+        detail: text.message,
+        logDetail: text.logMessage,
       });
       return {
         kind: 'ok',
@@ -297,11 +361,13 @@ export async function detectOpencodeBinary(
         attempts,
       };
     } else {
+      const text = bothTexts(() => l10n.t('version {0}, major {1}', parsed.version, parsed.major));
       attempts.push({
         label: candidate.source,
         path: candidate.path,
         outcome: 'unsupported',
-        detail: `version ${parsed.version}, major ${parsed.major}`,
+        detail: text.message,
+        logDetail: text.logMessage,
       });
       firstUnsupported ??= {
         path: candidate.path,
@@ -315,10 +381,14 @@ export async function detectOpencodeBinary(
   if (firstUnsupported !== undefined)
     return { kind: 'unsupported', binary: firstUnsupported, attempts };
   if (options.settingPath !== '') {
+    const text = bothTexts(() =>
+      l10n.t('the configured binary could not be run (see the log for details)'),
+    );
     return {
       kind: 'invalid-setting',
       value: options.settingPath,
-      reason: 'the configured binary could not be run (see the log for details)',
+      reason: text.message,
+      logReason: text.logMessage,
       attempts,
     };
   }
@@ -328,7 +398,12 @@ export async function detectOpencodeBinary(
 /**
  * Turns a detection result into the log level, user-facing text and kind of notification.
  *
- * User text is built here, in English (public repo), so tests can pin it. v1 gets a plain
+ * User text is built here, in the language of VS Code through `l10n.t` (English when no catalog is
+ * loaded, which is what the tests pin). The log does NOT get this translated text: its callers use
+ * {@link describeDetectionForLog}, which runs this function again through `inEnglish` with the
+ * English `logReason` of an invalid setting (the `reason` is translated when the detection runs, so
+ * a second evaluation alone would not turn it back; decision of Sergio, E11-i18n: logs stay in
+ * English), so the function stays the only place with the message literals. v1 gets a plain
  * "requires v2" warning with no install guidance and no compatibility mode (Sergio's
  * decision, Engram 848). A successful detection only logs. VERIFIED by unit tests; how the
  * texts look in VS Code is UNVERIFIED until Sergio runs F5.
@@ -338,35 +413,66 @@ export function describeDetection(result: DetectionResult): DetectionDescription
     case 'ok':
       return {
         level: 'info',
-        message: `Using opencode ${result.binary.version} at ${result.binary.path} (${result.binary.source}).`,
+        message: l10n.t(
+          'Using opencode {0} at {1} ({2}).',
+          result.binary.version,
+          result.binary.path,
+          result.binary.source,
+        ),
         notify: 'none',
       };
     case 'unknown-version':
       return {
         level: 'warn',
-        message: `Could not read the version of the opencode binary at ${result.binary.path} (output: ${JSON.stringify(result.output)}). Continuing anyway; open-vs-code requires opencode v2.`,
+        message: l10n.t(
+          'Could not read the version of the opencode binary at {0} (output: {1}). Continuing anyway; open-vs-code requires opencode v2.',
+          result.binary.path,
+          JSON.stringify(result.output),
+        ),
         notify: 'plain',
       };
     case 'unsupported':
       return {
         level: 'warn',
-        message: `open-vs-code requires opencode v2 (found ${result.binary.version} at ${result.binary.path}).`,
+        message: l10n.t(
+          'open-vs-code requires opencode v2 (found {0} at {1}).',
+          result.binary.version,
+          result.binary.path,
+        ),
         notify: 'plain',
       };
     case 'invalid-setting':
       return {
         level: 'warn',
-        message: `The setting openVsCode.opencodePath is invalid: ${result.reason} (${result.value}).`,
+        message: l10n.t(
+          'The setting openVsCode.opencodePath is invalid: {0} ({1}).',
+          result.reason,
+          result.value,
+        ),
         notify: 'actions',
       };
     case 'not-found':
       return {
         level: 'warn',
-        message:
+        message: l10n.t(
           'No usable opencode v2 binary was found. Set openVsCode.opencodePath or put opencode on your PATH.',
+        ),
         notify: 'actions',
       };
   }
+}
+
+/**
+ * The {@link describeDetection} text for the OutputChannel: always English, whatever the language
+ * of VS Code. An invalid setting carries its reason in both languages, so the English one is
+ * swapped in before the second evaluation.
+ * VERIFIED by `opencodeBinary.test.ts` ("describes an invalid setting in Spanish for the user and
+ * in English for the log").
+ */
+export function describeDetectionForLog(result: DetectionResult): DetectionDescription {
+  const forLog =
+    result.kind === 'invalid-setting' ? { ...result, reason: result.logReason } : result;
+  return inEnglish(() => describeDetection(forLog));
 }
 
 /** Longest `detail` the diagnosis carries: the same 300-character cap `nodeDeps` puts on stderr. */
@@ -412,7 +518,8 @@ export function diagnoseDetection(result: DetectionResult, settingPath: string):
  * through cmd.exe. `process.env` is case-insensitive on Windows, so `PATH`/`PATHEXT` work
  * whatever their spelling there (HYPOTHESIS, read in the Node docs and not executed, process.env, 2026-10-20).
  * `runVersion` never rejects: exit codes, ENOENT, EACCES/ENOEXEC and timeouts become
- * `{ ok: false, detail }` with the stderr (first 300 chars) for the log.
+ * `{ ok: false, detail, logDetail }` with the stderr (first 300 chars): `detail` in the language of
+ * VS Code, `logDetail` its English twin for the log.
  * VERIFIED on Windows 11 by a test that runs `node --version` through it; POSIX UNVERIFIED.
  *
  * `launchFor` (issue #41) maps the path to the command that really runs; the default is the path
@@ -457,15 +564,19 @@ export function nodeDeps(
               resolve({ ok: true, stdout });
               return;
             }
-            // `killed` is also true when maxBuffer is exceeded, so check that code first.
-            const reason =
-              error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
-                ? 'output exceeded maxBuffer'
-                : error.killed
-                  ? `timed out after ${VERSION_TIMEOUT_MS} ms`
-                  : error.message;
             const extra = stderr.trim().slice(0, 300);
-            resolve({ ok: false, detail: extra === '' ? reason : `${reason}; stderr: ${extra}` });
+            // One producer evaluated twice (user language, English for the log). `killed` is also
+            // true when maxBuffer is exceeded, so check that code first.
+            const text = bothTexts(() => {
+              const reason =
+                error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+                  ? l10n.t('output exceeded maxBuffer')
+                  : error.killed
+                    ? l10n.t('timed out after {0} ms', VERSION_TIMEOUT_MS)
+                    : error.message;
+              return extra === '' ? reason : l10n.t('{0}; stderr: {1}', reason, extra);
+            });
+            resolve({ ok: false, detail: text.message, logDetail: text.logMessage });
           },
         );
       }),

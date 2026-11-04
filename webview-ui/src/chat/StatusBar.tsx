@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { For, Match, Show, Switch } from 'solid-js';
 import type { Activity } from '../store/activity';
 import type { ChatState } from '../store/chatStore';
@@ -51,12 +52,18 @@ export function StatusBar(props: {
         <Match when={props.activity.kind === 'error'}>
           <div class="alert alert-error" role="alert">
             <span class="alert-text">
-              Error{props.activity.error ? ` (${props.activity.error.code})` : ''}:{' '}
-              {props.activity.error?.message}
+              {props.activity.error
+                ? l10n.t(
+                    'Error ({0}): {1}',
+                    props.activity.error.code,
+                    props.activity.error.message,
+                  )
+                : l10n.t('Error: {0}', '')}
+              {/* no error object: the sentence stays "Error: " as before */}
             </span>
             <Show when={props.canRetry}>
               <button type="button" class="secondary" onClick={() => props.onRetry()}>
-                Retry
+                {l10n.t('Retry')}
               </button>
             </Show>
           </div>
@@ -80,16 +87,17 @@ export function StatusBar(props: {
             role={notice.level === 'error' ? 'alert' : undefined}
           >
             <span class="alert-text">
-              {notice.level === 'error' ? 'Error: ' : ''}
-              {notice.error.message}
+              {notice.level === 'error'
+                ? l10n.t('Error: {0}', notice.error.message)
+                : notice.error.message}
             </span>
             <button
               type="button"
               class="secondary"
-              aria-label="Dismiss notice"
+              aria-label={l10n.t('Dismiss notice')}
               onClick={() => props.onDismiss(notice.id)}
             >
-              Dismiss
+              {l10n.t('Dismiss')}
             </button>
           </div>
         )}

@@ -1,7 +1,8 @@
+import * as l10n from '@vscode/l10n';
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import type { CommandOption } from '../../../src/shared/model';
 import { dismissOutside } from '../selectors/dismissOutside';
-import { COMMAND_STATUS_TEXT, commandStatus, type CommandStatus } from './CommandPopup';
+import { commandStatus, commandStatusText, type CommandStatus } from './CommandPopup';
 import { SlashIcon } from './icons';
 
 /** `id` of the menu, referenced by the `aria-controls` of the button. One prompt per document. */
@@ -180,8 +181,8 @@ export function CommandMenu(props: {
         aria-expanded={open()}
         aria-controls={MENU_ID}
         aria-disabled={triggerDisabled() ? 'true' : undefined}
-        aria-label="Commands"
-        title="Run a slash command"
+        aria-label={l10n.t('Commands')}
+        title={l10n.t('Run a slash command')}
         ref={(element) => {
           trigger = element;
         }}
@@ -200,7 +201,7 @@ export function CommandMenu(props: {
           id={MENU_ID}
           class="plus-menu command-menu"
           role="menu"
-          aria-label="Slash commands"
+          aria-label={l10n.t('Slash commands')}
           ref={(element) => {
             menu = element;
           }}
@@ -223,7 +224,7 @@ export function CommandMenu(props: {
                 tabIndex={0}
                 aria-disabled="true"
               >
-                {COMMAND_STATUS_TEXT[status() as Exclude<CommandStatus, 'list'>]}
+                {commandStatusText(status() as Exclude<CommandStatus, 'list'>)}
               </button>
             }
           >

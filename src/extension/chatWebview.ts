@@ -5,6 +5,7 @@
 
 import * as vscode from 'vscode';
 import { isWebviewToHost, type WebviewToHost } from '../shared/protocol';
+import { hostBundle } from './l10nBoot';
 import { buildWebviewHtml, createNonce, type ChatSurface } from './webviewHtml';
 
 // Contract with webview-ui/vite.config.mts: the output directory and the fixed
@@ -40,6 +41,14 @@ export function chatWebviewOptions(extensionUri: vscode.Uri): vscode.WebviewOpti
  * `settingsPanel.ts` shares this CSP, these resource roots and this bundle check. The validation
  * of what that tab sends is NOT {@link parseWebviewMessage} (the chat guard): the settings guard is
  * `isSettingsWebviewToHost`, applied by `settingsPanel.ts`.
+ * E11-i18n: the language and the bundle of VS Code go into the HTML (`vscode.env.language` and
+ * `hostBundle` of `l10nBoot.ts`, `undefined` in English); this is the only call site of
+ * `buildWebviewHtml`, so the three surfaces get them.
+ * VERIFIED in a Spanish window (Windows 11, VS Code 1.145.0, 04/11/2026), `test:visual` step 42:
+ * "A-wide the chat document says <html lang="es">" and "A-wide the prompt box placeholder is the
+ * Spanish one of the catalog" (the placeholder can only come from the bundle in the HTML). Only the
+ * chat view was looked at there; the Settings tab and the editor-tab chat share this call but were
+ * not opened in Spanish. UNVERIFIED on macOS and Linux.
  */
 export function renderChatWebview(
   webview: vscode.Webview,
@@ -57,6 +66,8 @@ export function renderChatWebview(
     styleUri: webview.asWebviewUri(styleUri).toString(),
     nonce: createNonce(),
     surface,
+    locale: vscode.env.language,
+    l10nBundle: hostBundle,
   });
   void warnIfBundleMissing(channel, [scriptUri, styleUri]);
 }

@@ -1,3 +1,5 @@
+import * as l10n from '@vscode/l10n';
+import { plural } from '../../../src/shared/l10n';
 import type { ChangedFile, MessageInfo, RevertState } from '../../../src/shared/model';
 import { statusWord } from './changedFileText';
 
@@ -46,15 +48,21 @@ export function splitAtRevert(
  * messages" when the boundary is not among the loaded messages and there is no honest count.
  */
 export function revertTitle(split: Pick<RevertSplit, 'revertedCount' | 'found'>): string {
-  if (!split.found) return 'Reverted messages';
-  return split.revertedCount === 1
-    ? '1 message reverted'
-    : `${String(split.revertedCount)} messages reverted`;
+  if (!split.found) return l10n.t('Reverted messages');
+  return plural(
+    split.revertedCount,
+    l10n.t('{0} message reverted', split.revertedCount),
+    l10n.t('{0} messages reverted', split.revertedCount),
+  );
 }
 
 /** "1 file changed on disk" / "3 files changed on disk": the caption of the list of files. */
 export function revertFilesCaption(count: number): string {
-  return count === 1 ? '1 file changed on disk' : `${String(count)} files changed on disk`;
+  return plural(
+    count,
+    l10n.t('{0} file changed on disk', count),
+    l10n.t('{0} files changed on disk', count),
+  );
 }
 
 /**
@@ -64,6 +72,14 @@ export function revertFilesCaption(count: number): string {
  * HYPOTHESIS: a real screen reader was not run; `revertView.test.ts` checks the strings.
  */
 export function revertOpenName(file: ChangedFile): string {
-  if (file.binary || file.tooLarge) return `Open ${file.path}, ${statusWord(file)}`;
-  return `Show what the revert undid in ${file.path}, ${statusWord(file)}, ${String(file.additions)} added, ${String(file.deletions)} deleted`;
+  if (file.binary || file.tooLarge) {
+    return l10n.t('Open {0}, {1}', file.path, statusWord(file));
+  }
+  return l10n.t(
+    'Show what the revert undid in {0}, {1}, {2} added, {3} deleted',
+    file.path,
+    statusWord(file),
+    file.additions,
+    file.deletions,
+  );
 }

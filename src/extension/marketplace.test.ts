@@ -37,7 +37,26 @@ function exists(relativePath: string): boolean {
   return existsSync(new URL(`../../${relativePath}`, import.meta.url));
 }
 
+const nls = JSON.parse(readText('package.nls.json')) as Record<string, string>;
+
+/**
+ * Turns a `%key%` string of package.json into its English text from `package.nls.json` (what a
+ * VS Code in English shows); any other string passes through. Throws on a missing key. The README
+ * is English, so every title and description is compared in its resolved form.
+ * VERIFIED indirectly: "has a Commands table whose rows are exactly the contributed commands"
+ * passes only if the `OpenCode: Show Logs` row of the README matches the resolved title.
+ */
+function resolveNls(text: string): string {
+  const key = /^%([\w.-]+)%$/.exec(text)?.[1];
+  if (key === undefined) return text;
+  const resolved = nls[key];
+  if (resolved === undefined) throw new Error(`package.nls.json has no key "${key}"`);
+  return resolved;
+}
+
 const manifest = JSON.parse(readText('package.json')) as Manifest;
+manifest.description = resolveNls(manifest.description);
+for (const command of manifest.contributes.commands) command.title = resolveNls(command.title);
 const readme = readText('README.md');
 
 /**

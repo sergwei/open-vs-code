@@ -10,7 +10,9 @@
 // welcome (treeView.ts of VS Code 1.105, read): that is why "Loading sessions…" is a message and
 // the other empty states are welcomes.
 
+import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
+import { plural } from '../shared/l10n';
 import { msUntilNextLocalMidnight } from './sessionTree';
 import type { SessionDrag, SessionDropTarget } from './sessionOrganization';
 import type {
@@ -152,7 +154,9 @@ function findNode(nodes: readonly SessionTreeNode[], id: string): SessionTreeNod
  * the message line above the rows is what the user sees; the load states take that line first, and
  * with no rows left the line stays empty, because a message hides the welcome of the empty filter
  * ("No sessions match the filters." with its Clear Filters link; step 34 V5 lost it that way).
- * Initial state: "Needs attention", "Pinned" and the date groups expanded, folders and "Archived"
+ * The texts it writes itself (the load message, the badge tooltip with its singular and plural, and
+ * the "Open" title of a row command) go through `l10n.t`; row labels and tooltips come translated
+ * from the model. Initial state: "Needs attention", "Pinned" and the date groups expanded, folders and "Archived"
  * collapsed (a folder with no children has no arrow); VS Code keeps what the user changed, by `id`.
  *
  * Logs the stable line `sessions view: N rows (more: true|false)` each time the loaded list changes,
@@ -280,9 +284,9 @@ export function registerSessionsView(options: SessionsViewOptions): SessionsView
     const filterText = tree.filterDescription();
     view.message =
       load === 'loading'
-        ? 'Loading sessions…'
+        ? l10n.t('Loading sessions…')
         : load === 'failed'
-          ? 'Could not load the sessions. See Show Logs.'
+          ? l10n.t('Could not load the sessions. See Show Logs.')
           : nodes.length > 0
             ? filterText
             : undefined; // with no rows the "No sessions match" welcome shows, and a message would hide it
@@ -341,7 +345,11 @@ export function registerSessionsView(options: SessionsViewOptions): SessionsView
         count > 0
           ? {
               value: count,
-              tooltip: `${String(count)} OpenCode request${count === 1 ? '' : 's'} waiting`,
+              tooltip: plural(
+                count,
+                l10n.t('{0} OpenCode request waiting', count),
+                l10n.t('{0} OpenCode requests waiting', count),
+              ),
             }
           : undefined;
     },
@@ -444,7 +452,7 @@ function toTreeItem(node: SessionTreeNode): vscode.TreeItem {
       item.accessibilityInformation = { label: node.accessibilityLabel };
       item.command = {
         command: OPEN_SESSION_COMMAND_ID,
-        title: 'Open',
+        title: l10n.t('Open'),
         arguments: [node.sessionID],
       };
       return item;

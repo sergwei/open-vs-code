@@ -1,7 +1,7 @@
+import * as l10n from '@vscode/l10n';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { isWebviewToHost, type ConnectionState, type UiCommand } from '../shared/protocol';
-import { EMPTY_TITLE } from '../shared/sessionLabel';
 import { createAttention } from './attention';
 import {
   ChatController,
@@ -16,6 +16,7 @@ import {
   type TabSnapshot,
 } from './chatLocation';
 import type { ChatPane } from './chatPane';
+import { logErrorOf } from './l10nEnglish';
 import { ChatPanels } from './chatPanels';
 import type { ChatSurfaceGate } from './chatSurfaceGate';
 import { ChatTabs } from './chatTabs';
@@ -83,6 +84,7 @@ import { registerSessionDiffProvider } from './sessionDiffEditor';
 import type { PendingSummary } from './pendingRequests';
 import { showSessionsSearch } from './sessionsSearch';
 import { RevealOrder } from './revealOrder';
+import { emptyTitle } from './sessionDisplay';
 import { registerSessionsView, type SessionsState } from './sessionsView';
 import { registerSessionsOrganize, sessionIDOf, type OrganizeAnswers } from './sessionsOrganize';
 import { createSessionTree, type SessionTreePage } from './sessionTree';
@@ -213,10 +215,20 @@ function parseReply(
   return { sessionID, permissionID, decision };
 }
 
-/** Shows a failure of a Sessions-tree action as a native warning, without awaiting its dismissal. */
-function warnSessionFailure(action: string, error: unknown): void {
+/**
+ * Shows a failure of a Sessions-tree action as a native warning, without awaiting its dismissal.
+ * One whole sentence per action (not a verb glued into a template), so each translates on its
+ * own; `error.message` is whatever the controller or the server said and is not translated here.
+ */
+function warnSessionFailure(action: 'rename' | 'delete' | 'loadMore', error: unknown): void {
   const reason = error instanceof Error ? error.message : String(error);
-  void vscode.window.showWarningMessage(`OpenCode could not ${action}: ${reason}`);
+  const text =
+    action === 'rename'
+      ? l10n.t('OpenCode could not rename the session: {0}', reason)
+      : action === 'delete'
+        ? l10n.t('OpenCode could not delete the session: {0}', reason)
+        : l10n.t('OpenCode could not load more sessions: {0}', reason);
+  void vscode.window.showWarningMessage(text);
 }
 
 /**
@@ -910,7 +922,7 @@ export function registerChat(
             // Stable line, only this branch writes it: it tells a test which path answered.
             log.info('side-bar view already resolved: replaying ready');
             void controller.onPaneReady(pane.id).catch((error: unknown) => {
-              log.error(`answering webview ready failed: ${String(error)}`);
+              log.error(`answering webview ready failed: ${logErrorOf(error)}`);
             });
           }
           break;
@@ -1003,18 +1015,18 @@ export function registerChat(
     onReady: (paneId) => {
       gate?.changed();
       void controller.onPaneReady(paneId).catch((error: unknown) => {
-        log.error(`answering webview ready failed: ${String(error)}`);
+        log.error(`answering webview ready failed: ${logErrorOf(error)}`);
       });
     },
     onMessage: (paneId, message) => {
       void controller.handle(paneId, message).catch((error: unknown) => {
-        log.error(`handling ${message.type} failed: ${String(error)}`);
+        log.error(`handling ${message.type} failed: ${logErrorOf(error)}`);
       });
     },
     onResync: (paneId) => {
       gate?.changed();
       void controller.onPaneReady(paneId).catch((error: unknown) => {
-        log.error(`resync of a returning chat tab failed: ${String(error)}`);
+        log.error(`resync of a returning chat tab failed: ${logErrorOf(error)}`);
       });
     },
     onSurfaceChange,
@@ -1042,13 +1054,13 @@ export function registerChat(
       if (mode !== 'sidebar') return;
       const pane = ensureSidebar();
       void controller.onPaneReady(pane.id).catch((error: unknown) => {
-        log.error(`answering webview ready failed: ${String(error)}`);
+        log.error(`answering webview ready failed: ${logErrorOf(error)}`);
       });
     },
     onMessage: (message) => {
       if (sidebarPane === undefined) return;
       void controller.handle(sidebarPane.id, message).catch((error: unknown) => {
-        log.error(`handling ${message.type} failed: ${String(error)}`);
+        log.error(`handling ${message.type} failed: ${logErrorOf(error)}`);
       });
     },
     onVisibilityChange: () => {
@@ -1149,7 +1161,7 @@ export function registerChat(
     const candidate = tabs.commandTarget();
     if (candidate !== undefined && controller.sessionOf(candidate) === undefined) {
       const loaded = controller.openInPane(candidate, sessionID).catch((error: unknown) => {
-        log.error(`opening a session in an empty tab failed: ${String(error)}`);
+        log.error(`opening a session in an empty tab failed: ${logErrorOf(error)}`);
       });
       revealSurface(candidate, false);
       if (focusPrompt) queuePromptFocus(candidate);
@@ -1233,7 +1245,7 @@ export function registerChat(
       try {
         await controller.renameSessionById(sessionID, title);
       } catch (error) {
-        warnSessionFailure('rename the session', error);
+        warnSessionFailure('rename', error);
       }
     }),
     vscode.commands.registerCommand(DELETE_SESSION_COMMAND_ID, async (raw: unknown) => {
@@ -1245,14 +1257,14 @@ export function registerChat(
         const { deleted } = await controller.deleteSessionById(sessionID);
         if (deleted && shown !== undefined && tabs.has(shown)) panels.close(shown);
       } catch (error) {
-        warnSessionFailure('delete the session', error);
+        warnSessionFailure('delete', error);
       }
     }),
     vscode.commands.registerCommand(SHOW_MORE_SESSIONS_COMMAND_ID, async () => {
       try {
         await controller.loadMoreSessions();
       } catch (error) {
-        warnSessionFailure('load more sessions', error);
+        warnSessionFailure('loadMore', error);
       }
     }),
     vscode.commands.registerCommand(SEARCH_SESSIONS_COMMAND_ID, async () => {
@@ -1433,7 +1445,7 @@ export function registerChat(
       );
       if (failure !== undefined) {
         void vscode.window.showWarningMessage(
-          `OpenCode could not answer the permission: ${failure.message}`,
+          l10n.t('OpenCode could not answer the permission: {0}', failure.message),
         );
       }
     }),
@@ -1492,7 +1504,7 @@ export function registerChat(
         // for the revived one and goes through the SAME `restore` as the serializer.
         const args =
           typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
-        const title = typeof args.title === 'string' ? args.title : EMPTY_TITLE;
+        const title = typeof args.title === 'string' ? args.title : emptyTitle();
         const panel = vscode.window.createWebviewPanel(
           CHAT_PANEL_VIEW_TYPE,
           title,

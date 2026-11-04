@@ -2,10 +2,37 @@
  * Helpers shared by the component tests (jsdom + Solid). Not part of the bundle: only
  * `*.test.tsx` files import it.
  */
+import * as l10n from '@vscode/l10n';
 import type { JSX } from 'solid-js';
 import { render } from 'solid-js/web';
+import spanishRaw from '../../l10n/bundle.l10n.es.json?raw';
+import { setLocale, type L10nBundle } from '../../src/shared/l10n';
 import type { WebviewToHost } from '../../src/shared/protocol';
 import { HostContext } from './chat/hostContext';
+
+/** The shipped Spanish catalog, parsed once from the file (not a copy of it written in a test). */
+const SPANISH = JSON.parse(spanishRaw) as L10nBundle;
+
+/**
+ * Switches the webview texts to Spanish: the shipped `l10n/bundle.l10n.es.json` for `l10n.t` and
+ * `es` for `plural` and the date formatters, the way `l10nBoot.ts` does at start-up.
+ * Pair it with {@link useEnglish} in an `afterEach`, or the catalog leaks into the other tests of
+ * the file. Mount components AFTER calling it: Solid reads the text once, when it renders.
+ * VERIFIED by the checks "reads its labels, placeholder and live-region counts from the shipped
+ * Spanish catalog" of `PromptInput.test.tsx`, "shows the group titles and the row times in
+ * Spanish" of `SessionPicker.test.tsx` and "writes the steps, lines and actions of the guide in
+ * Spanish" of `connectionView.test.ts`, which read real Spanish text through it.
+ */
+export function useSpanish(): void {
+  l10n.config({ contents: SPANISH });
+  setLocale('es');
+}
+
+/** Back to the English default: no catalog (the message is its own text) and `en` as the locale. */
+export function useEnglish(): void {
+  l10n.config({ contents: {} });
+  setLocale('en');
+}
 
 /** A mounted component: its container, the messages it sent to the "host", and how to unmount. */
 export interface Mounted {

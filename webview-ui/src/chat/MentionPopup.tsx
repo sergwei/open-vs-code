@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { createEffect, For, Show } from 'solid-js';
 import type { ErrorInfo } from '../../../src/shared/model';
 import type { AttachmentRef } from '../../../src/shared/protocol';
@@ -88,7 +89,7 @@ export function MentionPopup(props: {
         id={props.id}
         class="mention-list"
         role="listbox"
-        aria-label="Files"
+        aria-label={l10n.t('Files')}
         aria-busy={props.search.loading}
       >
         <Show when={status() === 'list'}>
@@ -114,11 +115,11 @@ export function MentionPopup(props: {
       </ul>
       <Show when={status() !== 'list'}>
         <div class="mention-status">
-          {status() === 'hint' && 'Type to search files'}
-          {status() === 'loading' && 'Searching…'}
-          {status() === 'empty' && 'No files match'}
+          {status() === 'hint' && l10n.t('Type to search files')}
+          {status() === 'loading' && l10n.t('Searching…')}
+          {status() === 'empty' && l10n.t('No files match')}
           {status() === 'error' &&
-            `Search failed: ${props.search.error?.message ?? 'unknown error'}`}
+            l10n.t('Search failed: {0}', props.search.error?.message ?? l10n.t('unknown error'))}
         </div>
       </Show>
     </div>

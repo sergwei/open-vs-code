@@ -3,10 +3,12 @@ import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { OPENCODE_PATH_SETTING } from './ids';
+import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 import {
   describeDetection,
+  describeDetectionForLog,
   detectOpencodeBinary,
   diagnoseDetection,
   findOnPath,
@@ -383,6 +385,42 @@ describe('detectOpencodeBinary', () => {
   });
 });
 
+// Protects the pass-2 review (C1): with VS Code in Spanish the detection stored translated texts
+// (`detail`, `reason`) and the OutputChannel got them. The user text stays Spanish, the `log*`
+// twins and `describeDetectionForLog` are English. Fake dependencies (synthetic); the Spanish
+// strings come from the shipped `l10n/bundle.l10n.es.json`.
+describe('detection in Spanish (the log stays in English)', () => {
+  beforeEach(useSpanish);
+  afterEach(useEnglish);
+
+  it('keeps a Spanish detail for the user and an English logDetail for the log', async () => {
+    const { deps } = fakeDeps({ platform: 'linux', path: '/bin' });
+    const result = await detectOpencodeBinary({ settingPath: '' }, deps);
+    expect(result.attempts[0]).toMatchObject({
+      outcome: 'not-on-path',
+      detail: 'no hay opencode2 en PATH',
+      logDetail: 'no opencode2 in PATH',
+    });
+  });
+
+  it('describes an invalid setting in Spanish for the user and in English for the log', async () => {
+    const { deps } = fakeDeps({ platform: 'linux' });
+    const result = await detectOpencodeBinary({ settingPath: 'bin/opencode' }, deps);
+    expect(result).toMatchObject({
+      reason: 'la ruta no es absoluta',
+      logReason: 'the path is not absolute',
+    });
+    expect(describeDetection(result).message).toBe(
+      'El ajuste openVsCode.opencodePath no es válido: la ruta no es absoluta (bin/opencode).',
+    );
+    expect(describeDetectionForLog(result).message).toBe(
+      'The setting openVsCode.opencodePath is invalid: the path is not absolute (bin/opencode).',
+    );
+    // The call left the Spanish catalog in place.
+    expect(describeDetection(result).message).toContain('El ajuste');
+  });
+});
+
 describe('describeDetection', () => {
   const binary = { path: '/bin/oc', source: 'opencode' as const, version: '1.19.3' };
   it('ok only logs', () => {
@@ -405,7 +443,13 @@ describe('describeDetection', () => {
   it('not-found and invalid-setting offer the buttons', () => {
     expect(describeDetection({ kind: 'not-found', attempts: [] }).notify).toBe('actions');
     expect(
-      describeDetection({ kind: 'invalid-setting', value: 'x', reason: 'r', attempts: [] }).notify,
+      describeDetection({
+        kind: 'invalid-setting',
+        value: 'x',
+        reason: 'r',
+        logReason: 'r',
+        attempts: [],
+      }).notify,
     ).toBe('actions');
   });
 });
@@ -416,8 +460,19 @@ describe('describeDetection', () => {
 describe('diagnoseDetection', () => {
   const binary = { path: '/bin/oc', source: 'opencode' as const, version: '1.19.3' };
   const attempts: DetectionAttempt[] = [
-    { label: 'opencode2', outcome: 'not-on-path', detail: 'no opencode2 in PATH' },
-    { label: 'opencode', path: '/bin/oc', outcome: 'unsupported', detail: 'version 1.19.3' },
+    {
+      label: 'opencode2',
+      outcome: 'not-on-path',
+      detail: 'no opencode2 in PATH',
+      logDetail: 'no opencode2 in PATH',
+    },
+    {
+      label: 'opencode',
+      path: '/bin/oc',
+      outcome: 'unsupported',
+      detail: 'version 1.19.3',
+      logDetail: 'version 1.19.3',
+    },
   ];
 
   it('keeps every attempt, in order, for each of the five kinds of result', () => {
@@ -425,7 +480,7 @@ describe('diagnoseDetection', () => {
       { kind: 'not-found', attempts },
       { kind: 'unsupported', binary, attempts },
       { kind: 'unknown-version', binary, output: 'local', attempts },
-      { kind: 'invalid-setting', value: '/x', reason: 'r', attempts },
+      { kind: 'invalid-setting', value: '/x', reason: 'r', logReason: 'r', attempts },
       { kind: 'ok', binary: { ...binary, version: '2.0.32' }, attempts },
     ];
     for (const result of results) {
@@ -460,6 +515,7 @@ describe('diagnoseDetection', () => {
           path: 'C:/v1/opencode.exe',
           outcome: 'unsupported',
           detail: 'version 1.19.3',
+          logDetail: 'version 1.19.3',
         },
       ],
     };
@@ -470,8 +526,8 @@ describe('diagnoseDetection', () => {
     const result: DetectionResult = {
       kind: 'not-found',
       attempts: [
-        { label: 'setting', outcome: 'run-failed', detail: 'x'.repeat(500) },
-        { label: 'setting', outcome: 'run-failed', detail: 'y'.repeat(300) },
+        { label: 'setting', outcome: 'run-failed', detail: 'x'.repeat(500), logDetail: '' },
+        { label: 'setting', outcome: 'run-failed', detail: 'y'.repeat(300), logDetail: '' },
       ],
     };
     const [long, exact] = diagnoseDetection(result, '').checks;

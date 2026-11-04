@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { createMemo, Index, Show } from 'solid-js';
 import { PathLink } from './PathLink';
 import { clampLines, type DiffLine } from './patchLines';
@@ -41,7 +42,12 @@ export function DiffView(props: { label: string; path?: string; lines: DiffLine[
           {(path) => <PathLink path={path()} />}
         </Show>
       </div>
-      <div class="diff-view" tabindex="0" role="group" aria-label={`Changes in ${props.label}`}>
+      <div
+        class="diff-view"
+        tabindex="0"
+        role="group"
+        aria-label={l10n.t('Changes in {0}', props.label)}
+      >
         <Index each={clamped().items}>
           {(line) => (
             <div class="diff-line" data-kind={line().kind}>

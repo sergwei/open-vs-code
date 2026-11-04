@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { createMemo, createSignal, Show } from 'solid-js';
 import { isLongUserText } from './longMessage';
 
@@ -38,7 +39,7 @@ export function UserText(props: { id: string; text: string }) {
             setOpen((value) => !value);
           }}
         >
-          {open() ? 'Show less' : 'Show more'}
+          {open() ? l10n.t('Show less') : l10n.t('Show more')}
         </button>
       </Show>
     </>

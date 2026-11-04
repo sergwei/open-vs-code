@@ -3,6 +3,7 @@
 // asked HERE, in a masked native InputBox of the host, never in the webview (architecture rule 1);
 // nothing in this module logs what it receives or returns.
 
+import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
 import { COPY_AUTH_CODE_COMMAND_ID, COPY_AUTH_LINK_COMMAND_ID } from './ids';
 import {
@@ -42,16 +43,20 @@ export interface ProviderAuthUiOptions {
  * The link the notification shows for "Copy code". It carries NO argument: the command copies the
  * code of the attempt in progress, so a crafted `command:` link cannot set the clipboard.
  */
-const COPY_CODE_LINK = `[Copy code](command:${COPY_AUTH_CODE_COMMAND_ID})`;
+const copyCodeLink = (): string => `[${l10n.t('Copy code')}](command:${COPY_AUTH_CODE_COMMAND_ID})`;
 
-/** Same for "Copy link": no argument, the command copies the link of the attempt in progress. */
-const COPY_LINK_LINK = `[Copy link](command:${COPY_AUTH_LINK_COMMAND_ID})`;
+/**
+ * Same for "Copy link": no argument, the command copies the link of the attempt in progress. Both
+ * links are functions so the visible text follows the language of the host; the `command:` part
+ * is not translated.
+ */
+const copyLinkLink = (): string => `[${l10n.t('Copy link')}](command:${COPY_AUTH_LINK_COMMAND_ID})`;
 
 /** Text of the notification: the instructions, then "Copy code" and/or "Copy link" when they apply. */
 function progressMessage(view: AuthProgressView): string {
   const links = [
-    ...(view.code === undefined ? [] : [COPY_CODE_LINK]),
-    ...(view.copyLink === true ? [COPY_LINK_LINK] : []),
+    ...(view.code === undefined ? [] : [copyCodeLink()]),
+    ...(view.copyLink === true ? [copyLinkLink()] : []),
   ];
   return links.length === 0 ? view.instructions : `${view.instructions} ${links.join(' ')}`;
 }
@@ -89,6 +94,9 @@ function progressMessage(view: AuthProgressView): string {
  * notification (`withProgress`, which has no buttons of its own: "Copy code" is a `command:` link
  * in its text, so the title and the instructions are stripped of `[ ] ( )` first,
  * `vscode-extension` section 7). `confirm` is a modal warning. `copy` writes to the clipboard.
+ * The validation messages of the two boxes and the text of the two links go through `l10n.t`
+ * (the dialog titles, placeholders and the confirmation come already translated from
+ * `providerAuth.ts`).
  *
  * VERIFIED in a real VS Code 1.144.0 on Windows 11 (1/11/2026, `npm run test:integration -- --label
  * fake-server`, 54 passing) through the seams of this module, with the dialogs PRE-ANSWERED by
@@ -132,7 +140,7 @@ export function createProviderAuthUi(options: ProviderAuthUiOptions = {}): AuthU
             ...(prompt.placeholder === undefined ? {} : { placeHolder: prompt.placeholder }),
             password: true,
             ignoreFocusOut: true,
-            validateInput: (text) => (text.trim() === '' ? 'Enter the API key' : undefined),
+            validateInput: (text) => (text.trim() === '' ? l10n.t('Enter the API key') : undefined),
           },
           source.token,
         );
@@ -156,7 +164,7 @@ export function createProviderAuthUi(options: ProviderAuthUiOptions = {}): AuthU
             title: prompt.title,
             ...(prompt.placeholder === undefined ? {} : { placeHolder: prompt.placeholder }),
             ignoreFocusOut: true,
-            validateInput: (text) => (text.trim() === '' ? 'Enter the code' : undefined),
+            validateInput: (text) => (text.trim() === '' ? l10n.t('Enter the code') : undefined),
           },
           source.token,
         );

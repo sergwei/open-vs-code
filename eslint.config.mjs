@@ -53,6 +53,49 @@ const outsideHostMessage = (what) =>
 
 const v1SdkMessage = 'The v1 SDK (`@opencode-ai/sdk`) is not supported; use `@opencode/client`.';
 
+/**
+ * E11-i18n: `@vscode/l10n` is imported ONLY as a namespace (`import * as l10n`), so the exporter of
+ * `scripts/l10n.mjs` (`@vscode/l10n-dev`), which only sees `l10n.t(` calls, extracts every text.
+ * A named or default import (`import { t }`) would hide a text from the catalog without an error.
+ */
+const l10nNamespaceOnly = {
+  selector:
+    "ImportDeclaration[source.value='@vscode/l10n'] > :matches(ImportSpecifier, ImportDefaultSpecifier)",
+  message:
+    "Import @vscode/l10n as a namespace: `import * as l10n from '@vscode/l10n'` (the catalog exporter only sees `l10n.t(`).",
+};
+
+/**
+ * E11-i18n: `vscode.l10n` (host only) is read in `src/extension/l10nBoot.ts` and nowhere else;
+ * every other module calls `@vscode/l10n`, which works in pure modules and in the webview. Three
+ * spellings are caught: `vscode.l10n`, `import { l10n } from 'vscode'` and `const { l10n } = vscode`.
+ * VERIFIED with a probe file under `src/extension/` that used each spelling: `npx eslint` reported
+ * this rule on all three (Windows 11, 04/11/2026); the probe was deleted afterwards.
+ */
+const vscodeL10nOnlyInBoot = {
+  selector: [
+    "MemberExpression[object.name='vscode'][property.name='l10n']",
+    "ImportDeclaration[source.value='vscode'] > ImportSpecifier[imported.name='l10n']",
+    "VariableDeclarator[init.name='vscode'] > ObjectPattern > Property[key.name='l10n']",
+  ].join(', '),
+  message:
+    'Use `l10n.t` from @vscode/l10n; `vscode.l10n` is read only in src/extension/l10nBoot.ts (E11-i18n).',
+};
+
+/**
+ * E11-i18n: in the host, the catalog is written ONLY by `src/extension/l10nEnglish.ts`
+ * (`setHostBundle`, `inEnglish`): `@vscode/l10n` has no getter, so a direct `l10n.config(` elsewhere
+ * would leave the copy `inEnglish` restores out of date and put the log in the wrong language.
+ * Tests are exempt (one catalog per file). VERIFIED with a probe file under `src/extension/` that
+ * called `l10n.config({ contents: {} })`: `npx eslint` reported this rule (Windows 11, 04/11/2026);
+ * the probe was deleted afterwards.
+ */
+const l10nConfigOnlyInEnglish = {
+  selector: "CallExpression[callee.object.name='l10n'][callee.property.name='config']",
+  message:
+    'Use setHostBundle / inEnglish from src/extension/l10nEnglish.ts; a direct l10n.config desyncs the log language (E11-i18n).',
+};
+
 /** Dynamic-import selector for the v1 SDK, applied in src/extension/** (see header). */
 const v1SdkDynamicImport = {
   selector: 'ImportExpression[source.value=/^@opencode-ai.sdk/]',
@@ -160,7 +203,40 @@ export default defineConfig(
     files: ['src/extension/**/*.{ts,tsx}'],
     rules: {
       'no-restricted-imports': ['error', { patterns: [v1SdkPattern] }],
-      'no-restricted-syntax': ['error', v1SdkDynamicImport],
+      'no-restricted-syntax': [
+        'error',
+        v1SdkDynamicImport,
+        l10nNamespaceOnly,
+        vscodeL10nOnlyInBoot,
+        l10nConfigOnlyInEnglish,
+      ],
+    },
+  },
+
+  // The one host file that may read `vscode.l10n` (it repeats the list: a later block replaces it).
+  {
+    files: ['src/extension/l10nBoot.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        v1SdkDynamicImport,
+        l10nNamespaceOnly,
+        l10nConfigOnlyInEnglish,
+      ],
+    },
+  },
+
+  // The one host module that writes the catalog (`l10nEnglish.ts`) and the tests, which are
+  // isolated per file and may load a catalog directly (same list again, without that rule).
+  {
+    files: ['src/extension/l10nEnglish.ts', 'src/extension/**/*.test.{ts,tsx}'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        v1SdkDynamicImport,
+        l10nNamespaceOnly,
+        vscodeL10nOnlyInBoot,
+      ],
     },
   },
 
@@ -169,7 +245,12 @@ export default defineConfig(
     ignores: ['src/extension/**'],
     rules: {
       'no-restricted-imports': ['error', { paths: commonPaths, patterns: commonPatterns }],
-      'no-restricted-syntax': ['error', hostOnlyDynamicImport, v1SdkDynamicImport],
+      'no-restricted-syntax': [
+        'error',
+        hostOnlyDynamicImport,
+        v1SdkDynamicImport,
+        l10nNamespaceOnly,
+      ],
     },
   },
 
@@ -184,7 +265,12 @@ export default defineConfig(
           patterns: [...commonPatterns, ...nodeBuiltinPatterns],
         },
       ],
-      'no-restricted-syntax': ['error', hostAndNodeDynamicImport, v1SdkDynamicImport],
+      'no-restricted-syntax': [
+        'error',
+        hostAndNodeDynamicImport,
+        v1SdkDynamicImport,
+        l10nNamespaceOnly,
+      ],
     },
   },
 

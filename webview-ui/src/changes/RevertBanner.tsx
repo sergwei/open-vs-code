@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { Show } from 'solid-js';
 import type { RevertState } from '../../../src/shared/model';
 import { ChangedFilesList } from './ChangedFilesList';
@@ -40,16 +41,18 @@ export function RevertBanner(props: {
   onOpenFile: (path: string) => void;
 }) {
   return (
-    <section class="revert-banner" aria-label="Reverted messages">
+    <section class="revert-banner" aria-label={l10n.t('Reverted messages')}>
       <p class="revert-banner-title">{revertTitle(props.split)}</p>
       <p class="revert-banner-note">
-        Restore brings back what the revert replaced; sending a message or Discard for good makes it
-        final.
+        {l10n.t(
+          'Restore brings back what the revert replaced; sending a message or Discard for good makes it final.',
+        )}
       </p>
       <Show when={props.revert.files.length > 0}>
         <p class="revert-banner-note">
-          Your own edits to these files since then were replaced too, and edits made while reverted
-          are lost on Restore.
+          {l10n.t(
+            'Your own edits to these files since then were replaced too, and edits made while reverted are lost on Restore.',
+          )}
         </p>
         <p class="revert-banner-caption">{revertFilesCaption(props.revert.files.length)}</p>
         <ChangedFilesList
@@ -67,7 +70,7 @@ export function RevertBanner(props: {
             if (!props.disabled) props.onRestore();
           }}
         >
-          Restore
+          {l10n.t('Restore')}
         </button>
         <button
           type="button"
@@ -77,7 +80,7 @@ export function RevertBanner(props: {
             if (!props.disabled) props.onDiscard();
           }}
         >
-          Discard for good
+          {l10n.t('Discard for good')}
         </button>
       </div>
     </section>

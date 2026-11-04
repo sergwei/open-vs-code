@@ -1,10 +1,11 @@
+import * as l10n from '@vscode/l10n';
 import { createEffect, createMemo, createSignal, For, on, Show } from 'solid-js';
 import type { SessionSummary } from '../../../src/shared/model';
 import { changedFilesSummary } from '../changes/changedFileText';
 import { ChangedFilesList } from '../changes/ChangedFilesList';
 import { childrenOf } from '../sessions/lineage';
 import { SessionPicker } from '../sessions/SessionPicker';
-import { EMPTY_TITLE, sessionLabel } from '../sessions/sessionGroups';
+import { displayLabel, emptyTitle } from '../sessions/sessionGroups';
 import type { ChatStore } from '../store/chatStore';
 import { UsageIndicator } from './UsageIndicator';
 
@@ -55,6 +56,8 @@ const PICKER_ID = 'session-picker';
  * session (surface "tab", Sessions button false, New session true)" and "ok   B7 the chat in the
  * side bar view keeps its Sessions button (surface "view", Sessions button true)"; in jsdom `App.test.tsx` "in an editor tab (surface
  * meta "tab") has no "Sessions" button…". The rest:
+ * E11-i18n: every text goes through `l10n.t`, the untitled title through `emptyTitle` and the
+ * titles of rows through `displayLabel`; the subagent count is one whole message with `{0}`.
  * VERIFIED in jsdom (`App.test.tsx`, `SessionPicker.test.tsx`) and by `npm run test:visual`
  * (steps 1-9, Windows 11, real VS Code; step 10 for the lineage); macOS/Linux UNVERIFIED.
  */
@@ -88,7 +91,7 @@ export function Header(props: {
 
   const title = createMemo(() => {
     const id = state.open.sessionID;
-    return (id === undefined ? undefined : state.sessions[id]?.title) ?? EMPTY_TITLE;
+    return (id === undefined ? undefined : state.sessions[id]?.title) ?? emptyTitle();
   });
   /** The summary row of the open session, if the host has sent it. */
   const openRow = createMemo(() => {
@@ -100,22 +103,23 @@ export function Header(props: {
     const row = openRow();
     if (row === undefined) return undefined;
     if (row.parentID !== undefined) {
-      const label = sessionLabel(state.sessions[row.parentID] ?? {});
+      const label = displayLabel(state.sessions[row.parentID] ?? {});
       return {
         text: `‹ ${label}`,
-        name: `Back to parent session ${label}`,
+        name: l10n.t('Back to parent session {0}', label),
         target: row.parentID,
       };
     }
     if (row.forkOf !== undefined) {
       const origin = state.sessions[row.forkOf];
-      if (origin === undefined)
-        return { text: 'Forked session', name: undefined, target: undefined };
-      const label = sessionLabel(origin);
+      if (origin === undefined) {
+        return { text: l10n.t('Forked session'), name: undefined, target: undefined };
+      }
+      const label = displayLabel(origin);
       return {
-        text: `Forked from ${label}`,
+        text: l10n.t('Forked from {0}', label),
         // Starts with the visible text so voice control ("click Forked from") finds it (WCAG 2.5.3).
-        name: `Forked from ${label}: open the original session`,
+        name: l10n.t('Forked from {0}: open the original session', label),
         target: row.forkOf,
       };
     }
@@ -130,12 +134,12 @@ export function Header(props: {
     const status = state.statuses[child.id]?.type;
     const fields: string[] = [];
     if (child.agent !== undefined) fields.push(child.agent);
-    if (status === 'busy' || status === 'retry') fields.push('Running');
+    if (status === 'busy' || status === 'retry') fields.push(l10n.t('Running'));
     if (
       state.requests.permissions.some((ask) => ask.sessionID === child.id) ||
       state.requests.forms.some((ask) => ask.sessionID === child.id)
     ) {
-      fields.push('Needs input');
+      fields.push(l10n.t('Needs input'));
     }
     return fields.join(' · ');
   };
@@ -147,8 +151,10 @@ export function Header(props: {
    */
   const childName = (child: SessionSummary): string => {
     const meta = childMeta(child);
-    const base = `Open subagent session ${sessionLabel(child)}`;
-    return meta === '' ? base : `${base}, ${meta}`;
+    const title = displayLabel(child);
+    return meta === ''
+      ? l10n.t('Open subagent session {0}', title)
+      : l10n.t('Open subagent session {0}, {1}', title, meta);
   };
   /** Closes the panel; `restoreFocus` puts the focus back on the "Sessions" button. */
   const closePicker = (restoreFocus: boolean): void => {
@@ -160,7 +166,7 @@ export function Header(props: {
     <div class="header-area">
       <Show when={path()}>
         {(current) => (
-          <nav class="session-path" aria-label="Session path">
+          <nav class="session-path" aria-label={l10n.t('Session path')}>
             <Show
               when={current().target}
               fallback={<span class="session-path-text">{current().text}</span>}
@@ -202,7 +208,7 @@ export function Header(props: {
               setPickerOpen(!pickerOpen());
             }}
           >
-            Sessions
+            {l10n.t('Sessions')}
           </button>
         </Show>
         <button
@@ -214,13 +220,13 @@ export function Header(props: {
             props.onNewSession();
           }}
         >
-          New session
+          {l10n.t('New session')}
         </button>
       </header>
       <UsageIndicator store={props.store} />
       <Show when={children().length > 0}>
         <details class="subagent-sessions">
-          <summary>{`Subagent sessions (${String(children().length)})`}</summary>
+          <summary>{l10n.t('Subagent sessions ({0})', children().length)}</summary>
           <ul class="subagent-list">
             <For each={children()}>
               {(child) => (
@@ -234,7 +240,7 @@ export function Header(props: {
                       props.onOpenSession(child.id);
                     }}
                   >
-                    <span class="session-title">{sessionLabel(child)}</span>
+                    <span class="session-title">{displayLabel(child)}</span>
                     <Show when={childMeta(child) !== ''}>
                       <span class="session-meta">{childMeta(child)}</span>
                     </Show>
@@ -250,7 +256,9 @@ export function Header(props: {
           <summary>{changedFilesSummary(state.diff.files.length)}</summary>
           <Show when={state.diff.error}>
             {(failure) => (
-              <p class="changed-files-error">{`Could not refresh the list: ${failure().message}`}</p>
+              <p class="changed-files-error">
+                {l10n.t('Could not refresh the list: {0}', failure().message)}
+              </p>
             )}
           </Show>
           <ChangedFilesList files={state.diff.files} onOpen={props.onOpenChangedFile} />

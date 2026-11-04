@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import {
   createMemo,
   createSignal,
@@ -259,7 +260,7 @@ export function MessageList(props: {
       <div
         class="message-list"
         role="log"
-        aria-label="Conversation"
+        aria-label={l10n.t('Conversation')}
         ref={(element) => {
           list = element;
         }}
@@ -277,7 +278,9 @@ export function MessageList(props: {
         <For each={props.messages}>
           {(message) => (
             <ErrorBoundary
-              fallback={<div class="message-error">This message could not be displayed.</div>}
+              fallback={
+                <div class="message-error">{l10n.t('This message could not be displayed.')}</div>
+              }
             >
               <Switch>
                 <Match when={asUser(message)}>
@@ -285,7 +288,7 @@ export function MessageList(props: {
                     <article class="message message-user">
                       <UserText id={user().id} text={user().text} />
                       <Show when={user().files.length > 0}>
-                        <ul class="message-files" aria-label="Attached files">
+                        <ul class="message-files" aria-label={l10n.t('Attached files')}>
                           <For each={user().files}>
                             {(file) => (
                               <li class="chip">
@@ -305,24 +308,24 @@ export function MessageList(props: {
                         <button
                           type="button"
                           class="secondary message-action"
-                          aria-label={actionLabel('Fork from here', user())}
+                          aria-label={actionLabel(l10n.t('Fork from here'), user())}
                           aria-disabled={props.forkDisabled ? 'true' : undefined}
                           onClick={() => {
                             if (!props.forkDisabled) props.onFork(user());
                           }}
                         >
-                          Fork from here
+                          {l10n.t('Fork from here')}
                         </button>
                         <button
                           type="button"
                           class="secondary message-action"
-                          aria-label={actionLabel('Revert from here', user())}
+                          aria-label={actionLabel(l10n.t('Revert from here'), user())}
                           aria-disabled={props.revertDisabled ? 'true' : undefined}
                           onClick={() => {
                             if (!props.revertDisabled) props.onRevert(user());
                           }}
                         >
-                          Revert from here
+                          {l10n.t('Revert from here')}
                         </button>
                       </div>
                     </article>
@@ -365,8 +368,8 @@ export function MessageList(props: {
                           >
                             <span class="alert-text">
                               {isStopError(error())
-                                ? 'Stopped'
-                                : `Error (${error().code}): ${error().message}`}
+                                ? l10n.t('Stopped')
+                                : l10n.t('Error ({0}): {1}', error().code, error().message)}
                             </span>
                             <Show when={isLast(assistant().id) && props.canRetry && !props.busy}>
                               <button
@@ -374,7 +377,7 @@ export function MessageList(props: {
                                 class="secondary"
                                 onClick={() => props.onRetry()}
                               >
-                                Retry
+                                {l10n.t('Retry')}
                               </button>
                             </Show>
                           </div>
@@ -398,7 +401,7 @@ export function MessageList(props: {
       </div>
       <Show when={!stick()}>
         <button type="button" class="secondary jump-latest" onClick={jumpToLatest}>
-          Jump to latest
+          {l10n.t('Jump to latest')}
         </button>
       </Show>
     </div>

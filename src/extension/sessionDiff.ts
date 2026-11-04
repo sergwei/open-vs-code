@@ -21,8 +21,10 @@
 
 import path from 'node:path';
 import type { FileDiffInfo } from '@opencode/client';
+import * as l10n from '@vscode/l10n';
 import type { ChangedFile, ErrorInfo } from '../shared/model';
 import type { HostToWebview } from '../shared/protocol';
+import { translatedError } from './l10nEnglish';
 import type { ChatApi } from './opencodeClient';
 import type { ServerLog } from './opencodeServer';
 import { resolveInsideFolder, toAttachmentName, type PathImpl } from './pathPolicy';
@@ -332,9 +334,12 @@ function postedKey(files: readonly ChangedFile[], error?: ErrorInfo): string {
 
 /**
  * Error with a stable `name` code, which the controller shows as the code of a notice. The one copy
- * of this helper: `sessionRevert.ts` and `sessionDiffEditor.ts` import it from here.
+ * of this helper: `sessionRevert.ts` and `sessionDiffEditor.ts` import it from here. With a
+ * producer (`() => l10n.t(...)`) the error carries the English twin of its text for the log
+ * (`translatedError`); with a plain string it has none.
  */
-export function codedError(code: string, message: string): Error {
+export function codedError(code: string, message: string | (() => string)): Error {
+  if (typeof message === 'function') return translatedError(message, code);
   const error = new Error(message);
   error.name = code;
   return error;
@@ -556,7 +561,9 @@ export function createSessionDiffs(deps: SessionDiffsDeps): SessionDiffs {
     if (full?.generation === generation && full.listing === current) return full.patches;
     const client = deps.client();
     if (client === undefined || current.range === undefined) {
-      return Promise.reject(codedError('ServerUnavailable', 'The opencode server is not running'));
+      return Promise.reject(
+        codedError('ServerUnavailable', () => l10n.t('The opencode server is not running')),
+      );
     }
     const patches = client.session
       .diff({
@@ -618,18 +625,22 @@ export function createSessionDiffs(deps: SessionDiffsDeps): SessionDiffs {
     async original(sessionID, shown) {
       const checked = target(sessionID, shown);
       if (!checked.ok) {
-        throw codedError('DiffNotListed', 'That file is not in the changed files of this session');
+        throw codedError('DiffNotListed', () =>
+          l10n.t('That file is not in the changed files of this session'),
+        );
       }
       if (checked.target.status === 'added') return '';
       const current = listing;
       const entry = current?.entries.get(shown);
       if (current === undefined || entry === undefined) {
-        throw codedError('DiffNotListed', 'That file is not in the changed files of this session');
+        throw codedError('DiffNotListed', () =>
+          l10n.t('That file is not in the changed files of this session'),
+        );
       }
       const row = (await patchesOf(current)).get(entry.raw);
       const text = row === undefined ? undefined : originalFromPatch(row);
       if (text === undefined) {
-        throw codedError('NoTextDiff', 'The server has no text diff for this file');
+        throw codedError('NoTextDiff', () => l10n.t('The server has no text diff for this file'));
       }
       return text;
     },

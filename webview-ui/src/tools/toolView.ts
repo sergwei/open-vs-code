@@ -41,6 +41,8 @@
  * `running`, `awaiting`, `rejected` or `stopped` state, a CRLF patch and ANSI output. macOS and Linux
  * are UNVERIFIED.
  */
+import * as l10n from '@vscode/l10n';
+import { plural } from '../../../src/shared/l10n';
 import type { ErrorInfo, JsonObject, JsonValue, Part } from '../../../src/shared/model';
 import { deriveToolOutcome } from '../requests/toolOutcome';
 import { isStopError } from '../store/activity';
@@ -130,21 +132,42 @@ export type BodySection =
  */
 const ARG_MAX_CHARS = 80;
 
-/** Titles by tool name. Names are those of opencode 2.0.32 (`bash` is `shell`, `task` is `subagent`). */
-const VERBS: Readonly<Record<string, string>> = {
-  shell: 'Shell',
-  read: 'Read',
-  edit: 'Edit',
-  write: 'Write',
-  patch: 'Patch',
-  grep: 'Grep',
-  glob: 'Glob',
-  webfetch: 'Fetch',
-  websearch: 'Search',
-  skill: 'Skill',
-  question: 'Question',
-  subagent: 'Subagent',
-};
+/**
+ * Title of a tool block by tool name, in the interface language. Names are those of opencode
+ * 2.0.32 (`bash` is `shell`, `task` is `subagent`); a name not listed is shown as the server
+ * named it. A function, not a table built at module level, so the texts follow the locale set at
+ * start-up.
+ */
+function verbOf(name: string): string {
+  switch (name) {
+    case 'shell':
+      return l10n.t('Shell');
+    case 'read':
+      return l10n.t('Read');
+    case 'edit':
+      return l10n.t('Edit');
+    case 'write':
+      return l10n.t('Write');
+    case 'patch':
+      return l10n.t('Patch');
+    case 'grep':
+      return l10n.t('Grep');
+    case 'glob':
+      return l10n.t('Glob');
+    case 'webfetch':
+      return l10n.t('Fetch');
+    case 'websearch':
+      return l10n.t('Search');
+    case 'skill':
+      return l10n.t('Skill');
+    case 'question':
+      return l10n.t('Question');
+    case 'subagent':
+      return l10n.t('Subagent');
+    default:
+      return name;
+  }
+}
 
 type Json = { readonly [key: string]: JsonValue } | undefined;
 
@@ -226,7 +249,9 @@ function outputFiles(part: ToolPart): string[] {
   const items = state.status === 'completed' ? state.output : (state.output ?? []);
   const notes: string[] = [];
   for (const item of items) {
-    if (item.type === 'file') notes.push(`File: ${item.name ?? 'unnamed'} (${item.mime})`);
+    if (item.type === 'file') {
+      notes.push(l10n.t('File: {0} ({1})', item.name ?? l10n.t('unnamed'), item.mime));
+    }
   }
   return notes;
 }
@@ -238,9 +263,19 @@ function extensionOf(path: string): string | undefined {
   return dot <= 0 || dot === name.length - 1 ? undefined : name.slice(dot + 1).toLowerCase();
 }
 
-/** `n` followed by the noun, singular for 1. */
-function count(n: number, singular: string, plural = `${singular}s`): string {
-  return `${String(n)} ${n === 1 ? singular : plural}`;
+/** "1 line" / "3 lines", in the interface language (each form is its own catalog text). */
+function lineCount(n: number): string {
+  return plural(n, l10n.t('{0} line', n), l10n.t('{0} lines', n));
+}
+
+/** "1 file" / "3 files", in the interface language. */
+function fileCount(n: number): string {
+  return plural(n, l10n.t('{0} file', n), l10n.t('{0} files', n));
+}
+
+/** "1 match" / "3 matches", in the interface language. */
+function matchCount(n: number): string {
+  return plural(n, l10n.t('{0} match', n), l10n.t('{0} matches', n));
 }
 
 /** "+3 −1" from the counters of the files, or `undefined` when none is known. */
@@ -278,23 +313,25 @@ export function toolStatus(part: ToolPart, awaiting: boolean): StatusView {
   const state = part.state;
   switch (state.status) {
     case 'streaming':
-      return { status: 'pending', label: 'pending', tone: 'neutral' };
+      return { status: 'pending', label: l10n.t('pending'), tone: 'neutral' };
     case 'running':
       return awaiting
-        ? { status: 'awaiting', label: 'waiting for approval', tone: 'neutral' }
-        : { status: 'running', label: 'running', tone: 'neutral' };
+        ? { status: 'awaiting', label: l10n.t('waiting for approval'), tone: 'neutral' }
+        : { status: 'running', label: l10n.t('running'), tone: 'neutral' };
     case 'completed':
-      return { status: 'completed', label: 'done', tone: 'neutral' };
+      return { status: 'completed', label: l10n.t('done'), tone: 'neutral' };
     case 'error': {
       const outcome = deriveToolOutcome(part);
       if (outcome?.kind === 'permission') {
-        return { status: 'rejected', label: 'rejected', tone: 'neutral' };
+        return { status: 'rejected', label: l10n.t('rejected'), tone: 'neutral' };
       }
       if (outcome?.kind === 'question') {
-        return { status: 'dismissed', label: 'dismissed', tone: 'neutral' };
+        return { status: 'dismissed', label: l10n.t('dismissed'), tone: 'neutral' };
       }
-      if (isStopError(state.error)) return { status: 'stopped', label: 'stopped', tone: 'neutral' };
-      return { status: 'failed', label: 'failed', tone: 'error' };
+      if (isStopError(state.error)) {
+        return { status: 'stopped', label: l10n.t('stopped'), tone: 'neutral' };
+      }
+      return { status: 'failed', label: l10n.t('failed'), tone: 'error' };
     }
   }
 }
@@ -338,16 +375,16 @@ function isNoOutput(text: string): boolean {
 function shellResult(part: ToolPart): string | undefined {
   const metadata = metadataOf(part);
   if (stringAt(metadata, 'status') === 'running' && part.state.status === 'completed') {
-    return 'running in background';
+    return l10n.t('running in background');
   }
   const exit = numberAt(metadata, 'exit');
-  if (exit !== undefined) return `exit ${String(exit)}`;
+  if (exit !== undefined) return l10n.t('exit {0}', exit);
   const signal = stringAt(metadata, 'signal');
-  if (signal !== undefined) return `signal ${signal}`;
-  if (metadata?.['timeout'] === true) return 'timed out';
+  if (signal !== undefined) return l10n.t('signal {0}', signal);
+  if (metadata?.['timeout'] === true) return l10n.t('timed out');
   for (const text of outputTexts(part)) {
     const match = /^Exited with code (-?\d+)$/.exec(text);
-    if (match?.[1] !== undefined) return `exit ${match[1]}`;
+    if (match?.[1] !== undefined) return l10n.t('exit {0}', match[1]);
   }
   return undefined;
 }
@@ -357,7 +394,7 @@ type HeaderParts = Pick<ToolSummary, 'verb' | 'arg' | 'detail' | 'result' | 'ope
 
 /** Verb, argument, detail, result and openable path of a block, without its status. */
 function headerParts(part: ToolPart): HeaderParts {
-  const verb = Object.hasOwn(VERBS, part.name) ? (VERBS[part.name] ?? part.name) : part.name;
+  const verb = verbOf(part.name);
   const input = inputOf(part);
   if (input === undefined) return { verb };
   const metadata = metadataOf(part);
@@ -375,9 +412,9 @@ function headerParts(part: ToolPart): HeaderParts {
       arg(path);
       const first = outputTexts(part)[0] ?? '';
       const lines = /lines (\d+-\d+)/.exec(short(first, 200));
-      if (/^Read directory/.test(first)) parts.result = 'directory';
-      else if (lines?.[1] !== undefined) parts.result = `lines ${lines[1]}`;
-      else if (outputFiles(part).length > 0) parts.result = 'file';
+      if (/^Read directory/.test(first)) parts.result = l10n.t('directory');
+      else if (lines?.[1] !== undefined) parts.result = l10n.t('lines {0}', lines[1]);
+      else if (outputFiles(part).length > 0) parts.result = l10n.t('file');
       if (path !== undefined && !/^Read directory/.test(first)) {
         parts.open = { path };
         const offset = numberAt(input, 'offset');
@@ -396,35 +433,35 @@ function headerParts(part: ToolPart): HeaderParts {
       const path = stringAt(input, 'path') ?? stringAt(input, 'filePath');
       arg(path);
       const content = stringAt(input, 'content');
-      if (content !== undefined) parts.result = count(allAdded(content).length, 'line');
+      if (content !== undefined) parts.result = lineCount(allAdded(content).length);
       if (path !== undefined) parts.open = { path };
       break;
     }
     case 'patch': {
       const files = filesAt(metadata);
       if (files.length === 1 && files[0] !== undefined) arg(files[0].file);
-      else if (files.length > 1) arg(count(files.length, 'file'));
+      else if (files.length > 1) arg(fileCount(files.length));
       parts.result = changeCounts(files);
       break;
     }
     case 'grep': {
       arg(stringAt(input, 'pattern'));
       const where = stringAt(input, 'path');
-      if (where !== undefined && where !== '') parts.detail = `in ${short(where)}`;
+      if (where !== undefined && where !== '') parts.detail = l10n.t('in {0}', short(where));
       const matches = numberAt(metadata, 'matches');
-      if (matches !== undefined) parts.result = count(matches, 'match', 'matches');
+      if (matches !== undefined) parts.result = matchCount(matches);
       else {
         const found = /Found (\d+) match/.exec(outputTexts(part)[0] ?? '');
-        if (found?.[1] !== undefined) parts.result = count(Number(found[1]), 'match', 'matches');
+        if (found?.[1] !== undefined) parts.result = matchCount(Number(found[1]));
       }
       break;
     }
     case 'glob': {
       arg(stringAt(input, 'pattern'));
       const where = stringAt(input, 'path');
-      if (where !== undefined && where !== '') parts.detail = `in ${short(where)}`;
+      if (where !== undefined && where !== '') parts.detail = l10n.t('in {0}', short(where));
       const files = numberAt(metadata, 'count');
-      if (files !== undefined) parts.result = count(files, 'file');
+      if (files !== undefined) parts.result = fileCount(files);
       break;
     }
     case 'webfetch':
@@ -536,7 +573,7 @@ function diffSections(part: ToolPart): BodySection[] {
   if (oldText !== undefined && newText !== undefined) {
     const section: BodySection = {
       kind: 'diff',
-      label: path ?? 'Change',
+      label: path ?? l10n.t('Change'),
       lines: replacement(oldText, newText),
     };
     if (path !== undefined) section.path = path;
@@ -544,7 +581,7 @@ function diffSections(part: ToolPart): BodySection[] {
   }
   const patchText = stringAt(input, 'patchText');
   if (patchText !== undefined) {
-    return [{ kind: 'code', label: 'Patch', text: patchText, from: 'head' }];
+    return [{ kind: 'code', label: l10n.t('Patch'), text: patchText, from: 'head' }];
   }
   return [];
 }
@@ -583,7 +620,7 @@ function diffSections(part: ToolPart): BodySection[] {
 export function toolBody(part: ToolPart): BodySection[] {
   const state = part.state;
   if (state.status === 'streaming') {
-    return [{ kind: 'note', text: 'The tool input is still arriving.' }];
+    return [{ kind: 'note', text: l10n.t('The tool input is still arriving.') }];
   }
   const sections: BodySection[] = [];
   const input = state.input;
@@ -598,9 +635,12 @@ export function toolBody(part: ToolPart): BodySection[] {
         specific = false;
         break;
       }
-      sections.push({ kind: 'code', label: 'Command', text: command, from: 'head' });
+      sections.push({ kind: 'code', label: l10n.t('Command'), text: command, from: 'head' });
       if (state.status === 'running') {
-        sections.push({ kind: 'note', text: 'The output appears when the command finishes.' });
+        sections.push({
+          kind: 'note',
+          text: l10n.t('The output appears when the command finishes.'),
+        });
       } else {
         // The output is the first item that is neither a notice nor the "(no output)" placeholder.
         // The notice is a separate item after the output. A background shell sends
@@ -613,12 +653,12 @@ export function toolBody(part: ToolPart): BodySection[] {
         if (outputText !== undefined) {
           sections.push({
             kind: 'code',
-            label: 'Output',
+            label: l10n.t('Output'),
             text: stripAnsi(outputText),
             from: 'tail',
           });
         } else if (state.status === 'completed') {
-          sections.push({ kind: 'note', text: 'No output.' });
+          sections.push({ kind: 'note', text: l10n.t('No output.') });
         }
         texts.forEach((text, index) => {
           if (index !== outputIndex && text !== '' && !isNoOutput(text)) {
@@ -627,7 +667,7 @@ export function toolBody(part: ToolPart): BodySection[] {
         });
       }
       if (stringAt(state.metadata, 'status') === 'running' && state.status === 'completed') {
-        sections.push({ kind: 'note', text: 'Still running in the background.' });
+        sections.push({ kind: 'note', text: l10n.t('Still running in the background.') });
       }
       break;
     }
@@ -640,7 +680,7 @@ export function toolBody(part: ToolPart): BodySection[] {
         const language = extensionOf(path);
         sections.push({
           kind: 'code',
-          label: 'Contents',
+          label: l10n.t('Contents'),
           text: output,
           from: 'head',
           ...(language === undefined ? {} : { language }),
@@ -667,7 +707,7 @@ export function toolBody(part: ToolPart): BodySection[] {
       }
       const section: BodySection = {
         kind: 'diff',
-        label: path ?? 'New file',
+        label: path ?? l10n.t('New file'),
         lines: allAdded(content),
       };
       if (path !== undefined) section.path = path;
@@ -676,9 +716,9 @@ export function toolBody(part: ToolPart): BodySection[] {
     }
     case 'grep': {
       const groups = parseMatches(texts[0] ?? '');
-      if (groups.length > 0) sections.push({ kind: 'matches', label: 'Matches', groups });
+      if (groups.length > 0) sections.push({ kind: 'matches', label: l10n.t('Matches'), groups });
       else if (output !== '') {
-        sections.push({ kind: 'code', label: 'Result', text: output, from: 'head' });
+        sections.push({ kind: 'code', label: l10n.t('Result'), text: output, from: 'head' });
       }
       break;
     }
@@ -687,15 +727,16 @@ export function toolBody(part: ToolPart): BodySection[] {
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter((line) => line !== '');
-      if (paths.length > 0) sections.push({ kind: 'paths', label: 'Files', paths });
+      if (paths.length > 0) sections.push({ kind: 'paths', label: l10n.t('Files'), paths });
       break;
     }
     case 'webfetch':
     case 'websearch':
     case 'subagent': {
       if (output !== '')
-        sections.push({ kind: 'code', label: 'Result', text: output, from: 'head' });
-      else if (state.status === 'completed') sections.push({ kind: 'note', text: 'No output.' });
+        sections.push({ kind: 'code', label: l10n.t('Result'), text: output, from: 'head' });
+      else if (state.status === 'completed')
+        sections.push({ kind: 'note', text: l10n.t('No output.') });
       break;
     }
     default:
@@ -705,12 +746,13 @@ export function toolBody(part: ToolPart): BodySection[] {
     sections.length = 0;
     sections.push({
       kind: 'code',
-      label: 'Input',
+      label: l10n.t('Input'),
       text: JSON.stringify(input, null, 2),
       from: 'head',
       language: 'json',
     });
-    if (output !== '') sections.push({ kind: 'code', label: 'Output', text: output, from: 'head' });
+    if (output !== '')
+      sections.push({ kind: 'code', label: l10n.t('Output'), text: output, from: 'head' });
     for (const note of outputFiles(part)) sections.push({ kind: 'note', text: note });
   }
   if (state.status === 'error') {
@@ -722,7 +764,7 @@ export function toolBody(part: ToolPart): BodySection[] {
   if (sections.length === 0) {
     sections.push({
       kind: 'note',
-      text: state.status === 'running' ? 'Running…' : 'Nothing to show.',
+      text: state.status === 'running' ? l10n.t('Running…') : l10n.t('Nothing to show.'),
     });
   }
   return sections;

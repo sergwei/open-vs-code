@@ -2,9 +2,10 @@
 // each reason, what the failing step says it searched, the actions each problem offers and the
 // latch of the guide (P1=1). Provenance: FABRICATED connection states built from the shapes of
 // `src/shared/protocol.ts`; real details of a failed detection come from the host tests of phase 1.
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { Catalog } from '../../../src/shared/model';
 import type { ConnectionState } from '../../../src/shared/protocol';
+import { useEnglish, useSpanish } from '../testing';
 import { describeConnection, describeProblem, guideSteps, nextGuideLatch } from './connectionView';
 
 type Unavailable = Extract<ConnectionState, { state: 'unavailable' }>;
@@ -31,6 +32,52 @@ const catalogWith = (count: number): Catalog => ({
   })),
   providers: [],
   agents: [],
+});
+
+afterEach(() => {
+  // The Spanish cases switch the catalog; the rest of the file reads English.
+  useEnglish();
+});
+
+describe('in Spanish (E11-i18n, phase 5a)', () => {
+  // Protects the setup guide and the problem card from a sentence that skips the catalog or breaks
+  // the order of its placeholders. Provenance: the REAL shipped `l10n/bundle.l10n.es.json` through
+  // `useSpanish` and FABRICATED connection states; the look is `test:visual` step 42.
+  it('writes the steps, lines and actions of the guide in Spanish', () => {
+    useSpanish();
+    const steps = guideSteps(
+      failure('binary-missing', 'not found', {
+        checks: [{ source: 'opencode2', outcome: 'not-on-path', detail: '' }],
+      }),
+      undefined,
+    );
+    expect(steps.map((s) => s.title)).toEqual([
+      'Buscar el binario de opencode',
+      'Iniciar el servidor',
+      'Elegir un modelo',
+    ]);
+    expect(steps[0]?.lines).toEqual([
+      'opencode2: no está en PATH',
+      'openVsCode.opencodePath no está definido.',
+    ]);
+    expect(steps[0]?.actions.map((a) => a.label)).toEqual([
+      'Elegir binario…',
+      'Guía de instalación',
+    ]);
+    expect(steps[1]?.lines).toEqual(['Se inicia solo tras el paso 1.']);
+  });
+
+  it('writes the cards, buttons and connection text in Spanish, with the number in place', () => {
+    useSpanish();
+    const stopped = describeProblem(failure('exited'));
+    expect(stopped?.title).toBe('opencode se detuvo');
+    expect(stopped?.actions.map((a) => a.label)).toEqual(['Reiniciar', 'Mostrar registros']);
+    expect(describeProblem({ state: 'reconnecting', attempt: 3 })?.title).toBe(
+      'Reconectando con opencode (intento 3)…',
+    );
+    expect(describeConnection({ state: 'reconnecting', attempt: 3 })).toBe('Reconectando (3)');
+    expect(describeConnection(failure('exited', 'boom'))).toBe('No disponible: boom');
+  });
 });
 
 describe('guideSteps', () => {

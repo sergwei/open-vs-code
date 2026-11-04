@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import {
   createEffect,
   createMemo,
@@ -8,11 +9,12 @@ import {
   onMount,
   Show,
 } from 'solid-js';
+import { plural } from '../../../src/shared/l10n';
 import { MAX_SESSION_SEARCH_LENGTH } from '../../../src/shared/protocol';
 import { useSend } from '../chat/hostContext';
 import { nextRequestId } from '../chat/PromptInput';
 import type { ChatStore } from '../store/chatStore';
-import { groupSessions } from './sessionGroups';
+import { groupSessions, groupTitle } from './sessionGroups';
 import { SessionRow } from './SessionRow';
 
 /** Built from its code point: a literal one in the source trips `no-irregular-whitespace`. */
@@ -43,7 +45,10 @@ export const SEARCH_DEBOUNCE_MS = 250;
  * box; deleting the OPEN session does not close the list or move the focus to the prompt (decision
  * of Sergio, 21/10/2026: the user is inside the list and may act on another row). "Show more"
  * stays focusable and ignores the click while a page is loading (`aria-disabled`, not `disabled`,
- * so the keyboard user keeps their place). VERIFIED by `SessionPicker.test.tsx` in jsdom with a fake host; the real look and the
+ * so the keyboard user keeps their place). E11-i18n: texts go through `l10n.t`, the count through
+ * `plural` and the group titles through `groupTitle` (the group stays an English key).
+ * VERIFIED in Spanish by `SessionPicker.test.tsx` "shows the group titles and the row times in
+ * Spanish" and "reads the labels, placeholder and status from the shipped Spanish catalog". VERIFIED by `SessionPicker.test.tsx` in jsdom with a fake host; the real look and the
  * focus ring are checked by `npm run test:visual` (step 9), Windows only; screen readers UNVERIFIED.
  */
 export function SessionPicker(props: {
@@ -95,9 +100,11 @@ export function SessionPicker(props: {
 
   const statusText = createMemo(() => {
     const { loading, loaded, rows } = state.browser;
-    if (loading && rows.length === 0) return 'Loading sessions…';
+    if (loading && rows.length === 0) return l10n.t('Loading sessions…');
     if (loaded && rows.length === 0) {
-      return state.browser.search.trim() === '' ? 'No sessions yet' : 'No sessions match';
+      return state.browser.search.trim() === ''
+        ? l10n.t('No sessions yet')
+        : l10n.t('No sessions match');
     }
     return '';
   });
@@ -194,11 +201,11 @@ export function SessionPicker(props: {
   createEffect(() => {
     const { loading, loaded, rows } = state.browser;
     if (loading) {
-      announce('Loading sessions…');
+      announce(l10n.t('Loading sessions…'));
     } else if (loaded) {
       const count = rows.length;
       if (count === 0) announce(statusText());
-      else announce(`${String(count)} session${count === 1 ? '' : 's'}`);
+      else announce(plural(count, l10n.t('{0} session', count), l10n.t('{0} sessions', count)));
     }
   });
 
@@ -208,14 +215,14 @@ export function SessionPicker(props: {
     if (target === undefined || state.sessionOps[target.id] !== undefined) return;
     setRenameTarget(undefined);
     const row = state.browser.rows.find((held) => held.id === target.id);
-    if (row?.title === target.title) announce(`Renamed to ${target.title}`);
+    if (row?.title === target.title) announce(l10n.t('Renamed to {0}', target.title));
   });
 
   return (
     <div
       class="session-picker"
       role="dialog"
-      aria-label="Sessions"
+      aria-label={l10n.t('Sessions')}
       ref={(element) => {
         panel = element;
       }}
@@ -224,8 +231,8 @@ export function SessionPicker(props: {
       <input
         type="search"
         class="session-search"
-        aria-label="Search sessions"
-        placeholder="Search by title"
+        aria-label={l10n.t('Search sessions')}
+        placeholder={l10n.t('Search by title')}
         maxlength={MAX_SESSION_SEARCH_LENGTH}
         value={search()}
         ref={(element) => {
@@ -250,8 +257,8 @@ export function SessionPicker(props: {
       <div class="session-groups" onKeyDown={onListKeyDown}>
         <For each={labels()}>
           {(label) => (
-            <section class="session-group" aria-label={label}>
-              <h3 class="session-group-title">{label}</h3>
+            <section class="session-group" aria-label={groupTitle(label)}>
+              <h3 class="session-group-title">{groupTitle(label)}</h3>
               <ul class="session-list">
                 <For each={rowsOf(label)}>
                   {(row) => (
@@ -301,7 +308,7 @@ export function SessionPicker(props: {
             runQuery(state.browser.search, true);
           }}
         >
-          Show more
+          {l10n.t('Show more')}
         </button>
       </Show>
     </div>

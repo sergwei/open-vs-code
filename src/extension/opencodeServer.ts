@@ -23,11 +23,13 @@ import {
   type ChildProcess,
   type ChildProcessWithoutNullStreams,
 } from 'node:child_process';
+import * as l10n from '@vscode/l10n';
 import { randomBytes } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Readable } from 'node:stream';
+import { bothTexts, inEnglish } from './l10nEnglish';
 import { parseOpencodeVersion } from './opencodeBinary';
 
 /**
@@ -106,15 +108,30 @@ export function safeLog(log: ServerLog): ServerLog {
 export type ServerStartErrorCode =
   'timeout' | 'exited' | 'spawn-failed' | 'folder-missing' | 'port-zero' | 'bad-url' | 'aborted';
 
-/** Typed startup failure; `code` lets the manager choose a reaction (plan B for `port-zero`). */
+/**
+ * Typed startup failure; `code` lets the manager choose a reaction (plan B for `port-zero`).
+ *
+ * `message` is what the user may read (translated); `logMessage` is the same text in English for
+ * the OutputChannel (decision of Sergio, E11-i18n: logs stay in English), and defaults to
+ * `message` for the errors built from plain strings. Built with {@link startError} so the
+ * `l10n.t` literal is written once. VERIFIED by `opencodeServer.test.ts` ("keeps the log text of a
+ * start failure in English while the message is Spanish").
+ */
 export class ServerStartError extends Error {
   constructor(
     readonly code: ServerStartErrorCode,
     message: string,
+    readonly logMessage: string = message,
   ) {
     super(message);
     this.name = 'ServerStartError';
   }
+}
+
+/** Builds a {@link ServerStartError} whose text is evaluated in both languages from one producer. */
+function startError(code: ServerStartErrorCode, produce: () => string): ServerStartError {
+  const { message, logMessage } = bothTexts(produce);
+  return new ServerStartError(code, message, logMessage);
 }
 
 /** A started server: the child (owned by the caller) and the credentials to talk to it. */
@@ -257,19 +274,25 @@ export function parseUrlLine(
   try {
     url = new URL(raw);
   } catch {
-    return { error: 'bad-url', message: `the server printed an invalid url: ${raw}` };
+    return { error: 'bad-url', message: l10n.t('the server printed an invalid url: {0}', raw) };
   }
   if (url.protocol !== 'http:' || !LOOPBACK_HOSTS.includes(url.hostname)) {
     return {
       error: 'bad-url',
-      message: `the server printed a url that is not plain http on loopback: ${raw}`,
+      message: l10n.t('the server printed a url that is not plain http on loopback: {0}', raw),
     };
   }
   if (url.port === '0') {
-    return { error: 'port-zero', message: `the server printed port 0 in its url: ${raw}` };
+    return {
+      error: 'port-zero',
+      message: l10n.t('the server printed port 0 in its url: {0}', raw),
+    };
   }
   if (url.port === '') {
-    return { error: 'bad-url', message: `the server printed a url without a port: ${raw}` };
+    return {
+      error: 'bad-url',
+      message: l10n.t('the server printed a url without a port: {0}', raw),
+    };
   }
   return { url: url.origin };
 }
@@ -290,7 +313,8 @@ export function basicAuthHeader(password: string): string {
  * Resolves with the server URL from the first stdout line that {@link parseUrlLine} accepts.
  *
  * Rejects with `timeout`, with `port-zero`/`bad-url` when the line is ours but unusable, and
- * with `exited` if stdout closes first. It does NOT kill the child: the caller owns the process.
+ * with `exited` if stdout closes first (each error carries its English `logMessage`). It does NOT
+ * kill the child: the caller owns the process.
  * The line interface is deliberately kept open after success so stdout keeps being drained
  * (lines go to `log.debug`): closing it pauses the stream (VERIFIED by `reviewer`, Node 20.19.6),
  * and that an undrained pipe blocks the child is HYPOTHESIS. Non-matching lines before the URL
@@ -308,7 +332,9 @@ export function readUrlLine(
     const timer = setTimeout(() => {
       settled = true;
       reject(
-        new ServerStartError('timeout', `timed out after ${timeoutMs} ms waiting for the url line`),
+        startError('timeout', () =>
+          l10n.t('timed out after {0} ms waiting for the url line', timeoutMs),
+        ),
       );
     }, timeoutMs);
     lines.on('line', (line) => {
@@ -323,14 +349,23 @@ export function readUrlLine(
       }
       settled = true;
       clearTimeout(timer);
-      if ('error' in result) reject(new ServerStartError(result.error, result.message));
-      else resolve(result.url);
+      if ('error' in result) {
+        // The same line parsed again in English: `parseUrlLine` has the one `l10n.t` literal.
+        const english = inEnglish(() => parseUrlLine(line));
+        reject(
+          new ServerStartError(
+            result.error,
+            result.message,
+            english !== undefined && 'error' in english ? english.message : result.message,
+          ),
+        );
+      } else resolve(result.url);
     });
     lines.on('close', () => {
       clearTimeout(timer);
       if (!settled) {
         settled = true;
-        reject(new ServerStartError('exited', 'stdout closed before the url line'));
+        reject(startError('exited', () => l10n.t('stdout closed before the url line')));
       }
     });
   });
@@ -423,7 +458,9 @@ async function assertDirectory(folder: string): Promise<void> {
   } catch {
     // falls through to the error below
   }
-  throw new ServerStartError('folder-missing', `the workspace folder does not exist: ${folder}`);
+  throw startError('folder-missing', () =>
+    l10n.t('the workspace folder does not exist: {0}', folder),
+  );
 }
 
 /**
@@ -465,7 +502,9 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
   const platform = options.platform ?? process.platform;
   const timeoutMs = options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
   const killWaitMs = options.killWaitMs ?? STOP_KILL_WAIT_MS;
-  if (signal?.aborted === true) throw new ServerStartError('aborted', 'the start was cancelled');
+  if (signal?.aborted === true) {
+    throw startError('aborted', () => l10n.t('the start was cancelled'));
+  }
   await assertDirectory(folder);
 
   const password = randomBytes(24).toString('base64url');
@@ -486,24 +525,30 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
   if (child.pid !== undefined) log.info(`spawned pid ${String(child.pid)}`);
 
   const stderrTail: string[] = [];
-  let exitInfo: string | undefined;
+  let exitedWith: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   let removeAbort = (): void => undefined;
   // Without an 'error' listener a failed spawn (ENOENT) throws inside the extension host.
   const failure = new Promise<never>((_resolve, reject) => {
     child.once('error', (error: NodeJS.ErrnoException) => {
-      const reason =
-        error.code === 'ENOENT'
-          ? `opencode binary not found: ${command}`
-          : `could not launch ${command}: ${error.message}`;
-      reject(new ServerStartError('spawn-failed', reason));
+      reject(
+        startError('spawn-failed', () =>
+          error.code === 'ENOENT'
+            ? l10n.t('opencode binary not found: {0}', command)
+            : l10n.t('could not launch {0}: {1}', command, error.message),
+        ),
+      );
     });
     child.once('exit', (code, exitSignal) => {
-      exitInfo = `exited (code ${String(code)}, signal ${String(exitSignal)})`;
-      reject(new ServerStartError('exited', exitInfo));
+      exitedWith = { code, signal: exitSignal };
+      reject(
+        startError('exited', () =>
+          l10n.t('exited (code {0}, signal {1})', String(code), String(exitSignal)),
+        ),
+      );
     });
     if (signal !== undefined) {
       const onAbort = (): void => {
-        reject(new ServerStartError('aborted', 'the start was cancelled'));
+        reject(startError('aborted', () => l10n.t('the start was cancelled')));
       };
       signal.addEventListener('abort', onAbort, { once: true });
       removeAbort = () => {
@@ -532,9 +577,19 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
     if (child.pid !== undefined) await waitForExit(child, killWaitMs);
     if (error instanceof ServerStartError && error.code === 'exited') {
       await new Promise((resolve) => setTimeout(resolve, STDERR_FLUSH_MS));
-      const what = exitInfo ?? error.message;
       const tail = stderrTail.length === 0 ? '' : `: ${stderrTail.join(' | ')}`;
-      throw new ServerStartError('exited', `opencode ${what} before printing its url${tail}`);
+      // Own key per case (no translated sentence inside another one). With no recorded exit, the
+      // `exited` error came from stdout closing; the stderr tail is raw child output, not ours.
+      throw startError('exited', () =>
+        exitedWith === undefined
+          ? l10n.t('opencode closed stdout before printing its url{0}', tail)
+          : l10n.t(
+              'opencode exited (code {0}, signal {1}) before printing its url{2}',
+              String(exitedWith.code),
+              String(exitedWith.signal),
+              tail,
+            ),
+      );
     }
     throw error;
   } finally {
@@ -595,17 +650,30 @@ export type ServerInfoErrorKind = 'transport' | 'unauthorized' | 'http-status' |
  * fetch failed` whose `cause` carries the code. The `TimeoutError` DOMException is VERIFIED only
  * by a probe under plain Node 24.22 on Windows 11 (22/10/2026: "The operation was aborted due to
  * timeout"); inside the extension host it is UNVERIFIED.
+ *
+ * The `malformed` messages go through `l10n.t`, so `logMessage` carries their English text for the
+ * log (`describeFailureCause` reads it; decision of Sergio, E11-i18n: logs stay in English); it
+ * defaults to `message`, which for the other kinds is already English.
  */
 export class ServerInfoError extends Error {
+  readonly logMessage: string;
+
   constructor(
     readonly kind: ServerInfoErrorKind,
     message: string,
     readonly status?: number,
-    options?: { cause?: unknown },
+    options?: { cause?: unknown; logMessage?: string },
   ) {
     super(message, options);
+    this.logMessage = options?.logMessage ?? message;
     this.name = 'ServerInfoError';
   }
+}
+
+/** A `malformed` {@link ServerInfoError} whose text is evaluated in both languages from one producer. */
+function malformedInfo(produce: () => string): ServerInfoError {
+  const { message, logMessage } = bothTexts(produce);
+  return new ServerInfoError('malformed', message, undefined, { logMessage });
 }
 
 /**
@@ -662,14 +730,14 @@ export async function fetchServerInfo(
   try {
     body = await response.json();
   } catch {
-    throw new ServerInfoError('malformed', 'GET /api/info returned a body that is not JSON');
+    throw malformedInfo(() => l10n.t('GET /api/info returned a body that is not JSON'));
   }
   if (typeof body !== 'object' || body === null || !('version' in body)) {
-    throw new ServerInfoError('malformed', 'GET /api/info returned a body without a version');
+    throw malformedInfo(() => l10n.t('GET /api/info returned a body without a version'));
   }
   const { version } = body;
   if (typeof version !== 'string') {
-    throw new ServerInfoError('malformed', 'GET /api/info returned a version that is not a string');
+    throw malformedInfo(() => l10n.t('GET /api/info returned a version that is not a string'));
   }
   const pid = 'pid' in body && typeof body.pid === 'number' ? body.pid : undefined;
   return { version, pid };
@@ -679,27 +747,39 @@ export async function fetchServerInfo(
  * Judges the version the server reports: major other than 2 is `unsupported`, a different
  * `x.y.z` than {@link PINNED_OPENCODE_VERSION} or an unparseable one (`local`) is a `warn` that
  * lets the start continue, an exact match is `ok`. Reuses `parseOpencodeVersion` from the
- * detection. VERIFIED by unit tests (synthetic strings).
+ * detection. The `message` is translated for the user; the manager logs the English twin by
+ * running this function again through `inEnglish` (logs stay in English, decision of Sergio,
+ * E11-i18n). VERIFIED by unit tests (synthetic strings).
  */
 export function checkServerVersion(version: string): VersionCheck {
   const parsed = parseOpencodeVersion(version);
   if (parsed === undefined) {
     return {
       kind: 'warn',
-      message: `the server reports the version "${version}", which is not x.y.z; continuing`,
+      message: l10n.t(
+        'the server reports the version "{0}", which is not x.y.z; continuing',
+        version,
+      ),
     };
   }
   if (parsed.major !== 2) {
     return {
       kind: 'unsupported',
-      message: `open-vs-code requires opencode v2 but the server reports ${parsed.version}`,
+      message: l10n.t(
+        'open-vs-code requires opencode v2 but the server reports {0}',
+        parsed.version,
+      ),
     };
   }
   if (parsed.version !== PINNED_OPENCODE_VERSION) {
     return {
       kind: 'warn',
-      message: `the server reports opencode ${parsed.version}; this extension is built against ${PINNED_OPENCODE_VERSION}`,
+      message: l10n.t(
+        'the server reports opencode {0}; this extension is built against {1}',
+        parsed.version,
+        PINNED_OPENCODE_VERSION,
+      ),
     };
   }
-  return { kind: 'ok', message: `opencode ${parsed.version}` };
+  return { kind: 'ok', message: l10n.t('opencode {0}', parsed.version) };
 }

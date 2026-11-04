@@ -21,6 +21,7 @@
 
 import path from 'node:path';
 import type { FileDiffInfo, SessionRevert } from '@opencode/client';
+import * as l10n from '@vscode/l10n';
 import type { RevertState } from '../shared/model';
 import type { HostToWebview } from '../shared/protocol';
 import type { ServerLog } from './opencodeServer';
@@ -231,13 +232,15 @@ export function createSessionReverts(deps: SessionRevertsDeps): SessionReverts {
       const found = checked.ok ? held?.rows.get(shown) : undefined;
       if (found === undefined) {
         return Promise.reject(
-          codedError('DiffNotListed', 'That file is not among the files of the revert'),
+          codedError('DiffNotListed', () =>
+            l10n.t('That file is not among the files of the revert'),
+          ),
         );
       }
       const text = originalFromPatch(found.row);
       if (text === undefined) {
         return Promise.reject(
-          codedError('NoTextDiff', 'The server has no text diff for this file'),
+          codedError('NoTextDiff', () => l10n.t('The server has no text diff for this file')),
         );
       }
       return Promise.resolve(text);

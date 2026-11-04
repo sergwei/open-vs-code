@@ -119,6 +119,32 @@ describe('fingerprint', () => {
     expect(fingerprint(root).hash).not.toBe(changed);
   });
 
+  /**
+   * Protects the decision of E11-i18n (04/11/2026): the translation catalogs change the texts that
+   * step 42 and the installed copy of step 25 show, so `package.nls*.json` and `l10n/**` move the
+   * fingerprint, with line endings normalised. Fabricated files in a temporary tree.
+   */
+  it('hashes package.nls*.json and l10n/, with normalised line endings', () => {
+    put('package.nls.json', '{\n  "a": "Show"\n}\n');
+    put('package.nls.es.json', '{\n  "a": "Mostrar"\n}\n');
+    put('l10n/bundle.l10n.es.json', '{\n  "Send": "Enviar"\n}\n');
+    const before = fingerprint(root).hash;
+    expect(hashedFiles(root)).toEqual(
+      expect.arrayContaining([
+        'package.nls.json',
+        'package.nls.es.json',
+        'l10n/bundle.l10n.es.json',
+      ]),
+    );
+    put('package.nls.es.json', '{\r\n  "a": "Mostrar"\r\n}\r\n');
+    expect(fingerprint(root).hash).toBe(before);
+    put('package.nls.es.json', '{\n  "a": "Ver"\n}\n');
+    const nls = fingerprint(root).hash;
+    expect(nls).not.toBe(before);
+    put('l10n/bundle.l10n.es.json', '{\n  "Send": "Mandar"\n}\n');
+    expect(fingerprint(root).hash).not.toBe(nls);
+  });
+
   it('survives a file esbuild cannot parse, hashed raw', () => {
     put('src/extension/broken.ts', 'export const = ;\n');
     const first = fingerprint(root).hash;

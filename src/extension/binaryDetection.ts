@@ -9,20 +9,20 @@ import {
 } from './ids';
 import {
   describeDetection,
+  describeDetectionForLog,
   detectOpencodeBinary,
   nodeDeps,
   type DetectionResult,
 } from './opencodeBinary';
+import { failureActionLabel } from './externalServer';
 import { launchCommandFor, launchModesOf, testLaunchFrom } from './testLaunch';
-
-const OPEN_SETTINGS = 'Open Settings';
-const SHOW_LOGS = 'Show Logs';
 
 /**
  * Wires opencode binary detection (issue #7) into VS Code: runs it now and again whenever
  * `openVsCode.opencodePath` changes.
  *
- * Thin adapter over the pure `opencodeBinary.ts`: reads the setting, logs every attempt,
+ * Thin adapter over the pure `opencodeBinary.ts`: reads the setting, logs every attempt (and the
+ * verdict in English even when the notification is translated),
  * and shows a native notification (not the webview, which does not exist yet and where
  * `viewsWelcome` does not apply; HYPOTHESIS: per the VS Code contribution-points docs,
  * not run, F5 will show it). Fire-and-forget so `activate` never waits on a child
@@ -34,7 +34,8 @@ const SHOW_LOGS = 'Show Logs';
  * `CHAT_SHOW_GRACE_MS` (3 s) for it via `notifyUnlessChatShows`, then shows nothing if the chat
  * shows the problem or a newer detection replaced this one (`current === run`), and warns once
  * otherwise. With the view closed the warning therefore arrives 3 s late (accepted by Sergio).
- * The warning is no longer awaited by `detect` (the wait happens inside the helper). Each
+ * The Open Settings and Show Logs buttons are the translated `failureActionLabel` texts and the
+ * answer is compared with them. The warning is no longer awaited by `detect` (the wait happens inside the helper). Each
  * decision is logged as `binary detection: native notification …`.
  * VERIFIED on Windows 11, VS Code 1.144.0 (28/10/2026) by a full `npm run test:visual` (exit 0):
  * "ok no native OpenCode warning appears while the setup guide is shown (center read: true; [])"
@@ -119,14 +120,17 @@ export function registerBinaryDetection(
 
     for (const attempt of result.attempts) {
       const where = attempt.path === undefined ? '' : ` ${attempt.path}`;
-      const line = `binary detection: ${attempt.label}${where}: ${attempt.outcome} (${attempt.detail})`;
+      // `logDetail` is the English twin: the OutputChannel never gets the translated `detail`.
+      const line = `binary detection: ${attempt.label}${where}: ${attempt.outcome} (${attempt.logDetail})`;
       if (attempt.outcome === 'ok' || attempt.outcome === 'duplicate') channel.info(line);
       else channel.warn(line);
     }
 
     const description = describeDetection(result);
-    if (description.level === 'info') channel.info(description.message);
-    else channel.warn(description.message);
+    // The user reads `description.message` in the language of VS Code; the log keeps English.
+    const logged = describeDetectionForLog(result).message;
+    if (description.level === 'info') channel.info(logged);
+    else channel.warn(logged);
     try {
       onResult?.(result);
     } catch (error) {
@@ -138,7 +142,10 @@ export function registerBinaryDetection(
 
     // E2 (issue #85, P3=2; issue #87): the guide or card of the chat already shows this, so the
     // warning waits for the chat's `ready` and is withheld if the chat shows the problem by then.
-    const buttons = description.notify === 'actions' ? [OPEN_SETTINGS, SHOW_LOGS] : [];
+    // Translated labels (the same two as the server failure buttons); VS Code hands back the label.
+    const openSettings = failureActionLabel('Open Settings');
+    const showLogs = failureActionLabel('Show Logs');
+    const buttons = description.notify === 'actions' ? [openSettings, showLogs] : [];
     await notifyUnlessChatShows({
       gate: surface?.gate,
       showsProblem: () => surface?.showsProblem() ?? false,
@@ -151,12 +158,12 @@ export function registerBinaryDetection(
         void vscode.window
           .showWarningMessage(description.message, ...buttons)
           .then(async (choice) => {
-            if (choice === OPEN_SETTINGS) {
+            if (choice === openSettings) {
               await vscode.commands.executeCommand(
                 'workbench.action.openSettings',
                 OPENCODE_PATH_SETTING,
               );
-            } else if (choice === SHOW_LOGS) {
+            } else if (choice === showLogs) {
               channel.show();
             }
           })
