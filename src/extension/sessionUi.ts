@@ -150,8 +150,8 @@ export async function confirmFolderDelete(info: {
  * filter leaves the session with a tab" and "V2 Default Dark Modern: without a filter the view has no
  * Clear Filters". HYPOTHESIS: the answer is read from each item's `key`, never from its label, so
  * a translated label cannot change the filters (read from the code; no test runs the picker with
- * a Spanish label: that would need the `locale-es` suite to pick a filter). NOT observed: the
- * keyboard path of the picker (Space to tick).
+ * a Spanish label: that would need a test in a Spanish VS Code to pick a filter, and none
+ * exists). NOT observed: the keyboard path of the picker (Space to tick).
  */
 export async function pickFilters(
   current: SessionTreeFilters,

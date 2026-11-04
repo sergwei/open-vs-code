@@ -44,11 +44,11 @@ export function chatWebviewOptions(extensionUri: vscode.Uri): vscode.WebviewOpti
  * E11-i18n: the language and the bundle of VS Code go into the HTML (`vscode.env.language` and
  * `hostBundle` of `l10nBoot.ts`, `undefined` in English); this is the only call site of
  * `buildWebviewHtml`, so the three surfaces get them.
- * VERIFIED in a Spanish window (Windows 11, VS Code 1.145.0, 04/11/2026), `test:visual` step 42:
- * "A-wide the chat document says <html lang="es">" and "A-wide the prompt box placeholder is the
- * Spanish one of the catalog" (the placeholder can only come from the bundle in the HTML). Only the
- * chat view was looked at there; the Settings tab and the editor-tab chat share this call but were
- * not opened in Spanish. UNVERIFIED on macOS and Linux.
+ * Seen once in a Spanish VS Code window on 04/11/2026 (Windows 11, VS Code 1.145.0): the chat
+ * document said `<html lang="es">` and the prompt placeholder was the Spanish one of the catalog,
+ * with a test since removed; no test keeps it. Only the chat view was looked at; the Settings tab
+ * and the editor-tab chat share this call but were not opened in Spanish. UNVERIFIED on macOS and
+ * Linux.
  */
 export function renderChatWebview(
   webview: vscode.Webview,

@@ -42,7 +42,7 @@ afterEach(() => {
 describe('in Spanish (E11-i18n, phase 5a)', () => {
   // Protects the setup guide and the problem card from a sentence that skips the catalog or breaks
   // the order of its placeholders. Provenance: the REAL shipped `l10n/bundle.l10n.es.json` through
-  // `useSpanish` and FABRICATED connection states; the look is `test:visual` step 42.
+  // `useSpanish` and FABRICATED connection states; the look in Spanish is checked by no test.
   it('writes the steps, lines and actions of the guide in Spanish', () => {
     useSpanish();
     const steps = guideSteps(

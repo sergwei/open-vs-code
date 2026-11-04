@@ -8,7 +8,6 @@ import { defineConfig } from '@vscode/test-cli';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LANGUAGE_PACK_ES, prepareLanguagePackForStable } from './test/visual/languagePack.mjs';
 
 /**
  * Isolated user data dir of the test instance.
@@ -141,7 +140,7 @@ const main = {
   launchArgs: [...common.launchArgs, '--log', 'trace', '--log', 'sergwei.open-vs-code:info'],
   // Relative to this file. Compiled by `npm run compile:integration`, not by Vitest.
   files:
-    'out/test/integration/**/!(realOpencode|externalServer|fakeServer|defaultLocation|projectPlugins|localeEs).test.js',
+    'out/test/integration/**/!(realOpencode|externalServer|fakeServer|defaultLocation|projectPlugins).test.js',
 };
 fs.mkdirSync(path.join(userDataDir, 'User'), { recursive: true });
 fs.writeFileSync(
@@ -444,77 +443,8 @@ fs.writeFileSync(
   ),
 );
 
-/**
- * Configuration of `localeEs.test.ts` (E11-i18n): the extension in a VS Code that really runs in
- * Spanish, so the manifest and the host texts can be read translated.
- *
- * Why it is not just `--locale=es`: without a language pack VS Code resolves `en`, and the pack
- * that `installExtensions` of test-cli installs lands in the DEFAULT profile, not in ours. The
- * recipe (spike of 04/11/2026, details in `test/visual/languagePack.mjs`): the pack goes into a
- * private extensions dir, one throw-away window registers it in `languagepacks.json` of the private
- * user data dir, and the real run (`--locale=es`, extensions disabled but ours) resolves `es`. It
- * runs at load time ONLY when this label is selected (`--label locale-es`) or no label is given,
- * because it downloads the pack and opens a window for a few seconds the first time; the profile is
- * kept between runs (`.vscode-test/user-data-es`, `.vscode-test/extensions-es`), so later loads do
- * nothing. A failure throws and stops the run: a Spanish suite that silently ran in English would
- * prove nothing. No folder (no server), `--password-store=basic` as in the other private profiles.
- * VERIFIED on Windows 11, VS Code 1.145.0 (04/11/2026, the full integration run on the final tree
- * of E11-i18n, 4 passing): `--label locale-es` passed "runs in a Spanish VS Code", "reads the
- * manifest title of Show Logs in Spanish", "reads the title of every command and the description
- * of a setting in Spanish" and "logs the host locale es with the loaded bundle". Needs the
- * network the first time (Marketplace
- * download of the pack): on CI it is one more download per OS. UNVERIFIED on macOS and Linux until
- * the CI runs it.
- */
-const localeEsUserDataDir = path.join(import.meta.dirname, '.vscode-test', 'user-data-es');
-const localeEsExtensionsDir = path.join(import.meta.dirname, '.vscode-test', 'extensions-es');
-const localeEs = {
-  ...common,
-  label: 'locale-es',
-  env: { ...env, OPEN_VS_CODE_TEST_USER_DATA_DIR: localeEsUserDataDir },
-  files: 'out/test/integration/localeEs.test.js',
-  launchArgs: [
-    '--disable-extensions',
-    `--user-data-dir=${localeEsUserDataDir}`,
-    `--extensions-dir=${localeEsExtensionsDir}`,
-    '--locale=es',
-    '--password-store=basic',
-  ],
-};
-/**
- * The labels named on the command line (`--label a,b`, `--label=a`, repeated); empty means all.
- * `-l` is the alias `@vscode/test-cli` declares for `--label` (`option('label', { alias: 'l' })` in
- * `node_modules/@vscode/test-cli/out/cli/args.mjs`), so `-l main` and `-l=main` count too: without
- * them the language pack would be prepared (download plus warm-up window) for a run that does not
- * ask for `locale-es`. HYPOTHESIS for `-l=x` (yargs reads it as `-l x`; not run here).
- */
-function requestedLabels(argv) {
-  const labels = [];
-  argv.forEach((arg, index) => {
-    const value =
-      arg === '--label' || arg === '-l'
-        ? argv[index + 1]
-        : arg.startsWith('--label=')
-          ? arg.slice('--label='.length)
-          : arg.startsWith('-l=')
-            ? arg.slice('-l='.length)
-            : '';
-    if (value) labels.push(...value.split(','));
-  });
-  return labels;
-}
-const labelsAsked = requestedLabels(process.argv);
-if (labelsAsked.length === 0 || labelsAsked.includes('locale-es')) {
-  await prepareLanguagePackForStable({
-    userDataDir: localeEsUserDataDir,
-    extensionsDir: localeEsExtensionsDir,
-    packId: LANGUAGE_PACK_ES,
-    locale: 'es',
-  });
-}
-
 export default defineConfig(
   process.env.OPEN_VS_CODE_REAL_OPENCODE
-    ? [main, realOpencode, externalServer, fakeServer, defaultLocation, projectPlugins, localeEs]
-    : [main, externalServer, fakeServer, defaultLocation, projectPlugins, localeEs],
+    ? [main, realOpencode, externalServer, fakeServer, defaultLocation, projectPlugins]
+    : [main, externalServer, fakeServer, defaultLocation, projectPlugins],
 );

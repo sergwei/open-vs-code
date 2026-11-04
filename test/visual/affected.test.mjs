@@ -56,17 +56,16 @@ describe('selectForFiles', () => {
     expect(selectForFiles(['src/extension/modsChat.test.ts']).mode).toBe('none');
   });
 
-  // E11-i18n: the language catalogs are read only by the window of step 42, so they select the
-  // `l10n` group and not the full run; the base manifest catalog and the boots stay cross-cutting
-  // (the cross-cutting list below). FABRICATED file lists: this checks `affected.mjs` only.
-  it('maps the language catalogs to the l10n group, not to a full run', () => {
+  // E11-i18n: no step runs in another language, so the language catalogs have no visual effect; the
+  // base manifest catalog stays cross-cutting. FABRICATED file lists: this checks `affected.mjs` only.
+  it('gives the language catalogs no visual effect, but not the base manifest catalog', () => {
     for (const file of [
       'package.nls.es.json',
       'package.nls.pt-br.json',
       'l10n/bundle.l10n.es.json',
       'l10n/bundle.l10n.json',
     ]) {
-      expect(selectForFiles([file]), file).toMatchObject({ mode: 'groups', groups: ['l10n'] });
+      expect(selectForFiles([file]), file).toMatchObject({ mode: 'none' });
     }
     expect(selectForFiles(['package.nls.json']).mode).toBe('full');
   });

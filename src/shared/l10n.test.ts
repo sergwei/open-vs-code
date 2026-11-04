@@ -5,9 +5,8 @@ import { currentLocale, formatParts, isL10nBundle, plural, setLocale } from './l
  * Guards the helpers of E11-i18n that both bundles share. Fabricated input throughout: what they
  * protect is the choice of the singular/plural text, the order of the pieces of a translated
  * sentence and the validation of the bundle the webview reads from its HTML. Whether a real VS
- * Code in Spanish picks the same forms is NOT covered: the `locale-es` integration label reads the
- * manifest title and the host log line, and `test:visual` step 42 the prompt placeholder, none of
- * them a plural.
+ * Code in Spanish picks the same forms is NOT covered: no test runs in a Spanish VS Code (the
+ * integration label and the `test:visual` step that did were removed on 04/11/2026).
  */
 
 afterEach(() => {

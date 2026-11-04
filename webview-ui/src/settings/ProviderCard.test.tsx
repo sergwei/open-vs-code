@@ -348,7 +348,7 @@ describe('in Spanish (E11-i18n)', () => {
   // Protects the Settings tab from a text that skips the catalog: the way to connect, the
   // hints, the primary button and Cancel must follow the language. Provenance: the REAL shipped
   // `l10n/bundle.l10n.es.json` read from the file through `useSpanish`, FABRICATED rows in jsdom;
-  // the look and the overflow in Spanish are `test:visual` step 42 (cell F).
+  // the look and the overflow in Spanish are checked by no test.
   afterEach(() => {
     useEnglish();
   });

@@ -228,7 +228,7 @@ describe('in Spanish (E11-i18n)', () => {
   // buttons, the "Always" confirmation with its broad-rule warning and the cascade hint must all
   // follow the language, while what the card POSTS stays the same. Provenance: the REAL shipped
   // `l10n/bundle.l10n.es.json` read from the file through `useSpanish`, the fabricated ask of this
-  // file in jsdom; the look and the overflow in Spanish are `test:visual` step 42 (cell D).
+  // file in jsdom; the look and the overflow in Spanish are checked by no test.
   afterEach(() => {
     useEnglish();
   });

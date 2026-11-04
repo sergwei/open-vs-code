@@ -6,9 +6,10 @@ import { bootL10n } from './l10nBoot';
 /**
  * Guards the boot of the webview translations (E11-i18n P2=1). Fabricated documents: they prove
  * that a valid meta translates, and that a missing or broken one degrades to English instead of
- * throwing. They do NOT prove that the host writes the meta (`webviewHtml.test.ts`); that a real
- * VS Code in Spanish delivers it is what `test:visual` step 42 checks. Importing the module also boots the
- * jsdom `document` once, which is why every test resets the library state afterwards.
+ * throwing. They do NOT prove that the host writes the meta (`webviewHtml.test.ts`), nor that a real
+ * VS Code in Spanish delivers it: no test runs in one (the Spanish window of `test:visual` was
+ * removed on 04/11/2026). Importing the module also boots the jsdom `document` once, which is why
+ * every test resets the library state afterwards.
  */
 
 /** Builds a document with the given `lang` and, when `meta` is a string, the l10n meta. */

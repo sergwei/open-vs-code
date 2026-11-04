@@ -94,11 +94,10 @@ function escapeAttribute(value: string): string {
  * VERIFIED by the unit tests "writes lang and the l10n meta, escaped, and the meta round-trips
  * through the parser" (`"`, `<`, `&` and `'` in the bundle, same exact CSP as without a bundle) and
  * "translates the Loading fallback with the configured bundle", both with fabricated input. In a
- * real Spanish window (Windows 11, VS Code 1.145.0, 04/11/2026) `test:visual` step 42 passed "A-wide
- * the chat document says <html lang="es">" and "A-wide the prompt box placeholder is the Spanish
- * one of the catalog", so the `lang` attribute and the meta bundle reach the webview. NOT observed
- * in a real window: the translated "Loading..." fallback and the escaping of a bundle with
- * quotes. UNVERIFIED on macOS and Linux.
+ * real Spanish window it was seen once (Windows 11, VS Code 1.145.0, 04/11/2026) that the chat
+ * document said `<html lang="es">` and the placeholder was the Spanish one, with a test since
+ * removed; no test keeps it. NOT observed in a real window: the translated "Loading..." fallback and
+ * the escaping of a bundle with quotes. UNVERIFIED on macOS and Linux.
  */
 export function buildWebviewHtml(options: WebviewHtmlOptions): string {
   const { cspSource, nonce } = options;

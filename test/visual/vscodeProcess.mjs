@@ -18,7 +18,6 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { LANGUAGE_PACKS, prepareLanguagePack } from './languagePack.mjs';
 
 /** Asks the OS for a free TCP port by binding port 0, then releases it (small race, accepted). */
 export function freePort() {
@@ -241,13 +240,6 @@ function installExtension(repoRoot, extensionsDir) {
  * key from a previous run. `withCopilot: true` does not write the two keys that hide the secondary
  * side bar and turn the built-in AI features off (issue #98).
  *
- * `locale` (E11-i18n, step 42; `'es'` is the only one known) starts the window in that language:
- * `--locale=<locale>` plus a profile that really resolves it, which needs the language pack
- * installed and registered (`prepareLanguagePack`, cached under `.vscode-test/language-pack-<locale>/`
- * so only the first run downloads it). The extensions dir is that cached one, and the profile gets
- * a copy of its `languagepacks.json`. Not combinable with `installed`. The first call on a checkout
- * needs the network and opens a throw-away window for a few seconds.
- *
  * `openVsCode.opencodePath` is the fixture (see {@link fakeEnv}) unless `opencodePath` overrides it
  * (E2 step 0 passes a path that does not exist); `startDown` starts with the fixture's `.down`
  * marker in place; the fixture's state file lives in
@@ -267,35 +259,13 @@ export async function startVSCode({
   installed,
   chatLocation,
   withCopilot,
-  locale,
 }) {
   const executable = await downloadAndUnzipVSCode('stable');
   const userDataDir = path.join(workDir, 'user-data');
-  // With `locale` the extensions dir is the CACHED one that holds the language pack (see below),
-  // not a per-run dir, so it is never wiped here.
-  const extensionsDir =
-    locale === undefined
-      ? path.join(workDir, 'extensions')
-      : path.join(repoRoot, '.vscode-test', `language-pack-${locale}`, 'extensions');
+  const extensionsDir = path.join(workDir, 'extensions');
   fs.rmSync(userDataDir, { recursive: true, force: true });
-  if (locale === undefined) fs.rmSync(extensionsDir, { recursive: true, force: true });
+  fs.rmSync(extensionsDir, { recursive: true, force: true });
   if (installed === true) installExtension(repoRoot, extensionsDir);
-  if (locale !== undefined) {
-    // E11-i18n: the pack is installed once per checkout and registered by one throw-away window
-    // (`languagePack.mjs`); each run starts its fresh profile with a COPY of that profile's
-    // `languagepacks.json`, which points into the cached extensions dir.
-    const packId = LANGUAGE_PACKS[locale];
-    if (packId === undefined) throw new Error(`no language pack known for locale "${locale}"`);
-    const packsFile = await prepareLanguagePack({
-      executable,
-      userDataDir: path.join(repoRoot, '.vscode-test', `language-pack-${locale}`, 'user-data'),
-      extensionsDir,
-      packId,
-      locale,
-    });
-    fs.mkdirSync(userDataDir, { recursive: true });
-    fs.copyFileSync(packsFile, path.join(userDataDir, 'languagepacks.json'));
-  }
   const xdgRoot = path.join(workDir, 'opencode-xdg');
   fs.rmSync(xdgRoot, { recursive: true, force: true });
   const stateFile = path.join(workDir, 'fake-opencode-state.json');
@@ -369,7 +339,6 @@ export async function startVSCode({
         ? []
         : ['--disable-extensions', `--extensionDevelopmentPath=${repoRoot}`]),
       ...(restricted === true ? [] : ['--disable-workspace-trust']),
-      ...(locale === undefined ? [] : [`--locale=${locale}`]),
       '--skip-release-notes',
       '--skip-welcome',
       `--remote-debugging-port=${String(port)}`,

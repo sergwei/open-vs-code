@@ -215,7 +215,7 @@ describe('in Spanish (E11-i18n, phase 5a)', () => {
   // Protects the prompt bar from a text that skips the catalog: every name, tooltip, placeholder and
   // live-region count must follow the language. Provenance: the REAL shipped
   // `l10n/bundle.l10n.es.json` read from the file through `useSpanish`, a fabricated prompt state in
-  // jsdom; the look and the overflow in Spanish are `test:visual` step 42.
+  // jsdom; the look and the overflow in Spanish are checked by no test.
   it('reads its labels, placeholder and live-region counts from the shipped Spanish catalog', () => {
     useSpanish();
     const { textarea, type, plus } = setup();
