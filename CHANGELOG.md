@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-04
+
+First release on the Visual Studio Marketplace and Open VSX.
+
 ### Added
 
 - **Spanish and a way to add languages**: the manifest (commands, settings, views), the notices and
