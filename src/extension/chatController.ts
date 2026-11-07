@@ -94,11 +94,25 @@
 // for <sid>: <n> files`, `revert cleared for <sid>`, `revert committed for <sid>`, `revert
 // refused: <reason>`, `revert commit cancelled <sid>`, `revert diff opened (<status>)`, `revert
 // diff open refused: not listed|session not open`; and `prompt accepted for <sid> (input <id>)`.
+//
+// E3-work-mode: the work mode of each session (Manual / Auto, `workMode.ts`). In Auto the HOST
+// answers `once` to the permission requests of the session and its subagents instead of showing a
+// card. New stable log lines, ids and actions only, never a resource: `work mode <manual|auto> for
+// <sid>` (or `for draft of pane <n>`), `permission auto-approved <id> for <sid> (<action>)`,
+// `permission auto-approve failed <id>: <code>` and `permission auto-approve skipped <id>: gone`.
 
 import type { V2Event } from '@opencode/client';
 import * as l10n from '@vscode/l10n';
 import { plural } from '../shared/l10n';
-import type { Catalog, ErrorInfo, ModelRef, SessionStatus, SessionSummary } from '../shared/model';
+import type {
+  Catalog,
+  ErrorInfo,
+  ModelRef,
+  PermissionAsk,
+  SessionStatus,
+  SessionSummary,
+  WorkMode,
+} from '../shared/model';
 import {
   dispatch,
   isComposeInBounds,
@@ -133,6 +147,7 @@ import type { ChatApi } from './opencodeClient';
 import { safeLog, type ServerLog } from './opencodeServer';
 import { createPendingRequests, type PendingSummary } from './pendingRequests';
 import { createRequestResolutions } from './requestResolutions';
+import { AUTO_RETRY_DELAYS_MS, createWorkModes } from './workMode';
 import { bothTexts, logErrorOf, translatedError } from './l10nEnglish';
 import type { ModsSink } from './modEvents';
 import type { ServerConfigSink } from './serverConfig';
@@ -762,6 +777,14 @@ export class ChatController {
    */
   private readonly resolutions = createRequestResolutions({ now: () => Date.now() });
   /**
+   * The work mode of each session and the draft of each empty pane (E3-work-mode), in memory only:
+   * a reload starts every session in Manual (decision of Sergio, 07/11/2026). Like the
+   * resolutions it is never emptied by a server restart: session ids survive it.
+   */
+  private readonly workModes = createWorkModes();
+  /** The last `workMode.state` posted to each pane, so {@link syncWorkModes} posts only changes. */
+  private readonly workModeSent = new Map<number, WorkMode>();
+  /**
    * Requests the stream announced or resolved while a resync was reading REST, so the snapshot can
    * be completed with them (same problem and cure as `translator.mergeLive` for messages: the
    * webview REPLACES its requests with the snapshot). Only filled while a resync is in flight, so
@@ -1021,7 +1044,8 @@ export class ChatController {
    * Removes a surface (it was closed): its pending work is cut off and it stops receiving. The
    * session it showed is no longer tracked by the translator. If it held the keyboard focus, the
    * focus state is recomputed from the panes left (false when none), so the context key does not
-   * stay true for a surface that is gone. Unknown ids are ignored.
+   * stay true for a surface that is gone. Unknown ids are ignored. The pane's draft work mode goes
+   * with it; the modes of sessions stay (another pane may show them).
    */
   detachPane(paneId: number): void {
     const pane = this.panes.get(paneId);
@@ -1038,6 +1062,8 @@ export class ChatController {
     this.panes.delete(paneId);
     this.restored.delete(paneId);
     this.lostSession.delete(paneId);
+    this.workModes.forgetPane(paneId);
+    this.workModeSent.delete(paneId);
     this.syncTracked();
   }
 
@@ -1067,13 +1093,185 @@ export class ChatController {
     return this.panes.get(paneId);
   }
 
-  /** Tells the translator which sessions are shown now (one per pane, without repeats). */
+  /**
+   * Tells the translator which sessions are shown now (one per pane, without repeats), and
+   * {@link syncWorkModes} because the mode a pane shows follows its session.
+   */
   private syncTracked(): void {
     const ids = new Set<string>();
     for (const pane of this.panes.values()) {
       if (pane.sessionID !== undefined) ids.add(pane.sessionID);
     }
     this.translator.setTracked([...ids]);
+    this.syncWorkModes(); // every change of the session a pane shows passes through here
+  }
+
+  /**
+   * The work mode pane `pane` shows: that of its session (following the root of its lineage,
+   * {@link WorkModes.modeFor}) or, with no session, its draft. For display only: whether a request
+   * is answered by the host is decided with a COMPLETE chain ({@link covers}).
+   */
+  private modeOfPane(pane: ChatPane): WorkMode {
+    return pane.sessionID === undefined
+      ? this.workModes.draftOf(pane.id)
+      : this.workModes.modeFor(this.lineage.chain(pane.sessionID));
+  }
+
+  /**
+   * Posts `workMode.state` to every pane whose mode differs from the last one posted to it. A pane
+   * never told counts as `manual`, which is also what a new webview document starts with, so Manual
+   * costs no message (every existing flow keeps its exact sequence of posts). Idempotent. Called
+   * whenever a pane's session or a mode changes; `onPaneReady` forgets the last value first,
+   * because a new document knows only that default.
+   */
+  private syncWorkModes(): void {
+    for (const pane of this.panes.values()) {
+      const mode = this.modeOfPane(pane);
+      if ((this.workModeSent.get(pane.id) ?? 'manual') === mode) continue;
+      this.workModeSent.set(pane.id, mode);
+      pane.post({ type: 'workMode.state', mode });
+    }
+  }
+
+  /**
+   * `workMode.set`: puts the session pane `pane` shows in `mode`, or, with no session yet, the
+   * draft its first prompt will hand to the session it creates. Logs the stable line `work mode
+   * <mode> for <sid>` (or `for draft of pane <n>`), tells every pane whose mode changed and, when
+   * the mode is Auto, answers the requests already waiting ({@link sweepAuto}, decision Q4=1).
+   */
+  private setWorkMode(pane: ChatPane, mode: WorkMode): void {
+    const sessionID = pane.sessionID;
+    if (sessionID === undefined) {
+      this.workModes.setDraft(pane.id, mode);
+      this.log.info(`work mode ${mode} for draft of pane ${pane.id}`);
+    } else {
+      this.workModes.setSession(sessionID, mode);
+      this.log.info(`work mode ${mode} for ${sessionID}`);
+    }
+    this.syncWorkModes();
+    if (mode === 'auto') void this.sweepAuto();
+  }
+
+  /**
+   * Flips pane `paneId` between Manual and Auto: the "OpenCode: Toggle Work Mode" command. The host
+   * owns the mode, so the command acts here and not through the webview. An unknown pane is ignored.
+   */
+  toggleWorkMode(paneId: number): void {
+    const pane = this.panes.get(paneId);
+    if (pane === undefined) return;
+    this.setWorkMode(pane, this.modeOfPane(pane) === 'auto' ? 'manual' : 'auto');
+  }
+
+  /**
+   * True when the host must answer `ask` itself: its session is in Auto, the chain up to a known
+   * root is complete (an incomplete one counts as Manual until {@link resolveLineage} finishes, the
+   * safe side) and the request is not one `workMode.ts` keeps for the user (`keepsForUser` lists
+   * them; this method does not).
+   */
+  private covers(ask: PermissionAsk): boolean {
+    const complete = this.lineage.rootOf(ask.sessionID) !== undefined;
+    return this.workModes.shouldAutoApprove(
+      ask,
+      complete ? this.lineage.chain(ask.sessionID) : undefined,
+    );
+  }
+
+  /**
+   * Handles a `permission.asked` on its way through {@link publish}: when {@link covers} says Auto,
+   * it is remembered for its record, answered by {@link autoApprove} and NOT tracked nor routed (no
+   * card, no notification, no badge). Returns `true` when it was taken. A duplicate of one already
+   * claimed is swallowed too; one whose auto-approve failed is left to the normal path (a card).
+   */
+  private interceptAuto(message: HostToWebview): boolean {
+    if (message.type !== 'permission.asked') return false;
+    const ask = message.permission;
+    if (this.workModes.isFailed(ask.id) || !this.covers(ask)) return false;
+    if (!this.workModes.claim(ask.id)) return true;
+    this.resolutions.observe(message);
+    void this.autoApprove(ask, true);
+    return true;
+  }
+
+  /**
+   * Answers `ask` with `once` (never `always`: that writes a rule into opencode's database), as the
+   * TUI and app of upstream do on the client side. Marks the record `auto` BEFORE the call, since
+   * the `permission.resolved` event can reach us before the HTTP answer. A failure is retried after
+   * each of {@link AUTO_RETRY_DELAYS_MS}, giving up early if the session is no longer Auto; the final
+   * failure marks the request failed, logs `permission auto-approve failed <id>: <code>`, warns the
+   * panes that show it and, with `showCard`, hands the request to the normal path so its card and
+   * attention appear (a swept request already has its card). `PermissionNotFoundError` means someone
+   * else answered or the turn was interrupted: no card, a resync heals the registry. Never rejects.
+   * Logs ids and the action, never the resources.
+   */
+  private async autoApprove(ask: PermissionAsk, showCard: boolean): Promise<void> {
+    const { id, sessionID, action } = ask;
+    this.resolutions.markAuto(id);
+    let code: string | undefined;
+    for (let attempt = 0; ; attempt += 1) {
+      const client = this.client;
+      if (client === undefined || this.disposed) {
+        this.resolutions.unmarkAuto(id);
+        this.workModes.release(id);
+        return;
+      }
+      try {
+        await client.permission.reply({ sessionID, requestID: id, decision: 'once' });
+        this.log.info(`permission auto-approved ${id} for ${sessionID} (${action})`);
+        return;
+      } catch (error) {
+        if (tagOf(error) === 'PermissionNotFoundError') {
+          this.resolutions.unmarkAuto(id);
+          this.log.info(`permission auto-approve skipped ${id}: gone`);
+          await this.healIfStale(error);
+          return;
+        }
+        code = toErrorInfo(error, this.secrets).code;
+      }
+      const delay = AUTO_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      if (this.disposed || !this.covers(ask)) break;
+    }
+    this.resolutions.unmarkAuto(id);
+    this.workModes.fail(id);
+    this.log.warn(`permission auto-approve failed ${id}: ${code ?? 'Unknown'}`);
+    if (showCard) this.publish([{ type: 'permission.asked', permission: ask }]);
+    for (const pane of this.displayingPanes(sessionID)) {
+      pane.post({
+        type: 'notice',
+        level: 'warning',
+        error: {
+          code: 'AutoApproveFailed',
+          message: l10n.t('Auto mode could not approve a request; answer it below'),
+        },
+      });
+    }
+  }
+
+  /**
+   * Answers with {@link autoApprove} the permission cards already waiting that {@link covers} now
+   * takes (a pane just went Auto, or a subagent's chain just completed), with the same exceptions.
+   * It reads the full requests from the server because the registry keeps only a summary without
+   * the resources and metadata `keepsForUser` needs; a failed read is logged and leaves the cards as they are.
+   * Never rejects.
+   */
+  private async sweepAuto(): Promise<void> {
+    const client = this.client;
+    if (client === undefined || !this.pending.list().some((p) => p.kind === 'permission')) return;
+    let asks: PermissionAsk[];
+    try {
+      asks = (await client.permission.request.list()).data.map(toPermissionAsk);
+    } catch (error) {
+      this.log.debug(`auto-approve sweep could not list requests: ${logErrorOf(error)}`);
+      return;
+    }
+    if (this.disposed || client !== this.client) return;
+    for (const ask of asks) {
+      // Only cards that are on screen: the rest are the business of the stream and the resync.
+      if (this.pending.find('permission', ask.id) === undefined) continue;
+      if (!this.covers(ask) || !this.workModes.claim(ask.id)) continue;
+      void this.autoApprove(ask, false);
+    }
   }
 
   /**
@@ -1195,6 +1393,10 @@ export class ChatController {
    * restart" and "resyncs a tab that gained the request through another path during the walk".
    * UNVERIFIED: the `disposed` flag alone (`dispose` also bumps the epoch, so no case isolates it)
    * and a real subagent that asks for permission (the fake server has none).
+   * E3-work-mode: when the walk ends current it also runs {@link sweepAuto}, because a chain that
+   * just became complete may put the request under an Auto root. VERIFIED by
+   * `chatController.workMode.test.ts` "keeps the card of a request with an incomplete chain until
+   * the walk completes it, then sweeps it" (fabricated client, 07/11/2026).
    */
   private async resolveLineage(sessionID: string): Promise<void> {
     const client = this.client;
@@ -1222,6 +1424,9 @@ export class ChatController {
     }
     // A read that REJECTED skipped the check inside the loop: repeat it for a stale walk.
     if (this.disposed || epoch !== this.lineageEpoch || client !== this.client) return;
+    // E3-work-mode: a complete chain may turn a waiting card into one Auto answers (decision T2=1
+    // kept it a card until now); the sweep does nothing when no permission is pending.
+    void this.sweepAuto();
     if (!this.pending.hasSession(sessionID)) return;
     const gained = this.displayingPanes(sessionID).filter((pane) => !before.has(pane.id));
     if (gained.length > 0) void this.resync(gained);
@@ -1757,15 +1962,20 @@ export class ChatController {
    * Issue #77, E4: every `session.upserted` feeds the lineage before it is routed and every
    * `session.removed` takes the id out of it afterwards, so a request that follows its session's
    * row finds the chain.
+   * E3-work-mode: a `permission.asked` that {@link interceptAuto} takes is neither tracked nor
+   * routed (no registry entry, no card, no attention), and a `session.removed` also forgets that
+   * session's work mode.
    */
   private publish(messages: readonly HostToWebview[]): void {
     let changed = false;
     const sink = this.deps.sessionList;
     for (const message of messages) {
-      if (this.trackRequest(message)) changed = true;
       // Before the route: a `permission.asked` that follows its session's row in the same batch
       // must already find the chain (issue #77 E4).
       if (message.type === 'session.upserted') this.lineage.learn([message.session]);
+      // E3-work-mode: in Auto the host answers by itself and the request goes nowhere else.
+      if (this.interceptAuto(message)) continue;
+      if (this.trackRequest(message)) changed = true;
       this.route(this.withResolution(message));
       // The tree follows the session events even with no pane open (`route` reaches only panes).
       if (
@@ -1781,6 +1991,7 @@ export class ChatController {
       if (message.type === 'session.removed') {
         this.onSessionRemoved(message.sessionID);
         this.lineage.forget(message.sessionID);
+        this.workModes.forgetSession(message.sessionID);
       }
     }
     if (changed) this.deps.attention.update(this.pending.list());
@@ -1936,6 +2147,10 @@ export class ChatController {
    * ({@link ChatPane.flushComposes}; a stale one arrives with `send` false). Last, the `ui.command`s of issue #35 that waited for this document
    * ({@link runUiCommand}), so New Session or Stop act on the state the snapshot just set.
    * Unknown pane ids are ignored.
+   * E3-work-mode: right after the mods state the pane gets its `workMode.state` when it is not the
+   * default (Manual), even with the server down, since the mode does not depend on it. VERIFIED by
+   * `chatController.workMode.test.ts` "sends the same state to two panes on one session and a new
+   * document gets it on ready".
    */
   async onPaneReady(paneId: number): Promise<void> {
     const pane = this.paneById(paneId);
@@ -1945,6 +2160,10 @@ export class ChatController {
     // E10-mods: the mods UI state does not depend on the server, so it goes out before the early
     // return below and a new document gets its bands and commands even with the server down.
     this.publishMods(pane);
+    // A new document knows only the default (Manual): forget what was posted so the sync sends
+    // the pane's mode when it is not that.
+    this.workModeSent.delete(pane.id);
+    this.syncWorkModes();
     if (this.client === undefined) {
       // A pane bound to a restored session gets no empty snapshot: its document would persist "no
       // session" and a second Reload with the server down would lose it (decision T3=1). The
@@ -2105,6 +2324,14 @@ export class ChatController {
    * requests are pending the attention feature is told again, and a pending request whose chain is
    * still incomplete starts {@link resolveLineage}. Each pane's snapshot carries only the requests
    * it shows ({@link publishSnapshot}).
+   * E3-work-mode: the permissions that {@link covers} takes (Auto, complete chain, not one that
+   * `keepsForUser` keeps for the user) are taken out of the registry, the snapshots and the attention update, so they never
+   * flash as a card; they stay in the memory of answered requests (their record needs the ask) and
+   * are answered by {@link autoApprove} once the snapshots went out, unless an answer for the same
+   * id is already in flight ({@link WorkModes.claim}), in which case the resync does nothing. A
+   * request whose auto-approve failed is not taken again and shows as the normal card.
+   * VERIFIED by `chatController.workMode.test.ts` "keeps the request out of the snapshot of a
+   * resync while its answer is in flight" (fabricated client, Windows 11, 07/11/2026).
    */
   async resync(only?: readonly ChatPane[]): Promise<void> {
     const client = this.client;
@@ -2199,7 +2426,19 @@ export class ChatController {
         return;
       }
       const current = stillCurrent();
-      const requests = this.completeWithLive(restRequests);
+      const everything = this.completeWithLive(restRequests);
+      // E3-work-mode: the permissions Auto answers never become cards, not even for the instant of
+      // the snapshot; `autoAsks` are answered after the registry and the panes have their share.
+      const autoAsks = everything.permissions.filter(
+        (ask) => !this.workModes.isFailed(ask.id) && this.covers(ask),
+      );
+      const requests: PendingAsks =
+        autoAsks.length === 0
+          ? everything
+          : {
+              permissions: everything.permissions.filter((ask) => !autoAsks.includes(ask)),
+              forms: everything.forms,
+            };
       const pendingChanged = this.pending.replaceAll(requests.permissions, requests.forms);
       // A snapshot that taught the lineage something can change who shows a request that was
       // already pending, so the attention feature reads `displays` again (it must be idempotent).
@@ -2209,13 +2448,16 @@ export class ChatController {
       for (const request of this.pending.list()) this.ensureLineage(request.sessionID);
       // So a request first seen here (asked before this host connected) can still be resolved
       // into a record when its `*.resolved` arrives.
-      this.resolutions.rememberAsks(requests.permissions, requests.forms);
+      this.resolutions.rememberAsks(everything.permissions, everything.forms);
       targets.forEach((pane, index) => {
         const read = reads[index];
         if (read !== undefined && current.includes(pane)) {
           this.publishSnapshot(pane, read, token, requests);
         }
       });
+      for (const ask of autoAsks) {
+        if (this.workModes.claim(ask.id)) void this.autoApprove(ask, true);
+      }
       publishTreeHalf();
     } catch (error) {
       const info = toErrorInfo(error, this.secrets);
@@ -4296,6 +4538,9 @@ export class ChatController {
       'server.restart': () => {
         this.deps.server.restart();
       },
+      'workMode.set': (m) => {
+        this.setWorkMode(pane, m.mode);
+      },
       'logs.show': () => {
         this.deps.server.showLogs();
       },
@@ -4882,6 +5127,12 @@ export class ChatController {
    * own OpenCode.log); `test:visual` step 14 repeated it with the real UI at 09:56:55.960 /
    * 09:56:55.989 / 09:56:58.038 (same log lines, same OS and versions). NOT observed: the host
    * refusing an unlisted variant against a real server, macOS and Linux (UNVERIFIED).
+   *
+   * E3-work-mode: a session this prompt CREATES inherits the work mode the pane chose before it
+   * existed (its draft), and logs `work mode <mode> for <sid>`. VERIFIED by
+   * `chatController.workMode.test.ts` "gives the mode chosen before the first prompt to the session
+   * that prompt creates" and by the integration case "answers permissions by itself in Auto work
+   * mode, with no card, badge or notification" (fake server, Windows 11, 07/11/2026).
    */
   private async sendPrompt(
     pane: ChatPane,
@@ -4961,6 +5212,12 @@ export class ChatController {
             ...(model === undefined ? {} : { model }),
           })
         ).id;
+        // E3-work-mode: the mode chosen before the session existed becomes the session's own.
+        const draft = this.workModes.takeDraft(pane.id);
+        if (draft !== undefined) {
+          this.workModes.setSession(sessionID, draft);
+          this.log.info(`work mode ${draft} for ${sessionID}`);
+        }
         if (agent !== undefined) this.log.info(`agent selected ${agent} for ${sessionID}`);
         if (model !== undefined) {
           this.log.info(

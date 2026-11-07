@@ -802,6 +802,20 @@ describe('connection', () => {
   });
 });
 
+// E3-work-mode: `workMode.state` REPLACES the mode, and a document starts in `manual` (the host
+// sends no message for Manual on a fresh document). FABRICATED host messages.
+describe('workMode', () => {
+  it('starts manual and applies each workMode.state, in both directions', () => {
+    withStore((store) => {
+      expect(store.state.workMode).toBe('manual');
+      store.apply({ type: 'workMode.state', mode: 'auto' });
+      expect(store.state.workMode).toBe('auto');
+      store.apply({ type: 'workMode.state', mode: 'manual' });
+      expect(store.state.workMode).toBe('manual');
+    });
+  });
+});
+
 // Issue #86 ("Checking…" after Choose binary…). Provenance: FABRICATED host messages in the order
 // the controller posts them (`setup.binary` before the `connection.state` of the new detection).
 describe('binaryCheck (issue #86)', () => {

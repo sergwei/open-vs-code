@@ -62,6 +62,7 @@ import {
   TEST_SESSION_ORGANIZATION_COMMAND_ID,
   TEST_SETTINGS_MESSAGE_COMMAND_ID,
   TEST_SETTINGS_STATE_COMMAND_ID,
+  TOGGLE_WORK_MODE_COMMAND_ID,
   UNARCHIVE_SESSION_COMMAND_ID,
   UNPIN_SESSION_COMMAND_ID,
   VIEW_CONTAINER_ID,
@@ -1207,6 +1208,115 @@ describe('fake server', function () {
     log.assertAbsent('attention: notified');
     log.assertAbsent('turn finished: interrupted');
     assert.strictEqual(countOf(log, 'turn finished:'), 1, `log:\n${log.added()}`);
+  });
+
+  /** Empties the sidebar chat's session, then toggles it to Auto: the draft its next prompt inherits. */
+  async function startAutoSession(log: LogCursor): Promise<void> {
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'session.new',
+      requestId: `work-mode-new-${String(Date.now())}`,
+    });
+    await sleep(500);
+    await vscode.commands.executeCommand(TOGGLE_WORK_MODE_COMMAND_ID);
+    await log.waitFor('work mode auto for draft of pane', 5_000);
+  }
+
+  /**
+   * E3-work-mode, Auto: a session toggled to Auto (palette command, before its first prompt) has
+   * the HOST answer `once` to an `edit` request, so the turn ends with no `permission asked`, no
+   * badge and no notification. The absences are checked after a margin because the badge and the
+   * notification have two triggers (the ask and the end of the turn).
+   *
+   * Protects: the draft handed to the session the first prompt creates, the interception before the
+   * registry and the routes, and the record flag. It does NOT show that a real opencode accepts the
+   * reply (the fixture is synthetic; the `once` of a real server was seen in `realOpencode.test.ts`
+   * for a `.env` read).
+   */
+  it('answers permissions by itself in Auto work mode, with no card, badge or notification', async function () {
+    const log = await openLogCursor();
+    await startAutoSession(log);
+    await sendPrompt(log, 'ASK_PERMISSION ASK_EDIT: edit the sample');
+    const answered = await matchInLog(
+      log,
+      /permission auto-approved (per_\S+) for (ses_\S+) \(edit\)/,
+      TURN_WAIT_MS,
+      'permission auto-approved',
+    );
+    const [, permissionID] = answered;
+    assert.ok(permissionID, 'id missing from the log line');
+    await log.waitFor(`permission ${permissionID} resolved: once`, 10_000);
+    await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+    log.mark();
+    await sleep(SETTLE_MS);
+    log.assertAbsent('attention: notified');
+    log.assertAbsent('attention: badge 1');
+    assert.ok(
+      !log.added().includes(`permission asked ${permissionID}`),
+      `an Auto request must not be tracked as a card; log:\n${log.added()}`,
+    );
+  });
+
+  /**
+   * E3-work-mode, Auto keeps the `.env` read for the user: the fixture's `ASK_PERMISSION` asks a
+   * `read` of `.env`, which stays a card (badge, with the view visible) even in Auto, and answering
+   * it lets the turn finish. Protects the exception of `workMode.ts`.
+   */
+  it('still asks for a .env read in Auto work mode', async function () {
+    const log = await openLogCursor();
+    await startAutoSession(log);
+    await sendPrompt(log, 'ASK_PERMISSION: read the env file');
+    const asked = await matchInLog(
+      log,
+      /permission asked (per_\S+) for (ses_\S+) \(read\)/,
+      TURN_WAIT_MS,
+      'permission asked',
+    );
+    const [, permissionID, sessionID] = asked;
+    assert.ok(permissionID && sessionID, 'ids missing from the log line');
+    await log.waitFor('attention: badge 1', 5_000);
+    log.assertAbsent('permission auto-approved');
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'permission.reply',
+      requestId: 'fake-auto-env',
+      sessionID,
+      permissionID,
+      decision: 'once',
+    });
+    await log.waitFor(`permission ${permissionID} resolved: once`, 10_000);
+    await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+  });
+
+  /**
+   * E3-work-mode, Manual is unchanged: the same `edit` request as the Auto case, in a fresh session
+   * that was never toggled, shows its card and the host answers nothing by itself.
+   */
+  it('keeps asking for the same edit request in Manual work mode', async function () {
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'session.new',
+      requestId: `work-mode-manual-${String(Date.now())}`,
+    });
+    await sleep(500);
+    await sendPrompt(log, 'ASK_PERMISSION ASK_EDIT: edit the sample');
+    const asked = await matchInLog(
+      log,
+      /permission asked (per_\S+) for (ses_\S+) \(edit\)/,
+      TURN_WAIT_MS,
+      'permission asked',
+    );
+    const [, permissionID, sessionID] = asked;
+    assert.ok(permissionID && sessionID, 'ids missing from the log line');
+    await log.waitFor('attention: badge 1', 5_000);
+    log.assertAbsent('permission auto-approved');
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'permission.reply',
+      requestId: 'fake-manual-edit',
+      sessionID,
+      permissionID,
+      decision: 'once',
+    });
+    await log.waitFor(`permission ${permissionID} resolved: once`, 10_000);
+    await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
   });
 
   /**

@@ -116,7 +116,8 @@ function describeAnswers(derived: Extract<DerivedOutcome, { verdict: 'answered' 
  * record to say it ("Read .env"). Returns `undefined` when neither source has anything to say.
  * Examples: "Allowed once · Read .env", "Always allowed · Read .env", "Rejected · Read .env",
  * "Rejected with feedback · Read .env — “don't read secrets”", "Answered · Pick a colour: Blue",
- * "Dismissed · Question from the agent". Tone: allowed/answered is `allowed`, rejected/dismissed/
+ * "Dismissed · Question from the agent", and, for a permission the host approved by itself in Auto
+ * work mode (`resolution.auto`, E3-work-mode), "Allowed automatically · Edit src/sample.ts". Tone: allowed/answered is `allowed`, rejected/dismissed/
  * blocked is `rejected` (a neutral warning colour, never the error red: Reject is a decision, not
  * a failure; lesson #934), anything else `neutral`. Built as whole strings because JSX eats the
  * spaces between `{expr}` and text (lesson #926). VERIFIED by `resolutionPlacement.test.ts`
@@ -133,7 +134,9 @@ export function outcomeView(
     const label =
       resolution.decision === 'reject' && resolution.withFeedback
         ? l10n.t('Rejected with feedback')
-        : outcomeLabel(resolution.decision);
+        : resolution.auto === true
+          ? l10n.t('Allowed automatically')
+          : outcomeLabel(resolution.decision);
     const about = describeRequest({
       action: resolution.action,
       resources: resolution.resource === undefined ? [] : [resolution.resource],

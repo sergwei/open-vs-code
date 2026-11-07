@@ -316,6 +316,14 @@ export type RevertState = {
 /** Points at the tool block that triggered a permission or a form. */
 export type ToolRef = { messageID: string; partID: string };
 
+/**
+ * How a session treats the permission requests of opencode (E3-work-mode). `manual` leaves them to
+ * opencode's own rules (a card when they ask); `auto` makes the host answer `once` by itself, except
+ * for the requests `workMode.ts` keeps for the user. The host owns the value; the webview only
+ * shows it and asks to change it.
+ */
+export type WorkMode = 'manual' | 'auto';
+
 /** User answer to a permission request. `reject` also rejects every pending one of the session (server side). */
 export type PermissionDecision = 'once' | 'always' | 'reject';
 
@@ -409,6 +417,11 @@ export type RequestResolution =
       resource?: string;
       /** True when the user sent a rejection with a message (the model reads it as feedback). */
       withFeedback: boolean;
+      /**
+       * True when the host answered `once` by itself because the session was in Auto work mode
+       * (E3-work-mode); absent when a person answered. Shown as "Allowed automatically".
+       */
+      auto?: true;
     }
   | {
       kind: 'form';

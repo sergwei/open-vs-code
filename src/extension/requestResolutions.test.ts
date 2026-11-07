@@ -116,6 +116,29 @@ describe('permissions', () => {
     ]);
   });
 
+  /** E3-work-mode: protects the "Allowed automatically" record from leaking onto a person's answer. */
+  it('flags auto only on the request the host answered itself, once, and only for a "once"', () => {
+    const { memory } = setup();
+    for (const id of ['per_1', 'per_2', 'per_3', 'per_4']) {
+      memory.observe({ type: 'permission.asked', permission: permission(id) });
+    }
+    memory.markAuto('per_1');
+    memory.markAuto('per_3');
+    memory.markAuto('per_4');
+    memory.unmarkAuto('per_4'); // the automatic answer failed, a person answers later
+    const resolve = (id: string, decision: 'once' | 'reject') =>
+      memory.observe({
+        type: 'permission.resolved',
+        sessionID: 'ses_1',
+        permissionID: id,
+        decision,
+      });
+    expect(resolve('per_1', 'once')).toMatchObject({ auto: true });
+    expect(resolve('per_2', 'once')).not.toHaveProperty('auto');
+    expect(resolve('per_3', 'reject')).not.toHaveProperty('auto'); // a person's reject won the race
+    expect(resolve('per_4', 'once')).not.toHaveProperty('auto');
+  });
+
   it('flags feedback only on the request that was replied with a message, and only when rejected', () => {
     const { memory } = setup();
     memory.observe({ type: 'permission.asked', permission: permission('per_1') });

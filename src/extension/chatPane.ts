@@ -74,7 +74,8 @@ export type MessageRoute = 'session' | 'all' | 'origin' | 'request';
  * only for the panes showing it. `origin`: an answer to something one pane asked (`request.result`,
  * `sessions.page`, `attachments.picked`, `files.found`, `ui.focus`, `ui.command`,
  * `prompt.compose` (issue #36: the prompt of one menu action goes to the one pane it was aimed
- * at, or two panes would send it twice), `snapshot`,
+ * at, or two panes would send it twice), `snapshot`, `workMode.state` (E3-work-mode: the controller
+ * posts it straight to each pane whose mode changed; two panes may show different sessions),
  * `setup.binary` of issue #86: the answer of the file dialog one pane opened), only for that pane; broadcasting a `request.result` would close a request with the same id in another
  * pane (ids are a per-document counter). `request` (issue #77 E4): a NEW `permission.asked` or
  * `form.asked`, for the panes that display it (`ChatController.displays`: a tab shows its own
@@ -105,6 +106,7 @@ export function routeOf(message: HostToWebview): MessageRoute {
     case 'prompt.compose':
     case 'snapshot':
     case 'setup.binary':
+    case 'workMode.state': // E3-work-mode: the mode of ONE pane's session, posted to that pane only
       return 'origin';
     case 'connection.state':
     case 'catalog':

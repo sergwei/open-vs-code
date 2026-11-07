@@ -59,6 +59,7 @@ import {
   SERVER_STATUS_ITEM_ID,
   SHOW_REQUEST_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
+  TOGGLE_WORK_MODE_COMMAND_ID,
   TEST_PROVIDER_ANSWERS_COMMAND_ID,
   TEST_SESSION_ANSWERS_COMMAND_ID,
   TEST_SESSION_ORGANIZATION_COMMAND_ID,
@@ -273,7 +274,8 @@ function warnSessionFailure(action: 'rename' | 'delete' | 'loadMore', error: unk
  * itself (the integration suite calls the command with URIs, it cannot right-click).
  *
  * Issue #35 registers the four palette commands (Open Chat, Focus Prompt, New Session, Stop
- * Response). In `sidebar` mode each one first reveals the chat with the command VS Code generates
+ * Response); E3-work-mode adds Toggle Work Mode, which acts on the controller directly (the host
+ * owns the mode) and never reveals the chat. In `sidebar` mode each one first reveals the chat with the command VS Code generates
  * for the view (`openVsCode.chat.focus`), which also hands the keyboard to the iframe, and then
  * asks the webview through `controller.runUiCommand` to do what its button does (in `editor` mode
  * the target is a tab, see below). Focus Prompt is a toggle:
@@ -1356,6 +1358,12 @@ export function registerChat(
       await runInChat('session.new');
     }),
     vscode.commands.registerCommand(STOP_RESPONSE_COMMAND_ID, () => runInChat('session.stop')),
+    // E3-work-mode: the host owns the mode, so the toggle acts on the controller and does not go
+    // through the webview. It reveals nothing: with no tab (editor mode) there is nothing to toggle.
+    vscode.commands.registerCommand(TOGGLE_WORK_MODE_COMMAND_ID, () => {
+      const paneId = mode === 'sidebar' ? ensureSidebar().id : tabs.commandTarget();
+      if (paneId !== undefined) controller.toggleWorkMode(paneId);
+    }),
     // Issue #30: the Explorer passes (clicked item, all selected items). The strings go through
     // the same host checks as a drop (`dropFiles`), minus the `file.find` one.
     vscode.commands.registerCommand(

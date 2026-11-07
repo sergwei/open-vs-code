@@ -38,6 +38,7 @@
   "command.openServerSettings.title": "Open Settings…",
   "command.openSettings.title": "Open Extension Settings",
   "command.stopResponse.title": "Stop Response",
+  "command.toggleWorkMode.title": "Toggle Work Mode",
   "command.renameSession.title": "Rename Session…",
   "command.deleteSession.title": "Delete Session",
   "command.searchSessions.title": "Search Sessions…",

@@ -78,6 +78,7 @@ import type {
   RevertState,
   SessionStatus,
   SessionSummary,
+  WorkMode,
 } from '../../../src/shared/model';
 import {
   dispatch,
@@ -254,6 +255,11 @@ export interface ChatState {
    */
   resolved: ResolvedRequest[];
   /**
+   * Work mode of the session this pane shows (E3-work-mode). Starts `manual`, which is also what
+   * the host assumes for a new document, and is replaced by every `workMode.state`.
+   */
+  workMode: WorkMode;
+  /**
    * The host's record of each answered request of the OPEN session, by request id. Persistent for
    * the life of the document and NOT cleared by a prompt: they are history. Replaced by a
    * snapshot, emptied when the open session is removed.
@@ -424,6 +430,7 @@ export function createChatStore(): ChatStore {
     open: emptyOpen(),
     requests: { permissions: [], forms: [] },
     resolved: [],
+    workMode: 'manual',
     resolutions: {},
     replying: {},
     requestErrors: {},
@@ -519,6 +526,12 @@ export function createChatStore(): ChatStore {
   const handlers: Handlers<HostToWebview> = {
     catalog: (m) => {
       setState('catalog', m.catalog);
+    },
+
+    // E3-work-mode: REPLACES the mode of the session this pane shows. The host sends it only when
+    // it differs from what the document already has (a new document starts in `manual`).
+    'workMode.state': (m) => {
+      setState('workMode', m.mode);
     },
 
     // E10-mods: the message is the WHOLE state, so both lists are replaced, matched by their key
