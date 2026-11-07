@@ -336,12 +336,13 @@ describe('keybindings in package.json', () => {
     expect(used.filter((k) => denied.includes(k))).toEqual([]);
   });
 
-  it('declares the four palette commands with their constants', () => {
+  it('declares the palette commands with their constants', () => {
     for (const id of [
       ids.OPEN_CHAT_COMMAND_ID,
       ids.FOCUS_PROMPT_COMMAND_ID,
       ids.NEW_SESSION_COMMAND_ID,
       ids.STOP_RESPONSE_COMMAND_ID,
+      ids.TOGGLE_WORK_MODE_COMMAND_ID, // E3-work-mode: no default key, so it is not in `keybindings`
     ]) {
       expect(contributed).toContain(id);
     }

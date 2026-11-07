@@ -53,6 +53,14 @@ export interface RequestResolutions {
   markReplied(kind: RequestKind, id: string): void;
   /** Undoes {@link RequestResolutions.markReplied} when the reply failed and the request stays pending. */
   unmark(kind: RequestKind, id: string): void;
+  /**
+   * Flags that the host itself is answering the permission `id` because its session is in Auto work
+   * mode (E3-work-mode), so its record carries `auto: true`. Call it BEFORE sending the reply, as
+   * with {@link RequestResolutions.markReplied}. Permissions only: a form is never auto-answered.
+   */
+  markAuto(id: string): void;
+  /** Undoes {@link RequestResolutions.markAuto} when the automatic answer did not go through. */
+  unmarkAuto(id: string): void;
   /** Resolutions of `sessionID`, oldest first (a copy). */
   forSession(sessionID: string): RequestResolution[];
   /**
@@ -89,7 +97,9 @@ function keyOf(kind: RequestKind, id: string): string {
  * dropped with `forgetAsks` when the stream stops. Between two snapshots they can only grow by the
  * `*.asked` events seen. A `*.resolved` of an ask no longer remembered yields no record. A record
  * keeps the action and the FIRST resource only (the card shows the same) and never a form answer
- * or the text of a rejection; nothing here is logged. VERIFIED by `requestResolutions.test.ts`
+ * or the text of a rejection; nothing here is logged. A permission the host answered itself in Auto
+ * work mode ({@link RequestResolutions.markAuto}) gets `auto: true` only if the server then
+ * published `once` for it. VERIFIED by `requestResolutions.test.ts`
  * with fabricated messages (logic only, not the contract); the shapes of the messages it consumes
  * were seen against a real opencode 2.0.32 (Windows 11, `test:visual`, 21/10/2026).
  */
@@ -99,6 +109,8 @@ export function createRequestResolutions(options: RequestResolutionsOptions): Re
   const permissionAsks = new Map<string, PermissionAsk>();
   const formAsks = new Map<string, FormAsk>();
   const replied = new Set<string>();
+  /** Permission ids the host answers itself (Auto work mode); consumed by their `permission.resolved`. */
+  const autos = new Set<string>();
   /** Insertion order is recency order: a touched session is deleted and set again. */
   const bySession = new Map<string, RequestResolution[]>();
 
@@ -138,6 +150,7 @@ export function createRequestResolutions(options: RequestResolutionsOptions): Re
           permissionAsks.delete(ask.id);
           const flag = keyOf('permission', ask.id);
           const withFeedback = replied.delete(flag) && message.decision === 'reject';
+          const auto = autos.delete(ask.id);
           const first = ask.resources[0];
           const resolution: RequestResolution = {
             kind: 'permission',
@@ -149,6 +162,8 @@ export function createRequestResolutions(options: RequestResolutionsOptions): Re
             action: ask.action,
             ...(first === undefined ? {} : { resource: first }),
             withFeedback,
+            // Only an automatic `once` counts: a person's answer that raced it is not "automatic".
+            ...(auto && message.decision === 'once' ? { auto: true as const } : {}),
           };
           store(resolution);
           return resolution;
@@ -180,6 +195,7 @@ export function createRequestResolutions(options: RequestResolutionsOptions): Re
             if (ask.sessionID !== message.sessionID) continue;
             permissionAsks.delete(id);
             replied.delete(keyOf('permission', id));
+            autos.delete(id);
           }
           for (const [id, ask] of formAsks) {
             if (ask.sessionID !== message.sessionID) continue;
@@ -202,6 +218,14 @@ export function createRequestResolutions(options: RequestResolutionsOptions): Re
       replied.delete(keyOf(kind, id));
     },
 
+    markAuto(id) {
+      autos.add(id);
+    },
+
+    unmarkAuto(id) {
+      autos.delete(id);
+    },
+
     forSession(sessionID) {
       return [...(bySession.get(sessionID) ?? [])];
     },
@@ -210,6 +234,7 @@ export function createRequestResolutions(options: RequestResolutionsOptions): Re
       permissionAsks.clear();
       formAsks.clear();
       replied.clear();
+      autos.clear();
     },
   };
 }

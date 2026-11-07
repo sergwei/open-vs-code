@@ -1181,6 +1181,11 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
             waiting={!connected() && !notStarted()}
             sendDisabled={!canSend() && !canRunModDraft()}
             attachDisabled={!connected()}
+            workMode={state.workMode}
+            onWorkMode={(mode) => {
+              props.send({ type: 'workMode.set', mode });
+            }}
+            workModeDisabled={!connected()}
             commands={commands()}
             commandsLoading={state.catalog === undefined}
             commandsDisabled={!connected()}

@@ -121,6 +121,37 @@ export function StopIcon() {
   );
 }
 
+/** A person (head and shoulders): Manual work mode, where the user answers the permissions. */
+export function PersonIcon() {
+  return (
+    <svg class="icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+      <circle cx="8" cy="5.2" r="2.6" fill="none" stroke="currentColor" stroke-width="1.5" />
+      <path
+        d="M2.8 13.5c.6-2.6 2.6-3.9 5.2-3.9s4.6 1.3 5.2 3.9"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+      />
+    </svg>
+  );
+}
+
+/** A lightning bolt: Auto work mode, where the host answers the permissions. */
+export function BoltIcon() {
+  return (
+    <svg class="icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+      <path
+        d="M9.2 1.8L3.6 9h3.9l-.7 5.2L12.4 7H8.5l.7-5.2z"
+        fill="currentColor"
+        stroke="currentColor"
+        stroke-width="0.8"
+        stroke-linejoin="round"
+      />
+    </svg>
+  );
+}
+
 /** An empty circle: a step that has not started yet. */
 export function WaitingIcon() {
   return (

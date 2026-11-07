@@ -405,6 +405,13 @@ export const NEW_SESSION_COMMAND_ID = 'openVsCode.newSession';
 export const STOP_RESPONSE_COMMAND_ID = 'openVsCode.stopResponse';
 
 /**
+ * Command id of "OpenCode: Toggle Work Mode" (contributed; E3-work-mode): flips the chat's session
+ * between Manual and Auto. It has no default key (decision of Sergio, 07/11/2026); the user can
+ * bind one.
+ */
+export const TOGGLE_WORK_MODE_COMMAND_ID = 'openVsCode.toggleWorkMode';
+
+/**
  * Context key that is `true` while the chat webview has the keyboard focus (issue #35). Not a
  * contributed id: it is set with `setContext` and read by the `when` clauses of the keybindings
  * in package.json, where it is written out by hand.

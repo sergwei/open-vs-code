@@ -194,6 +194,7 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
   },
   'ui.focus': { type: 'ui.focus', target: { kind: 'permission', sessionID: 's1', id: 'perm1' } },
   'ui.command': { type: 'ui.command', command: 'session.stop' },
+  'workMode.state': { type: 'workMode.state', mode: 'manual' },
   'prompt.compose': {
     type: 'prompt.compose',
     text: 'Explain what @src/a.ts#2-3 does.',
@@ -300,6 +301,7 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   'files.search': { type: 'files.search', requestId: 'r1', query: 'prompt' },
   'permissions.manage': { type: 'permissions.manage' },
   'server.restart': { type: 'server.restart' },
+  'workMode.set': { type: 'workMode.set', mode: 'auto' },
   'logs.show': { type: 'logs.show' },
   'setup.action': { type: 'setup.action', action: 'binary.choose' },
   'editor.open': { type: 'editor.open', path: 'src/a.ts', line: 3, column: 1 },
@@ -359,6 +361,18 @@ describe('isWebviewToHost', () => {
       expect(isWebviewToHost({ type: 'setup.action', action }), String(action)).toBe(false);
     }
     expect(isWebviewToHost({ type: 'setup.action' })).toBe(false);
+  });
+
+  // E3-work-mode. Fabricated messages: they pin the guard (a closed enum, no inherited keys), not
+  // how the host reacts to the mode.
+  it('accepts workMode.set for manual and auto and rejects any other mode', () => {
+    for (const mode of ['manual', 'auto']) {
+      expect(isWebviewToHost({ type: 'workMode.set', mode }), mode).toBe(true);
+    }
+    for (const mode of ['bypass', '', 'Auto', 'toString', 1, undefined, null]) {
+      expect(isWebviewToHost({ type: 'workMode.set', mode }), String(mode)).toBe(false);
+    }
+    expect(isWebviewToHost({ type: 'workMode.set' })).toBe(false);
   });
 
   it('accepts attachments.pick with no kind, file or image, and rejects another kind', () => {

@@ -2,7 +2,7 @@ import * as l10n from '@vscode/l10n';
 import { createEffect, createSignal, For, on, onCleanup, Show, type JSX } from 'solid-js';
 import { plural } from '../../../src/shared/l10n';
 import type { AttachmentRef } from '../../../src/shared/protocol';
-import type { CommandOption } from '../../../src/shared/model';
+import type { CommandOption, WorkMode } from '../../../src/shared/model';
 import { AttachmentOpenButton } from './AttachmentOpenButton';
 import { CommandMenu } from './CommandMenu';
 import { CommandPopup, commandStatus } from './CommandPopup';
@@ -13,6 +13,7 @@ import { MentionPopup, mentionStatus, optionId, type FileSearchView } from './Me
 import { PlusMenu } from './PlusMenu';
 import type { PromptHistory } from './promptHistory';
 import { applyCommand, filterCommands, findSlash, type SlashToken } from './slashCommand';
+import { WorkModeMenu } from './WorkModeMenu';
 
 let requestCounter = 0;
 
@@ -59,7 +60,8 @@ export function nextRequestId(): string {
  * it does not, the box keeps its minimum height and still works. `onFocusReady` hands the parent
  * a function that focuses the textarea, used after sending, stopping or retrying, and by the New
  * Session and Focus Prompt commands; it then keeps that focus for a moment (`holdFocus`, #92).
- * Without a connection (`waiting`, E2 P5=2) the textarea stays editable and its placeholder reads
+ * The work-mode pill only forwards the choice (`onWorkMode`); the mode shown is the host's
+ * (`workMode`). Without a connection (`waiting`, E2 P5=2) the textarea stays editable and its placeholder reads
  * "Waiting for opencode…"; VERIFIED by `PromptInput.test.tsx` ("shows the waiting placeholder
  * and stays editable without a connection").
  * E11-i18n: every visible text, `aria-label`, `title` and placeholder goes through `l10n.t`, and
@@ -69,8 +71,9 @@ export function nextRequestId(): string {
  * The action bar (E2, issue #85, phases 3 and 4) reads, left to right: the "+" button ({@link PlusMenu}:
  * Add selection, Attach file…, Attach image… and Mention a file; `insertMention` writes the `@` and
  * opens the popup by the same path as typing it),
- * the `selectors` slot (the combined agent and model chip), a free space, and the round Send / Stop
- * button. Send and Stop are icon buttons named by `aria-label` ("Send", "Stop"; decision P9=1+b of
+ * the `selectors` slot (the combined agent and model chip), the work-mode pill
+ * ({@link WorkModeMenu}, E3-work-mode: Manual or Auto, person or bolt icon), a free space, and the
+ * round Send / Stop button. Send and Stop are icon buttons named by `aria-label` ("Send", "Stop"; decision P9=1+b of
  * Sergio, 27/10/2026, Engram #1300), so a test or a script finds them by name, not by text. The row
  * wraps in a narrow side bar (CSS `flex-wrap`), and under 200 px the chip takes a row of its own.
  *
@@ -166,6 +169,12 @@ export function PromptInput(props: {
   sendDisabled: boolean;
   /** The "+" menu is blocked (`aria-disabled`) while there is no server to attach for. */
   attachDisabled: boolean;
+  /** Work mode of the session shown (E3-work-mode); the host owns it, this only displays it. */
+  workMode: WorkMode;
+  /** Asks the host to switch the work mode; the pill changes when `workMode.state` comes back. */
+  onWorkMode(mode: WorkMode): void;
+  /** The pill is blocked (`aria-disabled`) while there is no connection, like the "+" menu. */
+  workModeDisabled: boolean;
   /**
    * The server's slash commands (issue #33), from the catalog. ABSENT means "could not be read",
    * which is not the same as `[]` ("none"): the popup and the menu say each one.
@@ -222,6 +231,8 @@ export function PromptInput(props: {
   let closePlusMenu: (() => void) | undefined;
   /** Closes the "/" menu; set by the menu itself, for the same reason as {@link closePlusMenu}. */
   let closeCommandMenu: (() => void) | undefined;
+  /** Closes the work-mode menu; set by the menu itself, for the same reason as {@link closePlusMenu}. */
+  let closeWorkModeMenu: (() => void) | undefined;
 
   // The parent focuses the box after sending, stopping, a new session (a shortcut of issue #35)...
   // An open "+" menu closes then: when the webview document does not own the focus at that moment
@@ -229,6 +240,7 @@ export function PromptInput(props: {
   props.onFocusReady?.(() => {
     closePlusMenu?.();
     closeCommandMenu?.();
+    closeWorkModeMenu?.();
     textarea?.focus();
     holdFocus();
   });
@@ -748,6 +760,16 @@ export function PromptInput(props: {
           }}
         />
         <div class="prompt-selectors">{props.selectors}</div>
+        <WorkModeMenu
+          mode={props.workMode}
+          disabled={props.workModeDisabled}
+          onSelect={(mode) => {
+            props.onWorkMode(mode);
+          }}
+          onCloseReady={(close) => {
+            closeWorkModeMenu = close;
+          }}
+        />
         <Show
           when={props.busy}
           fallback={

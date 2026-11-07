@@ -16,7 +16,7 @@
 import * as l10n from '@vscode/l10n';
 import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CommandOption } from '../../../src/shared/model';
+import type { CommandOption, WorkMode } from '../../../src/shared/model';
 import type { AttachmentRef } from '../../../src/shared/protocol';
 import { must, mount, useEnglish, useSpanish, type Mounted } from '../testing';
 import type { DropContent } from './dropData';
@@ -49,6 +49,7 @@ function setup(
     files?: AttachmentRef[];
     draft?: string;
     attachDisabled?: boolean;
+    workMode?: WorkMode;
     waiting?: boolean;
     thumbs?: Record<string, string>;
     /** Slash commands of the catalog; the default is `COMMANDS`, `null` is "could not be read". */
@@ -77,6 +78,7 @@ function setup(
     mentionPick: vi.fn<(file: AttachmentRef) => void>(),
     drop: vi.fn<(content: DropContent) => void>(),
     pasteImages: vi.fn<(files: File[]) => void>(),
+    workMode: vi.fn<(mode: WorkMode) => void>(),
   };
   let focusBox: (() => void) | undefined;
   mounted = mount(() => (
@@ -89,6 +91,9 @@ function setup(
       waiting={options.waiting ?? false}
       sendDisabled={false}
       attachDisabled={options.attachDisabled ?? false}
+      workMode={options.workMode ?? 'manual'}
+      onWorkMode={calls.workMode}
+      workModeDisabled={false}
       commands={options.commands === null ? undefined : (options.commands ?? COMMANDS)}
       commandsLoading={options.commandsLoading ?? false}
       commandsDisabled={options.commandsDisabled ?? false}
@@ -142,6 +147,59 @@ function setup(
     },
   };
 }
+
+describe('the work-mode pill (E3-work-mode)', () => {
+  // Protects the place of the pill in the bar (after the selectors slot, right before Send), that
+  // Escape on its open menu does not stop a running turn, and that Shift+Tab from the prompt is
+  // never intercepted (WCAG 2.1.2). Events synthesized in jsdom; the real focus order is step 44.
+  it('sits between the selectors and Send, after "+" and "/"', () => {
+    setup();
+    const bar = must(mounted?.container ?? document.body, '.prompt-actions');
+    const order = [...bar.children].map((child) => child.className.split(' ')[0]);
+    expect(order).toEqual(['plus-wrap', 'plus-wrap', 'prompt-selectors', 'plus-wrap', 'primary']);
+    expect(
+      must<HTMLButtonElement>(bar, '[data-work-mode-trigger]').getAttribute('aria-label'),
+    ).toBe('Work mode: Manual');
+  });
+
+  it('shows the mode it is given and forwards a choice', () => {
+    const { calls } = setup({ workMode: 'auto' });
+    const pill = must<HTMLButtonElement>(
+      mounted?.container ?? document.body,
+      '[data-work-mode-trigger]',
+    );
+    expect(pill.textContent).toBe('Auto');
+    pill.click();
+    const manual = [
+      ...(mounted?.container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') ?? []),
+    ].find((item) => item.getAttribute('aria-checked') === 'false');
+    manual?.click();
+    expect(calls.workMode).toHaveBeenCalledWith('manual');
+  });
+
+  it('Escape on the open menu closes it and does NOT stop the running turn', () => {
+    const { calls } = setup({ busy: true });
+    const pill = must<HTMLButtonElement>(
+      mounted?.container ?? document.body,
+      '[data-work-mode-trigger]',
+    );
+    pill.click();
+    const spy = vi.fn();
+    window.addEventListener('keydown', spy);
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    document.activeElement?.dispatchEvent(escape);
+    window.removeEventListener('keydown', spy);
+    expect(spy).not.toHaveBeenCalled();
+    expect(calls.stop).not.toHaveBeenCalled();
+    expect(pill.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(pill);
+  });
+
+  it('does not intercept Shift+Tab in the prompt box', () => {
+    const { press } = setup();
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(false);
+  });
+});
 
 /** An item of the open "+" menu, by its visible name. */
 const menuItem = (name: string): HTMLButtonElement | undefined =>

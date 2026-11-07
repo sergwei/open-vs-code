@@ -267,6 +267,11 @@
         "category": "OpenCode"
       },
       {
+        "command": "openVsCode.toggleWorkMode",
+        "title": "%command.toggleWorkMode.title%",
+        "category": "OpenCode"
+      },
+      {
         "command": "openVsCode.renameSession",
         "title": "%command.renameSession.title%",
         "category": "OpenCode",

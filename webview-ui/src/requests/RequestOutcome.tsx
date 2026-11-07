@@ -19,7 +19,9 @@ function prefixText(prefix: OutcomeView['prefix']): string {
 
 /**
  * One line of the history saying what the user answered ("Allowed once · Read .env"), placed under
- * the tool that asked (issues #56/#18).
+ * the tool that asked (issues #56/#18). When the host approved it by itself in Auto work mode
+ * (E3-work-mode) the text is "Allowed automatically · Edit src/sample.ts": the wording is decided
+ * in `outcomeView`, this component only prints it.
  *
  * Plain text inside the `role="log"` of the conversation, which is already `aria-live="polite"`:
  * its insertion is announced by that region, so the line has no role of its own (no

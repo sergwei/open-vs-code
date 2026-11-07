@@ -142,6 +142,14 @@ describe('outcomeView with the host record', () => {
     );
   });
 
+  // E3-work-mode: a permission the host answered by itself (`auto`) reads "Allowed automatically",
+  // and the tone stays `allowed`. Fabricated record; the wording is ours.
+  it('words a permission the host approved by itself in Auto mode', () => {
+    const record = permission('p', { auto: true, action: 'edit', resource: 'src/sample.ts' });
+    expect(text(record)).toBe('Allowed automatically · Edit src/sample.ts');
+    expect(outcomeView(record, undefined, '')?.tone).toBe('allowed');
+  });
+
   it('adds the quoted feedback the tool block carries, cut at the limit', () => {
     const feedback = deriveToolOutcome(
       readTool({

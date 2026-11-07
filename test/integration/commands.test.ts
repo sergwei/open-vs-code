@@ -26,6 +26,7 @@ import {
   OPEN_CHAT_COMMAND_ID,
   OPEN_SETTINGS_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
+  TOGGLE_WORK_MODE_COMMAND_ID,
 } from '../../src/extension/ids';
 import { openLogFromStart } from './support/extensionLog';
 
@@ -119,14 +120,15 @@ describe('palette commands and keybindings', () => {
     await vscode.extensions.getExtension(EXTENSION_ID)?.activate();
   });
 
-  /** The four commands are registered, not just listed in the manifest. */
-  it('registers the four palette commands', async () => {
+  /** The palette commands (E3-work-mode added Toggle Work Mode) are registered, not just listed in the manifest. */
+  it('registers the palette commands', async () => {
     const commands = await vscode.commands.getCommands(true);
     for (const id of [
       OPEN_CHAT_COMMAND_ID,
       FOCUS_PROMPT_COMMAND_ID,
       NEW_SESSION_COMMAND_ID,
       STOP_RESPONSE_COMMAND_ID,
+      TOGGLE_WORK_MODE_COMMAND_ID,
     ]) {
       assert.ok(commands.includes(id), `${id} is not registered`);
     }

@@ -42,7 +42,8 @@
 // Phase 3 adds permissions and questions, all SYNTHETIC and written from the routes and types read
 // in 2.0.32 (never seen against a server except where `realOpencode.test.ts` says so): a prompt
 // containing ASK_PERMISSION runs the turn up to a tool call and a `permission.asked`
-// (action `read`, resources `.env`, `save: ["*"]`, `source` = the tool) and WAITS; ASK_QUESTION
+// (action `read`, resources `.env`, `save: ["*"]`, `source` = the tool; with ASK_EDIT too, action
+// `edit` and resource `src/sample.ts`: E3-work-mode, a request Auto answers by itself) and WAITS; ASK_QUESTION
 // does the same with a `form.created` (`metadata.kind: "question"`, fields q0 string with options
 // and custom, q1 multiselect). `POST /api/session/:sid/permission/:rid/reply` (204, then
 // `permission.replied`; `reject` rejects every pending request of the session; an unknown id is
@@ -548,7 +549,8 @@ function noContent(response) {
  * Builds the events of a tool call that asks the user something, split in the part played before
  * the question and the part played after it is answered.
  *
- * `kind` is `permission` (a `read` of `.env` with a `permission.asked`) or `question` (a `question`
+ * `kind` is `permission` (a `read` of `.env` with a `permission.asked`, or with `edit` an `edit` of
+ * `src/sample.ts`) or `question` (a `question`
  * tool with a form). `before` ends with the ask itself, which is also what registers the pending
  * request; `after(result)` is the tool result: `result.outcome` is `success` unless the user
  * rejected or cancelled (`denied`), `result.message` the optional text of that reject/cancel and
@@ -564,12 +566,16 @@ function noContent(response) {
  * REST `message.list` returns it once the tool finished (`content[]` of the assistant message).
  * The shapes follow the types of `@opencode/client@2.0.32`.
  */
-function askingTool(kind, a) {
+function askingTool(kind, a, edit = false) {
   const toolID = nextId('call');
-  const name = kind === 'permission' ? 'read' : 'question';
+  // E3-work-mode: a prompt with ASK_EDIT asks to `edit` a plain file instead of `read` `.env`, the
+  // request Auto work mode answers by itself (a `.env` read is the one it keeps for the user).
+  const action = edit ? 'edit' : 'read';
+  const resource = edit ? 'src/sample.ts' : '.env';
+  const name = kind === 'permission' ? action : 'question';
   const input =
     kind === 'permission'
-      ? { path: '.env' }
+      ? { path: resource }
       : {
           questions: [
             {
@@ -594,8 +600,8 @@ function askingTool(kind, a) {
       const request = {
         id: nextId('per'),
         sessionID: a.sessionID,
-        action: 'read',
-        resources: ['.env'],
+        action,
+        resources: [resource],
         save: ['*'],
         source: { type: 'tool', messageID: a.assistantMessageID, id: toolID },
       };
@@ -1414,7 +1420,7 @@ function playTurn(sessionID, inboxID, text, files = []) {
       steps.push(stepStarted, ...body);
     } else {
       // The turn pauses at the ask and the rest is held in `gates` until a reply resumes it.
-      const tool = askingTool(asking, a);
+      const tool = askingTool(asking, a, text.includes('ASK_EDIT'));
       toolBlock = tool.block;
       steps.push(stepStarted, ...tool.before);
       /**

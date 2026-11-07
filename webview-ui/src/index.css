@@ -2104,6 +2104,59 @@ button.plus-item[aria-disabled='true'] {
 }
 
 /*
+ * The work-mode pill and its menu (E3-work-mode). The pill wears the secondary button colours like
+ * the agent chip and never shrinks; text AND icon are always the button's foreground. Auto only adds
+ * a warning-coloured border: plan B of risk R2, because the first try, a bolt in
+ * `--vscode-editorWarning-foreground`, measured 2.47:1 on the pill in Default Light Modern (below
+ * the 3:1 of an icon; `test:visual` step 44, 07/11/2026). The mode is never told by colour alone
+ * (person or bolt, and the word). Under 200 px only the icon stays; the accessible name
+ * is the button's `aria-label`, not this text. The menu reuses the "+" menu box; each item is a
+ * label with its description under it, and the checked one carries the focus-border bar the "+"
+ * items keep transparent.
+ */
+button.work-mode-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--ovc-radius-pill);
+}
+
+.work-mode-pill .work-mode-icon {
+  display: inline-flex;
+}
+
+.work-mode-pill[data-mode='auto'] {
+  border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder));
+}
+
+@container (max-width: 199px) {
+  .work-mode-pill .work-mode-text {
+    display: none;
+  }
+}
+
+button.work-mode-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.work-mode-item-label {
+  font-weight: 600;
+}
+
+.work-mode-item-hint {
+  font-size: 0.9em;
+  white-space: normal;
+}
+
+button.work-mode-item[aria-checked='true'] {
+  border-left-color: var(--vscode-focusBorder);
+}
+
+/*
  * The slash commands (issue #33). The "/" button and its menu wear the "+" classes (same wrapper,
  * trigger, menu and item); only the row inside differs: `/name` and the server's description on one
  * line, the description cut with an ellipsis (whole in the `title`). The typed popup wears the `@`
