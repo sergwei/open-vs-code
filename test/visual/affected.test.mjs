@@ -22,6 +22,15 @@ describe('selectForFiles', () => {
     });
   });
 
+  // E3-work-mode: the pure Auto decision and the destructive-command classifier select the
+  // `requests` group (step 44); the controller that wires them stays cross-cutting. FABRICATED lists.
+  it('maps the work mode modules to the requests group', () => {
+    for (const file of ['src/extension/workMode.ts', 'src/extension/destructiveCommand.ts']) {
+      expect(selectForFiles([file]), file).toMatchObject({ mode: 'groups', groups: ['requests'] });
+    }
+    expect(selectForFiles(['src/extension/workMode.test.ts']).mode).toBe('none');
+  });
+
   // E10-config-views: the Settings tab has its own group (steps 35 and 36); the shared protocol file
   // stays cross-cutting through `src/shared/`.
   it('maps the Settings tab files to the config group and its shared protocol to a full run', () => {

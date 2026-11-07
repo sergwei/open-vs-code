@@ -82,6 +82,9 @@ export const AFFECTED_RULES = [
     groups: ['config'],
   },
   { pattern: /^webview-ui\/src\/requests\//, groups: ['requests'] },
+  // E3-work-mode: the pure decision of Auto and the destructive-command classifier (step 44).
+  // `chatController.ts`, `src/shared/` and `webview-ui/src/chat/` are cross-cutting already.
+  { pattern: /^src\/extension\/(workMode|destructiveCommand)\.ts$/, groups: ['requests'] },
   {
     pattern: /^src\/extension\/(pendingRequests|attention|attentionPolicy|requestResolutions)\.ts$/,
     groups: ['requests'],

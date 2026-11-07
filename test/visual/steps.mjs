@@ -108,10 +108,14 @@
  * The step 43 (the tabs of the request dock, E3-request-tabs) came after the 41: it needs the 1,
  * sends three prompts (two permissions and a question, pending at once in three sessions) and
  * measures 12 theme cells. VERIFIED on Windows 11 with VS Code 1.145.2: "43    13.1 s" in the full
- * run of 07/11/2026 (863.5 s in total, "all visual checks passed"). Its `budgetS` stays at 60 on
- * purpose: changing a budget in this branch invalidates that full run, so the 60 (the original
- * estimate for 3 turns plus 12 cells) is kept. The next branch that runs a full run recalibrates it
- * to 20 (13.1 times 1.25 is 16.4, rounded up to a multiple of 5).
+ * run of 07/11/2026 (863.5 s in total, "all visual checks passed"). Its `budgetS` of 20 is the
+ * criterion above applied to it (13.1 times 1.25 is 16.4, rounded up to a multiple of 5; #182),
+ * replacing the original estimate of 60.
+ * The step 44 (the work mode pill, E3-work-mode) needs the 1 and sends prompts: 4
+ * turns (an auto-approved edit, a `.env` read, a Manual edit, a SLOW one) plus the matrix of 5
+ * components x 4 themes with side bar drags. VERIFIED on Windows 11 with VS Code 1.145.2: "44    28.7 s"
+ * in the full run of 07/11/2026. Its `budgetS` of 40 is the criterion above applied to it (28.7 times
+ * 1.25 is 35.9, rounded up to a multiple of 5).
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -168,7 +172,8 @@ export const STEPS = [
   { id: '39', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 20 },
   { id: '40', needs: ['1'], sendsPrompt: false, groups: ['setup'], budgetS: 40 },
   { id: '41', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
-  { id: '43', needs: ['1'], sendsPrompt: true, groups: ['requests'], budgetS: 60 },
+  { id: '43', needs: ['1'], sendsPrompt: true, groups: ['requests'], budgetS: 20 },
+  { id: '44', needs: ['1'], sendsPrompt: true, groups: ['composer', 'requests'], budgetS: 40 },
 ];
 
 /** Every valid id, in canonical order. */
