@@ -105,6 +105,13 @@
  * #171): "41    11.7 s", times 1.25 is 14.6, rounded up to 15. It replaces the estimate of 30.
  * There was a step 42 (the extension in a Spanish VS Code, E11-i18n); it was removed on 04/11/2026
  * by decision of Sergio, and its id is not reused.
+ * The step 43 (the tabs of the request dock, E3-request-tabs) came after the 41: it needs the 1,
+ * sends three prompts (two permissions and a question, pending at once in three sessions) and
+ * measures 12 theme cells. VERIFIED on Windows 11 with VS Code 1.145.2: "43    13.1 s" in the full
+ * run of 07/11/2026 (863.5 s in total, "all visual checks passed"). Its `budgetS` stays at 60 on
+ * purpose: changing a budget in this branch invalidates that full run, so the 60 (the original
+ * estimate for 3 turns plus 12 cells) is kept. The next branch that runs a full run recalibrates it
+ * to 20 (13.1 times 1.25 is 16.4, rounded up to a multiple of 5).
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -161,6 +168,7 @@ export const STEPS = [
   { id: '39', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 20 },
   { id: '40', needs: ['1'], sendsPrompt: false, groups: ['setup'], budgetS: 40 },
   { id: '41', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
+  { id: '43', needs: ['1'], sendsPrompt: true, groups: ['requests'], budgetS: 60 },
 ];
 
 /** Every valid id, in canonical order. */
