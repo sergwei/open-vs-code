@@ -55,7 +55,9 @@ describe('selectForFiles', () => {
       'src/extension/modsLoader.ts',
       'src/extension/modPanelPolicy.ts',
       'src/extension/modsChat.ts',
+      'src/extension/modToggles.ts',
       'webview-ui/src/mods/ModBand.tsx',
+      'webview-ui/src/mods/ModsMenu.tsx',
     ]) {
       expect(selectForFiles([file]), file).toMatchObject({ mode: 'groups', groups: ['mods'] });
     }

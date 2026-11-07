@@ -17241,6 +17241,740 @@ try {
     await setTheme(DARK);
     assertNoWebviewErrors('work mode');
   });
+
+  // E10-mod-toggles (issue #181): the mods button and its popover with one switch per mod. The
+  // set-up installs `hello-station` (band and panel), `quiet` (counts in memory), `throws` (a
+  // `failed` row) and a folder with no mod.json (a skipped row). Behaviour, dark, 300 px, real mouse
+  // and keyboard: the badge reads 2; a click opens the popover with the focus on the first switch;
+  // Space on `quiet` switches only it off (hello-station keeps its band and its open panel tab, and
+  // gets no new "loaded" line) and Space again starts it; the switch of hello-station removes its
+  // band, its panel tab and its "/" entries while `quiet` keeps its Worker (its in-memory counter
+  // goes on); Reload Window keeps hello-station off (the memento of the workspace, NOT in memory as
+  // in the integration suite); Escape closes and returns the focus to the button, also with a SLOW
+  // turn running, which it does not stop; with `openVsCode.mods.enabled` off the switches are
+  // `aria-disabled` and "Open Settings" is there; "Open folder" is present but NOT pressed (it would
+  // open the system file manager and take the focus away). Matrix: 6 components (button with badge;
+  // header with link and footer; row on; row off; failed row; skipped row) x 3 widths (wide 900, 300,
+  // under 200) x 4 themes = 72 cells, each: inside the view, no sideways overflow, text whole (no
+  // clipping), text contrast >= 4.5 and switch edge and thumb or icon contrast >= 3.
+  await step('45 mods popover: one switch per mod (E10-mod-toggles)', async () => {
+    const DARK = 'Default Dark Modern';
+    const HELLO = 'hello-station';
+    const QUIET = 'quiet';
+    const SKIPPED_FOLDER = 'no-manifest-folder';
+    const MODS_KEY = 'openVsCode.mods.enabled';
+    const TAB_TITLE = 'Hello Station panel';
+    const countFile = path.join(vscode.modsHome, '..', 'mods-sentinel', 'quiet.count');
+    const hostLogText = () => {
+      const files = [];
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'OpenCode.log') files.push(full);
+        }
+      };
+      try {
+        walk(path.join(vscode.userDataDir, 'logs'));
+      } catch {
+        return '';
+      }
+      return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+    };
+    const loaded = (id) => hostLogText().split(`mod ${id} loaded`).length - 1;
+    // How many times the host logged that it applied a switch of `id` (`on` or `off`).
+    const switchedLines = (id, direction) =>
+      hostLogText().split(`mod ${id} switched ${direction} in this workspace`).length - 1;
+    const readCount = () => {
+      try {
+        return fs.readFileSync(countFile, 'utf8').trim();
+      } catch {
+        return '';
+      }
+    };
+    const tabs = () => page.locator('.tabs-container .tab', { hasText: TAB_TITLE });
+    // Copy of the Reload Window helper of step 41 (steps 8, 28, 32, 40, 41 each carry one).
+    const reload = async (mark) => {
+      await page.evaluate((key) => {
+        globalThis[key] = true;
+      }, mark);
+      await command('Developer: Reload Window');
+      web?.close();
+      await browser.close().catch(() => undefined);
+      let reloaded = false;
+      for (let tries = 0; tries < 120 && !reloaded; tries++) {
+        await connectWorkbench(90_000);
+        const stale = await page
+          .evaluate((key) => globalThis[key] === true, mark)
+          .catch(() => true);
+        reloaded = !stale;
+        if (reloaded) break;
+        await browser.close().catch(() => undefined);
+        await sleep(250); // between two attempts to reach the new page, not a wait for it
+      }
+      if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
+      await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
+      let opened = true;
+      try {
+        await openChat(8_000);
+      } catch {
+        opened = false;
+      }
+      if (!opened) {
+        await page
+          .locator('.activitybar [aria-label^="OpenCode"]')
+          .first()
+          .click()
+          .catch(() => undefined);
+        await openChat(60_000);
+      }
+    };
+    // What the webview shows of the mods button, the popover, the bands and the "/" popup now.
+    const view = () =>
+      web.inDoc((doc) => {
+        const rect = (element) => {
+          if (!element) return null;
+          const r = element.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width };
+        };
+        const trigger = doc.querySelector('button[data-mods-trigger]');
+        const dialog = doc.querySelector('[role="dialog"].mods-popover');
+        const active = doc.activeElement;
+        return {
+          found: trigger !== null,
+          label: trigger?.getAttribute('aria-label') ?? '',
+          expanded: trigger?.getAttribute('aria-expanded') ?? '',
+          badge: doc.querySelector('.mods-badge')?.textContent ?? '',
+          badgeHidden: doc.querySelector('.mods-badge')?.getAttribute('aria-hidden') === 'true',
+          open: dialog !== null,
+          activeIsTrigger: active === trigger,
+          activeSwitch: active?.closest('.mods-row')?.getAttribute('data-mod-id') ?? '',
+          activeText: active?.textContent ?? '',
+          hasFocus: doc.hasFocus(),
+          rows: [...doc.querySelectorAll('.mods-row[data-mod-id]')].map((row) => {
+            const sw = row.querySelector('button[role="switch"]');
+            return {
+              id: row.getAttribute('data-mod-id') ?? '',
+              checked: sw?.getAttribute('aria-checked') ?? '',
+              disabled: sw?.getAttribute('aria-disabled') === 'true',
+              busy: row.getAttribute('aria-busy') === 'true',
+              state: row.querySelector('.mods-state')?.textContent ?? '',
+            };
+          }),
+          skipped: [...doc.querySelectorAll('.mods-skipped')].map((row) => ({
+            folder: row.getAttribute('data-skipped') ?? '',
+            state: row.querySelector('.mods-state')?.textContent ?? '',
+          })),
+          links: [...doc.querySelectorAll('.mods-link')].map((link) => ({
+            text: link.textContent ?? '',
+            focusable: link.tabIndex >= 0 && link.getAttribute('aria-disabled') !== 'true',
+          })),
+          notice: doc.querySelector('.mods-off span')?.textContent ?? '',
+          footer: doc.querySelector('.mods-footer')?.textContent ?? '',
+          bands: [...doc.querySelectorAll('.mod-band .mod-band-name')].map((n) => n.textContent),
+          rowsPopup: [...doc.querySelectorAll('.command-popup [role="option"]')].map(
+            (row) => row.querySelector('.command-name')?.textContent ?? '',
+          ),
+          busy: [...doc.querySelectorAll('button')].some(
+            (b) => b.getAttribute('aria-label') === 'Stop',
+          ),
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+          dialogRect: rect(dialog),
+        };
+      });
+    const rowOf = (state, id) => state.rows.find((row) => row.id === id);
+    const press = async (key) => {
+      await page.keyboard.press(key);
+      await sleep(200); // the key reaches the webview asynchronously; negative checks follow
+    };
+    const openByMouse = async () => {
+      const before = await view();
+      if (before.open) return;
+      // The panel tab opened a moment ago can take the system focus while it loads, and the popover
+      // closes on the window blur: when the document has no focus, make the chat own it (steady for
+      // three reads) first. Skipped otherwise: it costs about a second per call.
+      if (!before.hasFocus) await focusPromptBox();
+      check(
+        await clickIn('button[data-mods-trigger]'),
+        'the mods button is pressed with the real mouse',
+      );
+      await waitPresent('[role="dialog"].mods-popover');
+    };
+    const closeByEscape = async () => {
+      if ((await view()).open) await press('Escape');
+    };
+    const switchSel = (id) => `.mods-row[data-mod-id="${id}"] button[role="switch"]`;
+    const waitChecked = (id, wanted) =>
+      waitFor(async () => rowOf(await view(), id)?.checked === wanted, 20_000, 150);
+
+    // The measuring function of the matrix cells: self-contained (it is serialized into the page).
+    // Colour maths is a copy of `measureText`'s; the base is the side bar background. `spec` is
+    // `{ dialog: bool, items: [{sel, kind: 'text' | 'icon' | 'box'}], switchSel }`.
+    const measureCell = (doc, spec) => {
+      const parse = (value) => {
+        const m =
+          /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+%?))?\s*\)$/i.exec(
+            String(value).trim(),
+          );
+        if (!m) {
+          // VS Code writes the theme variables as hex (`#rrggbb[aa]`); computed styles are `rgb()`.
+          const hex = /^#([0-9a-f]{3,8})$/i.exec(String(value).trim());
+          if (!hex) return null;
+          let digits = hex[1];
+          if (digits.length === 3 || digits.length === 4) {
+            digits = [...digits].map((c) => c + c).join('');
+          }
+          const alpha = digits.length === 8 ? Number.parseInt(digits.slice(6, 8), 16) / 255 : 1;
+          return [
+            Number.parseInt(digits.slice(0, 2), 16),
+            Number.parseInt(digits.slice(2, 4), 16),
+            Number.parseInt(digits.slice(4, 6), 16),
+            alpha,
+          ];
+        }
+        let alpha = m[4] === undefined ? 1 : Number.parseFloat(m[4]);
+        if (m[4]?.endsWith('%')) alpha /= 100;
+        return [Number(m[1]), Number(m[2]), Number(m[3]), alpha];
+      };
+      const over = (front, back) =>
+        [0, 1, 2].map((i) => front[i] * front[3] + back[i] * (1 - front[3])).concat([1]);
+      const lum = (color) => {
+        const [r, g, b] = color.slice(0, 3).map((channel) => {
+          const v = channel / 255;
+          return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      };
+      const ratioOf = (a, b) => {
+        const [high, low] = [lum(a), lum(b)].sort((x, y) => y - x);
+        return (high + 0.05) / (low + 0.05);
+      };
+      const win = doc.defaultView;
+      const root = win.getComputedStyle(doc.documentElement);
+      const base = parse(root.getPropertyValue('--vscode-sideBar-background')) ?? [30, 30, 30, 1];
+      // The background an element sits on: its ancestors painted over the side bar (own excluded).
+      const backgroundBehind = (element, includeSelf) => {
+        const chain = [];
+        for (
+          let node = includeSelf ? element : element.parentElement;
+          node;
+          node = node.parentElement
+        )
+          chain.unshift(node);
+        let background = [base[0], base[1], base[2], 1];
+        for (const node of chain) {
+          const own = parse(win.getComputedStyle(node).backgroundColor);
+          if (own && own[3] > 0) background = over(own, background);
+        }
+        return background;
+      };
+      const rect = (element) => {
+        element.scrollIntoView({ block: 'nearest' });
+        const r = element.getBoundingClientRect();
+        return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width };
+      };
+      const dialog = doc.querySelector('[role="dialog"].mods-popover');
+      const dialogBox = dialog ? rect(dialog) : null;
+      const viewBox = { width: win.innerWidth, height: win.innerHeight };
+      const inView = (box) =>
+        box.left >= -0.5 &&
+        box.top >= -0.5 &&
+        box.right <= viewBox.width + 0.5 &&
+        box.bottom <= viewBox.height + 0.5;
+      const items = spec.items.map(({ sel, kind }) => {
+        const element = doc.querySelector(sel);
+        if (!element) return { sel, found: false };
+        const box = rect(element);
+        const inside =
+          kind === 'icon' || dialogBox === null
+            ? true
+            : box.left >= dialogBox.left - 0.5 && box.right <= dialogBox.right + 0.5;
+        const clipped = kind === 'text' && element.scrollWidth > element.clientWidth + 1;
+        let ratio = null;
+        if (kind !== 'box') {
+          const color = parse(win.getComputedStyle(element).color);
+          const background = backgroundBehind(element, true);
+          ratio = color ? ratioOf(over(color, background), background) : null;
+        }
+        return {
+          sel,
+          found: true,
+          shown: box.width > 0,
+          inView: inView(box),
+          inside,
+          clipped,
+          ratio,
+          paint: `${win.getComputedStyle(element).color} on rgb(${backgroundBehind(element, true)
+            .slice(0, 3)
+            .map(Math.round)
+            .join(', ')})`,
+        };
+      });
+      let sw = null;
+      if (spec.switchSel) {
+        const element = doc.querySelector(spec.switchSel);
+        if (element) {
+          const style = win.getComputedStyle(element);
+          const behind = backgroundBehind(element, false);
+          const fill = parse(style.backgroundColor);
+          const track = fill && fill[3] > 0 ? over(fill, behind) : behind;
+          const border = parse(style.borderTopColor);
+          const hasBorder = Number.parseFloat(style.borderTopWidth) > 0 && border;
+          const checked = element.getAttribute('aria-checked') === 'true';
+          const edges = [];
+          if (checked) edges.push(ratioOf(track, behind));
+          if (hasBorder) edges.push(ratioOf(over(border, behind), behind));
+          const thumbColor = parse(win.getComputedStyle(element, '::after').backgroundColor);
+          const box = rect(element);
+          sw = {
+            checked,
+            edge: Math.max(...edges, 0),
+            thumb: thumbColor ? ratioOf(over(thumbColor, track), track) : null,
+            inView: inView(box),
+            inside:
+              dialogBox !== null &&
+              box.right <= dialogBox.right + 0.5 &&
+              box.left >= dialogBox.left - 0.5,
+          };
+        }
+      }
+      return {
+        view: viewBox,
+        dialog:
+          dialogBox === null
+            ? null
+            : { inView: inView(dialogBox), overflowX: dialog.scrollWidth - dialog.clientWidth },
+        overflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+        items,
+        sw,
+      };
+    };
+    // The six components of the matrix: what to look at in each.
+    const rowSel = (id) => `.mods-row[data-mod-id="${id}"]`;
+    const COMPONENTS = [
+      [
+        'button with badge',
+        {
+          dialog: false,
+          items: [
+            { sel: 'button[data-mods-trigger]', kind: 'icon', min: 3 },
+            { sel: '.mods-badge', kind: 'text', min: 4.5 },
+          ],
+        },
+      ],
+      [
+        'header with link and footer',
+        {
+          dialog: true,
+          items: [
+            { sel: '.mods-title', kind: 'text', min: 4.5 },
+            { sel: '.mods-header .mods-link', kind: 'text', min: 4.5 },
+            { sel: '.mods-footer', kind: 'text', min: 4.5 },
+          ],
+        },
+      ],
+      [
+        'row with the switch on',
+        {
+          dialog: true,
+          switchSel: switchSel(QUIET),
+          items: [
+            { sel: `${rowSel(QUIET)} .mods-name`, kind: 'text', min: 4.5 },
+            { sel: `${rowSel(QUIET)} .mods-description`, kind: 'text', min: 4.5 },
+          ],
+        },
+      ],
+      [
+        'row with the switch off',
+        {
+          dialog: true,
+          switchSel: switchSel(HELLO),
+          items: [
+            { sel: `${rowSel(HELLO)} .mods-name`, kind: 'text', min: 4.5 },
+            { sel: `${rowSel(HELLO)} .mods-description`, kind: 'text', min: 4.5 },
+          ],
+        },
+      ],
+      [
+        'failed row with its error',
+        {
+          dialog: true,
+          switchSel: switchSel('throws'),
+          items: [
+            { sel: `${rowSel('throws')} .mods-name`, kind: 'text', min: 4.5 },
+            { sel: `${rowSel('throws')} .mods-state`, kind: 'text', min: 4.5 },
+          ],
+        },
+      ],
+      [
+        'skipped folder row',
+        {
+          dialog: true,
+          items: [
+            { sel: '.mods-skipped .mods-name', kind: 'text', min: 4.5 },
+            { sel: '.mods-skipped .mods-state', kind: 'text', min: 4.5 },
+          ],
+        },
+      ],
+    ];
+    const cellVerdict = (spec, m) => {
+      const problems = [];
+      if (m.dialog === null && spec.dialog) problems.push('no popover');
+      if (m.dialog !== null && (!m.dialog.inView || m.dialog.overflowX > 1)) {
+        problems.push(`popover out of the view or scrolls sideways (${JSON.stringify(m.dialog)})`);
+      }
+      if (m.overflow > 1) problems.push(`page overflows sideways by ${String(m.overflow)} px`);
+      const numbers = [];
+      for (const [index, item] of m.items.entries()) {
+        const want = spec.items[index];
+        if (!item.found) {
+          problems.push(`${item.sel} not found`);
+          continue;
+        }
+        if (!item.shown || !item.inView || !item.inside || item.clipped) {
+          problems.push(
+            `${item.sel} not whole (shown ${String(item.shown)}, in view ${String(item.inView)}, in popover ${String(item.inside)}, clipped ${String(item.clipped)})`,
+          );
+        }
+        if (item.ratio !== null) {
+          numbers.push(item.ratio.toFixed(2));
+          if (item.ratio < want.min)
+            problems.push(
+              `${item.sel} contrast ${item.ratio.toFixed(2)} < ${String(want.min)} (${item.paint})`,
+            );
+        }
+      }
+      if (spec.switchSel) {
+        if (m.sw === null) problems.push('switch not found');
+        else {
+          numbers.push(
+            `edge ${m.sw.edge.toFixed(2)}`,
+            `thumb ${m.sw.thumb === null ? 'none' : m.sw.thumb.toFixed(2)}`,
+          );
+          if (!m.sw.inView || !m.sw.inside) problems.push('switch outside the popover or the view');
+          if (m.sw.edge < 3) problems.push(`switch edge contrast ${m.sw.edge.toFixed(2)} < 3`);
+          if (m.sw.thumb === null || m.sw.thumb < 3) problems.push('switch thumb contrast < 3');
+        }
+      }
+      return { ok: problems.length === 0, text: problems.join('; '), numbers: numbers.join(' / ') };
+    };
+
+    // --- Set-up: four folders in the mods root -----------------------------------------------------
+    await waitFor(
+      async () => (await visibleChatId().catch(() => undefined)) !== undefined,
+      15_000,
+      300,
+    );
+    await openChat(30_000);
+    await waitConnected();
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    check(await clickButton('New session'), 'New session is pressed');
+    await waitEmptyView();
+    assertNoWebviewErrors('before the mods popover step');
+    await setSideBarWidth(300).catch(() => undefined);
+    await setTheme(DARK);
+    try {
+      fs.rmSync(countFile, { force: true });
+      for (const id of [HELLO, QUIET, 'throws']) installModFixture(repoRoot, vscode.modsHome, id);
+      fs.mkdirSync(path.join(vscode.modsHome, SKIPPED_FOLDER), { recursive: true });
+      await command('OpenCode: Reload Mods');
+      check(
+        (await waitFor(() => loaded(HELLO) >= 1 && loaded(QUIET) >= 1, 20_000, 200)) === true,
+        'the host logs "mod hello-station loaded" and "mod quiet loaded" after Reload Mods',
+      );
+      await waitFor(async () => (await view()).badge === '2', 15_000, 200);
+
+      // --- Behaviour: the button, the popover, the focus -------------------------------------------
+      let state = await view();
+      check(
+        state.found &&
+          state.label === 'Mods: 2 active' &&
+          state.badge === '2' &&
+          state.badgeHidden &&
+          state.expanded === 'false',
+        `the button is named "Mods: 2 active", with the badge 2 hidden from assistive technology (name "${state.label}", badge "${state.badge}")`,
+      );
+      // A turn first: hello-station pins its band after each turn (step 38), and its panel opens by
+      // its command typed in the chat. Both are what the switches must NOT touch for quiet.
+      await send('Mods45 hello');
+      check(await waitIdle(60_000), 'the turn that makes hello-station pin its band ends');
+      await send(`/${HELLO}:panel`);
+      check(
+        (await waitFor(async () => (await tabs().count()) === 1, 15_000, 200)) === true,
+        `the panel of hello-station is open in a tab titled "${TAB_TITLE}"`,
+      );
+      await waitFor(async () => (await view()).bands.includes('Hello Station'), 10_000, 200);
+      check(
+        (await view()).bands.includes('Hello Station'),
+        'the band of hello-station is shown above the prompt',
+      );
+      await openChat(30_000);
+      await openByMouse();
+      state = await view();
+      check(
+        state.open &&
+          state.expanded === 'true' &&
+          state.activeSwitch === HELLO &&
+          state.rows.length === 3 &&
+          state.skipped.length === 1 &&
+          state.skipped[0].folder === SKIPPED_FOLDER,
+        `a click opens the popover with the focus on the first switch (hello-station), three mod rows and the skipped folder (focus on "${state.activeSwitch}", rows ${JSON.stringify(state.rows.map((r) => [r.id, r.checked]))})`,
+      );
+      check(
+        rowOf(state, 'throws')?.state.includes('boom from the throws fixture') === true &&
+          rowOf(state, 'throws')?.checked === 'true',
+        `the failed mod keeps its switch on and its row shows the error ("${rowOf(state, 'throws')?.state ?? ''}")`,
+      );
+      check(
+        state.footer === 'Each switch starts or stops only that mod. Saved for this workspace.',
+        `the footer says the choice is saved for this workspace ("${state.footer}")`,
+      );
+      await shot('45-popover-open');
+
+      // --- quiet off and on with the keyboard; hello-station untouched ------------------------------
+      const helloLoadedBefore = loaded(HELLO);
+      await press('Tab');
+      state = await view();
+      check(
+        state.activeSwitch === QUIET,
+        `Tab moves the focus to the switch of quiet (on "${state.activeSwitch}", popover open ${String(state.open)}, document has focus ${String(state.hasFocus)}, active text "${state.activeText}", focus on the button ${String(state.activeIsTrigger)})`,
+      );
+      // A Tab that did not arrive (the popover closed with the window blur, see the header of
+      // `ModsMenu`) would make the two waits below expire for 40 s: those checks are skipped, the
+      // failed Tab check above is the verdict.
+      if (state.activeSwitch === QUIET) {
+        const switchedOffBefore = switchedLines(QUIET, 'off');
+        await press('Space');
+        // Read right after the key, before the 20 s wait: the 5 s busy limit of the popover would
+        // erase `busy` by then (review 2, W-A). busy or a changed switch means the press arrived.
+        const right = await view();
+        const rightRow = rowOf(right, QUIET);
+        const turnedOff = (await waitChecked(QUIET, 'false')) === true;
+        const hostLogged = switchedLines(QUIET, 'off') > switchedOffBefore;
+        check(
+          turnedOff,
+          `Space on the switch of quiet turns it off (right after the key: popover open ${String(right.open)}, document has focus ${String(right.hasFocus)}, row busy ${String(rightRow?.busy)}, checked ${String(rightRow?.checked)}; the host logged "mod quiet switched off": ${String(hostLogged)})`,
+        );
+        if (turnedOff) {
+          state = await view();
+          check(
+            rowOf(state, HELLO)?.checked === 'true' &&
+              state.bands.includes('Hello Station') &&
+              (await tabs().count()) === 1 &&
+              loaded(HELLO) === helloLoadedBefore,
+            `quiet off: hello-station keeps its band and its open panel tab and has no new "loaded" line (${String(loaded(HELLO))} vs ${String(helloLoadedBefore)})`,
+          );
+          check(
+            state.badge === '1',
+            `the badge counts the one active mod left (badge "${state.badge}")`,
+          );
+          const quietLoadedBefore = loaded(QUIET);
+          await press('Space');
+          check(
+            (await waitChecked(QUIET, 'true')) === true,
+            'Space again turns the switch of quiet on',
+          );
+          check(
+            (await waitFor(() => loaded(QUIET) === quietLoadedBefore + 1, 15_000, 200)) === true &&
+              loaded(HELLO) === helloLoadedBefore,
+            `quiet starts again ("mod quiet loaded" +1) and hello-station gets no new line (${String(loaded(HELLO))} vs ${String(helloLoadedBefore)})`,
+          );
+        }
+      }
+
+      // --- hello-station off with the real mouse; quiet keeps its Worker ---------------------------
+      await closeByEscape();
+      await send(`/${QUIET}:count`);
+      check(
+        (await waitFor(() => readCount() === 'count=1', 10_000, 200)) === true,
+        `/quiet:count counts 1 in the fresh Worker (file says "${readCount()}")`,
+      );
+      await openByMouse();
+      check(
+        await clickIn(switchSel(HELLO)),
+        'the switch of hello-station is pressed with the real mouse',
+      );
+      check((await waitChecked(HELLO, 'false')) === true, 'the switch of hello-station reads off');
+      await waitFor(async () => (await tabs().count()) === 0, 10_000, 200);
+      state = await view();
+      check(
+        !state.bands.includes('Hello Station') &&
+          (await tabs().count()) === 0 &&
+          rowOf(state, QUIET)?.checked === 'true' &&
+          state.badge === '1',
+        `hello-station off: its band and its panel tab are gone and quiet stays on (bands ${JSON.stringify(state.bands)}, badge "${state.badge}")`,
+      );
+      await closeByEscape();
+      await focusPromptBox();
+      await clearPromptBox(150);
+      await page.keyboard.type(`/${QUIET}`);
+      await waitFor(async () => (await view()).rowsPopup.length > 0, 5_000, 100);
+      const quietRows = (await view()).rowsPopup;
+      await clearPromptBox(150);
+      await page.keyboard.type(`/${HELLO}`);
+      await sleep(300); // the popup filters as the text changes; the absence below is judged after it
+      state = await view();
+      check(
+        quietRows.some((row) => row.includes(`${QUIET}:count`)) &&
+          !state.rowsPopup.some((row) => row.includes(HELLO)),
+        `the "/" popup lists ${QUIET}:count (so it does open) and no hello-station command while it is off (${JSON.stringify(quietRows)}, then ${JSON.stringify(state.rowsPopup)})`,
+      );
+      await clearPromptBox(150);
+      await send(`/${QUIET}:count`);
+      check(
+        (await waitFor(() => readCount() === 'count=2', 10_000, 200)) === true,
+        `/quiet:count counts 2: switching hello-station did not restart quiet (file says "${readCount()}")`,
+      );
+
+      // --- Reload Window: the choice is in the workspace memento ------------------------------------
+      const helloBeforeReload = loaded(HELLO);
+      const quietBeforeReload = loaded(QUIET);
+      await reload('__visualReload45');
+      let quietBack = await waitFor(() => loaded(QUIET) > quietBeforeReload, 20_000, 200);
+      if (quietBack !== true) {
+        // HYPOTHESIS R4 of step 41: the mods root may not survive a Reload Window; Reload Mods then.
+        await command('OpenCode: Reload Mods');
+        quietBack = await waitFor(() => loaded(QUIET) > quietBeforeReload, 20_000, 200);
+      }
+      await waitFor(async () => (await view()).found, 20_000, 200);
+      await openByMouse();
+      state = await view();
+      check(
+        quietBack === true &&
+          rowOf(state, HELLO)?.checked === 'false' &&
+          rowOf(state, QUIET)?.checked === 'true' &&
+          state.bands.length === 0 &&
+          loaded(HELLO) === helloBeforeReload,
+        `after Reload Window hello-station is still off (switch ${rowOf(state, HELLO)?.checked ?? 'missing'}, no band, no new "loaded" line) and quiet started again`,
+      );
+      await shot('45-after-reload');
+
+      // --- Matrix: 6 components x 3 widths x 4 themes -----------------------------------------------
+      const WIDTHS = [
+        ['wide', 900],
+        ['300', 300],
+        ['under 200', 180],
+      ];
+      for (const [name, wanted] of WIDTHS) {
+        let barPx;
+        try {
+          barPx = await setSideBarWidth(wanted);
+        } catch (error) {
+          barPx = await sideBarPx();
+          warn(
+            `mods popover: the side bar did not go to ${String(wanted)} px (it is ${String(barPx)} px): ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        const reached =
+          name === '300'
+            ? Math.abs(barPx - 300) <= SIZE_TOLERANCE
+            : name === 'wide'
+              ? barPx >= 600
+              : barPx < 200;
+        if (!reached) {
+          warn(
+            `mods popover: width "${name}" not reached (side bar ${String(barPx)} px): not judged`,
+          );
+          continue;
+        }
+        for (const [themeName, theme] of PROBLEM_THEMES) {
+          await setTheme(theme);
+          await waitFor(async () => (await view()).found, 30_000, 300);
+          await openByMouse();
+          // The pointer rests on the button after the click, and its hover colours would be
+          // measured as the icon's: park it over the title bar, away from every element judged.
+          await page.mouse.move(400, 5);
+          await sleep(150); // the hover style leaves on the next frame; the cells below read it
+          for (const [component, spec] of COMPONENTS) {
+            const measured = await web.inDoc(measureCell, spec);
+            const verdict = cellVerdict(spec, measured);
+            check(
+              verdict.ok,
+              `${component} at ${name} (bar ${String(Math.round(barPx))} px), ${themeName}: inside the view, no sideways overflow, text whole, contrast ${verdict.numbers}${verdict.ok ? '' : ` - ${verdict.text}`}`,
+            );
+          }
+          await shot(`45-popover-${name.replace(' ', '-')}-${themeName}`);
+          await closeByEscape();
+        }
+      }
+      await setTheme(DARK);
+      await setSideBarWidth(300).catch(() => undefined);
+
+      // --- Escape returns the focus and does not stop a turn -------------------------------------------
+      await waitFor(async () => (await view()).found, 20_000, 200);
+      await openByMouse();
+      await press('Escape');
+      state = await view();
+      check(
+        !state.open && state.activeIsTrigger,
+        `Escape closes the popover and returns the focus to the button (open ${String(state.open)}, focus on the button ${String(state.activeIsTrigger)})`,
+      );
+      await focusPromptBox();
+      await clearPromptBox(150);
+      await page.keyboard.type('Mods45 slow SLOW');
+      await page.keyboard.press('Enter');
+      check((await waitFor(isBusy, 5_000, 100)) === true, 'a SLOW turn is running');
+      await openByMouse();
+      await press('Escape');
+      state = await view();
+      check(
+        !state.open && state.activeIsTrigger && (await isBusy()) === true,
+        `Escape with the popover open closes it and does NOT stop the running turn (open ${String(state.open)}, busy ${String(await isBusy())})`,
+      );
+      await command('OpenCode: Stop Response');
+      check(await waitIdle(30_000), 'Stop Response ends the SLOW turn');
+
+      // --- Global switch off: the list stays, the switches are aria-disabled --------------------------
+      writeSettings(vscode.userDataDir, { [MODS_KEY]: false });
+      // The popover is closed here, so wait on what the button shows: no mod is active any more.
+      await waitFor(async () => (await view()).label === 'Mods: 0 active', 15_000, 200);
+      await openByMouse();
+      await waitFor(async () => (await view()).notice !== '', 15_000, 200);
+      state = await view();
+      check(
+        state.notice.startsWith('Mods are turned off') &&
+          state.rows.length === 3 &&
+          state.rows.every((row) => row.disabled) &&
+          state.links.some((link) => link.text === 'Open Settings' && link.focusable),
+        `with ${MODS_KEY} off the popover lists the mods with aria-disabled switches, says they are off and offers "Open Settings" (notice "${state.notice}", ${JSON.stringify(state.rows.map((r) => [r.id, r.disabled]))})`,
+      );
+      check(
+        state.links.some((link) => link.text === 'Open folder' && link.focusable),
+        '"Open folder" is present and focusable (not pressed: it would open the system file manager)',
+      );
+      await shot('45-mods-off');
+      await closeByEscape();
+      writeSettings(vscode.userDataDir, { [MODS_KEY]: undefined });
+      // Popover closed again: quiet (on) is the one active mod (hello-station is still off).
+      await waitFor(async () => (await view()).label === 'Mods: 1 active', 20_000, 200);
+      assertNoWebviewErrors('mods popover');
+    } finally {
+      // Leave the run as the step found it: the global switch back, hello-station on again through
+      // the UI (the list lives in the workspace memento), no fixtures, dark theme, 300 px.
+      writeSettings(vscode.userDataDir, { [MODS_KEY]: undefined });
+      await closeByEscape().catch(() => undefined);
+      try {
+        await waitFor(async () => (await view()).found, 10_000, 200);
+        await openByMouse();
+        if (rowOf(await view(), HELLO)?.checked === 'false') {
+          await clickIn(switchSel(HELLO));
+          await waitChecked(HELLO, 'true');
+        }
+        await closeByEscape();
+      } catch {
+        // the webview may be gone; the fixtures are removed anyway
+      }
+      for (const id of [HELLO, QUIET, 'throws']) removeModFixture(vscode.modsHome, id);
+      fs.rmSync(path.join(vscode.modsHome, SKIPPED_FOLDER), { recursive: true, force: true });
+      fs.rmSync(countFile, { force: true });
+      await command('OpenCode: Reload Mods').catch(() => undefined);
+      await command('Notifications: Clear All Notifications').catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+      await setSideBarWidth(300).catch(() => undefined);
+    }
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
