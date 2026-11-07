@@ -7,6 +7,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Several pending requests share one box.** Instead of stacking one card on top of another, the
+  permissions and questions the agent is waiting on sit in a single box with a tab per request
+  (icon and name, the active one underlined, "1 of 3" on the right) and only the active request
+  below. The tab names always show whole; if they do not fit, the row scrolls sideways. With a
+  single request nothing changes.
+
 ## [1.0.0] - 2026-11-04
 
 First release on the Visual Studio Marketplace and Open VSX.
