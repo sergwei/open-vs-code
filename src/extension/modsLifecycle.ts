@@ -13,6 +13,9 @@
 // two generations of Workers. The loop and the "disposed" flag live in `modsLoader.ts`; this file
 // routes every write to the two channels through that flag, because VS Code releases a channel on
 // deactivate and a released channel throws.
+//
+// E10-mod-toggles (issue #181): each mod has its own on/off switch, per workspace, on top of the
+// machine-wide `openVsCode.mods.enabled`; see `modToggles.ts` and `modsLoader.ts`.
 
 import * as l10n from '@vscode/l10n';
 import { mkdir } from 'node:fs/promises';
@@ -28,6 +31,7 @@ import {
   OPEN_MODS_FOLDER_COMMAND_ID,
   RELOAD_MODS_COMMAND_ID,
   RUN_MOD_COMMAND_ID,
+  TEST_MOD_TOGGLE_COMMAND_ID,
   TEST_MODS_STATE_COMMAND_ID,
 } from './ids';
 import { globalModsRoot, discoverMods } from './modDiscovery';
@@ -36,6 +40,7 @@ import { ModHost, type ModState, type ModUi } from './modHost';
 import { createModPanels } from './modPanels';
 import { createModsChat } from './modsChat';
 import { createModsLoader } from './modsLoader';
+import { createDisabledStore } from './modToggles';
 import type { LogLevel } from '../mods/wire';
 
 /** What {@link registerMods} gives back. */
@@ -126,7 +131,8 @@ function showToast(
  * Registers the "OpenCode Mods" channel, the four contributed commands (Manage Mods, Reload Mods,
  * Open Mods Folder, Run Mod Command) and, in `ExtensionMode.Test` only, the uncontributed state
  * command. Starts the first load without awaiting it, and reloads when `openVsCode.mods.enabled`
- * changes (off: stops every mod; on: discovers again). Lifecycle lines (`mod x loaded`,
+ * changes (off: discovers, lists and stops every mod; on: discovers again and starts those not
+ * switched off in this workspace). Lifecycle lines (`mod x loaded`,
  * `mod x failed: …`, `mod folder x skipped: …`) go to `channel`, the main log; what a mod logs goes
  * to its own channel prefixed with `[id]`. The returned sink also carries the chat half (bands,
  * commands, run, compose) built by `createModsChat`, which `status` and `compose` of the host feed.
@@ -145,6 +151,22 @@ function showToast(
  * The texts of the Manage Mods list, the "no command" notice and the failure of Run Mod Command
  * go through `l10n.t` when they are shown; the channel names, the log lines and whatever a mod
  * writes (names, descriptions, messages) are not translated.
+ *
+ * Per-mod switch (E10-mod-toggles, issue #181): the list of switched-off ids is kept in
+ * `context.workspaceState` (`modToggles.ts`), or in memory when the window has no folder and no
+ * workspace file (decision #1997; then Manage Mods says "off in this window"). Manage Mods is
+ * built from the loader's inventory (every mod found, switched off ones included), not from the
+ * host's statuses, so it never says "No mods found" with every mod off. In `ExtensionMode.Test`
+ * the uncontributed command `openVsCode.test.modToggle(modId, enabled)` calls the same
+ * `chat.toggle` as the popover (an unknown id rejects and writes nothing) and the state command
+ * also returns `listing`. VERIFIED by `npm run test:integration -- --label main` (Windows 11, VS
+ * Code 1.145.2, 07/11/2026, 52 passing), the cases of `mods.test.ts` that start with "turning one
+ * mod off", "Reload Mods and turning" and "an unknown id is refused" all passed. VERIFIED for the
+ * memento across a window reload (integration keeps workspace storage in memory) on Windows 11,
+ * VS Code 1.145.2 (07/11/2026) by `test:visual` step 45 with the real Reload Window: "after Reload
+ * Window hello-station is still off (switch false, no band, no new "loaded" line) and quiet started
+ * again". Not observed: the no-folder window with its in-memory list (Vitest only,
+ * `modToggles.test.ts`), and macOS and Linux (CI only).
  */
 export function registerMods(
   context: vscode.ExtensionContext,
@@ -206,29 +228,79 @@ export function registerMods(
     },
     ...(isTest ? { heartbeatMs: TEST_HEARTBEAT_MS } : {}),
   });
-  const chat = createModsChat(host, (modId) => {
-    logComposeDropped(modId);
-  });
+  // The per-workspace list of switched-off mods lives in `workspaceState`, which VS Code keeps in
+  // the user profile and never in the opened folder (so a repository cannot write it). In a window
+  // with no folder and no workspace file the memento belongs to a window id that is random per
+  // window, so there the list is kept in memory and the UI says it lasts until the window closes
+  // (decision #1997).
+  const store = createDisabledStore(
+    vscode.workspace.workspaceFolders === undefined && vscode.workspace.workspaceFile === undefined
+      ? undefined
+      : context.workspaceState,
+  );
   const loader = createModsLoader({
     readEnabled,
     discover: () => discoverMods(root),
     host,
+    readDisabled: () => store.read(),
+    writeDisabled: (list) => store.write(list),
+    persisted: store.persisted,
     log: (level, text) => {
       channel[level](text);
     },
   });
+  // The loader exists before `chat` because `createModsChat` subscribes to it at once.
+  const chat = createModsChat(
+    {
+      statuses: () => host.statuses(),
+      commands: () => host.commands(),
+      onDidChange: (listener) => host.onDidChange(listener),
+      runCommand: (modId, name, args, sessionID) => host.runCommand(modId, name, args, sessionID),
+      inventory: () => loader.inventory(),
+      onDidChangeInventory: (listener) => loader.onDidChange(listener),
+      toggle: (modId, enabled) => loader.toggle(modId, enabled),
+      action: async (kind) => {
+        if (kind === 'openFolder') {
+          await vscode.commands.executeCommand(OPEN_MODS_FOLDER_COMMAND_ID);
+        } else {
+          await vscode.commands.executeCommand(
+            'workbench.action.openSettings',
+            MODS_ENABLED_SETTING,
+          );
+        }
+      },
+    },
+    (modId) => {
+      logComposeDropped(modId);
+    },
+  );
   const logMod = loader.guard(writeMods);
   const logLifecycle = loader.guard(writeMain);
   const logComposeDropped = loader.guard(writeComposeDropped);
   const load = loader.load;
 
   const manage = async (): Promise<void> => {
-    const items: ManageItem[] = host.statuses().map((status) => {
+    // Built from the inventory (every mod found), not from the host's statuses: a mod that is
+    // switched off has no Worker, and with them all off the list must not say "No mods found".
+    const inventory = loader.inventory();
+    const off = new Set(inventory.disabled);
+    const statusOf = new Map(host.statuses().map((status) => [status.id, status]));
+    const items: ManageItem[] = inventory.mods.map((mod) => {
+      if (off.has(mod.id)) {
+        return {
+          label: `$(circle-slash) ${mod.name}`,
+          description: `${mod.id} ${mod.version} · ${
+            inventory.persisted ? l10n.t('off in this workspace') : l10n.t('off in this window')
+          }`,
+        };
+      }
+      const status = statusOf.get(mod.id);
+      const state: ModState = status?.state ?? 'stopped';
       const item: ManageItem = {
-        label: `${status.state === 'active' ? '$(check)' : status.state === 'failed' ? '$(error)' : '$(circle-outline)'} ${status.name}`,
-        description: `${status.id} ${status.version} · ${modStateLabel(status.state)}`,
+        label: `${state === 'active' ? '$(check)' : state === 'failed' ? '$(error)' : '$(circle-outline)'} ${mod.name}`,
+        description: `${mod.id} ${mod.version} · ${modStateLabel(state)}`,
       };
-      if (status.error !== undefined) item.detail = status.error;
+      if (status?.error !== undefined) item.detail = status.error;
       return item;
     });
     for (const problem of loader.problems()) {
@@ -314,7 +386,18 @@ export function registerMods(
         mods: host.statuses(),
         commands: host.commands(),
         problems: loader.problems(),
+        listing: chat.state().listing,
       })),
+      // Same path as the popover's switch; a bad argument or an unknown id rejects, writing nothing.
+      vscode.commands.registerCommand(
+        TEST_MOD_TOGGLE_COMMAND_ID,
+        (modId: unknown, enabled: unknown) => {
+          if (typeof modId !== 'string' || typeof enabled !== 'boolean') {
+            return Promise.reject(new TypeError('expected (modId: string, enabled: boolean)'));
+          }
+          return chat.toggle(modId, enabled);
+        },
+      ),
     );
   }
   void load();

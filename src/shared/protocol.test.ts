@@ -238,6 +238,20 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
     type: 'mods.state',
     bands: [{ modId: 'hello-station', modName: 'Hello Station', text: 'Hi', severity: 'info' }],
     commands: [{ modId: 'hello-station', name: 'hello-station:hello', description: 'Says hello' }],
+    listing: {
+      enabled: true,
+      persisted: true,
+      mods: [
+        {
+          id: 'hello-station',
+          name: 'Hello Station',
+          version: '0.1.0',
+          enabled: true,
+          state: 'active',
+        },
+      ],
+      skipped: [{ folder: 'broken', reason: 'no mod.json' }],
+    },
   },
 };
 
@@ -302,6 +316,8 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   'permissions.manage': { type: 'permissions.manage' },
   'server.restart': { type: 'server.restart' },
   'workMode.set': { type: 'workMode.set', mode: 'auto' },
+  'mod.toggle': { type: 'mod.toggle', modId: 'hello-station', enabled: false },
+  'mods.action': { type: 'mods.action', action: 'openFolder' },
   'logs.show': { type: 'logs.show' },
   'setup.action': { type: 'setup.action', action: 'binary.choose' },
   'editor.open': { type: 'editor.open', path: 'src/a.ts', line: 3, column: 1 },
@@ -373,6 +389,40 @@ describe('isWebviewToHost', () => {
       expect(isWebviewToHost({ type: 'workMode.set', mode }), String(mode)).toBe(false);
     }
     expect(isWebviewToHost({ type: 'workMode.set' })).toBe(false);
+  });
+
+  // E10-mod-toggles. Fabricated messages pinning the guards of the per-mod switch: the id is checked
+  // for SHAPE only (that the host knows it is the handler's check), `enabled` must be a real boolean
+  // (a truthy string must not switch anything), and `mods.action` is a closed enum.
+  it('validates mod.toggle: a well-formed id and a boolean', () => {
+    const base = WEBVIEW_SAMPLES['mod.toggle'];
+    expect(isWebviewToHost(base)).toBe(true);
+    expect(isWebviewToHost({ ...base, enabled: true })).toBe(true);
+    expect(isWebviewToHost({ ...base, modId: 'a'.repeat(64) })).toBe(true);
+    const bad: unknown[] = [
+      { ...base, modId: 'Hello' },
+      { ...base, modId: '../x' },
+      { ...base, modId: 'a'.repeat(65) },
+      { ...base, modId: '' },
+      { ...base, modId: '-a' },
+      { ...base, modId: 7 },
+      { ...base, enabled: 'false' },
+      { ...base, enabled: 0 },
+      { ...base, enabled: undefined },
+    ];
+    for (const value of bad) {
+      expect(isWebviewToHost(value), JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  it('accepts mods.action for openFolder and openSettings and rejects any other value', () => {
+    for (const action of ['openFolder', 'openSettings']) {
+      expect(isWebviewToHost({ type: 'mods.action', action }), action).toBe(true);
+    }
+    for (const action of ['rm -rf', '', 'toString', 'openfolder', 1, undefined, null]) {
+      expect(isWebviewToHost({ type: 'mods.action', action }), String(action)).toBe(false);
+    }
+    expect(isWebviewToHost({ type: 'mods.action' })).toBe(false);
   });
 
   it('accepts attachments.pick with no kind, file or image, and rejects another kind', () => {

@@ -149,7 +149,7 @@ import { createPendingRequests, type PendingSummary } from './pendingRequests';
 import { createRequestResolutions } from './requestResolutions';
 import { AUTO_RETRY_DELAYS_MS, createWorkModes } from './workMode';
 import { bothTexts, logErrorOf, translatedError } from './l10nEnglish';
-import type { ModsSink } from './modEvents';
+import type { ModsChat, ModsSink } from './modEvents';
 import type { ServerConfigSink } from './serverConfig';
 import type { RunningServerInfo, ServerState } from './serverManager';
 import { createSessionBrowser, type SessionPage } from './sessionBrowser';
@@ -876,7 +876,8 @@ export class ChatController {
   /**
    * Sends the current mods UI state (E10-mods, phase 3) to `only`, or to every pane. Nothing when
    * the controller has no mods chat half, so a host without mods sends no `mods.state` at all. The
-   * message always carries the WHOLE state (it replaces the webview's), which is why a pane that
+   * message always carries the WHOLE state (bands, commands and, since E10-mod-toggles, the mods
+   * `listing`; it replaces the webview's), which is why a pane that
    * missed some changes needs nothing but the latest. A throw from the state builder is caught: a
    * failing mod must not break the chat.
    */
@@ -885,14 +886,41 @@ export class ChatController {
     if (chat === undefined) return;
     let message: HostToWebview;
     try {
-      const { bands, commands } = chat.state();
-      message = { type: 'mods.state', bands, commands };
+      const { bands, commands, listing } = chat.state();
+      message = { type: 'mods.state', bands, commands, listing };
     } catch (error) {
       this.log.warn(`mods state failed: ${logErrorOf(error)}`);
       return;
     }
     if (only !== undefined) only.post(message);
     else for (const pane of this.panes.values()) pane.post(message);
+  }
+
+  /**
+   * `mod.toggle` and `mods.action` (E10-mod-toggles, issue #181): hands the request to the mods chat
+   * half and, if it fails or there is none, answers a `warning` notice to the pane that asked and to
+   * no other (same pattern as `editor.*`: these messages carry no `requestId`). On success nothing
+   * is answered here: the outcome is the `mods.state` that every pane gets when the listing changes.
+   * The log names the type and the mod id, never any text from the mod. VERIFIED by
+   * `chatController.test.ts` "mod.toggle reaches the mods chat and a failure is a notice to the
+   * pane that asked only", "mods.action reaches the mods chat" and "mod.toggle and mods.action
+   * answer a notice when there is no mods chat half" (fabricated mods chat half and panes, Windows
+   * 11, 07/11/2026).
+   */
+  private async modsRequest(
+    pane: ChatPane,
+    type: 'mod.toggle' | 'mods.action',
+    work: (chat: ModsChat) => Promise<void>,
+  ): Promise<void> {
+    try {
+      const chat = this.deps.mods?.chat;
+      if (chat === undefined) throw translatedError(() => l10n.t('Mods are not available'));
+      await work(chat);
+    } catch (error) {
+      const info = toErrorInfo(error, this.secrets);
+      this.log.warn(`${type} failed: ${info.code}: ${logTextOf(info)}`);
+      pane.post({ type: 'notice', level: 'warning', error: info });
+    }
   }
 
   /**
@@ -4455,7 +4483,8 @@ export class ChatController {
    * `permissions.manage` runs the saved-permissions manager; `server.restart` and `logs.show` go
    * to `deps.server`. E2 (issue #85): `setup.action` goes to `deps.setup` and `attachments.pick`
    * passes its `kind` (default `file`) to the picker. E10-mods: `mod.command.run` runs a mod's
-   * command through {@link runModCommand}.
+   * command through {@link runModCommand}. E10-mod-toggles: `mod.toggle` and `mods.action` go
+   * through {@link modsRequest}.
    */
   handle(paneId: number, message: WebviewToHost): Promise<void> {
     const pane = this.paneById(paneId);
@@ -4502,6 +4531,12 @@ export class ChatController {
       },
       'mod.command.run': (m) => {
         pending.push(this.runModCommand(pane, m));
+      },
+      'mod.toggle': (m) => {
+        pending.push(this.modsRequest(pane, m.type, (chat) => chat.toggle(m.modId, m.enabled)));
+      },
+      'mods.action': (m) => {
+        pending.push(this.modsRequest(pane, m.type, (chat) => chat.action(m.action)));
       },
       'permission.reply': (m) => {
         pending.push(this.answerPermission(pane, m));

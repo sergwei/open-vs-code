@@ -2157,6 +2157,167 @@ button.work-mode-item[aria-checked='true'] {
 }
 
 /*
+ * The mods button and its popover (E10-mod-toggles, issue #181). The button is the "+" round one;
+ * the badge counting the active mods is a small pill in its corner (`aria-hidden`: the count is in
+ * the accessible name). The popover reuses the "+" menu box, which spans the prompt and opens
+ * upwards, so at 300 px and under 200 px it stays inside the view; every text wraps instead of
+ * being cut. The switch is a pill: ON fills with the button colour, OFF is an outline in the
+ * description colour (`--vscode-checkbox-border` measured 1.57:1 against the popover in Default
+ * Light Modern, below the 3:1 of a control; `test:visual` step 45; `--vscode-contrastBorder` in
+ * High Contrast), and the thumb takes the colour that
+ * contrasts with the track; the focus ring is `--vscode-focusBorder`.
+ */
+button.mods-trigger {
+  position: relative;
+}
+
+.mods-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--vscode-badge-foreground);
+  background: var(--vscode-badge-background);
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+  border-radius: 7px;
+}
+
+.mods-popover {
+  gap: 4px;
+  padding: 8px;
+}
+
+.mods-header,
+.mods-off,
+.mods-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mods-off {
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+
+.mods-title {
+  font-weight: 600;
+}
+
+button.mods-link {
+  padding: 0;
+  color: var(--vscode-textLink-foreground);
+  background: transparent;
+  border: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+button.mods-link:hover {
+  color: var(--vscode-textLink-activeForeground);
+}
+
+button.mods-link:focus-visible,
+button.mods-switch:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.mods-row {
+  padding: 4px 0;
+  border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
+}
+
+.mods-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mods-name {
+  font-weight: 600;
+}
+
+.mods-version,
+.mods-description,
+.mods-state {
+  font-size: 0.9em;
+  font-weight: 400;
+}
+
+.mods-description,
+.mods-version {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+.mods-state {
+  color: var(--vscode-foreground);
+  font-style: italic;
+}
+
+button.mods-switch {
+  flex: 0 0 auto;
+  position: relative;
+  width: 28px;
+  height: 16px;
+  padding: 0;
+  box-sizing: border-box;
+  border: 1px solid
+    var(--vscode-contrastBorder, var(--vscode-descriptionForeground, var(--vscode-foreground)));
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+button.mods-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--vscode-foreground);
+}
+
+button.mods-switch[aria-checked='true'] {
+  background: var(--vscode-button-background);
+  border-color: var(--vscode-contrastBorder, var(--vscode-button-background));
+}
+
+button.mods-switch[aria-checked='true']::after {
+  left: 14px;
+  background: var(--vscode-button-foreground);
+}
+
+button.mods-switch[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mods-row[aria-busy='true'] .mods-text {
+  opacity: 0.7;
+}
+
+.mods-footer {
+  margin: 4px 0 0;
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  overflow-wrap: anywhere;
+}
+
+/*
  * The slash commands (issue #33). The "/" button and its menu wear the "+" classes (same wrapper,
  * trigger, menu and item); only the row inside differs: `/name` and the server's description on one
  * line, the description cut with an ellipsis (whole in the `title`). The typed popup wears the `@`

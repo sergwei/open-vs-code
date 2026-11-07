@@ -6,7 +6,8 @@
 // down, and a suite loading the developer's real mods (H8: `OPEN_VS_CODE_MODS_HOME` is set for
 // every label by `.vscode-test.mjs`).
 //
-// How: the three fixtures of `src/extension/test-fixtures/mods/` (a well-behaved mod, one that
+// How: the four fixtures of `src/extension/test-fixtures/mods/` (a well-behaved mod, `quiet` (a
+// counter in memory, E10-mod-toggles), one that
 // throws in `activate`, one that spins forever) are copied into the seeded mods root, then
 // "OpenCode: Reload Mods" discovers them and the uncontributed test command reads the state. The
 // well-behaved mod proves its command ran INSIDE the Worker by writing a sentinel file.
@@ -25,6 +26,7 @@ import {
   MODS_ENABLED_KEY,
   RELOAD_MODS_COMMAND_ID,
   RUN_MOD_COMMAND_ID,
+  TEST_MOD_TOGGLE_COMMAND_ID,
   TEST_MODS_STATE_COMMAND_ID,
 } from '../../src/extension/ids';
 
@@ -35,6 +37,22 @@ interface ModsState {
   mods: Array<{ id: string; state: string; error?: string }>;
   commands: Array<{ modId: string; name: string }>;
   problems: Array<{ folder: string; reason: string }>;
+  /** The listing of the popover (E10-mod-toggles): every mod found, with its on/off state. */
+  listing: {
+    enabled: boolean;
+    persisted: boolean;
+    mods: Array<{ id: string; enabled: boolean; state: string }>;
+    skipped: Array<{ folder: string; reason: string }>;
+  };
+}
+
+/** The `state` of one mod in the listing of `s`, or `undefined` when the listing does not have it. */
+const listed = (s: ModsState, id: string): string | undefined =>
+  s.listing.mods.find((m) => m.id === id)?.state;
+
+/** Switches one mod through the test-only command (the same path as the popover's switch). */
+async function toggleMod(modId: string, enabled: boolean): Promise<void> {
+  await vscode.commands.executeCommand(TEST_MOD_TOGGLE_COMMAND_ID, modId, enabled);
 }
 
 /** Reads the state through the test-only command. */
@@ -86,6 +104,9 @@ describe('mods', function () {
   });
 
   after(async () => {
+    // Put back what the toggle cases may have left off (workspace storage is in memory here, but a
+    // later suite of the same window would still see it).
+    await toggleMod('hello-station', true).catch(() => undefined);
     await vscode.workspace
       .getConfiguration(CONFIG_SECTION)
       .update(MODS_ENABLED_KEY, undefined, vscode.ConfigurationTarget.Global);
@@ -100,15 +121,16 @@ describe('mods', function () {
    * The seeded root is the only one read (H8), a good mod becomes active with its command, a mod
    * that throws in `activate` is `failed` with its message, and one that spins forever is
    * `failed` as hung, while the good one keeps working (its three commands, `hello`, the
-   * phase 4 `panel` and the #169 `compose`, are listed; the panel itself is covered by `test:visual` step 39). VERIFIED: "✔ loads the good mod and contains
-   * the one that throws and the one that hangs" passed in 2130 ms with the three commands listed (label `main`, Windows 11,
-   * VS Code 1.144.1, 03/11/2026). macOS and Linux: CI only.
+   * phase 4 `panel` and the #169 `compose`, are listed, then `quiet:count`; the panel itself is
+   * covered by `test:visual` step 39), and the fourth fixture, `quiet`, is `active` too.
+   * VERIFIED by this case, which passed with the four commands listed (label `main`,
+   * Windows 11, VS Code 1.145.2, 07/11/2026). macOS and Linux: CI only.
    */
   it('loads the good mod and contains the one that throws and the one that hangs', async () => {
     await vscode.commands.executeCommand(RELOAD_MODS_COMMAND_ID);
     const result = await waitForState(
-      (s) => s.mods.length === 3 && s.mods.every((m) => m.state !== 'starting'),
-      'the three fixtures to settle',
+      (s) => s.mods.length === 4 && s.mods.every((m) => m.state !== 'starting'),
+      'the four fixtures to settle',
     );
     assert.strictEqual(path.resolve(result.root), path.resolve(modsHome ?? ''));
     const byId = Object.fromEntries(result.mods.map((m) => [m.id, m]));
@@ -117,9 +139,10 @@ describe('mods', function () {
     assert.match(byId['throws']?.error ?? '', /boom from the throws fixture/);
     assert.strictEqual(byId['hangs']?.state, 'failed');
     assert.match(byId['hangs']?.error ?? '', /^hung:/);
+    assert.strictEqual(byId['quiet']?.state, 'active');
     assert.deepStrictEqual(
       result.commands.map((c) => `${c.modId}:${c.name}`),
-      ['hello-station:hello', 'hello-station:panel', 'hello-station:compose'],
+      ['hello-station:hello', 'hello-station:panel', 'hello-station:compose', 'quiet:count'],
     );
   });
 
@@ -133,6 +156,101 @@ describe('mods', function () {
     const sentinel = path.join(sentinelDir, 'hello.ran');
     assert.ok(fs.existsSync(sentinel), 'the sentinel file was not written by the command');
     assert.match(fs.readFileSync(sentinel, 'utf8'), /args=from-the-test/);
+  });
+
+  /**
+   * Turning ONE mod off stops only that mod: `quiet` keeps its Worker, which a counter held in its
+   * memory proves (`count=1` before, `count=2` after; a restarted Worker would say `count=1`).
+   * `hello-station` leaves the host's statuses and its commands, shows as `disabled` in the listing,
+   * and comes back `active` when switched on. VERIFIED by this case, which passed (label
+   * `main`, Windows 11, VS Code 1.145.2, 07/11/2026). Not observed: the `count=2` assertion going
+   * red after a restart of `quiet` (that mutation was not run).
+   */
+  it('turning one mod off stops only that mod: the other keeps its in-memory state', async () => {
+    const countFile = path.join(sentinelDir, 'quiet.count');
+    await vscode.commands.executeCommand(RUN_MOD_COMMAND_ID, {
+      modId: 'quiet',
+      name: 'count',
+      args: '',
+    });
+    assert.match(fs.readFileSync(countFile, 'utf8'), /^count=1$/m);
+
+    await toggleMod('hello-station', false);
+    const off = await waitForState(
+      (s) =>
+        listed(s, 'hello-station') === 'disabled' && !s.mods.some((m) => m.id === 'hello-station'),
+      'hello-station to be switched off',
+    );
+    assert.ok(!off.commands.some((c) => c.modId === 'hello-station'), 'its commands are gone');
+    assert.strictEqual(listed(off, 'quiet'), 'active');
+    assert.ok(off.commands.some((c) => c.modId === 'quiet'));
+
+    await toggleMod('hello-station', true);
+    await waitForState(
+      (s) => listed(s, 'hello-station') === 'active',
+      'hello-station to start again',
+    );
+
+    await vscode.commands.executeCommand(RUN_MOD_COMMAND_ID, {
+      modId: 'quiet',
+      name: 'count',
+      args: '',
+    });
+    assert.match(fs.readFileSync(countFile, 'utf8'), /^count=2$/m);
+  });
+
+  /**
+   * A mod switched off stays off through "Reload Mods" and through turning `mods.enabled` off and
+   * on: the listing keeps it `disabled` (and, with the global switch off, still lists the others as
+   * `stopped` with `enabled: false` reported). Workspace storage is in memory in this suite, so
+   * what survives a window reload is measured only by `test:visual` step 45, whose check "after
+   * Reload Window hello-station is still off (switch false, no band, no new "loaded" line) and quiet
+   * started again" passed on Windows 11, VS Code 1.145.2 (07/11/2026). VERIFIED by this case, which passed (label `main`, Windows 11, VS Code
+   * 1.145.2, 07/11/2026).
+   */
+  it('Reload Mods and turning mods.enabled off and on keep a disabled mod off in this workspace', async () => {
+    await toggleMod('hello-station', false);
+    await vscode.commands.executeCommand(RELOAD_MODS_COMMAND_ID);
+    const reloaded = await waitForState(
+      (s) => listed(s, 'quiet') === 'active' && listed(s, 'hangs') === 'failed',
+      'the reload to settle',
+    );
+    assert.strictEqual(listed(reloaded, 'hello-station'), 'disabled');
+    assert.ok(!reloaded.mods.some((m) => m.id === 'hello-station'));
+
+    const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+    await config.update(MODS_ENABLED_KEY, false, vscode.ConfigurationTarget.Global);
+    const globalOff = await waitForState(
+      (s) => !s.listing.enabled && s.mods.length === 0 && listed(s, 'quiet') === 'stopped',
+      'the mods to stop and the listing to say so',
+    );
+    assert.strictEqual(listed(globalOff, 'hello-station'), 'disabled');
+
+    await config.update(MODS_ENABLED_KEY, undefined, vscode.ConfigurationTarget.Global);
+    const globalOn = await waitForState(
+      (s) => s.listing.enabled && listed(s, 'quiet') === 'active',
+      'the mods to start again',
+    );
+    assert.strictEqual(listed(globalOn, 'hello-station'), 'disabled');
+    assert.ok(!globalOn.mods.some((m) => m.id === 'hello-station'));
+
+    await toggleMod('hello-station', true);
+    await waitForState(
+      (s) => listed(s, 'hello-station') === 'active',
+      'hello-station to start again',
+    );
+  });
+
+  /** An id the last discovery never listed is refused, and the listing is the same afterwards. */
+  it('an unknown id is refused and writes nothing', async () => {
+    const before = (await state()).listing;
+    await assert.rejects(toggleMod('no-such-mod', false), /was not found in the mods folder/);
+    await assert.rejects(
+      Promise.resolve(vscode.commands.executeCommand(TEST_MOD_TOGGLE_COMMAND_ID, 'quiet', 'false')),
+      /expected \(modId: string, enabled: boolean\)/,
+    );
+    assert.deepStrictEqual((await state()).listing, before);
+    assert.strictEqual(listed(await state(), 'quiet'), 'active');
   });
 
   /** Turning the switch off stops every mod, and a mod command then finds nothing to run. */

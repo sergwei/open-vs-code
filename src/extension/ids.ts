@@ -323,7 +323,7 @@ export const MODS_ENABLED_SETTING = `${CONFIG_SECTION}.${MODS_ENABLED_KEY}`;
 /** Command id of "OpenCode: Manage Mods…" (contributed; E10-mods): lists the mods and their state. */
 export const MANAGE_MODS_COMMAND_ID = 'openVsCode.manageMods';
 
-/** Command id of "OpenCode: Reload Mods" (contributed; E10-mods): stops every mod and discovers again. */
+/** Command id of "OpenCode: Reload Mods" (contributed; E10-mods): stops every mod and discovers again; a mod switched off for this workspace stays off (E10-mod-toggles). */
 export const RELOAD_MODS_COMMAND_ID = 'openVsCode.reloadMods';
 
 /** Command id of "OpenCode: Open Mods Folder" (contributed; E10-mods): creates the root if needed and reveals it. */
@@ -338,6 +338,13 @@ export const RUN_MOD_COMMAND_ID = 'openVsCode.runModCommand';
  * {@link TEST_SETTINGS_STATE_COMMAND_ID}.
  */
 export const TEST_MODS_STATE_COMMAND_ID = 'openVsCode.test.modsState';
+
+/**
+ * Internal command that switches ONE mod, `(modId, enabled)`, through the same path as the popover
+ * (E10-mod-toggles). Registered ONLY in `ExtensionMode.Test`, NOT contributed, like
+ * {@link TEST_MODS_STATE_COMMAND_ID}; `test:visual` does not use it (it clicks the real switch).
+ */
+export const TEST_MOD_TOGGLE_COMMAND_ID = 'openVsCode.test.modToggle';
 
 /**
  * Name of the output channel that shows what mods log (E10-mods). The lifecycle lines of a mod

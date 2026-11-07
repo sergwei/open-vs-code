@@ -3223,14 +3223,64 @@ describe('slash commands (issue #33)', () => {
       name: 'hello-station:hello',
       description: 'Says hello',
     };
-    const modsState = (extra: Partial<Extract<HostToWebview, { type: 'mods.state' }>> = {}) =>
+    const modsState = (
+      extra: Partial<Omit<Extract<HostToWebview, { type: 'mods.state' }>, 'listing'>> = {},
+    ) =>
       ({
         type: 'mods.state',
         bands: [],
         commands: [HELLO_MOD],
         ...extra,
+        // An empty listing: the mod-command cases below do not need the popover.
+        listing: { enabled: true, persisted: true, mods: [], skipped: [] },
       }) satisfies HostToWebview;
     const runs = (h: Harness) => h.sent.filter((m) => m.type === 'mod.command.run');
+
+    // E10-mod-toggles. FABRICATED `mods.state`. Protects: the popover's switch and its two link
+    // buttons posting `mod.toggle` and `mods.action` with the exact shape the host validates.
+    it('posts mod.toggle from a switch and mods.action from the popover links', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi')]), {
+        type: 'mods.state',
+        bands: [],
+        commands: [],
+        listing: {
+          enabled: false,
+          persisted: true,
+          mods: [
+            {
+              id: 'quiet',
+              name: 'Quiet',
+              version: '1.0.0',
+              enabled: false,
+              state: 'stopped',
+            },
+          ],
+          skipped: [],
+        },
+      });
+      h.container.querySelector<HTMLButtonElement>('[data-mods-trigger]')?.click();
+      const buttons = [...h.container.querySelectorAll<HTMLButtonElement>('.mods-link')];
+      buttons.find((b) => b.textContent === 'Open Settings')?.click();
+      buttons.find((b) => b.textContent === 'Open folder')?.click();
+      expect(h.sent).toEqual([
+        { type: 'mods.action', action: 'openSettings' },
+        { type: 'mods.action', action: 'openFolder' },
+      ]);
+      h.apply({
+        type: 'mods.state',
+        bands: [],
+        commands: [],
+        listing: {
+          enabled: true,
+          persisted: true,
+          mods: [{ id: 'quiet', name: 'Quiet', version: '1.0.0', enabled: true, state: 'active' }],
+          skipped: [],
+        },
+      });
+      h.container.querySelector<HTMLButtonElement>('button[role="switch"]')?.click();
+      expect(h.sent.at(-1)).toEqual({ type: 'mod.toggle', modId: 'quiet', enabled: false });
+    });
 
     it('lists the mod command in the menu and sends mod.command.run, not a prompt', () => {
       const h = start();

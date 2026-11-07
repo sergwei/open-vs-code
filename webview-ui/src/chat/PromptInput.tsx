@@ -1,8 +1,8 @@
 import * as l10n from '@vscode/l10n';
 import { createEffect, createSignal, For, on, onCleanup, Show, type JSX } from 'solid-js';
 import { plural } from '../../../src/shared/l10n';
-import type { AttachmentRef } from '../../../src/shared/protocol';
-import type { CommandOption, WorkMode } from '../../../src/shared/model';
+import type { AttachmentRef, ModsAction } from '../../../src/shared/protocol';
+import type { CommandOption, ModsListing, WorkMode } from '../../../src/shared/model';
 import { AttachmentOpenButton } from './AttachmentOpenButton';
 import { CommandMenu } from './CommandMenu';
 import { CommandPopup, commandStatus } from './CommandPopup';
@@ -10,6 +10,7 @@ import { hasDropPayload, imagesOf, readDrop, type DropContent } from './dropData
 import { SendIcon, StopIcon } from './icons';
 import { applyMention, findMention, type MentionToken } from './mentionQuery';
 import { MentionPopup, mentionStatus, optionId, type FileSearchView } from './MentionPopup';
+import { ModsMenu } from '../mods/ModsMenu';
 import { PlusMenu } from './PlusMenu';
 import type { PromptHistory } from './promptHistory';
 import { applyCommand, filterCommands, findSlash, type SlashToken } from './slashCommand';
@@ -70,8 +71,12 @@ export function nextRequestId(): string {
  * "reads its labels, placeholder and live-region counts from the shipped Spanish catalog".
  * The action bar (E2, issue #85, phases 3 and 4) reads, left to right: the "+" button ({@link PlusMenu}:
  * Add selection, Attach file…, Attach image… and Mention a file; `insertMention` writes the `@` and
- * opens the popup by the same path as typing it),
- * the `selectors` slot (the combined agent and model chip), the work-mode pill
+ * opens the popup by the same path as typing it), the "/" button ({@link CommandMenu}), the mods
+ * button ({@link ModsMenu}, E10-mod-toggles: only while `mods` lists a mod or a skipped folder;
+ * it only forwards `onModToggle` / `onModsAction`, and `onFocusReady` closes its popover like the
+ * other menus; VERIFIED in jsdom by `PromptInput.test.tsx` "sits right after "/" and before the
+ * selectors slot" and "closes its popover when the parent focuses the box, and forwards the
+ * switch"), the `selectors` slot (the combined agent and model chip), the work-mode pill
  * ({@link WorkModeMenu}, E3-work-mode: Manual or Auto, person or bolt icon), a free space, and the
  * round Send / Stop button. Send and Stop are icon buttons named by `aria-label` ("Send", "Stop"; decision P9=1+b of
  * Sergio, 27/10/2026, Engram #1300), so a test or a script finds them by name, not by text. The row
@@ -175,6 +180,12 @@ export function PromptInput(props: {
   onWorkMode(mode: WorkMode): void;
   /** The pill is blocked (`aria-disabled`) while there is no connection, like the "+" menu. */
   workModeDisabled: boolean;
+  /** Every mod found on disk with its state (E10-mod-toggles), for the mods button and popover. */
+  mods: ModsListing;
+  /** A mod's switch was pressed; the popover changes when the next `mods.state` arrives. */
+  onModToggle(modId: string, enabled: boolean): void;
+  /** "Open folder" or "Open Settings" of the mods popover. */
+  onModsAction(action: ModsAction): void;
   /**
    * The server's slash commands (issue #33), from the catalog. ABSENT means "could not be read",
    * which is not the same as `[]` ("none"): the popup and the menu say each one.
@@ -233,6 +244,8 @@ export function PromptInput(props: {
   let closeCommandMenu: (() => void) | undefined;
   /** Closes the work-mode menu; set by the menu itself, for the same reason as {@link closePlusMenu}. */
   let closeWorkModeMenu: (() => void) | undefined;
+  /** Closes the mods popover; set by the menu itself, for the same reason as {@link closePlusMenu}. */
+  let closeModsMenu: (() => void) | undefined;
 
   // The parent focuses the box after sending, stopping, a new session (a shortcut of issue #35)...
   // An open "+" menu closes then: when the webview document does not own the focus at that moment
@@ -241,6 +254,7 @@ export function PromptInput(props: {
     closePlusMenu?.();
     closeCommandMenu?.();
     closeWorkModeMenu?.();
+    closeModsMenu?.();
     textarea?.focus();
     holdFocus();
   });
@@ -757,6 +771,18 @@ export function PromptInput(props: {
           onPick={pickCommand}
           onCloseReady={(close) => {
             closeCommandMenu = close;
+          }}
+        />
+        <ModsMenu
+          listing={props.mods}
+          onToggle={(modId, enabled) => {
+            props.onModToggle(modId, enabled);
+          }}
+          onAction={(action) => {
+            props.onModsAction(action);
+          }}
+          onCloseReady={(close) => {
+            closeModsMenu = close;
           }}
         />
         <div class="prompt-selectors">{props.selectors}</div>

@@ -955,7 +955,8 @@ describe('ready', () => {
   });
 });
 
-// E10-mods, phase 3. Protects against: a `mods.state` that is not re-sent after a `ready` (a
+// E10-mods, phase 3 (and the `mod.toggle` / `mods.action` cases of E10-mod-toggles, below).
+// Protects against: a `mods.state` that is not re-sent after a `ready` (a
 // reloaded chat document would lose its bands and commands, skill vscode-extension §4), a state
 // message sent to a host that has no mods, a `mod.command.run` that reaches a mod without being
 // listed or is left without a `request.result` (the prompt would stay locked), and a mod's compose
@@ -965,15 +966,51 @@ describe('mods (E10-mods phase 3)', () => {
   const HELLO_STATE: ModsState = {
     bands: [{ modId: 'hello-station', modName: 'Hello Station', text: 'Hi', severity: 'info' }],
     commands: [{ modId: 'hello-station', name: 'hello-station:hello' }],
+    listing: {
+      enabled: true,
+      persisted: true,
+      mods: [
+        {
+          id: 'hello-station',
+          name: 'Hello Station',
+          version: '0.1.0',
+          enabled: true,
+          state: 'active',
+        },
+      ],
+      skipped: [],
+    },
+  };
+  const EMPTY_LISTING: ModsState['listing'] = {
+    enabled: true,
+    persisted: true,
+    mods: [],
+    skipped: [],
   };
 
-  /** A recording `ModsChat`; `change()` fires its listeners with the state the test set. */
+  /**
+   * A recording `ModsChat`; `change()` fires its listeners with the state the test set. `toggles`
+   * and `actions` record what reached it; a `toggle` of `unknown-mod` rejects, as the real half does
+   * for an id it never listed.
+   */
   function fakeModsChat(initial: ModsState = HELLO_STATE) {
     let current = initial;
     const listeners = new Set<() => void>();
     const runs: Array<{ command: string; args: string; sessionID?: string }> = [];
+    const toggles: Array<{ modId: string; enabled: boolean }> = [];
+    const actions: string[] = [];
     const composeBound: Array<unknown> = [];
     const chat: ModsChat = {
+      toggle: (modId, enabled) => {
+        toggles.push({ modId, enabled });
+        return modId === 'unknown-mod'
+          ? Promise.reject(new Error('mod "unknown-mod" was not found in the mods folder'))
+          : Promise.resolve();
+      },
+      action: (kind) => {
+        actions.push(kind);
+        return Promise.resolve();
+      },
       state: () => current,
       onDidChange: (listener) => {
         listeners.add(listener);
@@ -991,6 +1028,8 @@ describe('mods (E10-mods phase 3)', () => {
     return {
       sink,
       runs,
+      toggles,
+      actions,
       listeners,
       change: (next: ModsState) => {
         current = next;
@@ -1041,8 +1080,10 @@ describe('mods (E10-mods phase 3)', () => {
       undefined,
       mods.sink,
     );
-    mods.change({ bands: [], commands: [] });
-    expect(modsMessages(posted)).toEqual([{ type: 'mods.state', bands: [], commands: [] }]);
+    mods.change({ bands: [], commands: [], listing: EMPTY_LISTING });
+    expect(modsMessages(posted)).toEqual([
+      { type: 'mods.state', bands: [], commands: [], listing: EMPTY_LISTING },
+    ]);
     controller.dispose();
     mods.change(HELLO_STATE);
     expect(modsMessages(posted)).toHaveLength(1);
@@ -1081,6 +1122,68 @@ describe('mods (E10-mods phase 3)', () => {
     expect(posted.at(-1)).toEqual({ type: 'request.result', requestId: 'r1' });
     expect(logs).toContain('info: mod command hello-station:hello ran');
     expect(logs.join(' | ')).not.toContain('secret-args');
+  });
+
+  // E10-mod-toggles (issue #181). FABRICATED `ModsChat` and panes (a second one attached by hand):
+  // they protect that `mod.toggle` and `mods.action` reach the mods half, that a failure is a notice
+  // to the pane that asked and to no other (a toggle of one tab must not paint an error in another),
+  // that nothing is answered on success (the outcome is the next `mods.state`), that the log never
+  // carries text from a mod, and that a host with no mods half says so instead of staying silent.
+  // The real half's refusal of an unknown id is covered by `modsChat.test.ts`.
+  it('mod.toggle reaches the mods chat and a failure is a notice to the pane that asked only', async () => {
+    const mods = fakeModsChat();
+    const { controller, posted, logs } = setup(
+      fakeApi().api,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      mods.sink,
+    );
+    const other: HostToWebview[] = [];
+    controller.attachPane({ post: (message) => other.push(message) });
+    await controller.handle({ type: 'mod.toggle', modId: 'hello-station', enabled: false });
+    expect(mods.toggles).toEqual([{ modId: 'hello-station', enabled: false }]);
+    expect(posted.filter((m) => m.type === 'notice')).toEqual([]);
+    await controller.handle({ type: 'mod.toggle', modId: 'unknown-mod', enabled: true });
+    expect(mods.toggles.at(-1)).toEqual({ modId: 'unknown-mod', enabled: true });
+    expect(posted.filter((m) => m.type === 'notice')).toMatchObject([
+      { type: 'notice', level: 'warning' },
+    ]);
+    expect(JSON.stringify(posted.filter((m) => m.type === 'notice'))).toContain('unknown-mod');
+    expect(other.filter((m) => m.type === 'notice')).toEqual([]);
+    expect(logs.some((line) => line.startsWith('warn: mod.toggle failed:'))).toBe(true);
+  });
+
+  it('mods.action reaches the mods chat', async () => {
+    const mods = fakeModsChat();
+    const { controller } = setup(
+      fakeApi().api,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      mods.sink,
+    );
+    await controller.handle({ type: 'mods.action', action: 'openSettings' });
+    await controller.handle({ type: 'mods.action', action: 'openFolder' });
+    expect(mods.actions).toEqual(['openSettings', 'openFolder']);
+  });
+
+  it('mod.toggle and mods.action answer a notice when there is no mods chat half', async () => {
+    const { controller, posted } = setup(fakeApi().api);
+    await controller.handle({ type: 'mod.toggle', modId: 'hello-station', enabled: false });
+    await controller.handle({ type: 'mods.action', action: 'openFolder' });
+    expect(posted.filter((m) => m.type === 'notice')).toMatchObject([
+      { level: 'warning', error: { message: 'Mods are not available' } },
+      { level: 'warning', error: { message: 'Mods are not available' } },
+    ]);
   });
 
   // Issue #155. FABRICATED `ModsChat` and a fake api; protects the premise of the webview fix: the

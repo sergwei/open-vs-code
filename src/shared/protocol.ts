@@ -24,6 +24,7 @@ import type {
   ModBand,
   ModCommandOption,
   ModelRef,
+  ModsListing,
   Part,
   PermissionAsk,
   PermissionDecision,
@@ -64,6 +65,15 @@ export const MAX_COMMAND_NAME_LENGTH = 200;
  * same order as a typed `/` line.
  */
 export const MAX_MOD_COMMAND_ARGS = 4000;
+
+/**
+ * The shape of a mod id (E10-mod-toggles). Declared here because `mod.toggle` is validated in this
+ * file; `src/mods/manifest.ts` re-exports it, so the manifest parser and the protocol cannot drift.
+ */
+export const MOD_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/** What `mods.action` can ask for: reveal the mods folder, or open the settings for the global switch. */
+export type ModsAction = 'openFolder' | 'openSettings';
 
 /**
  * Longest `path` `session.diff.open` accepts (issue #31). Our choice: the path is one the host
@@ -311,6 +321,8 @@ export type UiCommand = 'prompt.focus' | 'session.new' | 'session.stop';
  * `mods.state` (E10-mods, phase 3) is the WHOLE state of the mods UI: the status bands and the
  * commands mods registered. It REPLACES what the webview holds, is re-sent after every `ready` and
  * on each change, and is sent even when empty (an empty list is how a stopped mod's band goes away).
+ * Since E10-mod-toggles it also carries `listing`, every mod found on disk with its on/off state
+ * (see {@link ModsListing}); the webview never assumes the outcome of its own `mod.toggle`.
  * `workMode.state` (E3-work-mode) is the work mode of the session the pane shows, or of the draft of
  * a pane that shows none yet; it REPLACES what the webview holds. The host sends it after a pane's
  * `ready`, when the session the pane shows changes and when the mode changes, and the webview never
@@ -375,7 +387,7 @@ export type HostToWebview =
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; error: ErrorInfo }
   | { type: 'setup.binary'; outcome: 'cancelled' | 'failed' }
   | { type: 'setup.binary'; outcome: 'chosen'; path: string }
-  | { type: 'mods.state'; bands: ModBand[]; commands: ModCommandOption[] }
+  | { type: 'mods.state'; bands: ModBand[]; commands: ModCommandOption[]; listing: ModsListing }
   | { type: 'workMode.state'; mode: WorkMode };
 
 /**
@@ -453,6 +465,11 @@ export type HostToWebview =
  * `workMode.set` (E3-work-mode) asks the host to put the session the pane shows (or, with none, the
  * pane's draft) in `mode`. It has no `requestId`, like `server.restart`: the outcome is the next
  * `workMode.state`.
+ * `mod.toggle` (E10-mod-toggles) turns ONE mod on or off for this workspace. `modId` is checked here
+ * for shape ({@link MOD_ID_PATTERN}) and by the host against its last discovery. No `requestId`:
+ * the outcome is the next `mods.state`, and a failure arrives as a `notice` to the sender only.
+ * `mods.action` asks for one of the two things the popover cannot do itself: reveal the mods folder
+ * or open the settings filtered by `openVsCode.mods.enabled`. The webview never writes that setting.
  */
 export type WebviewToHost =
   | { type: 'ready' }
@@ -495,6 +512,8 @@ export type WebviewToHost =
   | { type: 'permissions.manage' }
   | { type: 'server.restart' }
   | { type: 'workMode.set'; mode: WorkMode }
+  | { type: 'mod.toggle'; modId: string; enabled: boolean }
+  | { type: 'mods.action'; action: ModsAction }
   | { type: 'logs.show' }
   | { type: 'setup.action'; action: SetupAction }
   | { type: 'editor.open'; path: string; line?: number; column?: number }
@@ -625,6 +644,12 @@ const isDecision = isOneOf(['once', 'always', 'reject']);
 const isDelivery = isOneOf(['steer', 'queue']);
 const isLogLevel = isOneOf(['info', 'warn', 'error']);
 const isWorkMode = isOneOf(['manual', 'auto'] satisfies WorkMode[]);
+const isModsAction = isOneOf(['openFolder', 'openSettings'] satisfies ModsAction[]);
+
+/** True for a string that is a well-formed mod id; whether the host knows it is the handler's check. */
+function isModId(value: unknown): boolean {
+  return typeof value === 'string' && MOD_ID_PATTERN.test(value);
+}
 const isSetupAction = isOneOf([
   'binary.choose',
   'binary.settings',
@@ -878,6 +903,8 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
   'permissions.manage': noFields,
   'server.restart': noFields,
   'workMode.set': (m) => isWorkMode(field(m, 'mode')),
+  'mod.toggle': (m) => isModId(field(m, 'modId')) && isBoolean(field(m, 'enabled')),
+  'mods.action': (m) => isModsAction(field(m, 'action')),
   'logs.show': noFields,
   'setup.action': (m) => isSetupAction(field(m, 'action')),
   'editor.open': (m) =>
