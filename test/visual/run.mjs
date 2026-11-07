@@ -1509,9 +1509,14 @@ async function clickButton(text) {
   if (/yes,?\s*always/i.test(text)) throw new Error(`refusing to press "${text}"`);
   const target = await web.inDoc((doc, label) => {
     const button = [...doc.querySelectorAll('button')].find(
-      // Send and Stop are round icon buttons (E2 P9=1+b): no text, only an `aria-label`.
+      // Send and Stop are round icon buttons (E2 P9=1+b): no text, only an `aria-label`. A button
+      // that is not rendered (the "Allow once" of an inactive request tab sits in a `hidden` panel,
+      // E3-request-tabs) is not the one to press: with several requests the first in the DOM may
+      // be invisible.
       (candidate) =>
-        candidate.textContent.trim() === label || candidate.getAttribute('aria-label') === label,
+        (candidate.textContent.trim() === label ||
+          candidate.getAttribute('aria-label') === label) &&
+        candidate.checkVisibility(),
     );
     if (!button) return null;
     button.setAttribute('data-visual-click', 'true');
@@ -16383,6 +16388,494 @@ try {
       await command('Notifications: Clear All Notifications').catch(() => undefined);
       await setTheme(DARK).catch(() => undefined);
     }
+  });
+
+  // E3-request-tabs: several pending requests share ONE box with a tab per request. The chat is in
+  // the side bar, which receives every request of its location (`chatController.ts`
+  // `paneDisplays`): session A asks for a permission, "New session" B asks for another, "New
+  // session" C asks a question, so three requests are pending at once. The behaviour cells (R1-R7)
+  // run in the dark theme at 300 px; the matrix is component x width x theme (plan section 4, step
+  // 4): at 300 px, wide (900 requested) and compact (150 requested) in the four themes, 12 cells,
+  // each with M1 the box does not overflow sideways (the tab list may scroll on its own), M2 the
+  // "N of M" counter is whole and inside the box, M3 every label is whole (no ellipsis) and its tab
+  // visible or reachable by scrolling the tab list, M4 contrast >= 4.5 of the active label, an
+  // inactive label and the counter, M5 the underline of the active tab >= 3:1 against the box and
+  // different from an inactive one, M6 no `style` attribute. Labels never get shortened (decision
+  // of Sergio, 07/11/2026): at 150 px the list scrolls.
+  await step('43 request dock tabs (E3-request-tabs)', async () => {
+    const DARK = 'Default Dark Modern';
+    const PROMPT_A = 'Tab43A: Read .env. ASK_PERMISSION';
+    const PROMPT_B = 'Tab43B: Read .env. ASK_PERMISSION';
+    const PROMPT_C =
+      'Tab43C: call the question tool now to ask me to pick one option: A or B. ASK_QUESTION';
+
+    /** What the dock shows right now; self-contained, it is serialized into the page. */
+    const dock = () =>
+      web.inDoc((doc) => {
+        const tabs = [...doc.querySelectorAll('.request-box [role="tab"]')];
+        const panelOf = (id) =>
+          [...doc.querySelectorAll('.request-box .request-panel')].find(
+            (panel) => panel.querySelector('[data-request-id]')?.dataset.requestId === id,
+          );
+        const visiblePanel = [...doc.querySelectorAll('.request-box .request-panel')].find(
+          (panel) => panel.checkVisibility(),
+        );
+        const focused = doc.activeElement;
+        const focusedCard = focused?.closest?.('[data-request-id]') ?? null;
+        return {
+          boxes: doc.querySelectorAll('.request-box').length,
+          lists: doc.querySelectorAll('[role="tablist"]').length,
+          tabs: tabs.map((tab) => ({
+            id: tab.dataset.requestTab,
+            label: tab.querySelector('.request-tab-label')?.textContent ?? '',
+            selected: tab.getAttribute('aria-selected') === 'true',
+            tabIndex: tab.tabIndex,
+          })),
+          counter: doc.querySelector('.request-counter')?.textContent ?? '',
+          cards: doc.querySelectorAll('.request-box [data-request-id]').length,
+          visiblePanels: [...doc.querySelectorAll('.request-box .request-panel')].filter((panel) =>
+            panel.checkVisibility(),
+          ).length,
+          visibleCard: visiblePanel?.querySelector('[data-request-id]')?.dataset.requestId ?? null,
+          focusedCard: focusedCard?.dataset.requestId ?? null,
+          focusedCardRendered: focusedCard !== null && focusedCard.checkVisibility(),
+          focusedTab: focused?.dataset?.requestTab ?? null,
+          focusOnPrompt: focused?.closest?.('.prompt') != null,
+          hiddenOrigins: tabs.map((tab) => {
+            const panel = panelOf(tab.dataset.requestTab);
+            return {
+              id: tab.dataset.requestTab,
+              hidden: panel !== undefined && !panel.checkVisibility(),
+              origin: panel?.querySelector('.request-origin')?.textContent?.trim() ?? null,
+              openButton:
+                panel?.querySelector('.request-origin button')?.textContent?.trim() ?? null,
+            };
+          }),
+          results: [...doc.querySelectorAll('.request-results li')].map((li) =>
+            (li.textContent ?? '').trim(),
+          ),
+          resultsInBox: doc.querySelectorAll('.request-box .request-results').length,
+          alerts: doc.querySelectorAll('[role="alert"]').length,
+          // The host injects `style` on `<html>`; the body is what this app writes.
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+        };
+      });
+    const until = async (predicate, ms = 8_000) =>
+      (await waitFor(async () => (predicate(await dock()) ? true : undefined), ms, 100)) === true;
+
+    /** A real mouse click at the centre of the tab of request `id`. */
+    const clickTab = async (id) => {
+      const target = await web.inDoc((doc, tabId) => {
+        const tab = [...doc.querySelectorAll('[role="tab"]')].find(
+          (candidate) => candidate.dataset.requestTab === tabId,
+        );
+        if (!tab) return null;
+        tab.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+        const rect = tab.getBoundingClientRect();
+        const x = rect.x + rect.width / 2;
+        const y = rect.y + rect.height / 2;
+        return { x, y, onTab: doc.elementFromPoint(x, y)?.closest('[role="tab"]') === tab };
+      }, id);
+      if (!target?.onTab) return false;
+      const frame = await chatFrameBox();
+      if (!frame) return false;
+      await page.mouse.click(frame.x + target.x, frame.y + target.y);
+      return true;
+    };
+    const selectedId = (state) => state.tabs.find((tab) => tab.selected)?.id ?? null;
+    /** Ticks the option "B" of the open question card (a programmatic click: no focus moves). */
+    const pickB = () =>
+      web.inDoc((doc) => {
+        const option = [
+          ...doc.querySelectorAll(
+            '.form-card input[type="radio"], .form-card input[type="checkbox"]',
+          ),
+        ].find((input) => (input.closest('label')?.textContent ?? '').trim() === 'B');
+        if (option && !option.checked) option.click();
+        return option?.checked ?? null;
+      });
+    const bChecked = () =>
+      web.inDoc((doc) => {
+        const option = [
+          ...doc.querySelectorAll(
+            '.form-card input[type="radio"], .form-card input[type="checkbox"]',
+          ),
+        ].find((input) => (input.closest('label')?.textContent ?? '').trim() === 'B');
+        return option?.checked ?? null;
+      });
+
+    await setTheme(DARK);
+    await setSideBarWidth(300).catch(() => undefined);
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+
+    // --- R1: one request, no tab row, one box, the card has the focus ----------------------------
+    check(await clickButton('New session'), 'R1 New session is pressed');
+    await waitEmptyView();
+    await send(PROMPT_A);
+    const gotA = await until((state) => state.cards === 1 && state.focusedCard !== null, 30_000);
+    let state = await dock();
+    const idA = state.visibleCard;
+    check(
+      gotA && state.lists === 0 && state.boxes === 1 && idA !== null && state.focusedCardRendered,
+      `R1 one request: no tab list (${String(state.lists)}), one box (${String(state.boxes)}), the card of ${String(idA)} has the focus and is rendered`,
+    );
+    await shot('43a-one');
+
+    // --- R2: a second session asks: two tabs, the new one active and focused ---------------------
+    check(await clickButton('New session'), 'R2 New session is pressed');
+    await waitEmptyView();
+    await send(PROMPT_B);
+    const gotB = await until((s) => s.tabs.length === 2, 30_000);
+    state = await dock();
+    const idB = selectedId(state);
+    const originA = state.hiddenOrigins.find((entry) => entry.id === idA);
+    check(
+      gotB &&
+        state.boxes === 1 &&
+        state.tabs[0]?.id === idA &&
+        idB !== null &&
+        idB !== idA &&
+        state.visiblePanels === 1 &&
+        state.visibleCard === idB,
+      `R2 two tabs in arrival order (${state.tabs.map((tab) => tab.label).join(', ')}), the new one (${String(idB)}) is active, one panel is visible (${String(state.visiblePanels)})`,
+    );
+    check(
+      (await until((s) => s.focusedCard === idB && s.focusedCardRendered)) &&
+        state.tabs.map((tab) => tab.tabIndex).join(',') === '-1,0',
+      `R2 the card of the new request has the focus and the tabs are a roving tabindex (${state.tabs.map((tab) => String(tab.tabIndex)).join(',')})`,
+    );
+    check(
+      originA !== undefined &&
+        originA.hidden &&
+        originA.origin !== null &&
+        originA.openButton === 'Open session',
+      `R2 the hidden panel of the first request still names its session and offers "Open session" (${JSON.stringify(originA)})`,
+    );
+    await shot('43b-two');
+
+    // --- R3: a question arrives: three tabs, the question active, its card focused ---------------
+    check(await clickButton('New session'), 'R3 New session is pressed');
+    await waitEmptyView();
+    await send(PROMPT_C);
+    const gotC = await until((s) => s.tabs.length === 3, 30_000);
+    state = await dock();
+    const idC = selectedId(state);
+    check(
+      gotC &&
+        state.tabs.map((tab) => tab.label).join(',') === 'Permission,Permission,Question' &&
+        idC !== null &&
+        state.tabs[2]?.id === idC &&
+        state.counter === '3 of 3',
+      `R3 three tabs (${state.tabs.map((tab) => tab.label).join(', ')}), the question is active, the counter says "${state.counter}"`,
+    );
+    check(
+      (await until((s) => s.focusedCard === idC && s.focusedCardRendered)) &&
+        (await dock()).visibleCard === idC,
+      'R3 the focus is on the card of the question, inside the panel that is visible (not on a hidden one)',
+    );
+    await shot('43c-three');
+
+    // --- R4: the real keyboard in the tab row ---------------------------------------------------
+    await page.keyboard.press('Shift+Tab');
+    check(
+      await until((s) => s.focusedTab === idC),
+      'R4 Shift+Tab from the card reaches the active tab',
+    );
+    const expectKey = async (key, wanted, text) => {
+      await page.keyboard.press(key);
+      const ok = await until((s) => s.focusedTab === wanted && selectedId(s) === wanted);
+      const now = await dock();
+      check(
+        ok,
+        `R4 ${text} (focused ${String(now.focusedTab)}, selected ${String(selectedId(now))})`,
+      );
+    };
+    await expectKey('ArrowLeft', idB, 'ArrowLeft moves to the previous tab and activates it');
+    await expectKey('Home', idA, 'Home goes to the first tab');
+    await expectKey('End', idC, 'End goes to the last tab');
+    await expectKey('ArrowRight', idA, 'ArrowRight on the last tab wraps to the first');
+    await page.keyboard.press('Escape');
+    check(
+      await until((s) => s.focusOnPrompt),
+      'R4 Escape on the tab row puts the focus back in the prompt box',
+    );
+
+    // --- R5: a real mouse click on a tab -----------------------------------------------------------
+    check(await clickTab(idB), 'R5 the tab of the second request is pressed with the real mouse');
+    check(
+      await until((s) => selectedId(s) === idB && s.visibleCard === idB),
+      'R5 the clicked tab is active and its panel is the visible one',
+    );
+
+    // --- R6: what was typed in a card survives leaving its tab ---------------------------------------
+    check(await clickTab(idC), 'R6 the tab of the question is pressed');
+    await until((s) => s.visibleCard === idC);
+    check((await pickB()) === true, 'R6 the option B of the question is ticked (not sent)');
+    check(await clickTab(idA), 'R6 the first tab is pressed');
+    await until((s) => s.visibleCard === idA);
+    check(await clickTab(idC), 'R6 and back to the question');
+    await until((s) => s.visibleCard === idC);
+    check(
+      (await bChecked()) === true,
+      'R6 the option B is still ticked after leaving the tab and coming back',
+    );
+
+    // --- R8: activating a tab brings it into view, with no help from the step ------------------------
+    // The step scrolls nothing here: Home (real keyboard) leaves the list at its start, End must
+    // bring the last tab inside the visible rectangle of the list by itself.
+    const listRects = () =>
+      web.inDoc((doc, lastId) => {
+        const list = doc.querySelector('.request-tabs');
+        const last = [...doc.querySelectorAll('[role="tab"]')].find(
+          (tab) => tab.dataset.requestTab === lastId,
+        );
+        if (!list || !last) return null;
+        const box = list.getBoundingClientRect();
+        const tab = last.getBoundingClientRect();
+        return {
+          scrolls: list.scrollWidth > list.clientWidth + 1,
+          inside: tab.left >= box.left - 1 && tab.right <= box.right + 1,
+        };
+      }, idC);
+    await page.keyboard.press('Home');
+    await until((s) => selectedId(s) === idA);
+    const atStart = await listRects();
+    await page.keyboard.press('End');
+    await until((s) => selectedId(s) === idC);
+    await sleep(300); // smooth scrolling, if any, settles
+    const atEnd = await listRects();
+    check(
+      atStart !== null && atEnd !== null && atStart.scrolls && !atStart.inside && atEnd.inside,
+      `R8 at 300 px, End on the keyboard makes the last tab visible by itself: the list scrolls (${String(atStart?.scrolls)}), the last tab was outside it after Home (${String(atStart !== null && !atStart.inside)}) and inside it after End (${String(atEnd?.inside)})`,
+    );
+
+    // --- The matrix, with the three requests pending -----------------------------------------------
+    const tabsLook = () =>
+      web.inDoc((doc) => {
+        const box = doc.querySelector('.request-box');
+        const list = doc.querySelector('.request-tabs');
+        const counter = doc.querySelector('.request-counter');
+        if (!box || !list || !counter) return { error: 'no box, tab list or counter' };
+        const boxRect = box.getBoundingClientRect();
+        const listRect = list.getBoundingClientRect();
+        const counterRect = counter.getBoundingClientRect();
+        const tabs = [...list.querySelectorAll('[role="tab"]')];
+        const labels = tabs.map((tab) => {
+          const label = tab.querySelector('.request-tab-label');
+          const style = doc.defaultView.getComputedStyle(label);
+          const rect = tab.getBoundingClientRect();
+          return {
+            text: label.textContent,
+            ellipsis: style.textOverflow === 'ellipsis',
+            clipped: label.scrollWidth > label.clientWidth + 1,
+            inside: rect.left >= listRect.left - 1 && rect.right <= listRect.right + 1,
+            icon: tab.querySelector('svg') !== null,
+          };
+        });
+        // Reachable by scrolling: the list scrolls on its own and, at the end, the last tab ends
+        // inside it. The scroll is put back.
+        const scrolls = doc.defaultView.getComputedStyle(list).overflowX;
+        const before = list.scrollLeft;
+        list.scrollLeft = list.scrollWidth;
+        const last = tabs[tabs.length - 1].getBoundingClientRect();
+        const reachesEnd = last.right <= list.getBoundingClientRect().right + 1;
+        list.scrollLeft = before;
+        // Underline of the active tab against the box, and against an inactive one.
+        const parse = (value) => {
+          const match = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?/.exec(
+            value,
+          );
+          return match
+            ? [
+                Number(match[1]),
+                Number(match[2]),
+                Number(match[3]),
+                match[4] === undefined ? 1 : Number(match[4]),
+              ]
+            : null;
+        };
+        const luminance = (color) => {
+          const [r, g, b] = color.slice(0, 3).map((channel) => {
+            const v = channel / 255;
+            return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+          });
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const styleOf = (element) => doc.defaultView.getComputedStyle(element);
+        const active = tabs.find((tab) => tab.getAttribute('aria-selected') === 'true');
+        const inactive = tabs.find((tab) => tab.getAttribute('aria-selected') === 'false');
+        let background = null;
+        for (let node = active; node && background === null; node = node.parentElement) {
+          const color = parse(styleOf(node).backgroundColor);
+          if (color && color[3] > 0.99) background = color;
+        }
+        background ??= parse(
+          styleOf(doc.documentElement).getPropertyValue('--vscode-sideBar-background'),
+        ) ?? [0, 0, 0, 1];
+        const underline = parse(styleOf(active).borderBottomColor);
+        const other = inactive ? parse(styleOf(inactive).borderBottomColor) : null;
+        const hi = underline ? luminance(underline) : 0;
+        const lo = luminance(background);
+        const underlineRatio = underline
+          ? (Math.max(hi, lo) + 0.05) / (Math.min(hi, lo) + 0.05)
+          : 0;
+        return {
+          boxOverflow: box.scrollWidth - box.clientWidth,
+          pageOverflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+          counterText: counter.textContent,
+          counterInside:
+            counterRect.left >= boxRect.left - 0.5 &&
+            counterRect.right <= boxRect.right + 0.5 &&
+            counter.scrollWidth <= counter.clientWidth + 1,
+          listScrolls: scrolls === 'auto' || scrolls === 'scroll',
+          listOverflowing: list.scrollWidth > list.clientWidth + 1,
+          reachesEnd,
+          labels,
+          underlineRatio,
+          underlineDiffers:
+            underline !== null &&
+            (other === null ||
+              other[3] === 0 ||
+              underline.slice(0, 3).join() !== other.slice(0, 3).join()),
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+        };
+      });
+
+    const WIDTHS = [
+      ['300', 300],
+      ['wide', 900],
+      ['compact', 150],
+    ];
+    for (const [name, wanted] of WIDTHS) {
+      let barPx;
+      try {
+        barPx = await setSideBarWidth(wanted);
+      } catch (error) {
+        barPx = await sideBarPx();
+        warn(
+          `request tabs: the side bar did not go to ${String(wanted)} px (it is ${String(barPx)} px): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const reached =
+        name === '300'
+          ? Math.abs(barPx - 300) <= SIZE_TOLERANCE
+          : name === 'wide'
+            ? barPx >= 600
+            : barPx < 200;
+      if (!reached) {
+        warn(
+          `request tabs: width "${name}" not reached (side bar ${String(barPx)} px): not judged`,
+        );
+        continue;
+      }
+      for (const [themeName, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        const where = `at ${name} (bar ${String(Math.round(barPx))} px), ${themeName}`;
+        // The resize may have re-created the webview (the first tab is then the active one): wait
+        // until it answers again with the three requests.
+        await waitFor(async () => (await dock()).tabs.length === 3, 60_000, 500);
+        const look = await tabsLook();
+        if (look.error !== undefined) {
+          check(false, `${where}: the tab row is measurable (${String(look.error)})`);
+          continue;
+        }
+        check(
+          look.boxOverflow <= 1 && look.pageOverflow <= 1,
+          `M1 ${where}: the box does not overflow sideways (box ${String(look.boxOverflow)} px, page ${String(look.pageOverflow)} px); its tab list ${look.listOverflowing ? 'scrolls on its own' : 'fits'}`,
+        );
+        check(
+          look.counterInside && /^\d of 3$/.test(look.counterText),
+          `M2 ${where}: the counter "${look.counterText}" is whole and inside the box`,
+        );
+        check(
+          look.labels.length === 3 &&
+            look.labels.every(
+              (label) =>
+                !label.ellipsis &&
+                !label.clipped &&
+                label.icon &&
+                (label.inside || (look.listScrolls && look.listOverflowing)),
+            ) &&
+            look.labels.map((label) => label.text).join(',') === 'Permission,Permission,Question' &&
+            (!look.listOverflowing || look.reachesEnd),
+          `M3 ${where}: every label is whole (${look.labels.map((label) => `${label.text}${label.inside ? '' : ' [by scrolling]'}`).join(', ')}), none cut with an ellipsis, and every tab is visible or reachable by scrolling its list`,
+        );
+        const text = await web.inDoc(measureText, {
+          active: '.request-tab[aria-selected="true"] .request-tab-label',
+          inactive: '.request-tab[aria-selected="false"] .request-tab-label',
+          counter: '.request-counter',
+        });
+        const ratio = (entry) => (entry ? entry.ratio : 0);
+        check(
+          ratio(text.active) >= 4.5 && ratio(text.inactive) >= 4.5 && ratio(text.counter) >= 4.5,
+          `M4 ${where}: contrast >= 4.5 for the active label ${ratio(text.active).toFixed(2)}, an inactive one ${ratio(text.inactive).toFixed(2)} and the counter ${ratio(text.counter).toFixed(2)}`,
+        );
+        check(
+          look.underlineRatio >= 3 && look.underlineDiffers,
+          `M5 ${where}: the underline of the active tab has contrast ${look.underlineRatio.toFixed(2)} >= 3 against the box and differs from an inactive tab's (${String(look.underlineDiffers)})`,
+        );
+        check(
+          look.styled === 0,
+          `M6 ${where}: no element has a style attribute (${String(look.styled)})`,
+        );
+        await shot(`43-${name}-${themeName}`);
+      }
+    }
+    await setTheme(DARK);
+    await setSideBarWidth(300).catch(() => undefined);
+    await waitFor(async () => (await dock()).tabs.length === 3, 60_000, 500);
+
+    // --- R7: resolving the requests, one by one ----------------------------------------------------
+    // The resize may have emptied the half-ticked question (a re-created webview starts it again).
+    check(await clickTab(idC), 'R7 the tab of the question is pressed');
+    await until((s) => s.visibleCard === idC);
+    check((await pickB()) === true, 'R7 the option B is ticked');
+    const submitted = await web.inDoc((doc) => {
+      const submit = [...doc.querySelectorAll('.form-card button')].find((button) =>
+        /submit/i.test(button.textContent),
+      );
+      submit?.click();
+      return submit !== undefined;
+    });
+    check(submitted, 'R7 the question is submitted');
+    check(await waitIdle(30_000), 'R7 the turn of the question ends');
+    check(
+      await until((s) => s.tabs.length === 2 && selectedId(s) === idB && s.counter === '2 of 2'),
+      `R7 the question is gone, the tab in its place (the second request) is active and the counter says "${(await dock()).counter}"`,
+    );
+    check(
+      await until((s) => s.focusOnPrompt),
+      'R7 the focus went back to the prompt box, not to the next card',
+    );
+    check(await clickButton('Allow once'), 'R7 Allow once is pressed on the active request');
+    check(
+      await until((s) => s.lists === 0 && s.cards === 1 && s.visibleCard === idA),
+      'R7 one request left: the tab row is gone and the box holds only the first card',
+    );
+    state = await dock();
+    check(
+      state.resultsInBox === 0 &&
+        state.results.length === 1 &&
+        /Allowed once/.test(state.results[0]),
+      `R7 the result line of the answered one is under the box, not inside it (${JSON.stringify(state.results)})`,
+    );
+    await shot('43d-resolved');
+    check(await clickButton('Allow once'), 'R7 Allow once is pressed on the last request');
+    check(
+      await until((s) => s.boxes === 0 && s.results.length === 2),
+      'R7 no box is left and the dock prints the two result lines',
+    );
+    state = await dock();
+    check(
+      state.results.every((line) => /^Allowed once: Read \.env$/.test(line)) && state.alerts === 0,
+      `R7 both lines say "Allowed once: Read .env" and no element has role=alert (${JSON.stringify(state.results)}, ${String(state.alerts)} alerts)`,
+    );
+    check(state.styled === 0, `R7 no element has a style attribute (${String(state.styled)})`);
+    assertNoWebviewErrors('step 43');
   });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
