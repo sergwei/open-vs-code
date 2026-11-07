@@ -57,6 +57,8 @@
  *    snapshot or a removal changes which session is open, and when the server goes away, because
  *    the host forgets the list then and would refuse a click on it. Nothing is sent when the list
  *    arrives: opening a file is the component's `session.diff.open`.
+ *  - E10-mod-toggles (issue #181) makes `mods.state` also replace `mods.listing` (see
+ *    `createChatStore`).
  * VERIFIED by `chatStore.test.ts` with fabricated messages (confirms this logic, not the host
  * contract). UNVERIFIED in a real webview until the F5 of issue #14.
  */
@@ -72,6 +74,7 @@ import type {
   ModBand,
   ModCommandOption,
   ModelRef,
+  ModsListing,
   Part,
   PermissionAsk,
   RequestResolution,
@@ -231,9 +234,10 @@ export interface ChatState {
   /**
    * The mods UI (E10-mods, phase 3): the status bands and the commands mods registered, replaced
    * whole by each `mods.state` (empty until the first one arrives, which is also what a host
-   * without mods leaves it as).
+   * without mods leaves it as). `listing` (E10-mod-toggles) is every mod found on disk with its
+   * on/off state, for the popover of the prompt bar.
    */
-  mods: { bands: ModBand[]; commands: ModCommandOption[] };
+  mods: { bands: ModBand[]; commands: ModCommandOption[]; listing: ModsListing };
   /** The unsent model/agent choice. See {@link SelectionDraft}. */
   selection: SelectionDraft;
   sessions: { [sessionID: string]: SessionSummary };
@@ -404,7 +408,11 @@ function emptyOpen(): OpenView {
 
 /**
  * Creates the store. Call it inside a reactive root (or `createRoot` in tests) so the signals
- * it creates have an owner.
+ * it creates have an owner. Its `mods.state` reducer (E10-mod-toggles) also replaces
+ * `mods.listing`, the popover's list: mods matched by `id`, skipped folders by `folder`, so a row
+ * keeps its object while its state changes.
+ * VERIFIED by `chatStore.test.ts` "keeps the listing row of the same mod and updates it in place"
+ * (fabricated messages: the logic, not the host contract).
  */
 export function createChatStore(): ChatStore {
   const [state, setState] = createStore<ChatState>({
@@ -412,7 +420,11 @@ export function createChatStore(): ChatStore {
     synced: false,
     binaryCheck: { kind: 'idle' },
     catalog: undefined,
-    mods: { bands: [], commands: [] },
+    mods: {
+      bands: [],
+      commands: [],
+      listing: { enabled: true, persisted: true, mods: [], skipped: [] },
+    },
     selection: { sessionID: undefined, model: undefined, agent: undefined },
     sessions: {},
     statuses: {},
@@ -536,10 +548,16 @@ export function createChatStore(): ChatStore {
 
     // E10-mods: the message is the WHOLE state, so both lists are replaced, matched by their key
     // (`reconcile`) so a band whose text did not change keeps its DOM node, and its button its focus.
+    // E10-mod-toggles: `listing` is replaced too, its mods by `id` and its skipped folders by
+    // `folder`, so a row whose state did not change keeps its DOM node (and its switch the focus).
     'mods.state': (m) => {
       batch(() => {
         setState('mods', 'bands', reconcile(m.bands, { key: 'modId' }));
         setState('mods', 'commands', reconcile(m.commands, { key: 'name' }));
+        setState('mods', 'listing', 'enabled', m.listing.enabled);
+        setState('mods', 'listing', 'persisted', m.listing.persisted);
+        setState('mods', 'listing', 'mods', reconcile(m.listing.mods, { key: 'id' }));
+        setState('mods', 'listing', 'skipped', reconcile(m.listing.skipped, { key: 'folder' }));
       });
     },
 

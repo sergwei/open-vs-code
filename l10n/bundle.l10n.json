@@ -2,6 +2,7 @@
   "Open chat": "Open chat",
   "Allow once": "Allow once",
   "Reject": "Reject",
+  "Mods are not available": "Mods are not available",
   "The command /{0} is not available": "The command /{0} is not available",
   "The chat is not available": "The chat is not available",
   "The mod composed an empty prompt": "The mod composed an empty prompt",
@@ -87,6 +88,7 @@
   "arguments of \"{0}\" are too long (at most {1} characters)": "arguments of \"{0}\" are too long (at most {1} characters)",
   "command \"{0}\" of mod \"{1}\" timed out": "command \"{0}\" of mod \"{1}\" timed out",
   "mod \"{0}\" stopped": "mod \"{0}\" stopped",
+  "mod \"{0}\" was not found in the mods folder": "mod \"{0}\" was not found in the mods folder",
   "command \"{0}\" is not available": "command \"{0}\" is not available",
   "starting/State of a mod, shown after its version in the Manage Mods list": {
     "message": "starting",
@@ -112,6 +114,8 @@
       "State of a mod, shown after its version in the Manage Mods list"
     ]
   },
+  "off in this workspace": "off in this workspace",
+  "off in this window": "off in this window",
   "skipped/Description of a mod folder that was not loaded, in the Manage Mods list": {
     "message": "skipped",
     "comment": [
@@ -517,6 +521,24 @@
   "Session cost: {0}.": "Session cost: {0}.",
   "Mod status": "Mod status",
   "Run {0} ({1})": "Run {0} ({1})",
+  "Could not start": "Could not start",
+  "Mods: {0} active/Name of the mods button, exactly one mod active": {
+    "message": "Mods: {0} active",
+    "comment": [
+      "Name of the mods button, exactly one mod active"
+    ]
+  },
+  "Mods: {0} active/Name of the mods button, none or several active": {
+    "message": "Mods: {0} active",
+    "comment": [
+      "Name of the mods button, none or several active"
+    ]
+  },
+  "Mods": "Mods",
+  "Mods are turned off. Turn them on in the settings to use the switches.": "Mods are turned off. Turn them on in the settings to use the switches.",
+  "Skipped: {0}": "Skipped: {0}",
+  "Each switch starts or stops only that mod. Saved for this workspace.": "Each switch starts or stops only that mod. Saved for this workspace.",
+  "No folder open: these choices last until you close this window": "No folder open: these choices last until you close this window",
   "(required)": "(required)",
   "Other": "Other",
   "Other answer for {0}": "Other answer for {0}",

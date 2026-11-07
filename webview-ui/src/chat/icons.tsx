@@ -191,3 +191,18 @@ export function QuestionIcon() {
     </svg>
   );
 }
+
+/** A puzzle piece: the "Mods" button of the prompt bar (its name is the `aria-label`, not the shape). */
+export function PuzzleIcon() {
+  return (
+    <svg class="icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+      <path
+        d="M6 2.5h2.5v1.4a1.2 1.2 0 1 0 2.4 0V2.5H13.5v3h-1.4a1.2 1.2 0 1 0 0 2.4h1.4v5.6H8.9v-1.4a1.2 1.2 0 1 0-2.4 0v1.4H2.5V8H3.9a1.2 1.2 0 1 0 0-2.4H2.5v-3H6z"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.3"
+        stroke-linejoin="round"
+      />
+    </svg>
+  );
+}

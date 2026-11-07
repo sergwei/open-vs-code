@@ -106,6 +106,40 @@ export type ModBand = {
 };
 
 /**
+ * One mod of the mods list, as the toggle popover shows it (E10-mod-toggles, issue #181).
+ * `enabled` is the user's per-workspace choice (false when the id is in the disabled list);
+ * `state` is what that choice and the host make of it: `disabled` exactly when `enabled` is false,
+ * otherwise the Worker's own state (`starting`, `active`, `failed`), or `stopped` when the mod has no
+ * Worker (the global `openVsCode.mods.enabled` switch is off, or the Worker is not up yet). `error`
+ * is set only for `failed`. All texts come from `mod.json` or from the Worker and are printed as
+ * plain text.
+ */
+export type ModEntry = {
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  enabled: boolean;
+  state: 'starting' | 'active' | 'failed' | 'stopped' | 'disabled';
+  error?: string;
+};
+
+/** A folder of the mods root that discovery refused, with the reason (no switch: nothing to toggle). */
+export type ModSkipped = { folder: string; reason: string };
+
+/**
+ * Everything the mods popover shows (E10-mod-toggles). `enabled` is the machine-wide
+ * `openVsCode.mods.enabled` switch (the webview never writes it); `persisted` is false in a window
+ * with no folder, where the per-mod choices last only until the window closes.
+ */
+export type ModsListing = {
+  enabled: boolean;
+  persisted: boolean;
+  mods: ModEntry[];
+  skipped: ModSkipped[];
+};
+
+/**
  * What the host knows about the server's models, agents and commands (issues #23/#24/#33), pushed
  * to the webview in the `catalog` message and replaced whole whenever it reloads.
  *

@@ -8,17 +8,30 @@
 // user types after the `/` and the one `mod.command.run` carries.
 
 import * as l10n from '@vscode/l10n';
-import type { ModBand, ModCommandOption } from '../shared/model';
+import type { ModBand, ModCommandOption, ModEntry, ModsListing } from '../shared/model';
+import type { ModsAction } from '../shared/protocol';
 import { translatedError } from './l10nEnglish';
 import type { ModComposeRequest, ModsChat, ModsState } from './modEvents';
 import type { ModCommandInfo, ModStatus, ModStatusLine } from './modHost';
+import type { ModsInventory } from './modsLoader';
 
-/** The part of `ModHost` the chat half reads; tests can inject a fake. */
+/**
+ * The part of `ModHost` the chat half reads, plus what the loader and the VS Code side know of the
+ * mods on disk and their switches (E10-mod-toggles); tests can inject a fake.
+ */
 export interface ModsSource {
   statuses(): ModStatus[];
   commands(): ModCommandInfo[];
   onDidChange(listener: () => void): { dispose(): void };
   runCommand(modId: string, name: string, args: string, sessionID?: string): Promise<void>;
+  /** The last discovery and the switches, for the listing. */
+  inventory(): ModsInventory;
+  /** Fires when {@link ModsSource.inventory} may have changed (a discovery ended, a switch moved). */
+  onDidChangeInventory(listener: () => void): { dispose(): void };
+  /** Switches one mod; the caller has already checked the id against the inventory. */
+  toggle(modId: string, enabled: boolean): Promise<void>;
+  /** Does what `mods.action` asked (reveal the folder, open the settings). */
+  action(kind: ModsAction): Promise<void>;
 }
 
 /** {@link ModsChat} plus the two doors the mods host calls into (its `ModUi.status` and `.compose`). */
@@ -41,7 +54,47 @@ export function qualify(modId: string, name: string): string {
 }
 
 /**
+ * Builds the listing of the popover from the inventory and the host's statuses. A mod in the
+ * disabled list is `disabled` whatever its Worker still says (the Worker may be in its grace); any
+ * other mod shows its Worker's state, or `stopped` when it has no Worker (the global switch is off,
+ * or the Worker is not up yet). `error` is copied only for `failed`.
+ */
+function buildListing(source: ModsSource): ModsListing {
+  const inventory = source.inventory();
+  const off = new Set(inventory.disabled);
+  const byId = new Map(source.statuses().map((status) => [status.id, status]));
+  const mods: ModEntry[] = inventory.mods.map((mod) => {
+    const enabled = !off.has(mod.id);
+    const status = byId.get(mod.id);
+    const entry: ModEntry = {
+      id: mod.id,
+      name: mod.name,
+      version: mod.version,
+      enabled,
+      state: enabled ? (status?.state ?? 'stopped') : 'disabled',
+    };
+    if (mod.description !== undefined) entry.description = mod.description;
+    if (entry.state === 'failed' && status?.error !== undefined) entry.error = status.error;
+    return entry;
+  });
+  return {
+    enabled: inventory.enabled,
+    persisted: inventory.persisted,
+    mods,
+    skipped: inventory.skipped.map(({ folder, reason }) => ({ folder, reason })),
+  };
+}
+
+/**
  * Builds the {@link ModsChatController} around `source`.
+ *
+ * `state()` also carries `listing` (see {@link buildListing}). `toggle` rejects with
+ * `mod "x" was not found in the mods folder` for an id that is not in the last discovery, BEFORE
+ * anything is written (the id comes from the webview, which is not trusted: the list is data a
+ * repository must not be able to grow with arbitrary ids). `action` is handed to the source as it is.
+ * VERIFIED by `modsChat.test.ts` (fabricated source, Windows 11, 07/11/2026): "builds the listing:
+ * disabled, starting, active, failed with its error, stopped and the skipped folders", "toggle of an
+ * unknown id rejects and writes nothing" and "repaints on a change of the inventory too".
  *
  * `state()` lists a band only for a mod that is `active` (a band set while `starting` shows once
  * the host reports the change) and gives it `severity: 'info'` when the mod gave none. A band's
@@ -67,6 +120,7 @@ export function createModsChat(
     for (const listener of [...listeners]) listener();
   };
   source.onDidChange(notify);
+  source.onDidChangeInventory(notify);
 
   return {
     state: (): ModsState => {
@@ -95,8 +149,17 @@ export function createModsChat(
         name: qualify(c.modId, c.name),
         description: c.description ?? c.modName,
       }));
-      return { bands, commands: options };
+      return { bands, commands: options, listing: buildListing(source) };
     },
+    toggle: (modId, enabled) => {
+      if (!source.inventory().mods.some((mod) => mod.id === modId)) {
+        return Promise.reject(
+          translatedError(() => l10n.t('mod "{0}" was not found in the mods folder', modId)),
+        );
+      }
+      return source.toggle(modId, enabled);
+    },
+    action: (kind) => source.action(kind),
     onDidChange: (listener) => {
       listeners.add(listener);
       return { dispose: () => listeners.delete(listener) };

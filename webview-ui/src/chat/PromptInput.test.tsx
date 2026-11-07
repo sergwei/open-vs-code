@@ -16,8 +16,8 @@
 import * as l10n from '@vscode/l10n';
 import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CommandOption, WorkMode } from '../../../src/shared/model';
-import type { AttachmentRef } from '../../../src/shared/protocol';
+import type { CommandOption, ModsListing, WorkMode } from '../../../src/shared/model';
+import type { AttachmentRef, ModsAction } from '../../../src/shared/protocol';
 import { must, mount, useEnglish, useSpanish, type Mounted } from '../testing';
 import type { DropContent } from './dropData';
 import type { FileSearchView } from './MentionPopup';
@@ -50,6 +50,8 @@ function setup(
     draft?: string;
     attachDisabled?: boolean;
     workMode?: WorkMode;
+    /** The mods listing; the default is an empty one, which hides the mods button. */
+    mods?: ModsListing;
     waiting?: boolean;
     thumbs?: Record<string, string>;
     /** Slash commands of the catalog; the default is `COMMANDS`, `null` is "could not be read". */
@@ -79,6 +81,8 @@ function setup(
     drop: vi.fn<(content: DropContent) => void>(),
     pasteImages: vi.fn<(files: File[]) => void>(),
     workMode: vi.fn<(mode: WorkMode) => void>(),
+    modToggle: vi.fn<(modId: string, enabled: boolean) => void>(),
+    modsAction: vi.fn<(action: ModsAction) => void>(),
   };
   let focusBox: (() => void) | undefined;
   mounted = mount(() => (
@@ -94,6 +98,9 @@ function setup(
       workMode={options.workMode ?? 'manual'}
       onWorkMode={calls.workMode}
       workModeDisabled={false}
+      mods={options.mods ?? { enabled: true, persisted: true, mods: [], skipped: [] }}
+      onModToggle={calls.modToggle}
+      onModsAction={calls.modsAction}
       commands={options.commands === null ? undefined : (options.commands ?? COMMANDS)}
       commandsLoading={options.commandsLoading ?? false}
       commandsDisabled={options.commandsDisabled ?? false}
@@ -147,6 +154,44 @@ function setup(
     },
   };
 }
+
+describe('the mods button (E10-mod-toggles)', () => {
+  // Protects the place of the button (after "/" and before the selectors slot), that the parent's
+  // `onFocusReady` closes its open popover, and that it forwards the switch. FABRICATED listing;
+  // jsdom has no layout, so the look is step 45 of `test:visual`.
+  const listing: ModsListing = {
+    enabled: true,
+    persisted: true,
+    mods: [{ id: 'quiet', name: 'Quiet', version: '1.0.0', enabled: true, state: 'active' }],
+    skipped: [],
+  };
+
+  it('sits right after "/" and before the selectors slot', () => {
+    setup({ mods: listing });
+    const bar = must(mounted?.container ?? document.body, '.prompt-actions');
+    const order = [...bar.children].map((child) => child.className.split(' ')[0]);
+    expect(order).toEqual([
+      'plus-wrap',
+      'plus-wrap',
+      'plus-wrap',
+      'prompt-selectors',
+      'plus-wrap',
+      'primary',
+    ]);
+    expect(bar.children[2]?.querySelector('[data-mods-trigger]')).not.toBeNull();
+  });
+
+  it('closes its popover when the parent focuses the box, and forwards the switch', () => {
+    const { calls, focusBox } = setup({ mods: listing });
+    const root = mounted?.container ?? document.body;
+    must<HTMLButtonElement>(root, '[data-mods-trigger]').click();
+    must<HTMLButtonElement>(root, 'button[role="switch"]').click();
+    expect(calls.modToggle).toHaveBeenCalledWith('quiet', false);
+    expect(root.querySelector('[role="dialog"]')).not.toBeNull();
+    focusBox();
+    expect(root.querySelector('[role="dialog"]')).toBeNull();
+  });
+});
 
 describe('the work-mode pill (E3-work-mode)', () => {
   // Protects the place of the pill in the bar (after the selectors slot, right before Send), that

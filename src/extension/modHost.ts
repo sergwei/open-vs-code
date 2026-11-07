@@ -13,7 +13,8 @@
 //   - dies (`process.exit()`, an `error` or `exit` of the Worker) -> `failed`;
 //   - never answers a command -> that call rejects after `commandTimeoutMs`; the mod stays active
 //     (a really blocked one is caught by the heartbeat).
-// There is no automatic restart: the user reloads.
+// There is no automatic restart: the user reloads (all mods), or retries one by switching it off
+// and on (`stopMod` then `start`, E10-mod-toggles).
 // Panels (phase 4): `panel.open/message/close` from a Worker go to the optional {@link ModPanelUi}
 // (`modPanels.ts`) after the wire guard checked paths, titles and the 1 MB cap; the host keeps the
 // ids each mod has open (at most {@link MAX_PANELS_PER_MOD}) and closes them all when the mod
@@ -196,6 +197,8 @@ interface ModRecord {
     { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
   >;
   nextRequest: number;
+  /** True once `deactivate` was posted to this record's Worker (it is posted at most once). */
+  deactivateSent?: boolean;
   statusLastAt: number;
   statusPending?: { line: ModStatusLine | undefined };
   statusTimer?: NodeJS.Timeout;
@@ -305,9 +308,11 @@ export class ModHost {
   }
 
   /**
-   * Starts a Worker per mod. A mod whose id is already running is skipped. Returns at once: each
-   * mod becomes `active` (or `failed`) later and {@link ModHost.onDidChange} says when. Does
-   * nothing after {@link ModHost.dispose}.
+   * Starts a Worker per mod. A mod whose id is already running is skipped; one with no record
+   * (never started, or removed by {@link ModHost.stopMod}), `stopped` or `failed` is spawned, and
+   * the others are not touched, so it is also how ONE mod is switched back on or retried. Returns
+   * at once: each mod becomes `active` (or `failed`) later and {@link ModHost.onDidChange} says
+   * when. Does nothing after {@link ModHost.dispose}.
    */
   start(mods: readonly DiscoveredMod[]): void {
     if (this.disposed) return;
@@ -396,6 +401,43 @@ export class ModHost {
     if (this.disposed) return;
     this.records.clear();
     this.start(mods);
+  }
+
+  /**
+   * Stops ONE mod with the protocol of {@link ModHost.stopAll} and forgets its record, so
+   * {@link ModHost.statuses} stops listing it and {@link ModHost.start} can spawn it again. The other
+   * mods keep their Worker, their band and their panels (`release` closes only this mod's panels and
+   * clears only its band). An unknown id is a no-op.
+   *
+   * Steps: `deactivate` (once per record, see `postDeactivate`: a `dispose` during the grace does
+   * not send a second one) if it is `starting` or `active`; one grace wait only if it was `active`;
+   * then, if it is still `starting` or `active`, `stopped` and `release`. A mod that failed during the
+   * grace is NOT marked `stopped` again (it is already released), and neither is one that `dispose`
+   * already stopped. `terminate` is idempotent and never rejects. The record is deleted only if it is
+   * still the same object (a reload during the grace may have put another there).
+   * VERIFIED by `modHost.test.ts` (fake factory and fake timers, Windows 11, 07/11/2026): "stopMod
+   * stops only that mod: the other keeps its Worker, its band and its open panels", "a stopped mod
+   * leaves statuses() and start([mod]) spawns a new Worker", "stopMod waits the grace only for an
+   * active mod", "stopMod of a mod that failed during the grace does not mark it stopped" and
+   * "stopMod after dispose creates nothing and does not throw". HYPOTHESIS: that two `terminate`
+   * calls on the same real Worker (this one and `stopAll` racing) never reject; the code swallows a
+   * rejection, and no real Worker was terminated twice.
+   */
+  async stopMod(id: string): Promise<void> {
+    const rec = this.records.get(id);
+    if (rec === undefined) return;
+    const wasActive = rec.state === 'active';
+    if (rec.state === 'starting' || wasActive) this.postDeactivate(rec);
+    if (wasActive && this.deactivateGraceMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, this.deactivateGraceMs));
+    }
+    if (rec.state === 'starting' || rec.state === 'active') {
+      rec.state = 'stopped';
+      this.release(rec);
+    }
+    await this.terminate(rec);
+    if (this.records.get(id) === rec) this.records.delete(id);
+    this.emitChange();
   }
 
   /**
@@ -810,7 +852,22 @@ export class ModHost {
   }
 
   /**
-   * Posts `deactivate` to every running mod, waits `deactivateGraceMs` once (only if some mod is
+   * Posts `deactivate` to a record ONCE. `stopMod` and `stopAll` can both reach the same Worker (a
+   * `dispose` that arrives during the grace of a `stopMod`), and the worker runs the mod's
+   * `deactivate` hook for every message, so the second one is skipped (review E10-mod-toggles W2).
+   * VERIFIED by `modHost.test.ts` "stopMod after dispose creates nothing and does not throw, and
+   * an unknown id is a no-op", which counts one `deactivate`; without the mark it fails (it counts
+   * two; mutation applied and reverted, Windows 11, 07/11/2026).
+   */
+  private postDeactivate(rec: ModRecord): void {
+    if (rec.deactivateSent === true) return;
+    rec.deactivateSent = true;
+    this.post(rec, { type: 'deactivate' });
+  }
+
+  /**
+   * Posts `deactivate` to every running mod that has not been sent one yet (a `stopMod` in
+   * progress already did), waits `deactivateGraceMs` once (only if some mod is
    * `active`; it waits that long, then goes on whether or not the hooks finished), marks them
    * `stopped` and terminates every Worker. Records are kept so the list still shows `stopped`.
    */
@@ -818,7 +875,7 @@ export class ModHost {
     const running = [...this.records.values()].filter(
       (rec) => rec.state === 'starting' || rec.state === 'active',
     );
-    for (const rec of running) this.post(rec, { type: 'deactivate' });
+    for (const rec of running) this.postDeactivate(rec);
     if (running.some((rec) => rec.state === 'active') && this.deactivateGraceMs > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, this.deactivateGraceMs));
     }

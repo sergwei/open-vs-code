@@ -12,7 +12,8 @@
 
 import type { V2Event } from '@opencode/client';
 import type { ModEvent, ModJson } from '../mods/api';
-import type { ModBand, ModCommandOption } from '../shared/model';
+import type { ModBand, ModCommandOption, ModsListing } from '../shared/model';
+import type { ModsAction } from '../shared/protocol';
 import { toStructuredErrorInfo, type ErrorSecrets } from './wireMapping';
 
 /**
@@ -53,10 +54,14 @@ export interface ModsSink {
   chat?: ModsChat;
 }
 
-/** What the chat shows of the mods: the bands and the commands, as the protocol carries them. */
+/**
+ * What the chat shows of the mods, as the protocol carries it: the bands, the commands, and (E10-mod-toggles)
+ * the `listing` of every mod found with its on/off state.
+ */
 export interface ModsState {
   bands: ModBand[];
   commands: ModCommandOption[];
+  listing: ModsListing;
 }
 
 /** What a mod asked the chat to compose (`station.chat.compose`): text for the prompt box, never sent (#169). */
@@ -70,13 +75,18 @@ export interface ModComposeRequest {
  * WHOLE current state (the controller sends it as one replacing `mods.state`), `onDidChange` says
  * when to send it again, `run` runs a command by its qualified `<modId>:<command>` name, and
  * `bindCompose` is how the VS Code side of the chat (which knows the target pane) receives what a
- * mod composes; `undefined` unbinds it.
+ * mod composes; `undefined` unbinds it. `toggle` switches ONE mod on or off for this workspace
+ * (E10-mod-toggles) and `action` reveals the mods folder or opens the settings of the global
+ * switch; the outcome of both is the next `state()`.
  */
 export interface ModsChat {
   state(): ModsState;
   onDidChange(listener: () => void): { dispose(): void };
   /** Rejects when no active mod has that command, or with the mod's own failure (see `ModHost.runCommand`). */
   run(command: string, args: string, sessionID?: string): Promise<void>;
+  /** Rejects, writing nothing, when `modId` is not in the last discovery. */
+  toggle(modId: string, enabled: boolean): Promise<void>;
+  action(kind: ModsAction): Promise<void>;
   bindCompose(handler: ((request: ModComposeRequest) => void) | undefined): void;
 }
 

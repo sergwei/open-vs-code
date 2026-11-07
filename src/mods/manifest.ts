@@ -2,12 +2,14 @@
 // a value or a reason; reading the file and the symlink check live in `src/extension/modDiscovery.ts`.
 
 import path from 'node:path';
+import { MOD_ID_PATTERN } from '../shared/protocol';
+
+// `id` of a mod: also the folder-safe name and the prefix of its commands (`<id>:<name>`). The
+// pattern lives in `src/shared/protocol.ts` (E10-mod-toggles), where `mod.toggle` is validated.
+export { MOD_ID_PATTERN };
 
 /** The only mod API version this build speaks. A mod that asks for another is `failed`, not guessed at. */
 export const SUPPORTED_API_VERSION = 1;
-
-/** `id` of a mod: also the folder-safe name and the prefix of its commands (`<id>:<name>`). */
-export const MOD_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 /** Biggest `mod.json` read, in bytes. Own choice: a manifest is a handful of lines. */
 export const MAX_MANIFEST_BYTES = 64 * 1024;

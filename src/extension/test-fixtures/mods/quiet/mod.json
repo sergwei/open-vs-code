@@ -1,0 +1,8 @@
+{
+  "id": "quiet",
+  "name": "Quiet",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "main": "index.mjs",
+  "description": "Test fixture: counts in memory, to prove it was not restarted."
+}

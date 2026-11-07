@@ -829,3 +829,167 @@ describe('ModHost with a fake Worker and fake timers', () => {
     expect(fake.count('command.run')).toBe(1);
   });
 });
+
+/**
+ * `ModHost.stopMod` (E10-mod-toggles, issue #181, plan Engram #1995 section 6 H1-H5).
+ *
+ * Protects the promise of the per-mod switch: turning ONE mod off stops only that mod (its Worker,
+ * its band, its tabs) and leaves every other Worker, band and tab alone, and a mod that fails or is
+ * disposed while it is being stopped is not stopped twice. FABRICATED Workers and fake timers: this
+ * proves the host's bookkeeping, not that a real Worker survives two `terminate` calls (that is
+ * HYPOTHESIS, see the header of `stopMod`).
+ * MUTATIONS (07/11/2026, Windows 11, each applied, seen red and reverted):
+ * - H1: the body of `stopMod` replaced by `await this.stopAll()` -> "stopMod stops only that mod:
+ *   the other keeps its Worker, its band and its open panels" failed (b got `deactivate`).
+ * - H2: without the `records.delete` -> "a stopped mod leaves statuses() and start([mod]) spawns a
+ *   new Worker" failed (statuses still listed `a`).
+ * - H3: the grace waited for any state -> "stopMod waits the grace only for an active mod" failed.
+ * - H4: without the second state check, `rec.state = 'stopped'` unconditionally -> "stopMod of a
+ *   mod that failed during the grace does not mark it stopped" failed (the second `terminate` saw
+ *   `stopped`).
+ * - H5 (review W2): without the `deactivateSent` mark of `postDeactivate` -> "stopMod after dispose
+ *   creates nothing and does not throw, and an unknown id is a no-op" failed (the Worker got two
+ *   `deactivate`, expected 1).
+ */
+describe('ModHost.stopMod with fake Workers and fake timers', () => {
+  const make = (id: string): DiscoveredMod => ({
+    manifest: { id, name: id.toUpperCase(), version: '1', apiVersion: 1, main: 'i.mjs' },
+    dir: `/m/${id}`,
+    entry: `/m/${id}/i.mjs`,
+  });
+  const A = make('a');
+  const B = make('b');
+  let created: FakeWorker[];
+  let statusCalls: Array<[string, string | undefined]>;
+  let panelCalls: string[];
+  let lifecycle: string[];
+  let host: ModHost;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    created = [];
+    statusCalls = [];
+    panelCalls = [];
+    lifecycle = [];
+    host = new ModHost({
+      workerFile: '/w.cjs',
+      createWorker: () => {
+        const worker = new FakeWorker();
+        created.push(worker);
+        return worker;
+      },
+      heartbeatMs: 100_000,
+      ui: {
+        status: (id, line) => void statusCalls.push([id, line?.text]),
+        toast: () => Promise.resolve(undefined),
+        compose: () => undefined,
+      },
+      panels: {
+        open: (modId, panelId) => void panelCalls.push(`open ${modId}:${panelId}`),
+        message: () => undefined,
+        close: (modId, panelId) => void panelCalls.push(`close ${modId}:${panelId}`),
+      },
+      logLifecycle: (text) => void lifecycle.push(text),
+      logMod: () => undefined,
+    });
+  });
+
+  afterEach(async () => {
+    const closing = host.dispose();
+    await vi.advanceTimersByTimeAsync(1000);
+    await closing;
+    vi.useRealTimers();
+  });
+
+  /** Starts `mods`, makes each Worker active and gives each a band and one open panel. */
+  function startWithBandAndPanel(...mods: DiscoveredMod[]): void {
+    host.start(mods);
+    mods.forEach((mod, index) => {
+      const worker = created[index];
+      worker?.say({ type: 'ready' });
+      worker?.say({ type: 'status.set', text: `band of ${mod.manifest.id}` });
+      worker?.say({ type: 'panel.open', panelId: 'p1', title: 'T', html: 'p.html' });
+    });
+  }
+
+  it('stopMod stops only that mod: the other keeps its Worker, its band and its open panels', async () => {
+    startWithBandAndPanel(A, B);
+    const stopping = host.stopMod('a');
+    await vi.advanceTimersByTimeAsync(250);
+    await stopping;
+    expect(created[0]?.count('deactivate')).toBe(1);
+    expect(created[0]?.terminate).toHaveBeenCalledTimes(1);
+    expect(created[1]?.count('deactivate')).toBe(0);
+    expect(created[1]?.terminate).not.toHaveBeenCalled();
+    expect(panelCalls).toEqual(['open a:p1', 'open b:p1', 'close a:p1']);
+    expect(statusCalls).toContainEqual(['a', undefined]);
+    expect(statusCalls).not.toContainEqual(['b', undefined]);
+    expect(host.statuses().map((s) => [s.id, s.state])).toEqual([['b', 'active']]);
+  });
+
+  it('a stopped mod leaves statuses() and start([mod]) spawns a new Worker', async () => {
+    startWithBandAndPanel(A, B);
+    const stopping = host.stopMod('a');
+    await vi.advanceTimersByTimeAsync(250);
+    await stopping;
+    expect(host.statuses().map((s) => s.id)).toEqual(['b']);
+    host.start([A, B]);
+    expect(created).toHaveLength(3);
+    expect(host.statuses().map((s) => [s.id, s.state])).toEqual([
+      ['b', 'active'],
+      ['a', 'starting'],
+    ]);
+  });
+
+  it('stopMod waits the grace only for an active mod', async () => {
+    host.start([A, B]);
+    created[1]?.say({ type: 'ready' }); // b is active, a is still starting
+    let startingDone = false;
+    void host.stopMod('a').then(() => {
+      startingDone = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(startingDone).toBe(true);
+    expect(created[0]?.count('deactivate')).toBe(1);
+    let activeDone = false;
+    void host.stopMod('b').then(() => {
+      activeDone = true;
+    });
+    await vi.advanceTimersByTimeAsync(249);
+    expect(activeDone).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(activeDone).toBe(true);
+  });
+
+  it('stopMod of a mod that failed during the grace does not mark it stopped', async () => {
+    host.start([A]);
+    const worker = created[0];
+    worker?.say({ type: 'ready' });
+    const seenByTerminate: Array<string | undefined> = [];
+    worker?.terminate.mockImplementation(() => {
+      seenByTerminate.push(host.statuses()[0]?.state);
+      return Promise.resolve(0);
+    });
+    const stopping = host.stopMod('a');
+    worker?.say({ type: 'failed', message: 'boom' }); // the mod dies while stopMod waits
+    await vi.advanceTimersByTimeAsync(250);
+    await stopping;
+    expect(lifecycle).toEqual(['mod a loaded', 'mod a failed: boom']);
+    expect(seenByTerminate).toEqual(['failed', 'failed']);
+    expect(host.statuses()).toEqual([]);
+  });
+
+  it('stopMod after dispose creates nothing and does not throw, and an unknown id is a no-op', async () => {
+    startWithBandAndPanel(A);
+    const during = host.stopMod('a'); // dispose arrives while stopMod waits
+    const disposing = host.dispose();
+    await vi.advanceTimersByTimeAsync(250);
+    await Promise.all([during, disposing]);
+    await expect(host.stopMod('a')).resolves.toBeUndefined();
+    await expect(host.stopMod('nobody')).resolves.toBeUndefined();
+    expect(created).toHaveLength(1);
+    // stopMod posted it first; stopAll must not repeat it (the mod's hook would run twice).
+    expect(created[0]?.count('deactivate')).toBe(1);
+    expect(panelCalls).toEqual(['open a:p1', 'close a:p1']); // released once, not twice
+  });
+});
