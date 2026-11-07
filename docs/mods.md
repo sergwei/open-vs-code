@@ -33,13 +33,44 @@ The commands:
 
 | Command | What it does |
 | --- | --- |
-| `OpenCode: Manage Mods…` | Lists every mod with its state (`active`, `failed` and why) and the folders that were skipped, with Reload, Open Folder and Show Logs |
-| `OpenCode: Reload Mods` | Stops every mod and loads the folder again. There is no file watcher: after editing a mod, reload |
+| `OpenCode: Manage Mods…` | Lists every mod with its state (`active`, `failed` and why, or switched off in this workspace) and the folders that were skipped, with Reload, Open Folder and Show Logs |
+| `OpenCode: Reload Mods` | Stops every mod and loads the folder again, except the ones you switched off in this workspace. There is no file watcher: after editing a mod, reload |
 | `OpenCode: Open Mods Folder` | Creates and shows the folder |
 | `OpenCode: Run Mod Command…` | Picks a command registered by a mod and runs it |
 
 The setting `openVsCode.mods.enabled` (default on, user-level only: a workspace cannot change it)
-turns every mod off.
+turns every mod off, in every workspace. To turn off just one mod, in just one workspace, see the
+next section.
+
+### Turning one mod off in a workspace
+
+When the mods folder holds at least one mod (or a folder that was skipped), the prompt bar shows a
+puzzle-piece button after **+** and **/**, with the number of active mods on it. It opens a popover
+with one switch per mod, its description, and a line when the mod is starting or failed. Folders that
+were skipped appear without a switch. **Open folder** reveals the mods folder.
+
+- **Each switch starts or stops only that mod.** Turning one off removes its band, its commands from
+  the `/` menu and its open panels, and stops its worker. The other mods keep running: their
+  state in memory, their bands and their open panels are not touched. Turning it on starts only that
+  mod. A mod that failed keeps its switch on (it is what you asked for); turn it off and on again to
+  retry it alone.
+- **The choice is saved for the workspace**, not for the machine. It survives **Reload Mods**,
+  changing `openVsCode.mods.enabled` and reloading the window. A workspace with several folders
+  (a `.code-workspace` file) has one list for the whole workspace, because mods run once per window
+  and do not depend on the folder opencode serves. A new mod starts on in every workspace: what is
+  saved is the list of mods you turned **off**.
+- **It is not a project mod.** The list lives in VS Code's own storage for your user profile, never
+  in the folder you opened, so a repository cannot change it. It can only stop mods, never load code.
+- **Moving, deleting or cloning the folder again** gives VS Code a new workspace identity, so every
+  mod is on again there.
+- **With no folder open** the choices last only until you close that window: the popover says so
+  ("No folder open: these choices last until you close this window") and **Manage Mods** shows
+  `off in this window`.
+- **With `openVsCode.mods.enabled` off** the popover still lists the mods, with the switches
+  disabled, says the mods are off and offers **Open Settings**. The popover never changes that
+  setting.
+- **A folder you edited since the last Reload Mods** is started from the manifest read then; run
+  **Reload Mods** to pick up changes of the folder itself.
 
 What a mod logs goes to the **OpenCode Mods** output channel, prefixed with its id. Lines about its
 life (`mod x loaded`, `mod x failed: …`) go to the **OpenCode** channel. A mod gets at most 50 lines
