@@ -16877,6 +16877,370 @@ try {
     check(state.styled === 0, `R7 no element has a style attribute (${String(state.styled)})`);
     assertNoWebviewErrors('step 43');
   });
+
+  // E3-work-mode: the Manual / Auto pill left of Send, its menu, and what Auto does with a permission.
+  // Behaviour (dark, 300 px): the pill reads "Manual"; the menu has two radio items and Manual is
+  // checked; choosing Auto with the real mouse makes the pill read "Auto"; an `edit` permission
+  // (ASK_PERMISSION ASK_EDIT) then shows NO card, raises no notification or badge and leaves
+  // "Allowed automatically" in the history; a `.env` read (ASK_PERMISSION) STILL shows its card in
+  // Auto (decision of Sergio, 07/11/2026); back in Manual the `edit` shows its card; Escape on the
+  // open menu does not stop a SLOW turn; Shift+Tab leaves the prompt backwards; Tab reaches the pill
+  // before Send. Matrix (plan E3-work-mode, section 5, phase 4), component x width x theme, each
+  // cell: the pill inside `.prompt-actions`, no sideways overflow, Send at the right edge of its
+  // row, text contrast >= 4.5 and, for Auto, the bolt >= 3 against the pill's real background:
+  // Manual 300 / Auto 300 / Auto wide / Auto icon only (< 200 px) / menu open at 300, 4 themes each.
+  await step('44 work mode pill (E3-work-mode)', async () => {
+    const DARK = 'Default Dark Modern';
+    const PROMPT_EDIT = 'WorkMode44 edit a file. ASK_PERMISSION ASK_EDIT';
+    const PROMPT_ENV = 'WorkMode44 read .env. ASK_PERMISSION';
+    const pillState = () =>
+      web.inDoc((doc) => {
+        const rect = (element) => {
+          if (!element) return null;
+          const r = element.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width };
+        };
+        const pill = doc.querySelector('button[data-work-mode-trigger]');
+        const text = doc.querySelector('.work-mode-text');
+        const active = doc.activeElement;
+        return {
+          label: text?.textContent?.trim() ?? '',
+          textShown: text !== null && doc.defaultView.getComputedStyle(text).display !== 'none',
+          name: pill?.getAttribute('aria-label') ?? '',
+          mode: pill?.getAttribute('data-mode') ?? '',
+          expanded: pill?.getAttribute('aria-expanded') ?? '',
+          open: doc.querySelector('[role="menu"].work-mode-menu') !== null,
+          items: [...doc.querySelectorAll('[role="menuitemradio"]')].map((item) => ({
+            label: item.querySelector('.work-mode-item-label')?.textContent ?? '',
+            hint: item.querySelector('.work-mode-item-hint')?.textContent ?? '',
+            checked: item.getAttribute('aria-checked'),
+          })),
+          activeIsPill: active === pill,
+          activeIsBody: active === doc.body || active === null,
+          activeIsPrompt: active === doc.querySelector('textarea.prompt-text'),
+          cards: doc.querySelectorAll('.permission-card').length,
+          view: { width: doc.defaultView.innerWidth, height: doc.defaultView.innerHeight },
+          scrollOverflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+          menu: rect(doc.querySelector('[role="menu"].work-mode-menu')),
+          bar: rect(doc.querySelector('.prompt-actions')),
+          prompt: rect(doc.querySelector('form.prompt')),
+          pill: rect(pill),
+          send: rect(doc.querySelector('button.send-button')),
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+        };
+      });
+    const inView = (box, view) =>
+      box !== null &&
+      box.left >= -0.5 &&
+      box.top >= -0.5 &&
+      box.right <= view.width + 0.5 &&
+      box.bottom <= view.height + 0.5;
+    const openByMouse = async () => {
+      if ((await pillState()).open) return;
+      check(
+        await clickIn('button[data-work-mode-trigger]'),
+        'the pill is pressed with the real mouse',
+      );
+      await waitPresent('[role="menu"].work-mode-menu');
+    };
+    const pressKey = async (key) => {
+      await page.keyboard.press(key);
+      await sleep(200); // the key reaches the webview asynchronously; negative checks follow
+    };
+    const toggleSideBar = () =>
+      page
+        .locator('.titlebar [aria-label^="Toggle Primary Side Bar"]')
+        .first()
+        .click({ timeout: 5_000 });
+    const toasts = () => page.locator('.notifications-toasts .notification-toast').allInnerTexts();
+
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    check(await clickButton('New session'), 'New session is pressed');
+    await waitEmptyView();
+    assertNoWebviewErrors('before the work mode step');
+    await setSideBarWidth(300).catch(() => undefined);
+    await setTheme(DARK);
+    await waitFor(async () => (await pillState()).pill !== null, 30_000, 300);
+
+    // --- Behaviour, dark, 300 px ------------------------------------------------------------------
+    let state = await pillState();
+    check(
+      state.label === 'Manual' && state.name === 'Work mode: Manual' && state.mode === 'manual',
+      `the pill reads Manual and is named "Work mode: Manual" (text "${state.label}", name "${state.name}")`,
+    );
+    await openByMouse();
+    state = await pillState();
+    check(
+      state.items.length === 2 &&
+        state.items[0].label === 'Manual' &&
+        state.items[0].checked === 'true' &&
+        state.items[1].label === 'Auto' &&
+        state.items[1].checked === 'false',
+      `the menu has two radio items and Manual is the checked one (${JSON.stringify(state.items.map((i) => [i.label, i.checked]))})`,
+    );
+    check(
+      state.items[0].hint === "Asks whenever opencode's permission rules ask." &&
+        state.items[1].hint.startsWith("Approves opencode's permission requests for you") &&
+        state.items[1].hint.includes(
+          'except those it recognises as reading secrets, going outside the project, deleting, destructive commands or publishing or pushing',
+        ),
+      'each item carries its description',
+    );
+    await pressKey('Escape');
+    state = await pillState();
+    check(
+      !state.open && state.activeIsPill,
+      `Escape closes the menu and returns the focus to the pill (open ${String(state.open)}, focus on the pill ${String(state.activeIsPill)})`,
+    );
+
+    // --- Matrix: Manual at 300 px ----------------------------------------------------------------
+    const cellChecks = async (where, auto) => {
+      await waitFor(async () => (await pillState()).pill !== null, 60_000, 500);
+      const s = await pillState();
+      check(
+        s.pill !== null &&
+          s.bar !== null &&
+          s.pill.left >= s.bar.left - 0.5 &&
+          s.pill.right <= s.bar.right + 0.5 &&
+          s.pill.top >= s.bar.top - 0.5 &&
+          s.pill.bottom <= s.bar.bottom + 0.5,
+        `${where}: the pill is inside .prompt-actions (${JSON.stringify(s.pill)} in ${JSON.stringify(s.bar)})`,
+      );
+      check(
+        s.scrollOverflow <= 1 && s.styled === 0 && inView(s.pill, s.view) && inView(s.send, s.view),
+        `${where}: no sideways overflow (${String(s.scrollOverflow)} px), no style attribute, pill and Send inside the view`,
+      );
+      check(
+        s.send !== null && s.prompt !== null && s.prompt.right - s.send.right <= 16,
+        `${where}: Send sits at the right edge of the box`,
+      );
+      const look = await web.inDoc(measureText, {
+        text: '.work-mode-pill',
+        icon: '.work-mode-pill .work-mode-icon',
+      });
+      check(
+        look.text !== null && look.text !== undefined && look.text.ratio >= 4.5,
+        `${where}: the pill text has contrast >= 4.5 (${look.text ? look.text.ratio.toFixed(2) : 'not found'})`,
+      );
+      check(
+        look.icon !== null && look.icon !== undefined && look.icon.ratio >= 3,
+        `${where}: the ${auto ? 'bolt' : 'person'} icon has contrast >= 3 against the pill (${look.icon ? `${look.icon.ratio.toFixed(2)}, ${look.icon.color} on ${look.icon.background}` : 'not found'})`,
+      );
+      return s;
+    };
+    for (const [themeName, theme] of PROBLEM_THEMES) {
+      await setTheme(theme);
+      const s = await cellChecks(`Manual pill at 300 px, ${themeName}`, false);
+      check(s.label === 'Manual', `Manual pill at 300 px, ${themeName}: it reads Manual`);
+      await shot(`44-manual-300-${themeName}`);
+    }
+    await setTheme(DARK);
+
+    // --- Choose Auto with the real mouse -------------------------------------------------------------
+    await openByMouse();
+    check(
+      await clickIn('[role="menuitemradio"][aria-checked="false"]'),
+      'the Auto item is pressed with the real mouse',
+    );
+    await waitFor(async () => (await pillState()).mode === 'auto', 5_000, 100);
+    state = await pillState();
+    check(
+      state.label === 'Auto' &&
+        state.name === 'Work mode: Auto' &&
+        !state.open &&
+        state.activeIsPill,
+      `the pill reads Auto, the menu closed and the focus back on the pill (text "${state.label}", name "${state.name}")`,
+    );
+
+    // --- Matrix: Auto at 300 px, wide and compact; the menu open at 300 px --------------------------
+    const WIDTHS = [
+      ['300', 300],
+      ['wide', 900],
+      ['compact', 150],
+    ];
+    for (const [name, wanted] of WIDTHS) {
+      let barPx;
+      try {
+        barPx = await setSideBarWidth(wanted);
+      } catch (error) {
+        barPx = await sideBarPx();
+        warn(
+          `work mode pill: the side bar did not go to ${String(wanted)} px (it is ${String(barPx)} px): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const reached =
+        name === '300'
+          ? Math.abs(barPx - 300) <= SIZE_TOLERANCE
+          : name === 'wide'
+            ? barPx >= 600
+            : barPx < 200;
+      if (!reached) {
+        warn(
+          `work mode pill: width "${name}" not reached (side bar ${String(barPx)} px): not judged`,
+        );
+        continue;
+      }
+      for (const [themeName, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        const where = `Auto pill at ${name} (bar ${String(Math.round(barPx))} px), ${themeName}`;
+        const s = await cellChecks(where, true);
+        check(
+          s.mode === 'auto',
+          `${where}: the mode survived the resize and the theme (mode "${s.mode}")`,
+        );
+        if (name === 'compact') {
+          check(
+            !s.textShown && s.name === 'Work mode: Auto',
+            `${where}: only the icon shows and the accessible name stays (text shown ${String(s.textShown)}, name "${s.name}")`,
+          );
+        } else {
+          check(s.textShown && s.label === 'Auto', `${where}: the pill shows the word Auto`);
+        }
+        await shot(`44-auto-${name}-${themeName}`);
+        if (name === '300') {
+          await openByMouse();
+          const open = await pillState();
+          const look = await web.inDoc(measureText, {
+            label: '.work-mode-item-label',
+            hint: '.work-mode-item-hint',
+          });
+          check(
+            open.items.length === 2 &&
+              inView(open.menu, open.view) &&
+              open.menu.width >= 0.8 * open.prompt.width &&
+              look.label !== null &&
+              look.label.ratio >= 4.5 &&
+              look.hint !== null &&
+              look.hint.ratio >= 4.5,
+            `Menu open at 300 px, ${themeName}: two items with descriptions inside the view, as wide as the box, label ${look.label ? look.label.ratio.toFixed(2) : 'none'} and hint ${look.hint ? look.hint.ratio.toFixed(2) : 'none'} >= 4.5`,
+          );
+          await shot(`44-menu-300-${themeName}`);
+          await pressKey('Escape');
+        }
+      }
+    }
+    await setTheme(DARK);
+    await setSideBarWidth(300).catch(() => undefined);
+    await waitFor(async () => (await pillState()).mode === 'auto', 30_000, 300);
+
+    // --- Auto: an edit is approved by the host; the view hidden raises nothing --------------------
+    // A toast of an earlier step (or of the side bar drags above) must not be read as Auto's.
+    await command('Notifications: Clear All Notifications').catch(() => undefined);
+    await focusPromptBox();
+    await page.keyboard.type(PROMPT_EDIT);
+    await page.keyboard.press('Enter');
+    await waitFor(isBusy, 3_000, 100);
+    await toggleSideBar();
+    await waitFor(async () => (await sideBarPx()) === 0, 3_000, 100);
+    await sleep(4_000); // the fixture asks within ~1 s; a notification, if any, would be up by now
+    const toastsAuto = await toasts();
+    if (toastsAuto.length > 0) console.log(`  toasts seen: ${JSON.stringify(toastsAuto)}`);
+    const badgeAuto = (
+      await page
+        .locator('.activitybar .action-item:has([aria-label^="OpenCode"]) .badge-content')
+        .allInnerTexts()
+        .catch(() => [])
+    ).join(',');
+    check(
+      toastsAuto.length === 0 && badgeAuto === '',
+      `Auto with the view hidden: no notification (${String(toastsAuto.length)}) and no badge ("${badgeAuto}")`,
+    );
+    await toggleSideBar();
+    await openChat(30_000);
+    check(await waitIdle(30_000), 'the turn of the edit ends by itself in Auto');
+    const auto = await outcomeLines();
+    state = await pillState();
+    check(
+      auto.log.some((line) => /Allowed automatically · Edit src\/sample\.ts/.test(line)) &&
+        state.cards === 0,
+      `Auto approved the edit: no card and the history says "Allowed automatically" (${JSON.stringify(auto.log)}, cards ${String(state.cards)})`,
+    );
+    await shot('44-auto-approved-edit');
+
+    // --- Auto still asks for a .env read ----------------------------------------------------------
+    await focusPromptBox();
+    await page.keyboard.type(PROMPT_ENV);
+    await page.keyboard.press('Enter');
+    const envCard = await waitFor(
+      () => web.inDoc((doc) => doc.querySelector('.permission-card') !== null),
+      20_000,
+    );
+    check(envCard === true, 'Auto still shows the card for reading a .env file');
+    check(await clickButton('Allow once'), 'Allow once is pressed on the .env card (never Always)');
+    check(await waitIdle(30_000), 'the turn of the .env read ends after Allow once');
+
+    // --- Back to Manual: the same edit asks again -------------------------------------------------
+    await openByMouse();
+    check(
+      await clickIn('[role="menuitemradio"][aria-checked="false"]'),
+      'the Manual item is pressed with the real mouse',
+    );
+    await waitFor(async () => (await pillState()).mode === 'manual', 5_000, 100);
+    check((await pillState()).label === 'Manual', 'the pill reads Manual again');
+    await focusPromptBox();
+    await page.keyboard.type(PROMPT_EDIT);
+    await page.keyboard.press('Enter');
+    const editCard = await waitFor(
+      () => web.inDoc((doc) => doc.querySelector('.permission-card') !== null),
+      20_000,
+    );
+    check(editCard === true, 'back in Manual the edit shows its card');
+    check(await clickButton('Allow once'), 'Allow once is pressed on the edit card (never Always)');
+    check(await waitIdle(30_000), 'the turn of the edit ends after Allow once');
+
+    // --- Keyboard: Escape does not stop a turn, Shift+Tab goes back, Tab reaches the pill first ---
+    await focusPromptBox();
+    await page.keyboard.type('WorkMode44 slow SLOW');
+    await page.keyboard.press('Enter');
+    check((await waitFor(isBusy, 5_000, 100)) === true, 'a SLOW turn is running');
+    await web.inDoc((doc) => doc.querySelector('button[data-work-mode-trigger]')?.focus());
+    await pressKey('Enter');
+    check((await pillState()).open === true, 'Enter on the pill opens the menu while a turn runs');
+    await pressKey('Escape');
+    state = await pillState();
+    check(
+      !state.open && (await isBusy()) === true,
+      `Escape on the open menu closes it and does NOT stop the running turn (open ${String(state.open)})`,
+    );
+    await command('OpenCode: Stop Response');
+    check(await waitIdle(30_000), 'Stop Response ends the SLOW turn');
+    await focusPromptBox();
+    await pressKey('Shift+Tab');
+    const back = await web.inDoc((doc) => {
+      const box = doc.querySelector('textarea.prompt-text');
+      const active = doc.activeElement;
+      return {
+        moved: active !== box && active !== doc.body && active !== null,
+        before: active !== null && box !== null && (active.compareDocumentPosition(box) & 4) !== 0, // 4 = DOCUMENT_POSITION_FOLLOWING
+      };
+    });
+    check(
+      back.moved && back.before,
+      `Shift+Tab from the prompt moves the focus to an element before it (${JSON.stringify(back)})`,
+    );
+    await focusPromptBox();
+    const order = [];
+    for (let i = 0; i < 8; i += 1) {
+      await pressKey('Tab');
+      const id = await web.inDoc((doc) => {
+        const active = doc.activeElement;
+        if (active === null) return 'none';
+        if (active.matches('button[data-work-mode-trigger]')) return 'pill';
+        if (active.matches('button.send-button')) return 'send';
+        return active.getAttribute('aria-label') ?? active.tagName;
+      });
+      order.push(id);
+      if (id === 'send') break;
+    }
+    check(
+      order.includes('pill') && order.indexOf('pill') < order.indexOf('send'),
+      `Tab from the prompt reaches the pill before Send (${order.join(' > ')})`,
+    );
+    await setTheme(DARK);
+    assertNoWebviewErrors('work mode');
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
