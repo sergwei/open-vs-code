@@ -17,6 +17,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A switch per mod.** A puzzle-piece button after **+** and **/** in the prompt bar (with the
+  number of active mods) opens a popover listing the mods with one switch each. A switch starts or
+  stops only that mod: the others keep their state, bands and open panels. The choice is saved for
+  the workspace (the list of mods you turned off), survives Reload Mods and reloading the window,
+  and a new mod starts on. With no folder open it lasts until the window closes. With
+  `openVsCode.mods.enabled` off the popover still lists the mods, with the switches disabled and an
+  **Open Settings** button. **Manage Mods** shows the mods that are off.
 - **Work mode (Manual / Auto)**: a pill left of Send in the prompt bar (person icon and
   **Manual**, bolt and **Auto**; only the icon under 200 px) chooses, per session, who answers
   opencode's permission requests. **Manual** changes nothing: the card appears whenever opencode's
