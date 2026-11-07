@@ -1703,15 +1703,82 @@ button.settings-toggle {
   overflow-y: auto;
 }
 
+/* One box for all the pending requests: border, background and radius live here, so with a single
+   request (no tab row) it looks as the lone card always did. */
+.request-box {
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  background: var(--vscode-editorWidget-background);
+  border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder));
+  border-radius: var(--ovc-radius-lg);
+}
+
+.request-panel[hidden] {
+  display: none;
+}
+
+/* The tab row: the tabs scroll horizontally when they do not fit (their labels are never cut), the
+   "N of M" counter stays outside that scroller. */
+.request-tabs-row {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  padding: 0 8px;
+  background: var(--vscode-editorWidget-background);
+  border-bottom: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  border-radius: var(--ovc-radius-lg) var(--ovc-radius-lg) 0 0;
+}
+
+.request-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.request-tab {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  color: var(--vscode-foreground);
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.request-tab:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.request-tab:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.request-tab[aria-selected='true'] {
+  font-weight: 600;
+  border-bottom-color: var(--vscode-focusBorder);
+}
+
+.request-counter {
+  flex: none;
+  align-self: center;
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
+
 .request-card {
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 8px;
-  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
-  background: var(--vscode-editorWidget-background);
-  border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder));
-  border-radius: var(--ovc-radius-lg);
 }
 
 .request-title {
@@ -2370,7 +2437,7 @@ button.agent-model-chip {
 [class*='vscode-high-contrast'] .setup-step,
 [class*='vscode-high-contrast'] .prompt-text,
 [class*='vscode-high-contrast'] .chip,
-[class*='vscode-high-contrast'] .request-card,
+[class*='vscode-high-contrast'] .request-box,
 [class*='vscode-high-contrast'] .request-always,
 [class*='vscode-high-contrast'] .request-feedback,
 [class*='vscode-high-contrast'] .form-field,
@@ -2409,6 +2476,19 @@ button.agent-model-chip {
 
 [class*='vscode-high-contrast'] .message-assistant {
   border-left-color: var(--vscode-contrastBorder);
+}
+
+/* The tab row: no tint in high contrast, so hover is a dashed outline and the active tab keeps its
+   underline in the active-border colour. The row keeps its opaque background: it is sticky, and
+   the content of a long form scrolls under it. */
+[class*='vscode-high-contrast'] .request-tab:hover {
+  background: transparent;
+  outline: 1px dashed var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+  outline-offset: -1px;
+}
+
+[class*='vscode-high-contrast'] .request-tab[aria-selected='true'] {
+  border-bottom-color: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
 }
 
 /* The connection dot has no tint to lean on in high contrast: an outline in the text colour. */

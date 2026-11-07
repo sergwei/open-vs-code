@@ -129,3 +129,34 @@ export function WaitingIcon() {
     </svg>
   );
 }
+
+/** A shield: the tab of a permission request in the request dock. */
+export function ShieldIcon() {
+  return (
+    <svg class="icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+      <path
+        d="M8 1.8l5 1.9v4c0 3-2.1 5-5 6.5-2.9-1.5-5-3.5-5-6.5v-4l5-1.9z"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.4"
+        stroke-linejoin="round"
+      />
+    </svg>
+  );
+}
+
+/** A circled question mark: the tab of a question or form request in the request dock. */
+export function QuestionIcon() {
+  return (
+    <svg class="icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+      <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" />
+      <path
+        d="M6.2 6.4a1.9 1.9 0 1 1 2.6 1.8c-.5.3-.8.6-.8 1.2M8 11.2v.4"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.4"
+        stroke-linecap="round"
+      />
+    </svg>
+  );
+}

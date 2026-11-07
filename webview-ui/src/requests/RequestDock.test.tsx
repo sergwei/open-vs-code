@@ -3,7 +3,9 @@
 // when the text repeats, the focus goes to a new card only when the user is not typing, `ui.focus`
 // always focuses (and waits for a card that has not arrived), and the focus returns to the prompt
 // when the focused card is resolved. A regression here is a request nobody notices, or the focus
-// stolen in the middle of a sentence.
+// stolen in the middle of a sentence. The `tabs` block (E3-request-tabs) adds the shared box: tabs
+// only from two requests, the active tab kept by id, the focus never landing on a `hidden` panel,
+// the keyboard of the tab row and the focus returning to the prompt when a tab goes away.
 //
 // Provenance: a real `createChatStore` driven with FABRICATED host messages, rendered in jsdom next
 // to a stand-in prompt form. jsdom implements focus and `activeElement`, but not layout, scrolling
@@ -400,5 +402,315 @@ describe('focus', () => {
       new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
     );
     expect(focusInput).toHaveBeenCalledTimes(1);
+  });
+});
+
+// E3-request-tabs: several pending requests share one box with a tab per request. Protects: no tab
+// row for a lone request (D1), only the active panel visible while all cards stay mounted (D2), the
+// active tab kept by id (D3, D4), a new request taking the tab only when the dock focuses its card
+// (D6), the focus never landing on a panel that is still `hidden` (D7), the keyboard of the tab row
+// (D8) and the focus returning to the prompt when what had it disappears (D9).
+//
+// Provenance: FABRICATED host messages into a real store, in jsdom. jsdom does not lay out, so the
+// horizontal scroll, the whole labels and the contrast belong to `test:visual` step 43; the
+// `hidden` / `focus()` order is also only SYNTHETIC here: the spy reads `closest('[hidden]')` at
+// the moment of each `focus()` call, but Chromium's `display: none` is read in step 43.
+describe('tabs', () => {
+  let documentHasFocus = true;
+  /** For each `focus()` call, the nearest `[hidden]` ancestor at that moment (D7). */
+  let hiddenAtFocus: Array<Element | null> = [];
+  beforeEach(() => {
+    documentHasFocus = true;
+    hiddenAtFocus = [];
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => documentHasFocus);
+    // Read through the descriptor: the real `focus` is called with the element as `this`.
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'focus')?.value as (
+      this: HTMLElement,
+    ) => void;
+    vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (this: HTMLElement) {
+      hiddenAtFocus.push(this.closest('[hidden]'));
+      original.call(this);
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const tabs = (container: HTMLElement) => [
+    ...container.querySelectorAll<HTMLElement>('[role="tab"]'),
+  ];
+  const selected = (container: HTMLElement) =>
+    tabs(container).find((tab) => tab.getAttribute('aria-selected') === 'true')?.dataset[
+      'requestTab'
+    ];
+  const key = (target: Element | null, name: string) =>
+    target?.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true }));
+  const resolve = (store: ChatStore, id: string) => {
+    store.apply({
+      type: 'permission.resolved',
+      sessionID: 'ses_1',
+      permissionID: id,
+      decision: 'once',
+    });
+  };
+
+  it('has no tab row for one request: the box holds just the card', () => {
+    const { store, container } = setup();
+    store.apply({ type: 'permission.asked', permission: permission('per_1') });
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    expect(container.querySelectorAll('.request-box')).toHaveLength(1);
+    const panel = must(container, '.request-panel');
+    expect(panel.hasAttribute('role')).toBe(false);
+    expect(panel.hasAttribute('hidden')).toBe(false);
+  });
+
+  it('shows one tab per request in card order, with only the active panel visible', () => {
+    const { store, container } = setup();
+    store.apply(snapshot({ permissions: [permission('per_1')], forms: [question('frm_1')] }));
+    expect(container.querySelectorAll('.request-box')).toHaveLength(1);
+    expect(tabs(container).map((tab) => tab.dataset['requestTab'])).toEqual(['per_1', 'frm_1']);
+    expect(tabs(container).map((tab) => tab.textContent)).toEqual(['Permission', 'Question']);
+    expect(selected(container)).toBe('per_1');
+    expect(tabs(container).map((tab) => tab.tabIndex)).toEqual([0, -1]);
+    const panels = [...container.querySelectorAll<HTMLElement>('[role="tabpanel"]')];
+    expect(panels.map((panel) => panel.hidden)).toEqual([false, true]);
+    expect(tabs(container).map((tab) => tab.getAttribute('aria-controls'))).toEqual(
+      panels.map((panel) => panel.id),
+    );
+    expect(must(container, '.request-counter').textContent).toBe('1 of 2');
+  });
+
+  it('activates the tab of a new request and focuses its card once the panel is visible', () => {
+    const { store, container, card, active, focusInput } = setup();
+    store.apply({ type: 'permission.asked', permission: permission('per_1') });
+    (active() as HTMLElement).blur();
+    hiddenAtFocus = [];
+    store.apply({ type: 'permission.asked', permission: permission('per_2') });
+    expect(selected(container)).toBe('per_2');
+    expect(active()).toBe(card('per_2'));
+    expect(hiddenAtFocus.length).toBeGreaterThan(0);
+    expect(hiddenAtFocus.every((hidden) => hidden === null)).toBe(true);
+    expect(focusInput).not.toHaveBeenCalled();
+  });
+
+  it('keeps the active tab when the new request does not get the focus', () => {
+    const { store, container, prompt, setTyping, card, active, focusInput } = setup();
+    store.apply({ type: 'permission.asked', permission: permission('per_1') });
+    // Focus inside the dock.
+    store.apply({ type: 'permission.asked', permission: permission('per_2') });
+    expect(selected(container)).toBe('per_1');
+    expect(active()).toBe(card('per_1'));
+    // Typing in the prompt.
+    prompt().focus();
+    setTyping(true);
+    store.apply({ type: 'permission.asked', permission: permission('per_3') });
+    expect(selected(container)).toBe('per_1');
+    expect(active()).toBe(prompt());
+    // A document without the focus.
+    setTyping(false);
+    documentHasFocus = false;
+    prompt().blur();
+    store.apply({ type: 'permission.asked', permission: permission('per_4') });
+    expect(selected(container)).toBe('per_1');
+    expect(tabs(container)).toHaveLength(4);
+    // A document without the focus is never given one, not even by the prompt.
+    expect(focusInput).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Protects the same rule from the other side: the focused card is resolved while the document has
+   * no focus (answered from the host notification), so `focusInput` is not called; and the record of
+   * what had the focus is then forgotten, so another request resolved later, with the focus back in
+   * the document but sitting on the body, does not jump to the prompt either. SYNTHETIC.
+   */
+  it('forgets a focused card that went away in a document without focus', () => {
+    const { store, focusInput, active, card } = setup();
+    store.apply(
+      snapshot({ permissions: [permission('per_1'), permission('per_2'), permission('per_3')] }),
+    );
+    expect(active()).toBe(card('per_1'));
+    documentHasFocus = false;
+    resolve(store, 'per_1');
+    expect(focusInput).not.toHaveBeenCalled();
+    documentHasFocus = true;
+    expect(active()).toBe(document.body);
+    resolve(store, 'per_2');
+    expect(focusInput).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Protects the decision of Sergio of 30/10/2026 (`hasFocus`): the user clicked text of the
+   * conversation (the focus fell to the body) and left for the editor; a request arriving and one
+   * being resolved must not call `focusInput`, which would focus the textarea of a webview that
+   * does not have the focus. SYNTHETIC: `hasFocus` is a spy.
+   */
+  it('does not call focusInput for list changes in a document that lost the focus', () => {
+    const { store, container, prompt, focusInput } = setup();
+    store.apply({ type: 'permission.asked', permission: permission('per_1') });
+    store.apply({ type: 'permission.asked', permission: permission('per_2') });
+    prompt().focus();
+    prompt().blur();
+    documentHasFocus = false;
+    store.apply({ type: 'permission.asked', permission: permission('per_3') });
+    resolve(store, 'per_3');
+    expect(tabs(container)).toHaveLength(2);
+    expect(focusInput).not.toHaveBeenCalled();
+  });
+
+  it('ui.focus on an inactive request activates its tab, focuses the card and clears the target', () => {
+    const { store, container, card, active } = setup();
+    store.apply(snapshot({ permissions: [permission('per_1'), permission('per_2')] }));
+    expect(selected(container)).toBe('per_1');
+    hiddenAtFocus = [];
+    store.apply({
+      type: 'ui.focus',
+      target: { kind: 'permission', sessionID: 'ses_1', id: 'per_2' },
+    });
+    expect(selected(container)).toBe('per_2');
+    expect(active()).toBe(card('per_2'));
+    expect(hiddenAtFocus.every((hidden) => hidden === null)).toBe(true);
+    expect(store.state.focusTarget).toBeUndefined();
+  });
+
+  it('moves and activates with the arrows (wrapping), Home and End; Escape goes to the prompt', () => {
+    const { store, container, active, focusInput } = setup();
+    store.apply(
+      snapshot({
+        permissions: [permission('per_1'), permission('per_2')],
+        forms: [question('frm_1')],
+      }),
+    );
+    const [first, second, third] = tabs(container);
+    first?.focus();
+    key(first ?? null, 'ArrowRight');
+    expect(selected(container)).toBe('per_2');
+    expect(active()).toBe(second);
+    key(second ?? null, 'End');
+    expect(selected(container)).toBe('frm_1');
+    key(third ?? null, 'ArrowRight');
+    expect(selected(container)).toBe('per_1');
+    key(first ?? null, 'ArrowLeft');
+    expect(selected(container)).toBe('frm_1');
+    key(third ?? null, 'Home');
+    expect(selected(container)).toBe('per_1');
+    expect(active()).toBe(first);
+    key(first ?? null, 'Escape');
+    expect(focusInput).toHaveBeenCalledTimes(1);
+  });
+
+  it('activates a tab on click', () => {
+    const { store, container } = setup();
+    store.apply(snapshot({ permissions: [permission('per_1'), permission('per_2')] }));
+    tabs(container)[1]?.click();
+    expect(selected(container)).toBe('per_2');
+    expect(
+      must(container, '[role="tabpanel"]:not([hidden]) [data-request-id]').dataset['requestId'],
+    ).toBe('per_2');
+  });
+
+  it('moves to the tab in the position of a resolved active one, and keeps the others by id', () => {
+    const { store, container } = setup();
+    store.apply(
+      snapshot({
+        permissions: [permission('per_1'), permission('per_2'), permission('per_3')],
+      }),
+    );
+    tabs(container)[1]?.click();
+    resolve(store, 'per_2');
+    expect(selected(container)).toBe('per_3');
+    expect(must(container, '.request-counter').textContent).toBe('2 of 2');
+    // Resolving the last one leaves a single request: no tab row any more.
+    resolve(store, 'per_3');
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    // A permission inserted before an active form does not move the active tab.
+    store.apply({ type: 'form.asked', form: question('frm_1') });
+    store.apply({ type: 'permission.asked', permission: permission('per_4') });
+    tabs(container)[2]?.click();
+    expect(selected(container)).toBe('frm_1');
+    store.apply({ type: 'permission.asked', permission: permission('per_5') });
+    expect(selected(container)).toBe('frm_1');
+    expect(must(container, '.request-counter').textContent).toBe('4 of 4');
+  });
+
+  it('gives the focus back to the prompt when the focused card, the focused tab or the tab row goes away', () => {
+    const a = setup();
+    a.store.apply(snapshot({ permissions: [permission('per_1'), permission('per_2')] }));
+    expect(a.active()).toBe(a.card('per_1'));
+    resolve(a.store, 'per_1');
+    expect(a.focusInput).toHaveBeenCalledTimes(1);
+
+    // The focused tab disappears.
+    const b = setup();
+    b.store.apply(snapshot({ permissions: [permission('per_1'), permission('per_2')] }));
+    tabs(b.container)[1]?.focus();
+    resolve(b.store, 'per_2');
+    expect(b.focusInput).toHaveBeenCalledTimes(1);
+
+    // Two become one with the focus on a tab that survives: the tab row unmounts under it.
+    const c = setup();
+    c.store.apply(snapshot({ permissions: [permission('per_1'), permission('per_2')] }));
+    tabs(c.container)[0]?.focus();
+    resolve(c.store, 'per_2');
+    expect(c.container.querySelector('[role="tablist"]')).toBeNull();
+    expect(c.focusInput).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps what was typed in a card when its tab is left and come back to', () => {
+    const { store, container } = setup();
+    store.apply(snapshot({ permissions: [permission('per_1')], forms: [question('frm_1')] }));
+    tabs(container)[1]?.click();
+    const field = must<HTMLInputElement>(
+      container,
+      '[data-request-id="frm_1"] .form-text, [data-request-id="frm_1"] .form-textarea',
+    );
+    field.value = 'half an answer';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    tabs(container)[0]?.click();
+    expect(must(container, '[data-request-id="frm_1"]').closest('[hidden]')).not.toBeNull();
+    tabs(container)[1]?.click();
+    expect(
+      must<HTMLInputElement>(
+        container,
+        '[data-request-id="frm_1"] .form-text, [data-request-id="frm_1"] .form-textarea',
+      ).value,
+    ).toBe('half an answer');
+  });
+
+  it('prints the result lines outside the box', () => {
+    const { store, container } = setup();
+    store.apply(
+      snapshot({ permissions: [permission('per_1'), permission('per_child', 'ses_child')] }, [
+        { id: 'ses_child', title: 'explore subagent', parentID: 'ses_1' },
+      ]),
+    );
+    store.apply({
+      type: 'permission.resolved',
+      sessionID: 'ses_child',
+      permissionID: 'per_child',
+      decision: 'once',
+      resolution: {
+        kind: 'permission',
+        id: 'per_child',
+        sessionID: 'ses_child',
+        at: 5,
+        decision: 'once',
+        action: 'read',
+        resource: '.env',
+        withFeedback: false,
+      },
+    });
+    expect(container.querySelector('.request-results')).not.toBeNull();
+    expect(container.querySelector('.request-box .request-results')).toBeNull();
+  });
+
+  it('names the tab of another session in its tooltip', () => {
+    const { store, container } = setup();
+    store.apply(
+      snapshot({ permissions: [permission('per_1'), permission('per_top', 'ses_top')] }, [
+        { id: 'ses_top', title: 'Other chat' },
+      ]),
+    );
+    expect(tabs(container)[1]?.title).toContain('Other chat');
+    expect(tabs(container)[0]?.title).not.toContain('From session');
   });
 });
