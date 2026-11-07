@@ -116,6 +116,13 @@
  * components x 4 themes with side bar drags. VERIFIED on Windows 11 with VS Code 1.145.2: "44    28.7 s"
  * in the full run of 07/11/2026. Its `budgetS` of 40 is the criterion above applied to it (28.7 times
  * 1.25 is 35.9, rounded up to a multiple of 5).
+ * The step 45 (the mods popover, E10-mod-toggles) needs the 1 and sends prompts (a turn for the
+ * band of hello-station, a SLOW one). It installs four mod folders, runs ONE Reload Window and the
+ * matrix of 72 cells with side bar drags. Its `budgetS` of 45 is an ESTIMATE: it comes from the
+ * "45    34.8 s" (the slowest of three `--steps 45 --bail` runs: 34.3, 34.8, 34.5; Windows 11, VS Code 1.145.2, 07/11/2026, after the
+ * review round removed two waits that expired for 20 s each; the 53.0 s of the first run included
+ * them), not from a full run: 34.8 times 1.25 is 43.5, rounded up to a multiple of 5. The next
+ * branch that runs a full run recalibrates it.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -174,6 +181,7 @@ export const STEPS = [
   { id: '41', needs: ['1'], sendsPrompt: false, groups: ['mods'], budgetS: 15 },
   { id: '43', needs: ['1'], sendsPrompt: true, groups: ['requests'], budgetS: 20 },
   { id: '44', needs: ['1'], sendsPrompt: true, groups: ['composer', 'requests'], budgetS: 40 },
+  { id: '45', needs: ['1'], sendsPrompt: true, groups: ['mods', 'composer'], budgetS: 45 },
 ];
 
 /** Every valid id, in canonical order. */

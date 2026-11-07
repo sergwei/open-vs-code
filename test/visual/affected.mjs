@@ -64,7 +64,7 @@ export const AFFECTED_RULES = [
   // `chatController.ts` and `test-fixtures/` (where the mod fixtures live) are cross-cutting already.
   {
     pattern:
-      /^src\/mods\/|^src\/extension\/(modDiscovery|modHost|modEvents|modsLifecycle|modsLoader|modsChat|modPanel\w*)\.ts$|^webview-ui\/src\/mods\//,
+      /^src\/mods\/|^src\/extension\/(modDiscovery|modHost|modEvents|modToggles|modsLifecycle|modsLoader|modsChat|modPanel\w*)\.ts$|^webview-ui\/src\/mods\//,
     groups: ['mods'],
   },
   { pattern: /^webview-ui\/src\/sessions\//, groups: ['sessions'] },
