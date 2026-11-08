@@ -59,8 +59,11 @@ const TRANSVERSAL = [
  * those steps in `run.mjs`. E9-sidebar-home adds the group `home` (the native Changes and Usage
  * views, the Quick start view and their model files, steps 49 and 50). `sessionTree.ts` (which
  * also draws the changed files count of a row) stays in `sessions` only: the count has no step of
- * its own. UNVERIFIED: that these extras are enough; a regression found outside the chosen
- * groups means the rule is too narrow, so widen it or make the file cross-cutting.
+ * its own. The subagent monitor (`webview-ui/src/subagents/`, `subagentDigest.ts`,
+ * `sessionActivity.ts`, issue #189) maps to the new group `subagents`, which holds step 51; the
+ * mapping is by the title of that step, not measured. UNVERIFIED: that these extras are enough; a
+ * regression found outside the chosen groups means the rule is too narrow, so widen it or make
+ * the file cross-cutting.
  */
 export const AFFECTED_RULES = [
   // E10-mods: the mods code, its host half and the band component (step 38). `src/shared/`,
@@ -79,6 +82,11 @@ export const AFFECTED_RULES = [
     groups: ['home'],
   },
   { pattern: /^webview-ui\/src\/sessions\//, groups: ['sessions'] },
+  // E2-subagent-monitor (issue #189): the bar, the live cards and the digest the host builds (step 51).
+  {
+    pattern: /^webview-ui\/src\/subagents\/|^src\/extension\/(subagentDigest|sessionActivity)\.ts$/,
+    groups: ['subagents'],
+  },
   {
     pattern:
       /^src\/extension\/(sessionBrowser|sessionTree|sessionsView|sessionsSearch|sessionLineage|sessionUi|sessionOrganization|sessionsOrganize|organizationStore)\.ts$/,
