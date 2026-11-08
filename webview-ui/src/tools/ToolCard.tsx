@@ -1,7 +1,15 @@
 import * as l10n from '@vscode/l10n';
-import { createMemo, createSignal, createUniqueId, Show } from 'solid-js';
+import { createMemo, createSignal, createUniqueId, For, Show } from 'solid-js';
 import type { Part } from '../../../src/shared/model';
 import { subagentOf } from '../sessions/lineage';
+import { useSubagents } from '../subagents/SubagentContext';
+import {
+  failureReason,
+  formatElapsed,
+  summaryLine,
+  toolPartOf,
+  toolsText,
+} from '../subagents/subagentView';
 import { PathLink } from './PathLink';
 import { ToolBody } from './ToolBody';
 import { toolSummary } from './toolView';
@@ -58,6 +66,33 @@ type ToolPart = Extract<Part, { type: 'tool' }>;
  * link in the side bar (seen in a capture of the first run). NOT observed: a
  * screen reader; whether `scrollIntoView` is needed or moves anything; a card in `running`,
  * `awaiting`, `rejected` or `stopped` state in a real run; macOS and Linux.
+ *
+ * Subagent monitor (issue #189). Inside a `SubagentProvider`, a `subagent` block whose child session
+ * is known (`monitor.childOf`: the block's own link, else title + agent) gets two things. While the
+ * CHILD works or waits (its state, not the tool's: with `background: true` the tool is `completed`
+ * at once) a live section sits under the header: state word, current tool, elapsed time
+ * (`aria-hidden`), tool count, the last tools and a Stop button; it has `aria-live="off"` because
+ * the message list is a live log. Once the child is over the section is gone and the header's
+ * result becomes the summary ("Finished · 3 tools · $0.02", "Failed: <reason>", "Stopped"), also
+ * in the toggle's accessible name, which still starts with "Subagent". With a summary the tool's
+ * own status word ("done", "failed"...) and its separator are NOT drawn nor named (decision of
+ * Sergio, reconciliation W4: a stopped child is a ToolFailure of the parent, so the word read
+ * "failed · Stopped"); the summary is the status. Open stays the
+ * `.subagent-link` of the header, now also for a child found by title + agent. Stop is
+ * `aria-disabled` while its request is in flight, never `disabled`, so the focus does not fall to
+ * the body. Without a provider the card is the old one.
+ * VERIFIED by the `subagent monitor` cases of `ToolCard.test.tsx` (jsdom, fabricated store data and
+ * messages). VERIFIED in a real VS Code 1.145.2 on Windows 11 (08/11/2026, the complete
+ * `test:visual` run on this final tree: no FAIL in step 51 or in the checks quoted here; its only
+ * FAILs are in the mods popover of step 45, #195, which passed twice alone right after): "A's card is live with Stop, Open and 1 to 3 latest tools, and B's card says waiting", "the
+ * card of A folds into "Stopped"", "the cards fold into Finished, Stopped and Failed", "the card
+ * labels still start with "Subagent"". VERIFIED in the same complete run: "a folded card draws no tool
+ * status word beside its summary", "side bar 300 px: the folded card of B reads "Finished · N
+ * tools · cost" ("Finished · 1 tool · $0.01")", "side bar 300 px, hc-light: the folded card is
+ * inside the document (true), no sideways overflow (0 px), no style attribute (0), title and
+ * summary contrast >= 4.5 (min 5.47 over 2 texts)" (the four themes), and "chat tab: the folded
+ * card of B reads "Finished · N tools · cost"" with "chat tab, dark: the folded card is inside the
+ * document". The 150 px cell was measured at 170 px (the workbench minimum).
  */
 export function ToolCard(props: {
   part: ToolPart;
@@ -69,10 +104,60 @@ export function ToolCard(props: {
   const bodyId = `tool-body-${createUniqueId()}`;
   const summary = createMemo(() => toolSummary(props.part, props.awaiting));
   const link = createMemo(() => subagentOf(props.part));
+  const monitor = useSubagents();
+  const child = createMemo(() => monitor?.childOf(props.part));
+  // The session the Open button points at: the block's own link, else the child found by title + agent.
+  const target = createMemo(() => {
+    const linked = link();
+    if (linked !== undefined)
+      return { sessionID: linked.sessionID, description: linked.description };
+    const row = child();
+    return row === undefined ? undefined : { sessionID: row.id, description: row.title };
+  });
+  const parentError = (): string | undefined =>
+    props.part.state.status === 'error' ? props.part.state.error.message : undefined;
+  const childState = createMemo(() => {
+    const row = child();
+    return row === undefined ? undefined : monitor?.stateOf(row.id, parentError());
+  });
+  const live = (): boolean => childState() === 'working' || childState() === 'waiting';
+  const activity = createMemo(() => {
+    const row = child();
+    return row === undefined ? undefined : monitor?.activity(row.id);
+  });
+  // Replaces the header's result once the child is over; never while the tool itself still runs.
+  const finished = createMemo(() => {
+    const row = child();
+    const state = childState();
+    const status = summary().status.status;
+    if (row === undefined || state === undefined || status === 'running' || status === 'awaiting') {
+      return undefined;
+    }
+    const error = parentError();
+    return summaryLine({
+      state,
+      toolCount: activity()?.toolCount ?? 0,
+      ...(activity()?.partial === true ? { partial: true } : {}),
+      ...(row.usage === undefined ? {} : { cost: row.usage.cost }),
+      ...(state === 'failed' && error !== undefined ? { reason: failureReason(error) } : {}),
+    });
+  });
+  const result = (): string | undefined => finished() ?? summary().result;
+  // The same name `toolSummary` builds, with the summary in place of the server's result.
+  const label = (): string => {
+    if (finished() === undefined) return summary().name;
+    const subject = [summary().verb, summary().arg, summary().detail]
+      .filter((piece): piece is string => piece !== undefined)
+      .join(' ');
+    return [subject, finished()]
+      .filter((piece): piece is string => piece !== undefined && piece !== '')
+      .join(' · ');
+  };
+  const current = () => activity()?.recent.at(-1);
 
   return (
     <div
-      classList={{ 'tool-card': true, 'part-subagent': link() !== undefined }}
+      classList={{ 'tool-card': true, 'part-subagent': target() !== undefined }}
       data-tool={props.part.name}
       data-status={summary().status.status}
     >
@@ -82,7 +167,7 @@ export function ToolCard(props: {
           class="tool-toggle"
           aria-expanded={open() ? 'true' : 'false'}
           aria-controls={open() ? bodyId : undefined}
-          aria-label={summary().name}
+          aria-label={label()}
           onClick={(event) => {
             const next = !open();
             setOpen(next);
@@ -105,23 +190,25 @@ export function ToolCard(props: {
           <Show when={summary().detail}>
             {(detail) => <span class="tool-detail">{detail()}</span>}
           </Show>
-          <span class="tool-sep" aria-hidden="true">
-            ·
-          </span>
-          <span
-            class="tool-status"
-            data-tone={summary().status.tone}
-            data-status={summary().status.status}
-          >
-            {summary().status.label}
-          </span>
-          <Show when={summary().result}>
-            {(result) => (
+          <Show when={finished() === undefined}>
+            <span class="tool-sep" aria-hidden="true">
+              ·
+            </span>
+            <span
+              class="tool-status"
+              data-tone={summary().status.tone}
+              data-status={summary().status.status}
+            >
+              {summary().status.label}
+            </span>
+          </Show>
+          <Show when={result()}>
+            {(text) => (
               <>
                 <span class="tool-sep" aria-hidden="true">
                   ·
                 </span>
-                <span class="tool-result">{result()}</span>
+                <span class="tool-result">{text()}</span>
               </>
             )}
           </Show>
@@ -129,18 +216,18 @@ export function ToolCard(props: {
         <Show when={summary().open}>
           {(target) => <PathLink path={target().path} line={target().line} text={l10n.t('Open')} />}
         </Show>
-        <Show when={link()}>
-          {(child) => (
+        <Show when={target()}>
+          {(session) => (
             <button
               type="button"
               class="secondary subagent-link"
               aria-label={
-                child().description === undefined || child().description === ''
+                session().description === undefined || session().description === ''
                   ? l10n.t('Open subagent session')
-                  : l10n.t('Open subagent session {0}', child().description ?? '')
+                  : l10n.t('Open subagent session {0}', session().description ?? '')
               }
               onClick={() => {
-                props.onOpenSession(child().sessionID);
+                props.onOpenSession(session().sessionID);
               }}
             >
               {l10n.t('Open subagent session')}
@@ -148,6 +235,56 @@ export function ToolCard(props: {
           )}
         </Show>
       </div>
+      <Show when={live() ? child() : undefined}>
+        {(row) => (
+          <div class="subagent-live" data-state={childState()} aria-live="off">
+            <p class="subagent-live-line">
+              <span class="subagent-state">
+                {childState() === 'waiting' ? l10n.t('Waiting for your answer') : l10n.t('Working')}
+              </span>
+              <Show when={current()}>
+                {(tool) => (
+                  <span class="subagent-current">
+                    {toolSummary(toolPartOf(tool()), false).name}
+                  </span>
+                )}
+              </Show>
+              <Show when={activity()?.since}>
+                {(since) => (
+                  <span class="subagent-elapsed" aria-hidden="true">
+                    {formatElapsed((monitor?.now() ?? since()) - since())}
+                  </span>
+                )}
+              </Show>
+              <Show when={toolsText(activity()?.toolCount ?? 0, activity()?.partial)}>
+                {(count) => <span class="subagent-count">{count()}</span>}
+              </Show>
+            </p>
+            <Show when={(activity()?.recent.length ?? 0) > 0}>
+              <ul class="subagent-tools" role="list" aria-label={l10n.t('Latest tools')}>
+                <For each={activity()?.recent ?? []}>
+                  {(tool) => <li>{toolSummary(toolPartOf(tool), false).name}</li>}
+                </For>
+              </ul>
+            </Show>
+            <button
+              type="button"
+              class="secondary subagent-stop"
+              aria-disabled={monitor?.stopping(row().id) === true ? 'true' : undefined}
+              aria-label={
+                row().title === undefined || row().title === ''
+                  ? l10n.t('Stop subagent')
+                  : l10n.t('Stop {0}', row().title ?? '')
+              }
+              onClick={() => {
+                monitor?.stop(row().id);
+              }}
+            >
+              {monitor?.stopping(row().id) === true ? l10n.t('Stopping…') : l10n.t('Stop')}
+            </button>
+          </div>
+        )}
+      </Show>
       <Show when={open()}>
         <div id={bodyId} class="tool-body" aria-live="off">
           <ToolBody part={props.part} />

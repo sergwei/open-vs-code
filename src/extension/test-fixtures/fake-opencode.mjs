@@ -76,6 +76,19 @@
 // with `metadata {sessionID, status: "running"}`, runs a short turn in the child and ends with
 // `session.tool.success` carrying `metadata {sessionID, status: "completed", truncated: false}`
 // (the event ORDER is the spike's; the ids, texts and timing are INVENTED).
+// E2-subagent-monitor (issue #189) adds a CREW switch, SYNTHETIC and written from the `subagent`
+// tool source read in the 2.0.32 tag (`packages/core/src/tool/plugin/subagent.ts@843a6c51`: the
+// child is created with `parentID`, `title` = description and `agent`; the tool ends in
+// "Subagent failed (sessionID: X): <message>" or "Subagent cancelled (sessionID: X)"); no real
+// subagent turn was observed. A prompt containing CREW makes the parent call `subagent` three
+// times in one step and each child RUNS a real turn of its own, driven by its prompt words: A plays
+// `TOOLS SLOW COSTLY` (nine tool calls, about 15 s, with a cost), B `ASK_PERMISSION SLOW COSTLY` (asks for
+// a permission from its own session and waits; COSTLY gives it a cost, so its folded card can read
+// "Finished · N tools · $cost") and C `FAIL` (its execution fails). The tool of each
+// child ends when the child's `session.execution.*` arrives (see `crewTurn`), the parent goes on
+// when all three ended, and a child stopped through `interrupt` ends as "Subagent cancelled". The
+// parent's own prompt must not contain the child words (TOOLS, SLOW, FAIL, ASK_PERMISSION): the
+// triggers match by substring.
 // E5-model-agent-selectors (issues #23/#24) adds, SYNTHETIC but copying what the planner saw in a
 // spike against a real opencode 2.0.32 (Windows 11, 21/10/2026): `GET /api/model`,
 // `GET /api/model/default`, `GET /api/provider` and `GET /api/agent`, all `{location, data}` (the
@@ -233,6 +246,7 @@ const pendingForms = new Map(); // id -> FormInfo
 const settledForms = new Set(); // ids already answered or cancelled, to answer 409 to a repeat
 const gates = new Map(); // session id -> (outcome) => void that resumes a paused turn
 const activeSteps = new Map(); // session id -> {a, chosen} of the step in flight, failed by an interrupt
+const childWaiters = new Map(); // CREW child id -> (type, data) => void, called on its `session.execution.*`
 let seq = 0;
 let dropped = false;
 
@@ -502,11 +516,19 @@ function scheduleSave() {
   saveTimer.unref();
 }
 
-/** Writes one SSE data frame to every open `/api/event` connection. */
+/**
+ * Writes one SSE data frame to every open `/api/event` connection. After the frame, an end of
+ * execution (`session.execution.succeeded|failed|interrupted`) of a CREW child calls its waiter
+ * (see {@link crewTurn}); `started` never does.
+ */
 function broadcast(type, data) {
   const frame = `data: ${JSON.stringify({ id: nextId('evt'), created: Date.now(), type, data })}\n\n`;
   for (const client of sseClients) client.write(frame);
   scheduleSave();
+  // CREW (issue #189): the end of a child's execution closes the `subagent` tool of its parent.
+  if (type.startsWith('session.execution.') && type !== 'session.execution.started') {
+    childWaiters.get(data?.sessionID)?.(type, data);
+  }
 }
 
 /**
@@ -766,6 +788,111 @@ function subagentTool(a) {
     time: { created: Date.now() },
   });
   return { steps, block };
+}
+
+/**
+ * The three `subagent` calls of a `CREW` turn (issue #189). SYNTHETIC; see the CREW paragraph of
+ * the header for what it imitates and what it invents.
+ *
+ * The steps open the three tools in the same step (`input.started` -> `input.ended` -> `called`),
+ * then create the three children (`session.created` with `parentID`, `title` = description,
+ * `agent`), publish each `session.tool.progress` with `status: "running"` and start each child's
+ * own turn with `playTurn` and its words. A waiter per child closes the parent's tool when the
+ * child's execution ends: `tool.success` (metadata `{sessionID, status: "completed"}`) on
+ * `succeeded`, `tool.failed` "Subagent failed (sessionID: X): <message>" on `failed` and
+ * "Subagent cancelled (sessionID: X)" on `interrupted`. `onSettled` runs once the third tool is
+ * closed. A parent that is no longer running (interrupted) gets nothing more. `blocks()` are the
+ * three tool blocks as the REST message holds them at the end.
+ */
+function crewTurn(a, onSettled) {
+  const parent = sessions.get(a.sessionID);
+  const members = [
+    { agent: 'explore', description: 'Walk the repository', prompt: 'TOOLS SLOW COSTLY' },
+    { agent: 'general', description: 'Ask before reading', prompt: 'ASK_PERMISSION SLOW COSTLY' },
+    { agent: 'general', description: 'Fail on purpose', prompt: 'FAIL' },
+  ].map((member) => ({
+    ...member,
+    toolID: nextId('call'),
+    childID: nextId('ses'),
+    input: { agent: member.agent, description: member.description, prompt: member.prompt },
+    state: undefined,
+  }));
+  let open = members.length;
+  const close = (member, type, data) => {
+    if (!running.has(a.sessionID)) return;
+    const { toolID, childID, input } = member;
+    childWaiters.delete(childID);
+    if (type === 'session.execution.succeeded') {
+      const content = [
+        {
+          type: 'text',
+          text: `<subagent sessionID="${childID}" state="completed">done</subagent>`,
+        },
+      ];
+      const metadata = { sessionID: childID, status: 'completed', truncated: false };
+      member.state = { status: 'completed', input, content, metadata };
+      broadcast('session.tool.success', { ...a, id: toolID, content, metadata, executed: true });
+    } else {
+      const message =
+        type === 'session.execution.interrupted'
+          ? `Subagent cancelled (sessionID: ${childID})`
+          : `Subagent failed (sessionID: ${childID}): ${data?.error?.message ?? 'unknown error'}`;
+      const error = { type: 'tool.execution', message };
+      member.state = { status: 'error', input, error };
+      broadcast('session.tool.failed', { ...a, id: toolID, error });
+    }
+    open -= 1;
+    if (open === 0) onSettled();
+  };
+  const steps = [
+    ...members.flatMap(({ toolID, input }) => [
+      ...toolInputSteps(a, toolID, 'subagent', input),
+      () => broadcast('session.tool.called', { ...a, id: toolID, input, executed: true }),
+    ]),
+    ...members.map((member) => () => {
+      const { childID, input } = member;
+      const now = Date.now();
+      sessions.set(childID, {
+        id: childID,
+        projectID: 'prj_fake',
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: now, updated: now },
+        location: parent.location,
+        title: input.description,
+        parentID: a.sessionID,
+        agent: input.agent,
+      });
+      history.set(childID, []);
+      childWaiters.set(childID, (type, data) => close(member, type, data));
+      broadcast('session.created', {
+        sessionID: childID,
+        projectID: 'prj_fake',
+        slug: childID,
+        version: '2.0.32',
+        location: parent.location,
+        title: input.description,
+        parentID: a.sessionID,
+        agent: input.agent,
+      });
+      broadcast('session.tool.progress', {
+        ...a,
+        id: member.toolID,
+        metadata: { sessionID: childID, status: 'running' },
+      });
+      running.add(childID);
+      playTurn(childID, nextId('msg'), input.prompt);
+    }),
+  ];
+  const blocks = () =>
+    members.map(({ toolID, state, input }) => ({
+      type: 'tool',
+      id: toolID,
+      name: 'subagent',
+      state: state ?? { status: 'running', input, metadata: {} },
+      time: { created: Date.now() },
+    }));
+  return { steps, blocks };
 }
 
 /**
@@ -1202,7 +1329,10 @@ function playCompaction(sessionID, inputID) {
  * turn then plays as usual (both INVENTED, for `test:visual` steps 28 and 29). MCPFLIP (issue #128,
  * INVENTED) flips an MCP server first (see `flipMcp`) and the turn plays as usual. A prompt
  * containing SLOW plays its events 300 ms apart and one containing SLOWER 1200 ms apart (about
- * 20 s, INVENTED, for the running row of `test:visual` step 50).
+ * 20 s, INVENTED, for the running row of `test:visual` step 50). A prompt containing CREW (issue
+ * #189) plays three `subagent` calls whose children run their own turns (see {@link crewTurn});
+ * the parent's body then waits in `gates` until the three ended, so the same function also plays
+ * a CHILD turn, with the words of the child's prompt.
  */
 function playTurn(sessionID, inboxID, text, files = []) {
   // MCPFLIP (E10-config-views, issue #128; INVENTED trigger, see {@link flipMcp}): flips an MCP
@@ -1406,7 +1536,17 @@ function playTurn(sessionID, inboxID, text, files = []) {
         broadcast('session.execution.succeeded', { sessionID });
       },
     ];
-    if (text.includes('SUBAGENT')) {
+    if (text.includes('CREW')) {
+      // Issue #189: the parent waits (in `gates`, like an asking turn) until its three children
+      // ended; an interrupt of the parent drops the gate, so a late child cannot resume it.
+      const crew = crewTurn(a, () => gates.get(sessionID)?.());
+      toolBlock = crew.blocks;
+      gates.set(sessionID, () => {
+        gates.delete(sessionID);
+        schedule(body);
+      });
+      steps.push(stepStarted, ...crew.steps);
+    } else if (text.includes('SUBAGENT')) {
       const subagent = subagentTool(a);
       toolBlock = subagent.block;
       steps.push(stepStarted, ...subagent.steps, ...body);

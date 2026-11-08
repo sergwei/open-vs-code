@@ -195,6 +195,22 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
   'ui.focus': { type: 'ui.focus', target: { kind: 'permission', sessionID: 's1', id: 'perm1' } },
   'ui.command': { type: 'ui.command', command: 'session.stop' },
   'workMode.state': { type: 'workMode.state', mode: 'manual' },
+  'subagent.activity': {
+    type: 'subagent.activity',
+    sessionID: 's1',
+    activity: {
+      sessionID: 'c1',
+      parentID: 's1',
+      running: true,
+      since: 1_000,
+      toolCount: 2,
+      partial: false,
+      recent: [
+        { id: 't1', name: 'read', status: 'completed', input: { path: 'src/a.ts' } },
+        { id: 't2', name: 'shell', status: 'error', input: { command: 'ls' }, error: 'boom' },
+      ],
+    },
+  },
   'prompt.compose': {
     type: 'prompt.compose',
     text: 'Explain what @src/a.ts#2-3 does.',
@@ -317,6 +333,7 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   'server.restart': { type: 'server.restart' },
   'workMode.set': { type: 'workMode.set', mode: 'auto' },
   'mod.toggle': { type: 'mod.toggle', modId: 'hello-station', enabled: false },
+  'subagent.stop': { type: 'subagent.stop', requestId: 'r1', parentID: 's1', sessionID: 'c1' },
   'mods.action': { type: 'mods.action', action: 'openFolder' },
   'logs.show': { type: 'logs.show' },
   'setup.action': { type: 'setup.action', action: 'binary.choose' },
@@ -389,6 +406,30 @@ describe('isWebviewToHost', () => {
       expect(isWebviewToHost({ type: 'workMode.set', mode }), String(mode)).toBe(false);
     }
     expect(isWebviewToHost({ type: 'workMode.set' })).toBe(false);
+  });
+
+  // E2-subagent-monitor (issue #189). Fabricated messages pinning the SHAPE guard of `subagent.stop`
+  // (ids non-empty, `sessionID` optional but never empty or non-string); that the child is a running
+  // direct child of `parentID` is the host handler's check. Like every guard here it does NOT reject
+  // extra keys (the host reads fields one by one, see `isWebviewToHost`), and the case says so.
+  it('validates subagent.stop: requestId and parentID, an optional non-empty sessionID', () => {
+    const base = { type: 'subagent.stop', requestId: 'r1', parentID: 's1' };
+    expect(isWebviewToHost(base)).toBe(true);
+    expect(isWebviewToHost({ ...base, sessionID: 'c1' })).toBe(true);
+    const bad: unknown[] = [
+      { ...base, sessionID: '' },
+      { ...base, sessionID: 7 },
+      { ...base, sessionID: null },
+      { ...base, requestId: '' },
+      { ...base, requestId: 3 },
+      { ...base, parentID: '' },
+      { ...base, parentID: undefined },
+      { type: 'subagent.stop', requestId: 'r1' },
+      { type: 'subagent.stop', parentID: 's1' },
+    ];
+    for (const message of bad)
+      expect(isWebviewToHost(message), JSON.stringify(message)).toBe(false);
+    expect(isWebviewToHost({ ...base, extra: 1 })).toBe(true);
   });
 
   // E10-mod-toggles. Fabricated messages pinning the guards of the per-mod switch: the id is checked
@@ -547,6 +588,7 @@ describe('isWebviewToHost', () => {
     const optionalByType: { [type: string]: string[] } = {
       'prompt.send': ['sessionID'],
       'mod.command.run': ['sessionID'],
+      'subagent.stop': ['sessionID'], // #189: without it, stop every running child of parentID
       'permission.reply': ['message'],
       'form.cancel': ['message'],
       'editor.open': ['line', 'column'],

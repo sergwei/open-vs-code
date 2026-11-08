@@ -614,6 +614,137 @@ button.jump-latest {
   background: var(--vscode-inputValidation-errorBackground, transparent);
 }
 
+/*
+ * Subagent monitor (issue #189): the live section of a `subagent` card and the bar above the
+ * status strip. Only --vscode-* variables, no `style` attribute, and the state is always a WORD in
+ * the text (`.subagent-state`); the tone only marks the border. Everything wraps: nothing may make
+ * the strip scroll sideways at 150 px.
+ */
+.subagent-live {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 4px 8px 6px;
+  border-top: 1px solid var(--vscode-panel-border, transparent);
+}
+
+.subagent-live[data-state='waiting'],
+.subagent-row[data-state='waiting'] {
+  border-left: 3px solid var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder));
+}
+
+.subagent-live-line,
+.subagent-row-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin: 0;
+  min-width: 0;
+  color: var(--vscode-foreground);
+  overflow-wrap: anywhere;
+}
+
+.subagent-state {
+  font-weight: 600;
+}
+
+.subagent-current,
+.subagent-elapsed,
+.subagent-count,
+.subagent-agent {
+  color: var(--vscode-foreground);
+}
+
+.subagent-agent {
+  font-weight: 600;
+}
+
+.subagent-tools {
+  margin: 0;
+  padding: 0 0 0 16px;
+  min-width: 0;
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-editor-font-family);
+  overflow-wrap: anywhere;
+}
+
+.subagent-bar {
+  font-size: 0.9em;
+  border: 1px solid var(--vscode-panel-border, transparent);
+  border-radius: var(--ovc-radius-md);
+}
+
+.subagent-bar-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  color: var(--vscode-foreground);
+  background: transparent;
+  border: none;
+  text-align: left;
+  font: inherit;
+  border-radius: var(--ovc-radius-sm);
+}
+
+.subagent-bar-toggle:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.subagent-bar-toggle[aria-expanded='true'] .tool-chevron {
+  border-left-color: transparent;
+  border-right-color: transparent;
+  border-top: 5px solid currentColor;
+  border-bottom: none;
+  border-left-width: 4px;
+  border-right: 4px solid transparent;
+}
+
+.subagent-bar-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 8px 8px;
+  border-top: 1px solid var(--vscode-panel-border, transparent);
+}
+
+.subagent-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.subagent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 6px;
+}
+
+.subagent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.subagent-stop[aria-disabled='true'],
+.subagent-stop-all[aria-disabled='true'],
+.subagent-actions button[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+[class*='vscode-high-contrast'] .subagent-bar,
+[class*='vscode-high-contrast'] .subagent-live,
+[class*='vscode-high-contrast'] .subagent-bar-panel {
+  border-color: var(--vscode-contrastBorder);
+}
+
 .tool-body {
   padding: 4px 8px 8px;
   border-top: 1px solid var(--vscode-panel-border, transparent);

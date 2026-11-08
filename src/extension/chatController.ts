@@ -21,7 +21,8 @@
 // The info lines of the log are STABLE on purpose: the opt-in integration test waits for them
 // (`webview ready`, `event stream connected`, `snapshot sent`, `prompt accepted for`,
 // `turn finished`, `abort requested for <sid> (interrupted: <bool>)`,
-// `compaction requested for <sid> (input <id>)` (issue #125), and from phase 3
+// `compaction requested for <sid> (input <id>)` (issue #125),
+// `subagent session <child> created under <parent>` (issue #189), and from phase 3
 // `permission asked <id> for <sid> (<action>)`, `permission <id> resolved: <decision>`,
 // `form asked <id> for <sid>`, `form <id> resolved: answered|cancelled`,
 // `permission reply sent for <id> (<decision>)`, `form reply sent for <id>`,
@@ -111,6 +112,7 @@ import type {
   PermissionAsk,
   SessionStatus,
   SessionSummary,
+  SubagentActivity,
   WorkMode,
 } from '../shared/model';
 import {
@@ -160,6 +162,7 @@ import {
   type SessionActivity,
 } from './sessionActivity';
 import { createSessionLineage, MAX_LINEAGE_DEPTH } from './sessionLineage';
+import { toSubagentActivity } from './subagentDigest';
 import { createSessionReverts } from './sessionRevert';
 import {
   lastCompactionAt,
@@ -197,6 +200,8 @@ const RESOLVE_CONCURRENCY = 4;
 
 /** How many messages of the open session the snapshot asks for (the API maximum is 200). */
 const MESSAGE_LIMIT = 200;
+/** Children whose messages one {@link ChatController.refreshSubagents} call reads (decision P4=1 of #189). */
+const MAX_SUBAGENT_READS = 10;
 
 /**
  * How many files one `@` search asks for. Our choice (issue #28): a popup of 20 rows is already
@@ -789,6 +794,12 @@ export class ChatController {
     (error) => this.log.warn(`activity listener failed: ${logErrorOf(error)}`),
     (text) => sanitizeText(text, this.secrets),
   );
+  /** Children whose messages {@link refreshSubagents} already seeded; emptied with the registry. */
+  private readonly seededChildren = new Set<string>();
+  /** Ids whose subagent digest waits for the microtask of {@link flushSubagentActivity}. */
+  private readonly subagentDirty = new Set<string>();
+  /** Unsubscribes the registry listener that publishes `subagent.activity` (see the constructor). */
+  private readonly activitySubscription: () => void;
   /** Sessions with a {@link resolveLineage} in flight, so one request does not start two walks. */
   private readonly lineageReads = new Set<string>();
   /** Bumped when the server goes away: a walk started under an older value publishes nothing. */
@@ -883,11 +894,22 @@ export class ChatController {
 
   /**
    * Wires the injected effects. The "Changed files" and revert holders are per pane and are built
-   * in {@link attachPane}.
+   * in {@link attachPane}. It also subscribes to the activity registry so a change of a subagent
+   * child reaches the panes showing its parent as `subagent.activity` (#189, see
+   * {@link flushSubagentActivity}); {@link dispose} unsubscribes.
    */
   constructor(private readonly deps: ChatControllerDeps) {
     this.log = safeLog(deps.log);
     this.runStream = deps.runStream ?? runEventStream;
+    // #189: the registry tells which sessions changed; the children among them are published to the
+    // panes showing their parent, coalesced per microtask (one event can fire this many times).
+    this.activitySubscription = this.activity.onChange((ids) => {
+      const idle = this.subagentDirty.size === 0;
+      for (const id of ids) {
+        if (this.activity.get(id)?.parentID !== undefined) this.subagentDirty.add(id);
+      }
+      if (idle && this.subagentDirty.size > 0) queueMicrotask(() => this.flushSubagentActivity());
+    });
     // E10-mods, phase 3: every change of the bands or commands goes to every pane as one whole
     // `mods.state`; a pane that is hidden loses it and gets the current one at its next `ready`.
     this.modsSubscription = deps.mods?.chat?.onDidChange(() => {
@@ -1553,6 +1575,145 @@ export class ChatController {
   }
 
   /**
+   * The digest of `childID` for the webview (#189), or `undefined` when the registry does not know
+   * it or it has no parent. Built from the registry, whose text is already scrubbed of the server
+   * URL and password (see {@link activityOf}); a tool that has no input yet travels with `{}`.
+   */
+  private subagentActivityOf(childID: string): SubagentActivity | undefined {
+    const seen = this.activity.get(childID);
+    if (seen?.parentID === undefined) return undefined;
+    return toSubagentActivity({
+      sessionID: childID,
+      parentID: seen.parentID,
+      running: seen.running,
+      ...(seen.since === undefined ? {} : { since: seen.since }),
+      ...(seen.endedAt === undefined ? {} : { endedAt: seen.endedAt }),
+      partial: seen.tools.partial,
+      tools: {
+        count: seen.tools.count,
+        recent: seen.tools.recent.map((run) => ({
+          id: run.id,
+          name: run.name,
+          status: run.status,
+          input: run.input ?? {},
+          ...(run.error === undefined ? {} : { error: run.error }),
+        })),
+      },
+    });
+  }
+
+  /**
+   * Posts, as `subagent.activity` to the panes showing each child's PARENT, the digest of the
+   * children the registry reported changed since the last flush (see the constructor). Runs in a
+   * microtask so a burst of events costs one message per child; a child whose parent no pane shows
+   * costs nothing.
+   * VERIFIED by `chatController.subagents.test.ts` "publishes the digest of a child only to the
+   * panes showing its parent, once per burst" (fabricated events, Windows 11, 08/11/2026).
+   */
+  private flushSubagentActivity(): void {
+    const ids = [...this.subagentDirty];
+    this.subagentDirty.clear();
+    if (this.disposed) return;
+    for (const id of ids) {
+      const activity = this.subagentActivityOf(id);
+      if (activity === undefined || this.panesOf(activity.parentID).length === 0) continue;
+      this.route({ type: 'subagent.activity', sessionID: activity.parentID, activity });
+    }
+  }
+
+  /**
+   * Reads the messages of the children of the session `pane` shows, once per child, so a child that
+   * ended before the tab opened still has its tool count (#189, decision P4=1): at most
+   * {@link MAX_SUBAGENT_READS} per call, after the snapshot so it never delays it. The registry
+   * merges them with what the stream counted (by tool id) and its listener publishes the result.
+   * `partial` when the page was full (the count is then a lower bound). A failed read is a debug
+   * line and is retried by the next resync; a read that finishes after the server changed is dropped.
+   * VERIFIED by `chatController.subagents.test.ts` "seeds the tool count of a child from its
+   * messages, once, up to the cap" (fabricated client, Windows 11, 08/11/2026).
+   */
+  private async refreshSubagents(pane: ChatPane): Promise<void> {
+    const client = this.client;
+    const openID = pane.sessionID;
+    if (client === undefined || openID === undefined) return;
+    const todo = this.activity
+      .childrenOf(openID)
+      .filter((id) => !this.seededChildren.has(id))
+      .slice(0, MAX_SUBAGENT_READS);
+    await Promise.all(
+      todo.map(async (childID) => {
+        try {
+          const page = await client.message.list({
+            sessionID: childID,
+            order: 'desc',
+            limit: MESSAGE_LIMIT,
+          });
+          if (this.disposed || client !== this.client) return;
+          this.seededChildren.add(childID);
+          this.activity.seedTools(childID, [...page.data].reverse(), {
+            partial: page.data.length >= MESSAGE_LIMIT,
+          });
+        } catch (error) {
+          this.log.debug(`could not read the messages of a subagent: ${logErrorOf(error)}`);
+        }
+      }),
+    );
+  }
+
+  /**
+   * `subagent.stop` (#189): interrupts ONE direct child of `parentID` (`sessionID`) or, without it,
+   * every child of `parentID` the host sees running; never the parent. Revalidated here, because
+   * the webview's idea of "running" or "child of" is not the source of truth: anything else answers
+   * `NotASubagent` and calls nothing. The interrupting is {@link interruptSessions}; the state
+   * changes arrive through the stream, and the pane gets `request.result` once the calls answered.
+   * Decision of Sergio (W3 of the review): when NOTHING was interrupted the result carries an
+   * error the user sees like the one of {@link abort}: `ServerUnavailable` with no client, else
+   * `SubagentStopFailed` (every call failed, or answered `interrupted: false`); a partial success
+   * answers without error. VERIFIED by `chatController.subagents.test.ts` "answers with an error
+   * when no child could be stopped, and without one when some was" (fabricated client rejecting
+   * `interrupt`, Windows 11, 08/11/2026). UNVERIFIED: the no-client branch (no test reaches a
+   * running registry with the client gone) and the `interrupted: false` answer. Also
+   * VERIFIED by `chatController.subagents.test.ts` "stops only the child it is told to", "stops
+   * every running child and not the parent" and "refuses a session that is not a running direct
+   * child" (fabricated client, Windows 11, 08/11/2026).
+   */
+  private async stopSubagents(
+    pane: ChatPane,
+    message: Extract<WebviewToHost, { type: 'subagent.stop' }>,
+  ): Promise<void> {
+    const { requestId, parentID, sessionID } = message;
+    const runningChild = (id: string): boolean => {
+      const seen = this.activity.get(id);
+      return seen?.parentID === parentID && seen.running;
+    };
+    const ids =
+      sessionID === undefined
+        ? this.activity.childrenOf(parentID).filter(runningChild)
+        : [sessionID].filter(runningChild);
+    if (ids.length === 0) {
+      this.result(
+        pane,
+        requestId,
+        refusal('NotASubagent', () => l10n.t('There is no running subagent to stop')),
+      );
+      return;
+    }
+    if (this.client === undefined) {
+      this.result(pane, requestId, unavailable());
+      return;
+    }
+    const stopped = await this.interruptSessions(ids, ' from the subagent monitor');
+    if (stopped.length === 0) {
+      this.result(
+        pane,
+        requestId,
+        refusal('SubagentStopFailed', () => l10n.t('The subagent could not be stopped')),
+      );
+      return;
+    }
+    this.result(pane, requestId);
+  }
+
+  /**
    * The text that names the chat a request belongs to in the toast title (decision Q2=1): the
    * title of the ROOT of its tree (the session a tab shows, even when a subagent is the one that
    * asks), else the session's own, else `''`, which the notification reads as "Untitled session".
@@ -1913,6 +2074,7 @@ export class ChatController {
     this.server = undefined;
     this.deps.serverConfig?.detach(); // issue #128: what it read described the server that left
     this.activity.reset(); // E9-sidebar-home: what it said described the server that left
+    this.seededChildren.clear(); // #189: the seeded counts went with the registry
     this.locationGeneration++;
     // The tree's cursors embed the old server's query, and an answer in flight belongs to it.
     this.treeBrowser.reset();
@@ -2020,6 +2182,12 @@ export class ChatController {
    * the `activity registry failed` line (no test makes the registry itself throw) and that it
    * sees an event on which another branch returns early (no event type is both something the
    * registry reads and an early return today).
+   * Issue #189: a `session.created` that carries a `parentID` also logs `subagent session <child>
+   * created under <parent>`. VERIFIED on Windows 11 (08/11/2026, `npm run test:integration --
+   * --label fake-server`, 64 passing): the case "monitors a CREW turn and stops one subagent
+   * without stopping the others" of `fakeServer.test.ts` finds the three children through that
+   * line (synthetic server, not a real opencode). No unit test reads it (the test logger is a
+   * stub).
    */
   private onEvent(event: V2Event): void {
     try {
@@ -2040,6 +2208,13 @@ export class ChatController {
         this.activity.observe(event);
       } catch (error) {
         this.log.warn(`activity registry failed on ${event.type}: ${logErrorOf(error)}`);
+      }
+      // Issue #189: a stable line per subagent session, so the integration case can learn the ids
+      // of the children of a CREW turn from the log.
+      if (event.type === 'session.created' && event.data.parentID !== undefined) {
+        this.log.info(
+          `subagent session ${event.data.sessionID} created under ${event.data.parentID}`,
+        );
       }
       if (event.type === 'server.connected') {
         this.log.info('event stream connected');
@@ -2577,6 +2752,7 @@ export class ChatController {
    * the stream wins over the photo; a pane-only resync does neither. VERIFIED by
    * `chatController.activity.test.ts` "a full resync tells the registry what runs and a pane-only
    * one does not" (fabricated client, Windows 11, 07/11/2026).
+   * Issue #189: after each pane's snapshot it starts {@link refreshSubagents} (not awaited).
    */
   async resync(only?: readonly ChatPane[]): Promise<void> {
     const client = this.client;
@@ -2707,6 +2883,7 @@ export class ChatController {
         const read = reads[index];
         if (read !== undefined && current.includes(pane)) {
           this.publishSnapshot(pane, read, token, requests);
+          void this.refreshSubagents(pane); // #189: after the snapshot, never delaying it
         }
       });
       for (const ask of autoAsks) {
@@ -2917,6 +3094,10 @@ export class ChatController {
    * the rows of the snapshot are first learned by the lineage so the filter sees them. VERIFIED by
    * `chatController.panes.test.ts` "sends each tab a snapshot with only the requests it shows"
    * (fabricated panes, 30/10/2026).
+   * Issue #189: the rows also teach the activity registry their parents, and `open.subagents`
+   * carries the digest of the open session's children the registry knows (absent with none).
+   * VERIFIED by `chatController.subagents.test.ts` "puts the digest of the children in the
+   * snapshot of the open session" (fabricated client, Windows 11, 08/11/2026).
    */
   private publishSnapshot(
     pane: ChatPane,
@@ -2953,6 +3134,16 @@ export class ChatController {
       merge: this.panes.size > 1 || this.treeMirrored,
     });
     const complete = open === undefined ? undefined : this.translator.mergeLive(open);
+    // #189: the children among the rows are learned (their listener publishes AFTER this
+    // snapshot, in a microtask) and their digests ride in `open.subagents`.
+    this.activity.learn(rows);
+    if (complete !== undefined) {
+      const subagents = this.activity
+        .childrenOf(complete.sessionID)
+        .map((id) => this.subagentActivityOf(id))
+        .filter((digest): digest is SubagentActivity => digest !== undefined);
+      if (subagents.length > 0) complete.subagents = subagents;
+    }
     pane.post({
       type: 'snapshot',
       snapshot: {
@@ -4788,7 +4979,10 @@ export class ChatController {
     return this.run(pane, message);
   }
 
-  /** Dispatch body of {@link handle}; kept apart so `dispatch` can return a Promise. */
+  /**
+   * Dispatch body of {@link handle}; kept apart so `dispatch` can return a Promise. Its
+   * `subagent.stop` case (#189) goes to {@link stopSubagents}.
+   */
   private async run(pane: ChatPane, message: WebviewToHost): Promise<void> {
     const pending: Promise<void>[] = [];
     dispatch<WebviewToHost>(message, {
@@ -4830,6 +5024,9 @@ export class ChatController {
       },
       'mods.action': (m) => {
         pending.push(this.modsRequest(pane, m.type, (chat) => chat.action(m.action)));
+      },
+      'subagent.stop': (m) => {
+        pending.push(this.stopSubagents(pane, m));
       },
       'permission.reply': (m) => {
         pending.push(this.answerPermission(pane, m));
@@ -5635,6 +5832,7 @@ export class ChatController {
   dispose(): void {
     this.disposed = true;
     this.modsSubscription?.dispose();
+    this.activitySubscription();
     this.startWaiter?.(false);
     this.startWaiter = undefined;
     this.stopStream();

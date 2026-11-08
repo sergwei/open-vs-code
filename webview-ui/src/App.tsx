@@ -44,6 +44,8 @@ import {
 } from './selectors/selection';
 import { deriveActivity } from './store/activity';
 import type { ChatStore } from './store/chatStore';
+import { SubagentBar } from './subagents/SubagentBar';
+import { createSubagentMonitor, SubagentProvider } from './subagents/SubagentContext';
 import type { UiState } from './uiState';
 
 /** Built from its code point: a literal one in the source trips `no-irregular-whitespace`. */
@@ -209,6 +211,21 @@ interface LastRevert {
  * VERIFIED in VS Code 1.144.0 on Windows 11 (02/11/2026, the final full `test:visual` run, 776.4 s,
  * synthetic server): "ok   M5 the command received its arguments ("Ana")" and "ok   M6 the band
  * button ran the command with no arguments".
+ *
+ * Issue #189 (subagent monitor): {@link createSubagentMonitor} is built here over the store and
+ * provided to the whole tree (`SubagentProvider`), so the tool cards and the {@link SubagentBar}
+ * (between the request dock and the status strip) read it without props. `stopSubagent` is the one
+ * place that sends `subagent.stop`: it marks the children as stopping (`store.beginStop`, NOT
+ * `pending`, so the prompt box stays usable) and sends ONE message, with `sessionID` for one child
+ * and without it for "Stop all"; the parent is never named as a target.
+ * VERIFIED by the `subagent bar in the App (issue #189)` cases of `App.test.tsx` (the bar before
+ * the status strip, "Stop all" without `sessionID`, "Stop Second task" with it, `pending` empty;
+ * fabricated host messages in jsdom). VERIFIED in a real VS Code 1.145.2 on Windows 11 (08/11/2026,
+ * the complete `test:visual` run of this tree, where step 51 has no FAIL; the step 45 failures are
+ * #195, which also fails intermittently on main): "each row has its Stop and only the waiting one has Answer",
+ * "Stop on the row of A is pressed", "A leaves the bar after Stop", "Stop all empties the bar", "the
+ * parent turn ends by itself after Stop all". UNVERIFIED in a real VS Code: the focus returning to
+ * the prompt when a row or the bar goes away (no check reads it).
  *
  * Issue #31: the header shows the "Changed files" list of the open session, and `openChangedFile`
  * turns a click on a row into `session.diff.open` for the open session (no `requestId`).
@@ -1060,6 +1077,25 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   };
 
   /**
+   * Sends `subagent.stop` for the children `ids` of `parentID` and marks them as stopping until the
+   * `request.result`. `childID` undefined sends no `sessionID` (the host stops every running child).
+   */
+  const stopSubagent = (parentID: string, ids: string[], childID: string | undefined): void => {
+    const requestId = nextRequestId();
+    props.store.beginStop(ids, requestId);
+    props.send({
+      type: 'subagent.stop',
+      requestId,
+      parentID,
+      ...(childID === undefined ? {} : { sessionID: childID }),
+    });
+  };
+  const subagents = createSubagentMonitor(props.store, {
+    open: openSession,
+    stop: stopSubagent,
+  });
+
+  /**
    * Asks the host to open the diff of a row of "Changed files" (issue #31). The host opens it only
    * if it listed that path for the open session, so a stale click costs a notice, nothing more.
    * No `requestId`: like `editor.open`, a failure comes back as a notice.
@@ -1072,184 +1108,191 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
 
   return (
     <HostContext.Provider value={props.send}>
-      <div class="app" data-connection={state.connection.state}>
-        <Show
-          when={!guideVisible()}
-          fallback={
-            <SetupGuide
-              connection={state.connection}
-              catalog={state.catalog}
-              binaryCheck={state.binaryCheck}
-              onChoose={props.store.beginBinaryChoice}
-            />
-          }
-        >
-          <Header
-            store={props.store}
-            onNewSession={newSession}
-            closePickerRequest={closePickerRequest()}
-            onOpenSession={openSession}
-            onOpenChangedFile={openChangedFile}
-          />
-          <main class="chat-main">
-            <Show
-              when={state.open.messages.length > 0}
-              fallback={
-                <Show
-                  when={problem()}
-                  fallback={
-                    <EmptyState
-                      onPick={(text) => {
-                        setDraft(text);
-                        focusInput?.();
-                      }}
-                    />
-                  }
-                >
-                  {(current) => <ConnectionCard problem={current()} />}
-                </Show>
-              }
-            >
-              <MessageList
-                open={state.open}
-                messages={messages()}
+      <SubagentProvider value={subagents}>
+        <div class="app" data-connection={state.connection.state}>
+          <Show
+            when={!guideVisible()}
+            fallback={
+              <SetupGuide
+                connection={state.connection}
                 catalog={state.catalog}
-                resolutions={state.resolutions}
-                requests={state.requests}
-                busy={busy()}
-                canRetry={lastUser() !== undefined}
-                forkDisabled={forkDisabled()}
-                revertDisabled={revertDisabled()}
-                onRetry={retry}
-                onFork={forkFrom}
-                onRevert={revertFrom}
-                onOpenSession={openSession}
-                trailing={
-                  <Show when={problem()}>
+                binaryCheck={state.binaryCheck}
+                onChoose={props.store.beginBinaryChoice}
+              />
+            }
+          >
+            <Header
+              store={props.store}
+              onNewSession={newSession}
+              closePickerRequest={closePickerRequest()}
+              onOpenSession={openSession}
+              onOpenChangedFile={openChangedFile}
+            />
+            <main class="chat-main">
+              <Show
+                when={state.open.messages.length > 0}
+                fallback={
+                  <Show
+                    when={problem()}
+                    fallback={
+                      <EmptyState
+                        onPick={(text) => {
+                          setDraft(text);
+                          focusInput?.();
+                        }}
+                      />
+                    }
+                  >
                     {(current) => <ConnectionCard problem={current()} />}
                   </Show>
                 }
-              />
-            </Show>
-          </main>
-          <Show when={state.open.revert}>
-            {(revert) => (
-              <RevertBanner
-                revert={revert()}
-                split={split()}
-                disabled={revertDisabled()}
-                onRestore={() => {
-                  finishRevert('session.revert.clear');
-                }}
-                onDiscard={() => {
-                  finishRevert('session.revert.commit');
-                }}
-                onOpenFile={openRevertedFile}
-              />
-            )}
-          </Show>
-          <ModBands
-            bands={state.mods.bands}
-            disabled={state.pending.length > 0}
-            onRun={(command) => {
-              runModCommand(command, '');
-            }}
-          />
-          <RequestDock
-            store={props.store}
-            typing={draft().trim() !== ''}
-            focusInput={() => {
-              focusInput?.();
-            }}
-          />
-          <StatusBar
-            state={state}
-            activity={activity()}
-            announcement={announcement()}
-            canRetry={lastUser() !== undefined && canSend() && !lastMessageHasError()}
-            onRetry={retry}
-            onDismiss={props.store.dismissNotice}
-          />
-          <PromptInput
-            draft={draft()}
-            onDraft={(text) => {
-              setDraft(text);
-            }}
-            history={history}
-            files={state.draftFiles}
-            busy={busy()}
-            waiting={!connected() && !notStarted()}
-            sendDisabled={!canSend() && !canRunModDraft()}
-            attachDisabled={!connected()}
-            workMode={state.workMode}
-            onWorkMode={(mode) => {
-              props.send({ type: 'workMode.set', mode });
-            }}
-            workModeDisabled={!connected()}
-            mods={state.mods.listing}
-            onModToggle={(modId, enabled) => {
-              props.send({ type: 'mod.toggle', modId, enabled });
-            }}
-            onModsAction={(action) => {
-              props.send({ type: 'mods.action', action });
-            }}
-            commands={commands()}
-            commandsLoading={state.catalog === undefined}
-            commandsDisabled={!connected()}
-            commandRunnable={(name) =>
-              isModCommand(name, state.catalog?.commands, state.mods.commands)
-            }
-            fileSearch={state.fileSearch}
-            onMentionQuery={searchFiles}
-            onMentionPick={(file) => {
-              // Plain copy: the chip is read back into a `postMessage` when the prompt is sent.
-              props.store.addDraftFiles([{ uri: file.uri, name: file.name }]);
-              clearFileSearch();
-            }}
-            onSubmit={submit}
-            onStop={stop}
-            onAttach={() => {
-              attach('file');
-            }}
-            onAttachImage={() => {
-              attach('image');
-            }}
-            onAddSelection={addSelection}
-            onRemoveFile={removeFile}
-            onDrop={dropped}
-            onPasteImages={addImages}
-            thumbs={state.thumbs}
-            onFocusReady={(focus) => {
-              // Same rule as the "+" menu: the focus moving by code closes the chip's panel too.
-              focusInput = () => {
-                closeChipPanel?.();
-                focus();
-              };
-            }}
-            selectors={
-              <AgentModelMenu
-                onCloseReady={(close) => {
-                  closeChipPanel = close;
-                }}
-                catalog={state.catalog}
-                agent={effectiveAgent(selectionInput())}
-                model={effectiveModel(selectionInput())}
-                variants={variantChoices(effectiveModel(selectionInput()))}
-                connection={state.connection.state}
-                disabled={!connected()}
-                onSelectAgent={props.store.selectAgent}
-                onSelectModel={props.store.selectModel}
-                onSelectVariant={(variant) => {
-                  const effective = effectiveModel(selectionInput());
-                  if (effective !== undefined) {
-                    props.store.selectModel(withVariant(effective.ref, variant));
+              >
+                <MessageList
+                  open={state.open}
+                  messages={messages()}
+                  catalog={state.catalog}
+                  resolutions={state.resolutions}
+                  requests={state.requests}
+                  busy={busy()}
+                  canRetry={lastUser() !== undefined}
+                  forkDisabled={forkDisabled()}
+                  revertDisabled={revertDisabled()}
+                  onRetry={retry}
+                  onFork={forkFrom}
+                  onRevert={revertFrom}
+                  onOpenSession={openSession}
+                  trailing={
+                    <Show when={problem()}>
+                      {(current) => <ConnectionCard problem={current()} />}
+                    </Show>
                   }
-                }}
-              />
-            }
-          />
-        </Show>
-      </div>
+                />
+              </Show>
+            </main>
+            <Show when={state.open.revert}>
+              {(revert) => (
+                <RevertBanner
+                  revert={revert()}
+                  split={split()}
+                  disabled={revertDisabled()}
+                  onRestore={() => {
+                    finishRevert('session.revert.clear');
+                  }}
+                  onDiscard={() => {
+                    finishRevert('session.revert.commit');
+                  }}
+                  onOpenFile={openRevertedFile}
+                />
+              )}
+            </Show>
+            <ModBands
+              bands={state.mods.bands}
+              disabled={state.pending.length > 0}
+              onRun={(command) => {
+                runModCommand(command, '');
+              }}
+            />
+            <RequestDock
+              store={props.store}
+              typing={draft().trim() !== ''}
+              focusInput={() => {
+                focusInput?.();
+              }}
+            />
+            <SubagentBar
+              focusInput={() => {
+                focusInput?.();
+              }}
+            />
+            <StatusBar
+              state={state}
+              activity={activity()}
+              announcement={announcement()}
+              canRetry={lastUser() !== undefined && canSend() && !lastMessageHasError()}
+              onRetry={retry}
+              onDismiss={props.store.dismissNotice}
+            />
+            <PromptInput
+              draft={draft()}
+              onDraft={(text) => {
+                setDraft(text);
+              }}
+              history={history}
+              files={state.draftFiles}
+              busy={busy()}
+              waiting={!connected() && !notStarted()}
+              sendDisabled={!canSend() && !canRunModDraft()}
+              attachDisabled={!connected()}
+              workMode={state.workMode}
+              onWorkMode={(mode) => {
+                props.send({ type: 'workMode.set', mode });
+              }}
+              workModeDisabled={!connected()}
+              mods={state.mods.listing}
+              onModToggle={(modId, enabled) => {
+                props.send({ type: 'mod.toggle', modId, enabled });
+              }}
+              onModsAction={(action) => {
+                props.send({ type: 'mods.action', action });
+              }}
+              commands={commands()}
+              commandsLoading={state.catalog === undefined}
+              commandsDisabled={!connected()}
+              commandRunnable={(name) =>
+                isModCommand(name, state.catalog?.commands, state.mods.commands)
+              }
+              fileSearch={state.fileSearch}
+              onMentionQuery={searchFiles}
+              onMentionPick={(file) => {
+                // Plain copy: the chip is read back into a `postMessage` when the prompt is sent.
+                props.store.addDraftFiles([{ uri: file.uri, name: file.name }]);
+                clearFileSearch();
+              }}
+              onSubmit={submit}
+              onStop={stop}
+              onAttach={() => {
+                attach('file');
+              }}
+              onAttachImage={() => {
+                attach('image');
+              }}
+              onAddSelection={addSelection}
+              onRemoveFile={removeFile}
+              onDrop={dropped}
+              onPasteImages={addImages}
+              thumbs={state.thumbs}
+              onFocusReady={(focus) => {
+                // Same rule as the "+" menu: the focus moving by code closes the chip's panel too.
+                focusInput = () => {
+                  closeChipPanel?.();
+                  focus();
+                };
+              }}
+              selectors={
+                <AgentModelMenu
+                  onCloseReady={(close) => {
+                    closeChipPanel = close;
+                  }}
+                  catalog={state.catalog}
+                  agent={effectiveAgent(selectionInput())}
+                  model={effectiveModel(selectionInput())}
+                  variants={variantChoices(effectiveModel(selectionInput()))}
+                  connection={state.connection.state}
+                  disabled={!connected()}
+                  onSelectAgent={props.store.selectAgent}
+                  onSelectModel={props.store.selectModel}
+                  onSelectVariant={(variant) => {
+                    const effective = effectiveModel(selectionInput());
+                    if (effective !== undefined) {
+                      props.store.selectModel(withVariant(effective.ref, variant));
+                    }
+                  }}
+                />
+              }
+            />
+          </Show>
+        </div>
+      </SubagentProvider>
     </HostContext.Provider>
   );
 }

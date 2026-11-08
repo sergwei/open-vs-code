@@ -220,6 +220,44 @@ export type SessionSummary = {
 };
 
 /**
+ * One tool call of a subagent child session, already slimmed by the host (E2-subagent-monitor,
+ * issue #189) so it can travel in `subagent.activity` without carrying a `write` or `edit` whole.
+ *
+ * `input` holds only primitive values, strings cut to the host's cap (`slimInput` and `MAX_INPUT_VALUE_CHARS` of `sessionActivity.ts`); the webview
+ * builds a minimal `ToolPart` from it and reuses the normal tool summary, so there is no second
+ * tool mapping. `error` is the failure text of an `error` call. SYNTHETIC until a real subagent turn
+ * is observed: the shape comes from the plan, not from a recorded stream.
+ */
+export type SubagentTool = {
+  id: string;
+  name: string;
+  status: 'running' | 'completed' | 'error';
+  input: JsonObject;
+  error?: string;
+};
+
+/**
+ * What the host digests about ONE direct child session of a session the pane shows (issue #189).
+ * Agent, title, cost, outcome and busy/idle live in `SessionSummary` and `statuses`, not here.
+ *
+ * `running` is the host's reading of the child's execution; `since` (epoch ms) is when the current
+ * execution started and `endedAt` when the last one ended, either may be absent after a resync that
+ * saw no events. `toolCount` is the number of tool calls seen; `partial` says it is a lower bound
+ * (the host read at most one page of messages, shown as "N+"). `recent` is the last tool calls,
+ * oldest first, at most 3 of them (`RECENT_TOOLS` of `sessionActivity.ts`).
+ */
+export type SubagentActivity = {
+  sessionID: string;
+  parentID: string;
+  running: boolean;
+  since?: number;
+  endedAt?: number;
+  toolCount: number;
+  partial?: boolean;
+  recent: SubagentTool[];
+};
+
+/**
  * Live state of a session. `nextAt` of `retry` is an epoch-milliseconds timestamp.
  *
  * `error` means "not running; the last execution failed" (issue #14: opencode 2.0.32 publishes

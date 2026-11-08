@@ -16,7 +16,12 @@
 // protected by the host tests and the opt-in integration suite.
 import { batch, createEffect, createRoot } from 'solid-js';
 import { describe, expect, it } from 'vitest';
-import type { MessageInfo, Part, RequestResolution } from '../../../src/shared/model';
+import type {
+  MessageInfo,
+  Part,
+  RequestResolution,
+  SubagentActivity,
+} from '../../../src/shared/model';
 import { createChatStore, MAX_NOTICES, MAX_RESOLVED, type ChatStore } from './chatStore';
 
 const SES = 'ses_1';
@@ -812,6 +817,123 @@ describe('workMode', () => {
       expect(store.state.workMode).toBe('auto');
       store.apply({ type: 'workMode.state', mode: 'manual' });
       expect(store.state.workMode).toBe('manual');
+    });
+  });
+});
+
+// Issue #189 (subagent monitor). Protects: an update of a child keeps the entry object and the
+// objects of the tools it still lists (the live card must not rebuild its DOM), a snapshot REPLACES
+// the record, an update whose parent is not the open session is ignored, and removing the open
+// session empties it. Provenance: FABRICATED host messages, not a recorded stream.
+describe('subagents (issue #189)', () => {
+  const tool = (id: string, status: 'running' | 'completed' = 'running') => ({
+    id,
+    name: 'read',
+    status,
+    input: { path: 'src/a.ts' },
+  });
+  const child = (id: string, over: Partial<SubagentActivity> = {}): SubagentActivity => ({
+    sessionID: id,
+    parentID: SES,
+    running: true,
+    toolCount: 1,
+    recent: [tool('t1')],
+    ...over,
+  });
+
+  it('starts empty and upserts one child per update, keeping object identity', () => {
+    withStore((store) => {
+      expect(store.state.subagents).toEqual({});
+      store.apply({ type: 'subagent.activity', sessionID: SES, activity: child('c1') });
+      const entry = store.state.subagents.c1;
+      const firstTool = entry?.recent[0];
+      store.apply({
+        type: 'subagent.activity',
+        sessionID: SES,
+        activity: child('c1', { toolCount: 2, recent: [tool('t1', 'completed'), tool('t2')] }),
+      });
+      expect(store.state.subagents.c1).toBe(entry);
+      expect(store.state.subagents.c1?.recent[0]).toBe(firstTool);
+      expect(store.state.subagents.c1?.recent.map((t) => t.status)).toEqual([
+        'completed',
+        'running',
+      ]);
+      store.apply({ type: 'subagent.activity', sessionID: SES, activity: child('c2') });
+      expect(Object.keys(store.state.subagents)).toEqual(['c1', 'c2']);
+    });
+  });
+
+  it('drops a field the new digest no longer has (a restarted child has no endedAt)', () => {
+    withStore((store) => {
+      store.apply({
+        type: 'subagent.activity',
+        sessionID: SES,
+        activity: child('c1', { running: false, endedAt: 9 }),
+      });
+      store.apply({ type: 'subagent.activity', sessionID: SES, activity: child('c1') });
+      expect(store.state.subagents.c1?.endedAt).toBeUndefined();
+      expect(store.state.subagents.c1?.running).toBe(true);
+    });
+  });
+
+  it('ignores an update whose parent is not the open session', () => {
+    withStore((store) => {
+      store.apply({ type: 'subagent.activity', sessionID: 'other', activity: child('c1') });
+      expect(store.state.subagents).toEqual({});
+    });
+  });
+
+  it('replaces the whole record with each snapshot and empties it for another session', () => {
+    withStore((store) => {
+      store.apply({ type: 'subagent.activity', sessionID: SES, activity: child('c1') });
+      const base = openSnapshot();
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...base, open: { ...base.open, subagents: [child('c2')] } },
+      });
+      expect(Object.keys(store.state.subagents)).toEqual(['c2']);
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...base, open: { ...base.open, sessionID: 'ses_2' } },
+      });
+      expect(store.state.subagents).toEqual({});
+    });
+  });
+
+  it('empties the record when the open session is removed', () => {
+    withStore((store) => {
+      store.apply({ type: 'subagent.activity', sessionID: SES, activity: child('c1') });
+      store.apply({ type: 'session.removed', sessionID: SES });
+      expect(store.state.subagents).toEqual({});
+    });
+  });
+});
+
+// Protects the Stop mark of the subagent monitor and the "Answer" focus request (issue #189): a
+// mark exists for each child of the request until THAT request's result arrives and never touches
+// `pending`; `requestFocus` fills the slot the dock reads. Provenance: FABRICATED messages.
+describe('stopping and requestFocus (issue #189)', () => {
+  it('marks the children until the result of their request, leaving pending alone', () => {
+    withStore((store) => {
+      store.beginStop(['c1', 'c2'], 'r1');
+      store.beginStop(['c3'], 'r2');
+      expect(store.state.stopping).toEqual({ c1: 'r1', c2: 'r1', c3: 'r2' });
+      expect(store.state.pending).toEqual([]);
+      store.apply({ type: 'request.result', requestId: 'r1' });
+      expect(store.state.stopping).toEqual({ c3: 'r2' });
+    });
+  });
+
+  it('requestFocus fills focusTarget with a plain copy and clearFocusTarget empties it', () => {
+    withStore((store) => {
+      store.requestFocus({ kind: 'permission', sessionID: 'c1', id: 'perm_1' });
+      expect(store.state.focusTarget).toEqual({
+        kind: 'permission',
+        sessionID: 'c1',
+        id: 'perm_1',
+      });
+      store.clearFocusTarget();
+      expect(store.state.focusTarget).toBeUndefined();
     });
   });
 });
