@@ -10,7 +10,10 @@ interface Manifest {
   capabilities?: { untrustedWorkspaces?: { supported?: unknown; description?: string } };
   contributes: {
     viewsContainers: { activitybar: { id: string }[] };
-    views: Record<string, { id: string; name?: string; when?: string }[]>;
+    views: Record<
+      string,
+      { id: string; name?: string; when?: string; type?: string; visibility?: string }[]
+    >;
     viewsWelcome?: { view: string; contents: string; when?: string }[];
     commands: { command: string; title?: string; category?: string; icon?: string }[];
     menus?: Record<string, { command: string; group?: string; when?: string }[]>;
@@ -355,6 +358,8 @@ describe('keybindings in package.json', () => {
  * ordered group, the extra Explorer entry next to the existing one, `resourceScheme == file` on
  * every entry (so untitled, `git:` and `output:` documents never show them) and the palette
  * (editor commands visible, the Explorer ones hidden because they need the Explorer's arguments).
+ * The exact list of commands hidden from the palette (`when: false`) also holds the refresh buttons
+ * of the Changes and Usage views (E9-sidebar-home), which only make sense as view title buttons.
  * The data is the REAL package.json. How VS Code RENDERS the menus is not covered here: that is
  * the `test:visual` checks "C1 the editor right-click menu lists "Add to OpenCode Chat", "Explain with
  * OpenCode" and "Fix with OpenCode" in that order" and "C2 the Explorer
@@ -423,6 +428,9 @@ describe('context menus (issue #36)', () => {
         ids.UNPIN_SESSION_COMMAND_ID,
         ids.ARCHIVE_SESSION_COMMAND_ID,
         ids.UNARCHIVE_SESSION_COMMAND_ID,
+        // E9-sidebar-home: the refresh buttons of the Changes and Usage views are title buttons.
+        ids.REFRESH_CHANGES_COMMAND_ID,
+        ids.REFRESH_USAGE_COMMAND_ID,
       ].sort(),
     );
     const palette = entries('commandPalette').map((e) => e.command);
@@ -732,6 +740,60 @@ describe('chat location (issue #77)', () => {
       manifest.contributes.commands.find((c) => c.command === id)?.title;
     expect(titleOf(ids.OPEN_SERVER_SETTINGS_COMMAND_ID)).toBe('Open Settings…');
     expect(titleOf(ids.OPEN_SETTINGS_COMMAND_ID)).toBe('Open Extension Settings');
+  });
+});
+
+/**
+ * Protects the manifest side of the sidebar home (E9-sidebar-home, issue #187; decisions P2=1 and
+ * P3=2 of Sergio, 07/11/2026): the container lists Quick start (a webview), Sessions, the Changes
+ * view and the Usage view in that order; the three new ones appear only while the Sessions view does
+ * (the same `when`), the two native ones start COLLAPSED, the Usage name says it covers all projects,
+ * and the internal open command stays out of `contributes`. The data is the REAL package.json; what
+ * VS Code does with `visibility` and `when` is `test:visual` step 49 (VERIFIED in the full run of E9-sidebar-home, 08/11/2026, "ok   U1
+ * the Changes and Usage panes are in the container and start COLLAPSED, and the fixture got no
+ * stats request").
+ */
+describe('sidebar home views (E9-sidebar-home)', () => {
+  const views = manifest.contributes.views[ids.VIEW_CONTAINER_ID] ?? [];
+  const commandIds = manifest.contributes.commands.map((c) => c.command);
+  const editorWhen = `config.${ids.CHAT_LOCATION_SETTING} != sidebar`;
+
+  it('lists Quick start, Sessions, Changes and Usage in that order after the chat view', () => {
+    expect(views.map((v) => v.id)).toEqual([
+      ids.CHAT_VIEW_ID,
+      ids.HOME_VIEW_ID,
+      ids.SESSIONS_VIEW_ID,
+      ids.CHANGES_VIEW_ID,
+      ids.USAGE_VIEW_ID,
+    ]);
+    expect(views.find((v) => v.id === ids.HOME_VIEW_ID)?.type).toBe('webview');
+  });
+
+  it('shows the three new views with the Sessions view and collapses the native two at first', () => {
+    for (const id of [ids.HOME_VIEW_ID, ids.CHANGES_VIEW_ID, ids.USAGE_VIEW_ID]) {
+      expect(views.find((v) => v.id === id)?.when, id).toBe(editorWhen);
+    }
+    expect(views.find((v) => v.id === ids.CHANGES_VIEW_ID)?.visibility).toBe('collapsed');
+    expect(views.find((v) => v.id === ids.USAGE_VIEW_ID)?.visibility).toBe('collapsed');
+    expect(views.find((v) => v.id === ids.SESSIONS_VIEW_ID)?.visibility).toBeUndefined();
+  });
+
+  it('names the Usage view "all projects" in English and Spanish', () => {
+    const spanish = readJson<Record<string, string>>('../../package.nls.es.json');
+    expect(nls['view.usage.name']).toMatch(/all projects/i);
+    expect(spanish['view.usage.name']).toMatch(/todos los proyectos/i);
+  });
+
+  it('keeps the open command internal and puts a refresh button on each native view', () => {
+    expect(commandIds).not.toContain(ids.OPEN_CHANGED_FILE_COMMAND_ID);
+    expect(commandIds).not.toContain(ids.TEST_SIDEBAR_VIEWS_COMMAND_ID);
+    const title = manifest.contributes.menus?.['view/title'] ?? [];
+    expect(title.find((e) => e.command === ids.REFRESH_CHANGES_COMMAND_ID)?.when).toBe(
+      `view == ${ids.CHANGES_VIEW_ID}`,
+    );
+    expect(title.find((e) => e.command === ids.REFRESH_USAGE_COMMAND_ID)?.when).toBe(
+      `view == ${ids.USAGE_VIEW_ID}`,
+    );
   });
 });
 

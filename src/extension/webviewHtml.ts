@@ -35,9 +35,10 @@ export interface WebviewHtmlOptions {
 /**
  * The places the bundle can be shown: the chat in the side-bar `view` or in an editor `tab`, and
  * the OpenCode Settings tab (`settings`, issue #128, E10), whose `index.tsx` mounts another root
- * from this meta.
+ * from this meta, and the Quick start view above the Sessions tree (`home`, issue #187), which
+ * mounts a third root with its own protocol (`homeProtocol.ts`).
  */
-export type ChatSurface = 'view' | 'tab' | 'settings';
+export type ChatSurface = 'view' | 'tab' | 'settings' | 'home';
 
 /**
  * Creates a fresh CSP nonce: 16 random bytes, base64 (24 characters).

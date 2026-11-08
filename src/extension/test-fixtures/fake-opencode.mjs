@@ -1200,7 +1200,9 @@ function playCompaction(sessionID, inputID) {
  * Two triggers are served BEFORE the turn: WIPE_SESSIONS deletes every session and plays NO turn at
  * all; DELETE_TITLED:<needle> deletes the other sessions whose title contains the needle and the
  * turn then plays as usual (both INVENTED, for `test:visual` steps 28 and 29). MCPFLIP (issue #128,
- * INVENTED) flips an MCP server first (see `flipMcp`) and the turn plays as usual.
+ * INVENTED) flips an MCP server first (see `flipMcp`) and the turn plays as usual. A prompt
+ * containing SLOW plays its events 300 ms apart and one containing SLOWER 1200 ms apart (about
+ * 20 s, INVENTED, for the running row of `test:visual` step 50).
  */
 function playTurn(sessionID, inboxID, text, files = []) {
   // MCPFLIP (E10-config-views, issue #128; INVENTED trigger, see {@link flipMcp}): flips an MCP
@@ -1459,8 +1461,10 @@ function playTurn(sessionID, inboxID, text, files = []) {
       });
     }
   }
-  // A prompt containing SLOW plays 20x slower (about 5 s), so a test can interrupt it mid-turn.
-  const interval = text.includes('SLOW') ? 300 : 15;
+  // A prompt containing SLOW plays 20x slower (about 5 s), so a test can interrupt it mid-turn;
+  // one containing SLOWER plays 80x slower (about 20 s), for a `test:visual` matrix that must look at
+  // a running row for longer than a SLOW turn lasts (step 50).
+  const interval = text.includes('SLOWER') ? 1200 : text.includes('SLOW') ? 300 : 15;
   /**
    * Plays `list` one `interval` apart (a step marked by `paced` waits its own time instead); the
    * timers are kept so an interrupt can cancel them.
@@ -2630,8 +2634,95 @@ function handleFakeOauthApprove(request, response) {
 }
 
 /**
+ * How many requests `GET /api/experimental/session/stats` has received (issue #187, phase 3). Each
+ * one writes the stderr line `{"fake":"stats","call":N,"from":…}`, which the extension logs
+ * verbatim: the fake-server suite counts those lines to prove the Usage view reads nothing while
+ * it is collapsed, and exactly two (today and the week) when it is shown.
+ */
+let statsCalls = 0;
+
+/**
+ * The answer of `GET /api/experimental/session/stats` (issue #187, E9), SYNTHETIC: the shape of
+ * `SessionStatsInfo` read in `types.d.ts` of 2.0.32, the numbers computed from this fixture's own
+ * session rows (a session counts when it was created inside `[from, to)`; its cost and tokens are
+ * those the steps accumulated through `addUsage`, `steps` is its assistant messages). Like the real
+ * route WITHOUT `project` it covers every session of the process, whatever its folder, and the
+ * `project` parameter is ignored (the host never sends it, decision P3=2). `from` and `to` are
+ * epoch ms (default `0` and now); `from >= to` and an unknown `timezone` are 400
+ * `InvalidRequestError` (the timezone rule is read in `handlers/session.ts` @843a6c51, the
+ * `from >= to` one is invented). `tools` is always `{ mode: 'none' }` and `activity` is empty.
+ */
+function sessionStats(params) {
+  const from = params.has('from') ? Number(params.get('from')) : 0;
+  const to = params.has('to') ? Number(params.get('to')) : Date.now();
+  const timezone = params.get('timezone');
+  if (timezone !== null) {
+    try {
+      new Intl.DateTimeFormat('en', { timeZone: timezone });
+    } catch {
+      return { error: { _tag: 'InvalidRequestError', message: `Invalid timezone: ${timezone}` } };
+    }
+  }
+  if (!(from < to)) {
+    return { error: { _tag: 'InvalidRequestError', message: 'from must be before to' } };
+  }
+  const total = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
+  const byModel = new Map();
+  let cost = 0;
+  let count = 0;
+  let subagents = 0;
+  let prompts = 0;
+  let steps = 0;
+  const add = (into, tokens) => {
+    into.input += tokens.input;
+    into.output += tokens.output;
+    into.reasoning += tokens.reasoning;
+    into.cache.read += tokens.cache.read;
+    into.cache.write += tokens.cache.write;
+  };
+  for (const row of sessions.values()) {
+    if (row.time.created < from || row.time.created >= to) continue;
+    count += 1;
+    if (row.parentID !== undefined) subagents += 1;
+    const messages = history.get(row.id) ?? [];
+    const rowSteps = messages.filter((message) => message.type === 'assistant').length;
+    prompts += messages.filter((message) => message.type === 'user').length;
+    steps += rowSteps;
+    cost += row.cost;
+    add(total, row.tokens);
+    const model = row.model ?? DEFAULT_MODEL;
+    const key = `${model.providerID}/${model.id}`;
+    const entry = byModel.get(key) ?? {
+      model: { id: model.id, providerID: model.providerID },
+      steps: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      cost: 0,
+    };
+    entry.steps += rowSteps;
+    entry.cost += row.cost;
+    add(entry.tokens, row.tokens);
+    byModel.set(key, entry);
+  }
+  return {
+    range: { from, to },
+    sessions: count,
+    subagents,
+    prompts,
+    steps,
+    tokens: total,
+    cost,
+    tools: { mode: 'none' },
+    activeDays: count === 0 ? 0 : 1,
+    streak: count === 0 ? 0 : 1,
+    activity: [],
+    models: [...byModel.values()],
+  };
+}
+
+/**
  * Answers the chat routes (and, issue #128, the read routes `GET /api/integration[/:id]`, `GET
- * /api/mcp` and `GET /api/mcp/resource`); returns false when the request is not one of them.
+ * /api/mcp` and `GET /api/mcp/resource`); returns false when the request is not one of them. The
+ * stats route also counts its requests (`statsCalls`, one stderr line each; issue #187).
  * Authentication was already checked by the caller.
  */
 function handleChat(request, response) {
@@ -2660,6 +2751,18 @@ function handleChat(request, response) {
     json(response, 200, {
       data: Object.fromEntries([...running].map((id) => [id, { type: 'running' }])),
     });
+    return true;
+  }
+  if (method === 'GET' && path === '/api/experimental/session/stats') {
+    // The call counter (issue #187, phase 3): one stderr line per request, which the host logs, so a
+    // test can count the reads a view made (or did not make while collapsed) from `OpenCode.log`.
+    statsCalls += 1;
+    process.stderr.write(
+      `${JSON.stringify({ fake: 'stats', call: statsCalls, from: url.searchParams.get('from') })}\n`,
+    );
+    const stats = sessionStats(url.searchParams);
+    if (stats.error === undefined) json(response, 200, { data: stats });
+    else json(response, 400, stats.error);
     return true;
   }
   if (method === 'GET' && path === '/api/session') {

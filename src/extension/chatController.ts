@@ -727,6 +727,10 @@ export class ChatController {
   private locationGeneration = 0;
   /** Listeners of {@link onDiffRenewed}; each pane's holder feeds all of them. */
   private readonly renewedListeners = new Set<(sessionID: string) => void>();
+  /** Listeners of {@link onChangedFilesCount}. */
+  private readonly changedFilesListeners = new Set<(sessionID: string) => void>();
+  /** Listeners of {@link onFilesChanged}. */
+  private readonly filesChangedListeners = new Set<(sessionID: string, rootID: string) => void>();
   /**
    * `uri`s the host took from four sources: the native file dialog, `editorContext`, a drop and
    * the "Add to OpenCode Chat" command. `prompt.send` accepts these and {@link offeredUris}, plus
@@ -1049,6 +1053,9 @@ export class ChatController {
         boundary: (sessionID) => built.reverts.boundary(sessionID),
         post: (message) => {
           built.post(message);
+          if (message.type === 'session.diff') {
+            for (const listener of this.changedFilesListeners) listener(message.sessionID);
+          }
         },
         log: this.log,
         describe: (error) => toErrorInfo(error, this.secrets),
@@ -1496,6 +1503,53 @@ export class ChatController {
     });
     if (stale) await this.resync();
     return done;
+  }
+
+  /**
+   * The boundary of the revert prepared in the pane showing `sessionID` (E9-sidebar-home: the
+   * Changes view builds the same diffs as the tab), or `undefined` when no pane shows it or it
+   * has none. A session without a tab has no known boundary: the caller then diffs the whole
+   * range (documented there).
+   */
+  revertBoundaryOf(sessionID: string): string | undefined {
+    for (const pane of this.panesOf(sessionID)) {
+      const boundary = pane.reverts.boundary(sessionID);
+      if (boundary !== undefined) return boundary;
+    }
+    return undefined;
+  }
+
+  /**
+   * Hands what the home view's box holds to pane `paneId` as a `prompt.compose` with no files and
+   * `send: true` (issue #187, decision P1=1): the tab keeps it until its webview is ready and
+   * sends it after the chips, so the prompt goes out with the tab's preferred model, agent, work
+   * mode and mods, and the session is created by the first send like any other (no session is
+   * made here, which would skip the catalog's model choice). Same outcome contract as
+   * {@link composeFromMod}: `rejected` with the sanitized error for a missing pane or a blank text
+   * (the only bound {@link isComposeInBounds} puts on a compose without files: there is no cap on
+   * the length); nothing is composed then. Logs the fact, never the text.
+   * VERIFIED by `chatController.home.test.ts` "composeFromHome composes with send true and refuses
+   * a blank text and a missing pane" (fabricated pane, Windows 11, 07/11/2026).
+   * VERIFIED end to end by the full `test:visual` run of E9-sidebar-home (Windows 11, VS Code
+   * 1.145.2, 08/11/2026): "ok   F1 Enter
+   * opened exactly one new tab with one accepted prompt and cleared the box".
+   */
+  composeFromHome(paneId: number, text: string): ComposeOutcome {
+    const pane = this.paneById(paneId);
+    const refuse = (error: unknown): ComposeOutcome => {
+      const info = toErrorInfo(error, this.secrets);
+      this.log.warn(`home compose refused (${info.code})`);
+      return { status: 'rejected', error: info };
+    };
+    if (pane === undefined) {
+      return refuse(translatedError(() => l10n.t('The chat is not available')));
+    }
+    if (!isComposeInBounds({ text, files: [] })) {
+      return refuse(codedError('ComposeRefused', () => l10n.t('Write something to start')));
+    }
+    this.log.info('home composed a prompt');
+    pane.compose({ type: 'prompt.compose', text, files: [], send: true });
+    return { status: 'composed' };
   }
 
   /**
@@ -2061,7 +2115,9 @@ export class ChatController {
    * touched nothing, or when there are no snapshots), or any `session.revert.*` of the open
    * session. A committed revert also forgets the cached first message of the range, because the
    * messages it removes can include it. Events of other sessions (a subagent's) are ignored: the
-   * list is the open session's. Does not stop the event: the caller still translates it.
+   * list is the open session's. The exception is `announceFilesChanged` (E9-sidebar-home): a step with
+   * files is announced to `onFilesChanged` listeners whatever session ran it and whether or not a
+   * tab shows it. Does not stop the event: the caller still translates it.
    * `filesystem.changed` is deliberately NOT used: it fires for any edit of any file.
    * HYPOTHESIS: the field names `files` and `snapshot` of `step.ended` are as typed in
    * `@opencode/client@2.0.32`; the synthetic server emits them on its `EDIT_FILES` turn only, and no
@@ -2075,6 +2131,7 @@ export class ChatController {
           for (const pane of this.panesOf(event.data.sessionID)) {
             void pane.diffs.request(event.data.sessionID);
           }
+          this.announceFilesChanged(event.data.sessionID);
         }
         return;
       case 'session.revert.committed': {
@@ -3838,6 +3895,21 @@ export class ChatController {
   }
 
   /**
+   * Subscribes to "the list of changed files a tab holds for this session changed" (P4=1 of
+   * E9-sidebar-home): fired when a pane's `SessionDiffs` posts a new `session.diff`, which it only
+   * does when the list differs from what the webview shows, so `changedFilesOf` has a new answer.
+   * Returns the unsubscribe function. The Sessions tree repaints on it.
+   * VERIFIED by `chatController.test.ts` "announces a changed files list to the Sessions tree
+   * listener" (Vitest, Windows 11, 08/11/2026). Not observed: a real window.
+   */
+  onChangedFilesCount(listener: (sessionID: string) => void): () => void {
+    this.changedFilesListeners.add(listener);
+    return () => {
+      this.changedFilesListeners.delete(listener);
+    };
+  }
+
+  /**
    * Subscribes to "the originals of this session may have changed" (a new list or a moved range,
    * see `SessionDiffs.onRenewed`); the content provider re-reads its open documents on it.
    * Returns the unsubscribe function.
@@ -3847,6 +3919,47 @@ export class ChatController {
     return () => {
       this.renewedListeners.delete(listener);
     };
+  }
+
+  /**
+   * Subscribes to "a step of this session (or of one of its subagents) changed files" (E9-sidebar-
+   * home: the Changes view lists the session and re-reads its files). The listener gets the id of
+   * the session that ran the step and the id of the ROOT of its tree (the session itself while its
+   * chain is incomplete, see {@link rootOf}); it fires for sessions with no tab as well, unlike the
+   * pane's own list. A throwing listener is logged and does not reach the stream. Returns the
+   * unsubscribe function.
+   */
+  onFilesChanged(listener: (sessionID: string, rootID: string) => void): () => void {
+    this.filesChangedListeners.add(listener);
+    return () => {
+      this.filesChangedListeners.delete(listener);
+    };
+  }
+
+  /** Fires {@link onFilesChanged} for `sessionID` with its root; each listener is guarded. */
+  private announceFilesChanged(sessionID: string): void {
+    const rootID = this.lineage.rootOf(sessionID) ?? sessionID;
+    for (const listener of this.filesChangedListeners) {
+      try {
+        listener(sessionID, rootID);
+      } catch (error) {
+        this.log.warn(`files-changed listener failed: ${logErrorOf(error)}`);
+      }
+    }
+  }
+
+  /**
+   * The client of the current server, or `undefined` without one: for the native views of the side
+   * bar (Changes, Usage), which read through the same connection the chat uses and never keep a
+   * client of their own, so a restart is seen at the next read.
+   */
+  currentApi(): ChatApi | undefined {
+    return this.client;
+  }
+
+  /** Turns a thrown value into the scrubbed `ErrorInfo` the user may read (the secrets are removed). */
+  describeError(error: unknown): ErrorInfo {
+    return toErrorInfo(error, this.secrets);
   }
 
   /**
@@ -5195,7 +5308,8 @@ export class ChatController {
 
   /**
    * How many files the "Changed files" list of a tab showing `sessionID` holds right now, for the
-   * tooltip of the Sessions tree (decision Q8=1: only sessions with a tab, zero requests). The
+   * tooltip and the row description of the Sessions tree (decision Q8=1 and P4=1: only sessions
+   * with a tab, zero requests; the row repaints on {@link onChangedFilesCount}). The
    * first pane that holds a list for the session answers; `undefined` when no pane does (no tab, or
    * the list was not loaded yet). Never reads the server.
    * UNVERIFIED on screen: covered by a unit case of `sessionDiff.test.ts` only.

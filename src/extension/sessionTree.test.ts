@@ -188,6 +188,36 @@ describe('groups and rows', () => {
     );
   });
 
+  /**
+   * Protects P4=1 of E9-sidebar-home: the count shows only when the host knows it (never a read
+   * for it), singular for one, nothing for zero. FABRICATED rows and a stub lookup.
+   */
+  it('shows the changed files count only when the host knows it', () => {
+    const known: Record<string, number> = { one: 1, many: 3, none: 0 };
+    const tree = createSessionTree({
+      now: () => NOW,
+      locale: 'de-DE',
+      changedFiles: (id) => known[id],
+    });
+    tree.setOnline(true);
+    tree.reset({
+      folder: 'C:\\work',
+      rows: [
+        row('one', at(21, 9, 12)),
+        row('many', at(21, 9, 11)),
+        row('none', at(21, 9, 10)),
+        row('unknown', at(21, 9, 9)),
+      ],
+      statuses: {},
+      hasMore: false,
+    });
+    expect(only(tree, 'one').description).toBe('09:12 · 1 file');
+    expect(only(tree, 'many').description).toBe('09:11 · 3 files');
+    expect(only(tree, 'many').accessibilityLabel).toBe('Title many, 09:11, 3 files');
+    expect(only(tree, 'none').description).toBe('09:10');
+    expect(only(tree, 'unknown').description).toBe('09:09');
+  });
+
   it('draws the most urgent state: needs input over running over failed over idle', () => {
     const tree = loaded([row('a', at(21, 9)), row('b', at(21, 8)), row('c', at(21, 7))], {
       statuses: { a: BUSY, b: FAILED },

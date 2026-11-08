@@ -71,9 +71,27 @@
           "when": "config.openVsCode.chatLocation == sidebar"
         },
         {
+          "type": "webview",
+          "id": "openVsCode.home",
+          "name": "%view.home.name%",
+          "when": "config.openVsCode.chatLocation != sidebar"
+        },
+        {
           "id": "openVsCode.sessions",
           "name": "%view.sessions.name%",
           "when": "config.openVsCode.chatLocation != sidebar"
+        },
+        {
+          "id": "openVsCode.sessionChanges",
+          "name": "%view.sessionChanges.name%",
+          "when": "config.openVsCode.chatLocation != sidebar",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "openVsCode.usage",
+          "name": "%view.usage.name%",
+          "when": "config.openVsCode.chatLocation != sidebar",
+          "visibility": "collapsed"
         }
       ]
     },
@@ -354,6 +372,18 @@
         "title": "%command.clearFilters.title%",
         "category": "OpenCode",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "openVsCode.refreshChanges",
+        "title": "%command.refreshChanges.title%",
+        "category": "OpenCode",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "openVsCode.refreshUsage",
+        "title": "%command.refreshUsage.title%",
+        "category": "OpenCode",
+        "icon": "$(refresh)"
       }
     ],
     "keybindings": [
@@ -440,6 +470,16 @@
           "command": "openVsCode.restartServer",
           "group": "9_server",
           "when": "view == openVsCode.sessions"
+        },
+        {
+          "command": "openVsCode.refreshChanges",
+          "group": "navigation",
+          "when": "view == openVsCode.sessionChanges"
+        },
+        {
+          "command": "openVsCode.refreshUsage",
+          "group": "navigation",
+          "when": "view == openVsCode.usage"
         }
       ],
       "view/item/context": [
@@ -596,6 +636,14 @@
         },
         {
           "command": "openVsCode.unarchiveSession",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.refreshChanges",
+          "when": "false"
+        },
+        {
+          "command": "openVsCode.refreshUsage",
           "when": "false"
         }
       ]

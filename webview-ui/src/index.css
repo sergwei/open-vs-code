@@ -3249,6 +3249,185 @@ button.agent-model-chip {
   color: var(--vscode-textLink-foreground);
 }
 
+/*
+ * ---------- Quick start view (issue #187, E9-sidebar-home) ----------
+ * Same bundle as the chat, another root, shown in the side bar (170 px and up). The pills wrap onto
+ * more lines instead of being cut, so nothing leaves the container. Colours are `--vscode-*` only
+ * and nothing is set through a `style` attribute. The error tone of an MCP pill is a border and the
+ * icon; its text stays in the foreground colour (errorForeground fails contrast on the sidebar).
+ */
+.home-root {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-sizing: border-box;
+  padding: 8px;
+  color: var(--vscode-foreground);
+}
+
+.home-box-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.home-box {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 60px;
+  padding: 4px 6px;
+  resize: vertical;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: var(--ovc-radius-sm);
+}
+
+.home-box::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+.home-box:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.home-box[aria-disabled='true'] {
+  opacity: 0.6;
+}
+
+.home-hint,
+.home-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.home-notice {
+  margin: 0;
+  padding: 4px 6px;
+  font-size: 12px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-inputValidation-errorBackground);
+  border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-foreground));
+  border-radius: var(--ovc-radius-sm);
+}
+
+.home-pills,
+.home-list {
+  display: flex;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.home-pills {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.home-list {
+  flex-direction: column;
+  gap: 4px;
+}
+
+button.home-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 8px;
+  font-size: 12px;
+  color: var(--vscode-badge-foreground);
+  background: var(--vscode-badge-background);
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+  border-radius: var(--ovc-radius-pill);
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+
+button.home-pill:hover {
+  text-decoration: underline;
+}
+
+button.home-pill:focus-visible,
+button.home-action:focus-visible,
+button.home-row-open:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+button.home-pill[data-kind='mcp'] {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-foreground));
+}
+
+button.home-pill[data-kind='mcp'] .icon {
+  flex: none;
+}
+
+button.home-pill[data-mode='auto'] {
+  border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-foreground));
+}
+
+.home-heading {
+  margin: 4px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.home-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 4px 6px;
+  background: var(--vscode-editorWidget-background, transparent);
+  border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+  border-radius: var(--ovc-radius-md);
+}
+
+.home-row-main {
+  display: flex;
+  flex: 1 1 100px;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+button.home-row-open {
+  padding: 0;
+  color: inherit;
+  background: none;
+  border: 0;
+  text-align: start;
+}
+
+.home-row-title {
+  overflow-wrap: anywhere;
+}
+
+.home-row-detail {
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+
+.home-clock {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-descriptionForeground);
+}
+
+button.home-action[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ---------- reduced motion ---------- */
 
 @media (prefers-reduced-motion: reduce) {

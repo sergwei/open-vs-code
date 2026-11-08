@@ -63,8 +63,11 @@ import {
   TEST_PROVIDER_ANSWERS_COMMAND_ID,
   TEST_SESSION_ANSWERS_COMMAND_ID,
   TEST_SESSION_ORGANIZATION_COMMAND_ID,
+  TEST_HOME_MESSAGE_COMMAND_ID,
+  TEST_HOME_STATE_COMMAND_ID,
   TEST_SETTINGS_MESSAGE_COMMAND_ID,
   TEST_SETTINGS_STATE_COMMAND_ID,
+  TEST_SIDEBAR_VIEWS_COMMAND_ID,
   VIEW_CONTAINER_ID,
 } from './ids';
 import { ProviderAuth } from './providerAuth';
@@ -79,13 +82,14 @@ import { safeLog } from './opencodeServer';
 import { createSetupActions } from './setupActions';
 import { pickSavedPermissionsToRevoke } from './savedPermissionsUi';
 import { restartServerWithFeedback } from './serverLifecycle';
-import { describeServerStatus } from './serverStatus';
+import { describeServerStatus, statusModelLabel } from './serverStatus';
 import type { ServerManager } from './serverManager';
 import { registerSessionDiffProvider } from './sessionDiffEditor';
 import type { PendingSummary } from './pendingRequests';
 import { showSessionsSearch } from './sessionsSearch';
 import { RevealOrder } from './revealOrder';
 import { emptyTitle } from './sessionDisplay';
+import { registerSidebarHome } from './sidebarHome';
 import { registerSessionsView, type SessionsState } from './sessionsView';
 import { registerSessionsOrganize, sessionIDOf, type OrganizeAnswers } from './sessionsOrganize';
 import { createSessionTree, type SessionTreePage } from './sessionTree';
@@ -256,6 +260,21 @@ function warnSessionFailure(action: 'rename' | 'delete' | 'loadMore', error: unk
  * `controller.onDiffRenewed`. Issue #32 also hands the controller the modal that confirms
  * "Discard for good" (`confirmRevertDiscard`).
  *
+ * E9-sidebar-home (issue #187, phases 2-3): `registerSidebarHome` builds the native Changes and Usage
+ * views (the lifecycle only feeds them: `controller.onFilesChanged`, `controller.onActivity`, the
+ * server connection, the Sessions tree and the tabs). The content provider of the diffs gets a
+ * COMPOSITE source: `controller.diffOriginal` (the tabs) first, and only when it refuses with
+ * `DiffNotListed` the model of the Changes view, so a file of a session with no tab opens with its
+ * left side served; `onRenewed` joins both. Under `ExtensionMode.Test`,
+ * `TEST_SIDEBAR_VIEWS_COMMAND_ID` reads what the two trees draw.
+ * Phase 4 (Quick start): the same `registerSidebarHome` also owns the `openVsCode.home` webview
+ * view; the lifecycle gives it the sources of its state (connection, model label, MCP rows of the
+ * server config, the registry's activity and the pending requests) and its actions: `start` opens a
+ * NEW tab and composes the text with `send: true` (Auto first goes through `workMode.set`), `stop`
+ * is `controller.stopSession`, `reply` and `open` reuse `SHOW_REQUEST_COMMAND_ID` and
+ * `OPEN_SESSION_COMMAND_ID`. Under `ExtensionMode.Test`, `TEST_HOME_MESSAGE_COMMAND_ID` and
+ * `TEST_HOME_STATE_COMMAND_ID` drive it without a webview.
+ *
  * The injection command runs a raw message through the SAME guard (`isWebviewToHost`) and the
  * SAME controller as a real webview message. It exists only if `context.extensionMode` is
  * `ExtensionMode.Test`, so the integration suite can send a prompt without reaching into the
@@ -422,7 +441,14 @@ function warnSessionFailure(action: 'rename' | 'delete' | 'loadMore', error: unk
  * `workspaceState`; here it is only wired: it receives the folder of each full read (`reset`) BEFORE
  * the rows, reads the organized sessions the page lacks through `controller.readSessions` once the
  * page is in (also when `chatLocation` switches to `editor` later), and forgets a session when
- * `session.removed` arrives. The tooltip asks `controller.changedFilesOf` for the files of a tab.
+ * `session.removed` arrives. The tooltip and the row description ask `controller.changedFilesOf` for the files of a tab
+ * (the rows repaint on `controller.onChangedFilesCount`, P4=1); ONLY the row description falls back
+ * to `home.changes.count` (a session expanded in the Changes view with no tab) and repaints on
+ * `home.changes.onChange`, one repaint per task (P4.1): the tooltip does not use the fallback, so
+ * for such a session the row says "N files" and its tooltip has no "Changed files" line. No test
+ * chains the fallback end to end (this function needs `vscode`; the tree lookup and `count` are
+ * tested apart). UNVERIFIED: that fallback in a real window (no check expands a session of the
+ * Changes view and then reads the Sessions row).
  * Rename and Delete Session still act on the CLICKED row only (`targetSession`, risk R5).
  * `TEST_SESSION_ORGANIZATION_COMMAND_ID` returns what the real Memento holds. In `sidebar` mode
  * nothing runs: no commands act, no extra read is made. VERIFIED in a real window by `test:visual`
@@ -535,7 +561,14 @@ export function registerChat(
   let badgeCount = 0;
   // The model of the native Sessions tree (E3, issue #77) and the last connection state the
   // controller reported, which picks the welcome of the tree when it has no rows.
-  const sessionTree = createSessionTree({ locale: vscode.env.language });
+  // P4=1 of E9-sidebar-home (option P4.1 of the plan): a row shows its changed files count when a
+  // tab holds the list, or else when the Changes view already loaded it. `controller` and `home` are
+  // assigned below; the tree only calls this while projecting, after startup.
+  const sessionTree = createSessionTree({
+    locale: vscode.env.language,
+    changedFiles: (sessionID) =>
+      controller.changedFilesOf(sessionID) ?? home.changes.count(sessionID),
+  });
   let connection: ConnectionState | undefined;
   // Answers for the NEXT Rename box, Delete modal and the dialogs of the organizing commands, set
   // only by the Test-mode command below (the organizing ones are read by `sessionsOrganize.ts`).
@@ -593,9 +626,13 @@ export function registerChat(
   // summaries reaching the model of the tree, so a row says "Needs input" (decision Q6=1). A
   // request of a subagent marks the ROOT row, at any depth (E4 of #77): the tree lists roots only.
   // An unknown chain (`rootOf` undefined) falls back to the session itself, as before.
+  // The same list, kept for the Quick start view's "waiting" rows and to revalidate its `home.reply`.
+  let pendingRequests: readonly PendingSummary[] = [];
   const attentionAndTree: AttentionSink = {
     update: (requests) => {
       attention.update(requests);
+      pendingRequests = requests;
+      home.quickChanged();
       const marked = requests.map((request) => ({
         sessionID: controller.rootOf(request.sessionID) ?? request.sessionID,
       }));
@@ -728,6 +765,10 @@ export function registerChat(
     },
   });
 
+  // Built once: the controller uses it, and so does the Changes view to open a diff in the column
+  // the chat's own diffs use (`targetColumn`).
+  const editorActions = createEditorActions(log, { lastEditor, tabs });
+
   const controller = new ChatController({
     serverConfig: configSink,
     ...(mods === undefined ? {} : { mods }),
@@ -736,15 +777,18 @@ export function registerChat(
         statusConnection = next;
         paintStatus();
         settings.changed(); // the tab's header shows the connection and the server version
+        home.connection(next.state === 'connected');
+        home.quickChanged();
       },
       catalog: (next) => {
         statusCatalog = next;
         paintStatus();
+        home.quickChanged();
       },
     },
     createClient: createOpencodeClient,
     log,
-    editor: createEditorActions(log, { lastEditor, tabs }),
+    editor: editorActions,
     memory: {
       get: (folder) => {
         const map = readSessionMap(context);
@@ -777,6 +821,7 @@ export function registerChat(
         lastPage = { rows: page.rows, hasMore: page.hasMore };
         if (organized || reset) sessionsView.refresh();
         organize.reconcile(lastPage);
+        home.sessionsChanged(); // the "Today" candidates of the Changes view moved
       },
       failed: () => {
         if (sessionTree.fail()) sessionsView.refresh();
@@ -785,10 +830,16 @@ export function registerChat(
         if (sessionTree.append(rows, hasMore)) sessionsView.refresh();
       },
       event: (message) => {
-        if (sessionTree.event(message)) sessionsView.refresh();
+        if (sessionTree.event(message)) {
+          sessionsView.refresh();
+          home.sessionsChanged();
+        }
         // A deleted session (here or by another client) leaves the organization too; nothing is
         // deleted on the server by this (risk R7 of the plan: a move by another client may do the same).
-        if (message.type === 'session.removed') organize.forget([message.sessionID]);
+        if (message.type === 'session.removed') {
+          organize.forget([message.sessionID]);
+          home.sessionRemoved(message.sessionID);
+        }
       },
       connection: (next) => {
         connection = next;
@@ -995,6 +1046,7 @@ export function registerChat(
       return sessionID === undefined ? [] : [sessionID];
     });
     if (sessionTree.setTabs(shown)) sessionsView.refresh();
+    home.sessionsChanged(); // the sessions with a tab are candidates of the Changes view
     const target = tabs.commandTarget();
     sessionsView.reveal(target === undefined ? undefined : controller.sessionOf(target));
   };
@@ -1016,6 +1068,8 @@ export function registerChat(
     if (sessionTree.load() === 'offline') return 'offline';
     return sessionTree.filteredEmpty() ? 'filteredEmpty' : 'ready';
   };
+  // Coalesces the repaints the Changes view asks of the Sessions tree (see `home.changes.onChange` below).
+  let changesRepaint = false;
   const sessionsView = registerSessionsView({
     tree: sessionTree,
     log,
@@ -1042,6 +1096,78 @@ export function registerChat(
     editorMode: () => mode === 'editor',
     readSessions: (ids) => controller.readSessions(ids),
     answers: testAnswers,
+  });
+  // E9-sidebar-home (issue #187): the native Changes and Usage views under the Sessions tree. They
+  // are registered in both chat locations; the `when` of their manifest entries decides who sees them.
+  const home = registerSidebarHome({
+    log,
+    client: () => controller.currentApi(),
+    folder: () => {
+      const state = manager.state;
+      return state.kind === 'running' ? state.server.folder : undefined;
+    },
+    catalog: () => statusCatalog,
+    tabs: () =>
+      tabs.recent().flatMap((paneId) => {
+        const sessionID = controller.sessionOf(paneId);
+        return sessionID === undefined ? [] : [controller.rootOf(sessionID) ?? sessionID];
+      }),
+    today: () =>
+      sessionTree
+        .project(Date.now(), vscode.env.language)
+        .flatMap((node) =>
+          node.kind === 'group' && node.id === 'group:Today'
+            ? node.children.map((row) => row.sessionID)
+            : [],
+        ),
+    updatedAt: (sessionID) => sessionTree.rowOf(sessionID)?.updatedAt,
+    titleOf: (sessionID) => sessionTree.rowOf(sessionID)?.title ?? controller.labelOf(sessionID),
+    boundary: (sessionID) => controller.revertBoundaryOf(sessionID),
+    openDiff: (target) => editorActions.openDiff(target),
+    describe: (error) => controller.describeError(error),
+    locale: vscode.env.language,
+    extensionUri: context.extensionUri,
+    channel,
+    quick: {
+      connection: () => statusConnection,
+      model: () => statusModelLabel(statusCatalog),
+      mcp: () => serverConfig.snapshot().mcp.servers,
+      runningSessions: () => controller.runningSessions(),
+      activityOf: (sessionID) => controller.activityOf(sessionID),
+      rootOf: (sessionID) => controller.rootOf(sessionID),
+      labelOf: (sessionID) => controller.labelOf(sessionID),
+      pending: () => pendingRequests,
+      // One new tab, the work mode asked for in the box, then the text as `prompt.compose` with
+      // `send: true`: the tab's own model, agent and mods apply and the first send creates the session.
+      start: async (text, workMode) => {
+        const paneId = openTab(undefined, true);
+        if (workMode === 'auto') {
+          await controller.handle(paneId, { type: 'workMode.set', mode: 'auto' });
+        }
+        const outcome = controller.composeFromHome(paneId, text);
+        return outcome.status === 'rejected'
+          ? { ok: false, error: outcome.error.message }
+          : { ok: true };
+      },
+      stop: async (rootID) =>
+        (await controller.stopSession(rootID, ' from the side bar')).status === 'stopped',
+      reply: (kind, sessionID, id) => {
+        void vscode.commands.executeCommand(SHOW_REQUEST_COMMAND_ID, { kind, sessionID, id });
+      },
+      open: (sessionID) => {
+        void vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, sessionID);
+      },
+      action: (action) => {
+        const command = {
+          restart: RESTART_SERVER_COMMAND_ID,
+          logs: SHOW_LOGS_COMMAND_ID,
+          settings: OPEN_SERVER_SETTINGS_COMMAND_ID,
+        }[action];
+        void vscode.commands.executeCommand(command);
+      },
+      onActivity: (listener) => controller.onActivity(() => listener()),
+      onConfig: (listener) => serverConfig.onDidChange(listener),
+    },
   });
   const panels = new ChatPanels(context.extensionUri, channel, log, tabs, {
     attachPane: (surface) => controller.attachPane(surface),
@@ -1242,6 +1368,34 @@ export function registerChat(
     view.disposable,
     sessionsView.disposable,
     organize.disposable,
+    home.disposable,
+    {
+      dispose: controller.onFilesChanged((_sessionID, rootID) => {
+        home.filesChanged(rootID);
+      }),
+    },
+    {
+      // P4=1: a new list of changed files changes the count the Sessions rows show.
+      dispose: controller.onChangedFilesCount(() => {
+        sessionsView.refresh();
+      }),
+    },
+    {
+      // P4.1: the Changes view loaded or refreshed a list; one repaint per task however many changes.
+      dispose: home.changes.onChange(() => {
+        if (changesRepaint) return;
+        changesRepaint = true;
+        queueMicrotask(() => {
+          changesRepaint = false;
+          sessionsView.refresh();
+        });
+      }),
+    },
+    {
+      dispose: controller.onActivity(() => {
+        home.activity(controller.runningSessions());
+      }),
+    },
     // Not `dispose`: the tabs stay open so the workbench can save them for the next start.
     { dispose: () => panels.detachAll() },
     // Registered in BOTH modes: VS Code only persists a chat tab if a serializer exists for its
@@ -1349,9 +1503,26 @@ export function registerChat(
     // a diff tab restored by Reload Window finds its provider.
     registerSessionDiffProvider(
       {
-        original: (sessionID, shown) => controller.diffOriginal(sessionID, shown),
+        // The tab that shows the session answers first; a session with no tab (a row of the
+        // Changes view) falls to the model of that view. Only `DiffNotListed` falls through: any
+        // other refusal of the tab (no text diff) is final, the Changes model would say the same.
+        original: async (sessionID, shown) => {
+          try {
+            return await controller.diffOriginal(sessionID, shown);
+          } catch (error) {
+            if (!(error instanceof Error) || error.name !== 'DiffNotListed') throw error;
+            return home.changes.original(sessionID, shown);
+          }
+        },
         reverted: (sessionID, shown) => controller.revertedOriginal(sessionID, shown),
-        onRenewed: (listener) => controller.onDiffRenewed(listener),
+        onRenewed: (listener) => {
+          const stopTabs = controller.onDiffRenewed(listener);
+          const stopChanges = home.changes.onRenewed(listener);
+          return () => {
+            stopTabs();
+            stopChanges();
+          };
+        },
       },
       log,
     ),
@@ -1545,6 +1716,19 @@ export function registerChat(
         settings.onMessage(raw),
       ),
       vscode.commands.registerCommand(TEST_SETTINGS_STATE_COMMAND_ID, () => settings.buildState()),
+      // E9-sidebar-home: what the Changes and Usage trees draw, read through their real providers.
+      vscode.commands.registerCommand(TEST_SIDEBAR_VIEWS_COMMAND_ID, (raw: unknown) => {
+        const expand =
+          typeof raw === 'object' && raw !== null
+            ? (raw as Record<string, unknown>).expand
+            : undefined;
+        return home.describeViews(typeof expand === 'string' ? expand : undefined);
+      }),
+      // E9-sidebar-home (Quick start): a raw home message through the real guard and controller.
+      vscode.commands.registerCommand(TEST_HOME_MESSAGE_COMMAND_ID, (raw: unknown) =>
+        home.quickMessage(raw),
+      ),
+      vscode.commands.registerCommand(TEST_HOME_STATE_COMMAND_ID, () => home.quickState()),
       vscode.commands.registerCommand(RESTORE_CHAT_TAB_TEST_COMMAND_ID, (raw: unknown) => {
         // The persisted state and title of a tab "revived by VS Code"; a panel we create stands in
         // for the revived one and goes through the SAME `restore` as the serializer.

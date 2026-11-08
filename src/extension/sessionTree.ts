@@ -191,6 +191,13 @@ export interface SessionTreeOptions {
   now?: () => number;
   /** BCP 47 tag for the dates; `undefined` is the `Intl` default. */
   locale?: string;
+  /**
+   * How many changed files the host already holds for a session, or `undefined` when it does not
+   * (decision P4=1 of E9-sidebar-home: the row shows the count only when known in memory, so it
+   * never causes a server read). Read on every projection; a change of the answer is the caller's
+   * to announce (it refreshes the view).
+   */
+  changedFiles?: (sessionID: string) => number | undefined;
 }
 
 /** The title-bar filters; the ones that are on combine with OR, none on means no filter. */
@@ -321,11 +328,23 @@ const costFormats = new Map<string, Intl.NumberFormat>();
 const countFormats = new Map<string, Intl.NumberFormat>();
 
 /**
+ * The "N files" piece of a row description (decision P4=1 of E9-sidebar-home), or nothing when the
+ * count is unknown or zero: a session that changed no file says nothing, as before.
+ * VERIFIED by `sessionTree.test.ts` "shows the changed files count only when the host knows it"
+ * (Vitest, Windows 11, 08/11/2026). UNVERIFIED on screen: no `test:visual` step looks at it.
+ */
+function filesText(count: number | undefined): string[] {
+  if (count === undefined || count <= 0) return [];
+  return [count === 1 ? l10n.t('1 file') : l10n.t('{0} files', count)];
+}
+
+/**
  * The cost as money. Assumes US dollars, which is what opencode reports (HYPOTHESIS: read in the
  * `usage` of `SessionSummary`, never compared with a bill; the currency is not in the payload). A
  * cost under one cent shows four decimals so that a cheap session does not read as `$0.00`.
+ * Exported (E9-sidebar-home) so the Usage view (`usageStats.ts`) writes money the same way.
  */
-function costText(cost: number, locale: string | undefined): string {
+export function costText(cost: number, locale: string | undefined): string {
   const digits = cost > 0 && cost < 0.01 ? 4 : 2;
   const key = `${locale ?? ''}|${String(digits)}`;
   let format = costFormats.get(key);
@@ -416,6 +435,7 @@ function iconOf(state: SessionTreeState): SessionTreeIcon {
  * and the filter line) goes through `l10n.t`; the ids keep the English keys. VERIFIED by
  * `sessionTree.test.ts` "paints groups, sections, the more row and the untitled session in
  * Spanish" (Windows 11, 04/11/2026): the group ids stay `group:Today` while the label reads `Hoy`.
+ * `options.changedFiles` (P4=1) adds "N files" to the row description when the host knows the count.
  * HYPOTHESIS: keeping `error` statuses across a `reset` (REST only says "active or not", so a
  * "Failed" mark would otherwise vanish at every reconnection); to check, fail a turn, reconnect
  * and see whether the row still says Failed until the next run.
@@ -476,7 +496,11 @@ export function createSessionTree(options: SessionTreeOptions = {}): SessionTree
     };
   }
 
-  /** Builds the node of one row; `shortcut` makes it the "Needs attention" duplicate. */
+  /**
+   * Builds the node of one row; `shortcut` makes it the "Needs attention" duplicate. The
+   * description and the accessibility label end with "N files" when `options.changedFiles` knows
+   * the count of the session (P4=1); the tooltip keeps its own "Changed files" line.
+   */
   function sessionNode(
     row: SessionSummary,
     group: GroupLabel | undefined,
@@ -498,6 +522,7 @@ export function createSessionTree(options: SessionTreeOptions = {}): SessionTree
       l10n.t({ message: 'Tab', comment: ['An editor tab that shows this session'] }),
     );
     const time = formatSessionTime(row.updatedAt, now, locale);
+    const files = filesText(options.changedFiles?.(row.id));
     const label = displayLabel(row);
     const pinned = isPinned(organization, row.id);
     const archived = isArchived(organization, row.id);
@@ -509,11 +534,11 @@ export function createSessionTree(options: SessionTreeOptions = {}): SessionTree
       shortcut,
       group,
       label,
-      description: [...words, time].join(' · '),
+      description: [...words, time, ...files].join(' · '),
       state,
       icon: iconOf(state),
       contextValue: `session${running ? ';running' : ''}${tab ? ';tab' : ''}${needsInput ? ';needsInput' : ''}${pinned ? ';pinned' : ''}${archived ? ';archived' : ''}${foldered ? ';foldered' : ''}`,
-      accessibilityLabel: [label, ...words, time].join(', '),
+      accessibilityLabel: [label, ...words, time, ...files].join(', '),
     };
   }
 

@@ -257,7 +257,10 @@ const questionForm = (id: string, sessionID = 'ses_old'): FormInfo =>
     }),
   );
 
-/** A fake client recording its calls; every method has a harmless default. */
+/**
+ * A fake client recording its calls; every method has a harmless default (`session.stats`, which
+ * the controller never calls, answers an empty window only so the type is whole).
+ */
 function fakeApi(options: FakeOptions = {}) {
   const calls: string[] = [];
   const prompts: Array<{
@@ -383,6 +386,22 @@ function fakeApi(options: FakeOptions = {}) {
         diffInputs.push(input);
         return (options.diffImpl ?? (() => Promise.resolve([])))(input);
       },
+      // E9-sidebar-home: the controller never reads usage; the stub only keeps `ChatApi` whole.
+      stats: () =>
+        Promise.resolve({
+          range: { from: 0, to: 1 },
+          sessions: 0,
+          subagents: 0,
+          prompts: 0,
+          steps: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          cost: 0,
+          tools: { mode: 'none' },
+          activeDays: 0,
+          streak: 0,
+          activity: [],
+          models: [],
+        }),
       switchAgent: (input) => {
         calls.push('session.switchAgent');
         switches.push(`agent:${input.agent}`);
@@ -5271,6 +5290,24 @@ describe('changed files (issue #31)', () => {
     ]);
     expect(diffInputs).toEqual([{ sessionID: 'ses_1', from: 'msg_1', to: 'msg_2', context: 0 }]);
     expect(logs).toContain('info: session diff: 1 files for ses_1');
+  });
+
+  /**
+   * Protects P4=1 of E9-sidebar-home: the Sessions tree must repaint when the count of changed
+   * files it shows (`changedFilesOf`) changes. FABRICATED rows on a fake client: it proves the
+   * wiring of `onChangedFilesCount`, not what a real server returns.
+   */
+  it('announces a changed files list to the Sessions tree listener', async () => {
+    const { streams, controller } = withOpenSession();
+    const heard: string[] = [];
+    const stop = controller.onChangedFilesCount((sessionID) => heard.push(sessionID));
+    expect(controller.changedFilesOf('ses_1')).toBeUndefined();
+    emit(streams, 'session.step.ended', stepEnded('ses_1', ['src/a.ts']));
+    await flush();
+    await flush();
+    expect(heard).toEqual(['ses_1']);
+    expect(controller.changedFilesOf('ses_1')).toBe(1);
+    stop();
   });
 
   it('also reloads when a step FAILS with changed files', async () => {
