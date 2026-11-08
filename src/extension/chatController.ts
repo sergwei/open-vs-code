@@ -154,11 +154,17 @@ import type { ServerConfigSink } from './serverConfig';
 import type { RunningServerInfo, ServerState } from './serverManager';
 import { createSessionBrowser, type SessionPage } from './sessionBrowser';
 import { codedError, createSessionDiffs, type DiffTarget } from './sessionDiff';
+import {
+  createSessionActivity,
+  type ActivityListener,
+  type SessionActivity,
+} from './sessionActivity';
 import { createSessionLineage, MAX_LINEAGE_DEPTH } from './sessionLineage';
 import { createSessionReverts } from './sessionRevert';
 import {
   lastCompactionAt,
   logTextOf,
+  sanitizeText,
   toAgentOptions,
   toCommandOption,
   toErrorInfo,
@@ -766,6 +772,19 @@ export class ChatController {
    * {@link resolveLineage}; emptied when the folder changes.
    */
   private readonly lineage = createSessionLineage();
+  /**
+   * What every session is doing (E9-sidebar-home, issue #187; the base of #189). Created and owned
+   * here, not injected: the controller is the only one that sees every event and every snapshot.
+   * Fed first thing in {@link onEvent}, told the running set by a full {@link resync}, emptied by
+   * {@link stopStream}; read through {@link activityOf} and {@link onActivity}.
+   * Its `clean` scrubs the server's text with the CURRENT secrets (the getter is read at each call:
+   * they change with the server) before the registry stores it, so the registry never holds a raw
+   * secret and even a direct `.get` returns clean text.
+   */
+  private readonly activity = createSessionActivity(
+    (error) => this.log.warn(`activity listener failed: ${logErrorOf(error)}`),
+    (text) => sanitizeText(text, this.secrets),
+  );
   /** Sessions with a {@link resolveLineage} in flight, so one request does not start two walks. */
   private readonly lineageReads = new Set<string>();
   /** Bumped when the server goes away: a walk started under an older value publishes nothing. */
@@ -1362,6 +1381,122 @@ export class ChatController {
   }
 
   /**
+   * What the host knows `sessionID` is doing: running or not, since when, the current step and its
+   * tool count (see {@link SessionActivity}); `undefined` for a session it has never heard of.
+   * Each session answers for ITSELF: a child is not folded into its root, so the home view can
+   * fold and the subagent monitor can list. Asking never reads the server.
+   * The text the server wrote (a failed tool's `error`, the strings of a tool `input`) is already
+   * scrubbed of this server's URL and password (architecture rule 1) when the registry STORES it,
+   * before the input is cut to its short form: see the `clean` the field below is built with. So
+   * a consumer that posts it to a webview leaks no secret, and there is no second scrub here.
+   * VERIFIED by `chatController.activity.test.ts` "activityOf keeps the password out of the
+   * registry when it crosses the 160-character cut" and "... the loopback URL ..." (the secret
+   * straddles index 160; with `slimInput` cutting BEFORE `clean` both went red, restored green),
+   * "activityOf scrubs the server URL and password out of a failed tool's error and its input
+   * strings" and "activityOf scrubs the password out of an agent and a tool name" (planted
+   * secrets, fabricated events, Windows 11, 08/11/2026). Not covered: a secret planted in a REST
+   * block read by `seedTools`, and text that reaches a consumer by another road (none today).
+   */
+  activityOf(sessionID: string): SessionActivity | undefined {
+    return this.activity.get(sessionID);
+  }
+
+  /** The ids of the sessions the host sees running now ({@link activityOf} says what each does). */
+  runningSessions(): string[] {
+    return this.activity.runningIds();
+  }
+
+  /**
+   * Subscribes to changes of any session's activity; the listener gets the affected ids (also the
+   * ones forgotten) and must coalesce on its side: one event can fire it many times a second.
+   * Returns the function that unsubscribes.
+   */
+  onActivity(listener: ActivityListener): () => void {
+    return this.activity.onChange(listener);
+  }
+
+  /**
+   * Stops the work of the tree of `rootID` from a native view (the home view's "Stop", issue
+   * #187): the root and EVERY descendant the host sees running, through {@link interruptSessions}
+   * with `origin` (see there: appended verbatim to the log line, so each caller says where the stop
+   * came from). Why the descendants too: interrupting a parent stops a subagent running in the
+   * foreground, but one launched with `background: true` is NOT interrupted with it (read in
+   * `core/src/tool/plugin/subagent.ts` @843a6c51 L227-239; not run against a real server).
+   * `refused` when the host sees nothing of that tree running: the caller's idea of "running" is
+   * never the source of truth, so a stale button does nothing. `stopped` carries the ids asked.
+   * A descendant counts when EITHER the lineage resolves its root to `rootID` OR the registry's
+   * own `parentID` links reach `rootID` (recursively): a background child whose root the lineage
+   * cannot resolve (a root outside the rows read, no `session.created` seen) is still stopped.
+   * VERIFIED by `chatController.activity.test.ts` "stopSession interrupts the root and its running
+   * descendants and refuses a tree that is not running" and "stopSession also follows the
+   * registry's parent links when the lineage does not know the root" (fabricated client, Windows
+   * 11, 07/11/2026).
+   */
+  async stopSession(
+    rootID: string,
+    origin: string,
+  ): Promise<{ status: 'stopped'; sessions: string[] } | { status: 'refused' }> {
+    const tree = new Set<string>([rootID]);
+    const pending = [rootID];
+    for (let id = pending.pop(); id !== undefined; id = pending.pop()) {
+      for (const child of this.activity.childrenOf(id)) {
+        if (tree.has(child)) continue; // also guards a parent cycle
+        tree.add(child);
+        pending.push(child);
+      }
+    }
+    const ids = this.activity
+      .runningIds()
+      .filter((id) => tree.has(id) || this.lineage.rootOf(id) === rootID);
+    if (ids.length === 0) return { status: 'refused' };
+    await this.interruptSessions(ids, origin);
+    return { status: 'stopped', sessions: ids };
+  }
+
+  /**
+   * The common way to stop sessions (E9-sidebar-home and the subagent monitor, #189): asks the
+   * server to interrupt each of `ids` that the host sees running (the others are skipped: the
+   * caller's list may be stale), all in parallel and tolerating failures one by one. Per id it
+   * writes the stable line `abort requested for <sid> (interrupted: <b>)<origin>`, where `origin`
+   * is appended VERBATIM (pass it with its leading space, or `''`); a failure writes `abort failed
+   * for <sid>: <code>`. If any answer was `interrupted: false` (the server had nothing of its own
+   * to interrupt, so the host's "running" is stale) it runs ONE {@link resync} to heal. The state
+   * itself arrives through `session.execution.interrupted`, never through this answer. Returns
+   * the ids that were really interrupted. Does not touch the panes' requests.
+   * HYPOTHESIS for the parallel calls against a real server (one id per call is the verified
+   * shape: see {@link abort}); `chatController.activity.test.ts` runs them against a fabricated
+   * client.
+   */
+  async interruptSessions(ids: readonly string[], origin: string): Promise<string[]> {
+    const client = this.client;
+    if (client === undefined) return [];
+    const running = new Set(this.activity.runningIds());
+    const targets = [...new Set(ids)].filter((id) => running.has(id));
+    const answers = await Promise.allSettled(
+      targets.map((sessionID) => client.session.interrupt({ sessionID })),
+    );
+    const done: string[] = [];
+    let stale = false;
+    answers.forEach((answer, index) => {
+      const sessionID = targets[index];
+      if (sessionID === undefined) return;
+      if (answer.status === 'rejected') {
+        const info = toErrorInfo(answer.reason, this.secrets);
+        this.log.warn(`abort failed for ${sessionID}: ${info.code}`);
+        return;
+      }
+      const { interrupted } = answer.value;
+      this.log.info(
+        `abort requested for ${sessionID} (interrupted: ${String(interrupted)})${origin}`,
+      );
+      if (interrupted) done.push(sessionID);
+      else stale = true;
+    });
+    if (stale) await this.resync();
+    return done;
+  }
+
+  /**
    * The text that names the chat a request belongs to in the toast title (decision Q2=1): the
    * title of the ROOT of its tree (the session a tab shows, even when a subagent is the one that
    * asks), else the session's own, else `''`, which the notification reads as "Untitled session".
@@ -1705,6 +1840,7 @@ export class ChatController {
    * The Sessions tree's cursors and in-flight pages and searches go as well (issue #77, E3), and
    * so do the lineage walks in flight (E4); the lineage rows already learned stay. The settings sink
    * is detached too (issue #128): the integrations and MCP servers it read described that server.
+   * The activity registry is emptied too (E9-sidebar-home): its listeners hear every id it knew.
    */
   private stopStream(): void {
     this.streamAbort?.abort();
@@ -1720,6 +1856,7 @@ export class ChatController {
     this.client = undefined;
     this.server = undefined;
     this.deps.serverConfig?.detach(); // issue #128: what it read described the server that left
+    this.activity.reset(); // E9-sidebar-home: what it said described the server that left
     this.locationGeneration++;
     // The tree's cursors embed the old server's query, and an answer in flight belongs to it.
     this.treeBrowser.reset();
@@ -1818,6 +1955,15 @@ export class ChatController {
    * early returns), inside its own try/catch so a failing sink cannot cost the chat an event.
    * VERIFIED by `chatController.e2e.test.ts` "a sink that throws does not stop the chat..." and
    * "receives a whole permission turn in order, with the tool name" (Windows 11, 02/11/2026).
+   * E9-sidebar-home: after the mods sink, every event also goes to the activity registry
+   * (`sessionActivity.ts`), with the same guard: a bug of the registry logs `activity registry
+   * failed on <type>`, a throwing listener of it logs `activity listener failed` (the registry
+   * contains those itself), and the event still reaches the branches. VERIFIED by
+   * `chatController.activity.test.ts` "sees the events of a turn, and a throwing listener does not
+   * stop the chat" (listener case only; fabricated events, Windows 11, 07/11/2026). UNVERIFIED:
+   * the `activity registry failed` line (no test makes the registry itself throw) and that it
+   * sees an event on which another branch returns early (no event type is both something the
+   * registry reads and an early return today).
    */
   private onEvent(event: V2Event): void {
     try {
@@ -1831,6 +1977,13 @@ export class ChatController {
         this.deps.mods?.event(event, this.secrets);
       } catch (error) {
         this.log.warn(`mods sink failed on ${event.type}: ${logErrorOf(error)}`);
+      }
+      // E9-sidebar-home: the activity registry sees EVERY event as well, before the returns, and a
+      // throw in it (or in a listener of it) must not cost the chat the event either.
+      try {
+        this.activity.observe(event);
+      } catch (error) {
+        this.log.warn(`activity registry failed on ${event.type}: ${logErrorOf(error)}`);
       }
       if (event.type === 'server.connected') {
         this.log.info('event stream connected');
@@ -2360,6 +2513,11 @@ export class ChatController {
    * request whose auto-approve failed is not taken again and shows as the normal card.
    * VERIFIED by `chatController.workMode.test.ts` "keeps the request out of the snapshot of a
    * resync while its answer is in flight" (fabricated client, Windows 11, 07/11/2026).
+   * E9-sidebar-home: a FULL resync (no `only`) also hands the activity registry the rows it read
+   * (parents) and the ids of `session.active()` (which sessions run), stamped before the read so
+   * the stream wins over the photo; a pane-only resync does neither. VERIFIED by
+   * `chatController.activity.test.ts` "a full resync tells the registry what runs and a pane-only
+   * one does not" (fabricated client, Windows 11, 07/11/2026).
    */
   async resync(only?: readonly ChatPane[]): Promise<void> {
     const client = this.client;
@@ -2374,6 +2532,9 @@ export class ChatController {
     // Statuses the stream derives from here on override the (older) REST ones at publication. The
     // stamp is this resync's own: another one starting meanwhile cannot erase them (R2).
     const token = this.translator.beginResync();
+    // E9-sidebar-home: the stamp of the activity registry, taken BEFORE `session.active()` is read
+    // so an execution that starts or ends while the read is in flight wins over the photo.
+    const activityMark = this.activity.mark();
     if (this.resyncing === 0) {
       this.live.permissions.clear();
       this.live.forms.clear();
@@ -2447,6 +2608,12 @@ export class ChatController {
       );
       // Issue #77 E4: the lineage learns from every row read, BEFORE the registry of requests is
       // replaced, so the attention feature and the per-pane filters see the chains of this read.
+      // E9-sidebar-home: only a FULL resync tells the registry what runs. Not behind `dropped()`:
+      // the stamp already protects it against newer events.
+      if (only === undefined && !this.disposed && client === this.client) {
+        this.activity.learn(list.data);
+        this.activity.running(Object.keys(active), activityMark);
+      }
       let learned = this.lineage.learn(list.data.map(toSessionSummary));
       for (const read of reads) if (this.lineage.learn(read.sessions)) learned = true;
       if (dropped()) {
