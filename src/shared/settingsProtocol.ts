@@ -61,7 +61,52 @@ export interface ProviderRow {
   name: string;
   connections: SettingsConnectionRow[];
   methods: SettingsMethodRow[];
+  /**
+   * How many models of the catalog this provider offers; ABSENT while the model list has not been
+   * read (the webview must not say "0 models" then).
+   */
+  modelCount?: number;
 }
+
+/** One model of the server's catalog, as the default-model picker lists it. */
+export interface SettingsModelRow {
+  providerID: string;
+  /** The catalog id (`ModelInfo.id`); `providerID/id` is what `openVsCode.defaultModel` holds. */
+  id: string;
+  name: string;
+  providerName: string;
+}
+
+/**
+ * Where `openVsCode.defaultModel` stands against the catalog the host holds: `none` (blank),
+ * `applied` (written `provider/model` and offered), `invalid` (not written `provider/model`) and
+ * `unavailable` (well written, but the catalog does not offer it). `unavailable` is computed against
+ * the rows held NOW, so it only means something once `models.loaded` is true.
+ */
+export type SettingsPreferenceStatus = 'none' | 'applied' | 'invalid' | 'unavailable';
+
+/** The `openVsCode.defaultModel` setting as the picker needs it. */
+export interface SettingsPreference {
+  /** The effective text of the setting (`provider/model`), or `''` when unset. */
+  value: string;
+  status: SettingsPreferenceStatus;
+  /** True when the workspace or the folder has its own value, which hides the user's one. */
+  workspaceOverride: boolean;
+}
+
+/** The settings of this extension the tab may open in the native Settings editor. */
+export type SettingsSettingKey =
+  'opencodePath' | 'serverUrl' | 'defaultModel' | 'chatLocation' | 'autoStart' | 'mods.enabled';
+
+/** The closed list behind {@link SettingsSettingKey}; the host revalidates against it. */
+export const SETTINGS_SETTING_KEYS: readonly SettingsSettingKey[] = [
+  'opencodePath',
+  'serverUrl',
+  'defaultModel',
+  'chatLocation',
+  'autoStart',
+  'mods.enabled',
+];
 
 /** One MCP server with its resources and templates (read only). */
 export interface SettingsMcpServerRow {
@@ -92,6 +137,14 @@ export interface SettingsState {
    */
   remote?: string;
   providers: { loaded: boolean; failed: boolean; rows: ProviderRow[] };
+  models: {
+    loaded: boolean;
+    failed: boolean;
+    rows: SettingsModelRow[];
+    /** The model opencode itself proposes (`model.default`); ABSENT when it names none. */
+    serverDefault?: { providerID: string; id: string; name: string };
+  };
+  preference: SettingsPreference;
   mcp: {
     loaded: boolean;
     failed: boolean;
@@ -105,7 +158,15 @@ export interface SettingsState {
 /** A one-shot message ("Connected to X", "Sign-in expired"); never carries a secret. */
 export interface SettingsNotice {
   integrationID: string;
-  kind: 'connected' | 'removed' | 'failed' | 'expired' | 'cancelled' | 'unsupported';
+  kind:
+    | 'connected'
+    | 'removed'
+    | 'failed'
+    | 'expired'
+    | 'cancelled'
+    | 'unsupported'
+    /** A default-model request was refused or could not be saved; says nothing about sign-in. */
+    | 'modelRefused';
   message?: string;
 }
 
@@ -132,7 +193,10 @@ export type SettingsWebviewToHost =
   | { type: 'settings.cancel'; integrationID: string }
   | { type: 'settings.copyCode'; integrationID: string }
   | { type: 'settings.disconnect'; integrationID: string; credentialID: string }
-  | { type: 'settings.action'; action: SettingsAction };
+  | { type: 'settings.action'; action: SettingsAction }
+  /** `''` clears the setting; otherwise `provider/model`, revalidated against the catalog. */
+  | { type: 'settings.setDefaultModel'; model: string }
+  | { type: 'settings.openSetting'; key: SettingsSettingKey };
 
 /** True for a non-empty string of at most {@link MAX_SETTINGS_ID} characters. */
 function isId(value: unknown): value is string {
@@ -175,6 +239,19 @@ function isSettingsAction(value: unknown): value is SettingsAction {
   return value === 'logs' || value === 'extensionSettings' || value === 'restart';
 }
 
+/** True for a key of the closed {@link SETTINGS_SETTING_KEYS} list. */
+function isSettingKey(value: unknown): value is SettingsSettingKey {
+  return SETTINGS_SETTING_KEYS.some((key) => key === value);
+}
+
+/**
+ * True for the text of a default-model request: a string that is empty (clear the setting) or at
+ * most `2 * MAX_SETTINGS_ID + 1` characters (`provider/model`, each half an id).
+ */
+function isModelText(value: unknown): boolean {
+  return typeof value === 'string' && value.length <= 2 * MAX_SETTINGS_ID + 1;
+}
+
 /** The fields each webview message may have besides `type`, and the check of their values. */
 const WEBVIEW_SHAPES: Record<
   SettingsWebviewToHost['type'],
@@ -196,27 +273,37 @@ const WEBVIEW_SHAPES: Record<
     valid: (m) => isId(field(m, 'integrationID')) && isId(field(m, 'credentialID')),
   },
   'settings.action': { keys: ['action'], valid: (m) => isSettingsAction(field(m, 'action')) },
+  'settings.setDefaultModel': { keys: ['model'], valid: (m) => isModelText(field(m, 'model')) },
+  'settings.openSetting': { keys: ['key'], valid: (m) => isSettingKey(field(m, 'key')) },
 };
 
 /**
  * Guard for messages arriving at the host from the settings webview, which is untrusted input.
  *
- * Accepts only a plain object whose `type` is one of the seven known ones, whose own properties
- * are EXACTLY `type` plus the ones that type declares (so a `key`, `apiKey` or `secret` makes it
- * fail, as does any other extra field), and whose values pass the bounds above: ids up to 200
- * characters, a method index up to 100, at most 20 answers of at most 2000 characters. Never
+ * Accepts only a plain object whose `type` is one of the nine known ones, whose own properties
+ * are EXACTLY `type` plus the ones that type declares (so a `apiKey` or `secret` makes it fail, as
+ * does any other extra field; `settings.openSetting` DOES declare a `key`, which must be one of
+ * {@link SETTINGS_SETTING_KEYS}, never free text), and whose values pass the bounds above: ids up
+ * to 200 characters, a method index up to 100, at most 20 answers of at most 2000 characters, a
+ * default-model text of at most 401 characters (empty allowed: it clears the setting). Never
  * throws: a throwing getter or a hostile object yields `false`. Whether the integration or method
  * exists is NOT checked here; `settingsController.ts` revalidates against the server's snapshot.
  *
  * VERIFIED by `settingsProtocol.test.ts` with fabricated messages (a message with `key`, `apiKey`
- * or `secret` is rejected; Windows 11, vitest) and, through `test.settingsMessage` (the same guard,
+ * or `secret` is rejected on `settings.ready`, `settings.connect`, `settings.cancel` and
+ * `settings.setDefaultModel`; `settings.openSetting` accepts a `key` only from the closed list, and
+ * rejects `apiKey` and `secret`; Windows 11, vitest, 07/11/2026) and, through `test.settingsMessage` (the same guard,
  * not a DOM `postMessage`), by the `fake-server` case "removes a credential only after a yes, and
  * refuses one of another provider". VERIFIED from the real DOM in a real VS Code 1.144.0 on Windows
  * 11 (1/11/2026, `npm run test:visual -- --group config`, against the synthetic server): messages
  * posted by mouse clicks in the tab passed this guard and did their work, "ok   W1 Cancel in the
  * card closes the native InputBox (closed true) and the card goes back to Add a provider …", "ok
- * V9 confirming the modal removes the credential: Azure is back in Add a provider with no Remove
- * button …" and "ok   V8 Copy code in the card puts ABCD-1234 on the clipboard …".
+ * V9 confirming the modal removes the credential: Azure is back in Add a provider with no
+ * Disconnect button …" (the text of 7/11/2026, `--steps 36`; it said "Remove" before the redesign
+ * of issue #186) and "ok   V8 Copy code in the card puts ABCD-1234 on the clipboard …".
+ * The `--steps 36` run of 7/11/2026 was on an EARLIER tree than this one (the search box, the CSS
+ * and the review fixes came after it); the final full `test:visual` of the branch is what covers
+ * this tree, and no run of it is claimed here.
  */
 export function isSettingsWebviewToHost(value: unknown): value is SettingsWebviewToHost {
   try {

@@ -33,6 +33,8 @@ import * as vscode from 'vscode';
 import { toEditorRef } from '../../src/extension/fileMentions';
 import { EMPTY_TITLE } from '../../src/shared/sessionLabel';
 import {
+  CONFIG_SECTION,
+  DEFAULT_MODEL_KEY,
   ADD_SELECTION_TO_CHAT_COMMAND_ID,
   ADD_TO_CHAT_COMMAND_ID,
   EXPLAIN_FILES_COMMAND_ID,
@@ -2626,6 +2628,69 @@ describe('fake server', function () {
         'azure losing its credential',
       );
       assert.strictEqual(credentialsOf(await readState(), 'anthropic').length, 1);
+    });
+
+    /**
+     * Sets the default model of new chats from the Settings tab (issue #186, phase 1.3): the host
+     * writes `openVsCode.defaultModel` in the USER settings of the isolated profile, the state shows
+     * it applied, and the chat controller logs `new chats propose <model>`: the model chosen is the
+     * one of the two the earlier cases left the chat NOT proposing (read from the log), because the
+     * line is written only when the proposal changes (the first run chose the one already proposed
+     * and waited in vain). A
+     * model the catalog does not offer is refused and writes nothing, and the empty text clears the
+     * setting. The setting is restored in a `finally`.
+     *
+     * Protects the P3 decision (the setting, never a file of opencode), the revalidation against
+     * the catalog the host holds, and the wiring `onDidChangeConfiguration` -> `settings.changed()`
+     * + `onPreferencesChanged`, which no unit test crosses. The "chat proposes it" half is the log
+     * line, not the catalog the webview receives: no VS Code API reads that. Provenance: the
+     * SYNTHETIC server (two models of the provider `opencode`, a fabricated catalog), messages fed
+     * through `TEST_SETTINGS_MESSAGE_COMMAND_ID`; the select itself is `ModelsSection.test.tsx`
+     * (jsdom) and `test:visual` step 47.
+     */
+    it('sets the default model from the Settings tab and the chat proposes it', async function () {
+      const config = () => vscode.workspace.getConfiguration(CONFIG_SECTION);
+      const saved = config().inspect<string>(DEFAULT_MODEL_KEY)?.globalValue;
+      const send = (model: string): Thenable<unknown> =>
+        vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+          type: 'settings.setDefaultModel',
+          model,
+        });
+      try {
+        await waitForState((s) => s.models.loaded && s.models.rows.length >= 2, 'the model list');
+        // The cases before this one used a model, so the chat may already propose either of the two
+        // (the last used one): pick the one it does NOT propose, or no line would be written.
+        const proposals = [
+          ...(await openLogFromStart()).added().matchAll(/new chats propose (\S+)/g),
+        ];
+        const chosen =
+          proposals.at(-1)?.[1] === 'opencode/big-pickle'
+            ? 'opencode/glm-5.3-flash-free'
+            : 'opencode/big-pickle';
+        const log = await openLogCursor();
+        await send(chosen);
+        const state = await waitForState(
+          (s) => s.preference.value === chosen && s.preference.status === 'applied',
+          'the setting applied',
+        );
+        assert.strictEqual(state.preference.workspaceOverride, false);
+        assert.strictEqual(config().inspect<string>(DEFAULT_MODEL_KEY)?.globalValue, chosen);
+        await log.waitFor(`new chats propose ${chosen}`, 10_000);
+
+        await send('ghost/model');
+        await log.waitFor('settings request refused: settings.setDefaultModel', 10_000);
+        await sleep(SETTLE_MS);
+        assert.strictEqual(config().inspect<string>(DEFAULT_MODEL_KEY)?.globalValue, chosen);
+
+        await send('');
+        await waitForState(
+          (s) => s.preference.value === '' && s.preference.status === 'none',
+          'the setting cleared',
+        );
+        assert.strictEqual(config().inspect<string>(DEFAULT_MODEL_KEY)?.globalValue, undefined);
+      } finally {
+        await config().update(DEFAULT_MODEL_KEY, saved, vscode.ConfigurationTarget.Global);
+      }
     });
   });
 

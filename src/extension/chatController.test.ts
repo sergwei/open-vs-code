@@ -4619,7 +4619,8 @@ describe('the lineage of the open session (issue #21)', () => {
  * and fails the NEXT turn, VERIFIED in the planner spike, opencode 2.0.32, Windows 11,
  * 21/10/2026, so the HOST must check); `switchAgent` called when the agent did not change (it does
  * not deduplicate and `plan` injects a reminder); a prompt sent after a failed switch (it would be
- * redelivered with the next good run); and the precedence setting > last used > server default.
+ * redelivered with the next good run); the precedence setting > last used > server default; and
+ * (issue #186) the `new chats propose <model>` log line, written once per change of the proposal.
  * SYNTHETIC: a fake client with hand-made `ModelInfo` / `AgentInfo` in the shapes the spike saw.
  */
 describe('catalog and selection (issues #23/#24)', () => {
@@ -4893,6 +4894,24 @@ describe('catalog and selection (issues #23/#24)', () => {
       controller.onPreferencesChanged();
       expect(calls.length).toBe(before);
       expect(catalogs(posted).at(-1)?.preferredModel).toEqual(GLM);
+    });
+
+    // Protects the `fake-server` case "sets the default model from the Settings tab and the chat
+    // proposes it", which waits on this line (nothing else shows the catalog the chat holds).
+    // Provenance: fabricated catalog and preferences (`fakeApi`, `prefs`).
+    it('logs "new chats propose X" once per change of the proposal, not on a repeat', async () => {
+      const { controller, logs, prefs } = await loaded(() => undefined);
+      const lines = () => logs.filter((line) => line.includes('new chats propose'));
+      expect(lines()).toEqual(['info: new chats propose opencode/big-pickle']);
+      controller.onPreferencesChanged();
+      expect(lines()).toHaveLength(1);
+      prefs.setting = 'opencode/glm-5.3-flash-free';
+      controller.onPreferencesChanged();
+      controller.onPreferencesChanged();
+      expect(lines()).toEqual([
+        'info: new chats propose opencode/big-pickle',
+        'info: new chats propose opencode/glm-5.3-flash-free',
+      ]);
     });
 
     it('does nothing without a catalog', () => {

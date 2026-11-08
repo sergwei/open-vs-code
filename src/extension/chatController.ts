@@ -874,6 +874,8 @@ export class ChatController {
   private commandRetryGeneration = 0;
   /** The `defaultModel` setting value the user was last told about, so it is told once. */
   private ignoredSettingNoticed: string | undefined;
+  /** The model the last `new chats propose` log line named, so a line is written only on a change. */
+  private proposedLogged: string | undefined;
 
   /**
    * Wires the injected effects. The "Changed files" and revert holders are per pane and are built
@@ -3207,7 +3209,12 @@ export class ChatController {
   /**
    * Returns `catalog` with `preferredModel` set from the user's preferences: the
    * `openVsCode.defaultModel` setting, then the last model used, each only if the catalog offers it.
-   * A setting that is written but unusable is reported by {@link reportIgnoredSetting}.
+   * A setting that is written but unusable is reported by {@link reportIgnoredSetting}. Whenever
+   * the model a new session would start with (the preferred one, else the server default) differs
+   * from the last one named, it writes ONE info line `new chats propose <provider>/<id>` (or
+   * `none`): the `fake-server` case "sets the default model from the Settings tab and the chat
+   * proposes it" waits on it, because no VS Code API reads the catalog the chat holds. Model ids
+   * are catalog data, never user text or a secret.
    */
   private withPreferredModel(catalog: Catalog): Catalog {
     const { model, ignored } = resolvePreferredModel({
@@ -3216,6 +3223,12 @@ export class ChatController {
       available: catalog.models,
     });
     this.reportIgnoredSetting(ignored);
+    const proposed = model ?? catalog.serverDefault;
+    const proposedText = proposed === undefined ? 'none' : `${proposed.providerID}/${proposed.id}`;
+    if (proposedText !== this.proposedLogged) {
+      this.proposedLogged = proposedText;
+      this.log.info(`new chats propose ${proposedText}`);
+    }
     const next: Catalog = {
       models: catalog.models,
       providers: catalog.providers,

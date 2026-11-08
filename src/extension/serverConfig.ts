@@ -11,6 +11,9 @@
 // provider may have `headers`), and the day a server version adds a field to `IntegrationInfo`
 // this mapping must not forward it by accident. `credential.list` is not even part of `ChatApi`.
 // The unit test plants a secret in every such place and looks for it in the serialized snapshot.
+// The same holds for the MODEL catalog (issue #186): `model.list` and `provider.list` carry
+// `headers`, `body` and `settings` that may hold keys, so a model row is only `{id, providerID,
+// name}` plus the provider's `{id, name, integrationID}`, read field by field.
 
 import * as l10n from '@vscode/l10n';
 import type { ErrorSecrets } from './wireMapping';
@@ -23,6 +26,10 @@ import type { ProviderAuthApi } from './providerAuth';
 export type ServerConfigApi = {
   integration: Pick<ChatApi['integration'], 'list' | 'get'>;
   mcp: ChatApi['mcp'];
+  /** The catalog reads of the model picker (issue #186): `model.list`, `model.default`. */
+  model: ChatApi['model'];
+  /** `provider.list`, for the provider names and the link provider to integration. */
+  provider: ChatApi['provider'];
 };
 
 /** Longest line of server text kept (an error, a label, a description). */
@@ -73,6 +80,22 @@ export interface IntegrationRow {
   name: string;
   connections: ConnectionRow[];
   methods: MethodRow[];
+  /**
+   * `'mcp'` when the server says this integration belongs to a remote MCP server
+   * (`metadata.source === 'mcp'`, plan #2037 section 2); ABSENT otherwise. The Providers list leaves
+   * these out, because they are signed in from the MCP section.
+   */
+  source?: 'mcp';
+}
+
+/** One model of the catalog with the name of its provider (issue #186). */
+export interface ModelRow {
+  providerID: string;
+  id: string;
+  name: string;
+  providerName: string;
+  /** The integration the provider belongs to (`ProviderInfo.integrationID`), if it says so. */
+  integrationID?: string;
 }
 
 /** The states `mcp.list` reports. */
@@ -98,6 +121,14 @@ export interface ServerConfigSnapshot {
     /** True when the last read failed (the rows are then the previous ones). */
     failed: boolean;
     rows: IntegrationRow[];
+  };
+  models: {
+    loaded: boolean;
+    /** True when the last read failed (the rows are then the previous ones). */
+    failed: boolean;
+    rows: ModelRow[];
+    /** What `model.default` answered; ABSENT when it answered `null` or nothing was read. */
+    serverDefault?: { providerID: string; id: string; name: string };
   };
   mcp: {
     loaded: boolean;
@@ -200,8 +231,11 @@ function toFields(method: WireMethod): { fields: FieldRow[]; supported: boolean 
  * and the message of a `needs_auth` status; env: variable name) and the `key`, `oauth` and
  * `external` methods with their string fields. `env` and `command` methods are not rows (an env
  * connection already says it). `metadata`, the status `url`, and anything else the server may add
- * are dropped on purpose. VERIFIED by unit tests with a planted secret (fabricated data); the
- * shapes follow the types of `@opencode/client` 2.0.32 and the planner spike.
+ * are dropped on purpose, except that `metadata.source === 'mcp'` is kept as `source: 'mcp'` (and
+ * nothing else of `metadata`). VERIFIED by unit tests with a planted secret (fabricated data); the
+ * shapes follow the types of `@opencode/client` 2.0.32 and the planner spike. HYPOTHESIS that a real
+ * server marks its MCP integrations that way: read in `core/src/mcp/index.ts` L173-213 of the
+ * 2.0.32 tag, never listed from a running server (the PR2 real-opencode case will).
  */
 export function toIntegrationRow(
   info: Awaited<ReturnType<ServerConfigApi['integration']['get']>>['data'],
@@ -246,7 +280,41 @@ export function toIntegrationRow(
       });
     }
   });
-  return { id: info.id, name: firstLine(info.name), connections, methods };
+  const row: IntegrationRow = { id: info.id, name: firstLine(info.name), connections, methods };
+  if (info.metadata?.source === 'mcp') row.source = 'mcp';
+  return row;
+}
+
+/**
+ * Joins `model.list` and `provider.list` into rows, field by field: the model keeps `id`,
+ * `providerID` and `name`, the provider only `name` and `integrationID` (the rest, `headers`, `body`
+ * and `settings` included, may hold keys and is never read). A model whose provider is not in the
+ * list takes the provider id as its provider name. Order is the server's.
+ * VERIFIED on Windows 11 (08/11/2026, vitest, FABRICATED `ModelInfo` and `ProviderInfo` with
+ * planted secrets): the check "keeps no planted secret from model.list or provider.list in a serialized
+ * snapshot" of `serverConfig.test.ts`. A real server's payload was not inspected.
+ */
+export function toModelRows(
+  models: Awaited<ReturnType<ServerConfigApi['model']['list']>>['data'],
+  providers: Awaited<ReturnType<ServerConfigApi['provider']['list']>>['data'],
+): ModelRow[] {
+  const byId = new Map<string, { name: string; integrationID?: string }>();
+  for (const provider of providers) {
+    const entry: { name: string; integrationID?: string } = { name: firstLine(provider.name) };
+    if (provider.integrationID !== undefined) entry.integrationID = provider.integrationID;
+    byId.set(provider.id, entry);
+  }
+  return models.map((model) => {
+    const provider = byId.get(model.providerID);
+    const row: ModelRow = {
+      providerID: model.providerID,
+      id: model.id,
+      name: firstLine(model.name),
+      providerName: provider?.name ?? model.providerID,
+    };
+    if (provider?.integrationID !== undefined) row.integrationID = provider.integrationID;
+    return row;
+  });
 }
 
 /** One `McpServer` of the wire reduced to the fields kept, with the error scrubbed and cut. */
@@ -361,8 +429,8 @@ class CoalescedRead {
 }
 
 /**
- * The store: three coalesced reads (integrations, MCP list, MCP resource catalog) of the server
- * attached, each REPLACING its rows whole (an integration or server that left must disappear),
+ * The store: four coalesced reads (integrations, models, MCP list, MCP resource catalog) of the
+ * server attached, each REPLACING its rows whole (an integration or server that left must disappear),
  * and a snapshot to read them. A failed read keeps the previous rows, sets `failed` and logs one
  * `warn` line; a read for a server that went away meanwhile is dropped (generation check).
  *
@@ -392,6 +460,11 @@ export class ServerConfig implements ServerConfigSink {
   private integrationsLoaded = false;
   private integrationsFailed = false;
 
+  private models: ModelRow[] = [];
+  private serverDefault: { providerID: string; id: string; name: string } | undefined;
+  private modelsLoaded = false;
+  private modelsFailed = false;
+
   private mcpList: { name: string; status: McpStatusName; error?: string }[] = [];
   private catalog: McpCatalogRows = { resources: new Map(), templates: new Map() };
   private mcpLoaded = false;
@@ -404,6 +477,10 @@ export class ServerConfig implements ServerConfigSink {
   private readonly integrationRead = new CoalescedRead(
     () => this.generation,
     (generation) => this.readIntegrations(generation),
+  );
+  private readonly modelRead = new CoalescedRead(
+    () => this.generation,
+    (generation) => this.readModels(generation),
   );
   private readonly mcpRead = new CoalescedRead(
     () => this.generation,
@@ -434,6 +511,12 @@ export class ServerConfig implements ServerConfigSink {
         loaded: this.integrationsLoaded,
         failed: this.integrationsFailed,
         rows: this.integrations,
+      },
+      models: {
+        loaded: this.modelsLoaded,
+        failed: this.modelsFailed,
+        rows: this.models,
+        ...(this.serverDefault === undefined ? {} : { serverDefault: this.serverDefault }),
       },
       mcp: {
         loaded: this.mcpLoaded,
@@ -473,9 +556,10 @@ export class ServerConfig implements ServerConfigSink {
   /**
    * Routes one stream event. `server.connected` and `location.shutdown` re-read everything (the
    * stream has no replay: `opencode-api` section 4); `integration.updated`, `credential.updated` and
-   * `credential.switched` re-read the integrations (`provider.updated` and `model.updated` are
-   * their consequence and are left to the chat catalog; HYPOTHESIS, the opt-in suite never changed
-   * a credential); `mcp.status.changed` re-reads the list AND the resource catalog, and
+   * `credential.switched` re-read the integrations AND the models (a new credential makes a
+   * provider available, so its models appear: HYPOTHESIS, the opt-in suite never changed a
+   * credential); `model.updated`, `provider.updated` and `config.updated` re-read only the models
+   * (names read in the client types of 2.0.32, never seen on a real stream); `mcp.status.changed` re-reads the list AND the resource catalog, and
    * `mcp.resources.changed` only the catalog. The catalog is re-read on a status change too as a
    * defence: upstream 843a6c5 (`packages/core/src/mcp/index.ts` L463-465) publishes
    * `ResourcesChanged` when a server connects, but no test follows that event end to end against
@@ -497,6 +581,12 @@ export class ServerConfig implements ServerConfigSink {
       case 'credential.updated':
       case 'credential.switched':
         void this.integrationRead.request();
+        void this.modelRead.request();
+        return;
+      case 'model.updated':
+      case 'provider.updated':
+      case 'config.updated':
+        void this.modelRead.request();
         return;
       case 'mcp.status.changed':
         this.mcpEventSeen = true;
@@ -511,10 +601,11 @@ export class ServerConfig implements ServerConfigSink {
     }
   }
 
-  /** Re-reads the three sources (the Refresh button); resolves when all are done, never rejects. */
+  /** Re-reads the four sources (the Refresh button); resolves when all are done, never rejects. */
   async reloadAll(): Promise<void> {
     await Promise.all([
       this.integrationRead.request(),
+      this.modelRead.request(),
       this.mcpRead.request(),
       this.catalogRead.request(),
     ]);
@@ -527,11 +618,16 @@ export class ServerConfig implements ServerConfigSink {
     this.epoch = undefined;
     this.secrets = {};
     this.integrationRead.reset();
+    this.modelRead.reset();
     this.mcpRead.reset();
     this.catalogRead.reset();
     this.integrations = [];
     this.integrationsLoaded = false;
     this.integrationsFailed = false;
+    this.models = [];
+    this.serverDefault = undefined;
+    this.modelsLoaded = false;
+    this.modelsFailed = false;
     this.mcpList = [];
     this.catalog = { resources: new Map(), templates: new Map() };
     this.mcpLoaded = false;
@@ -591,6 +687,42 @@ export class ServerConfig implements ServerConfigSink {
       if (generation !== this.generation) return;
       this.integrationsFailed = true;
       this.warnFailed('integration list', error);
+    }
+    this.notify();
+  }
+
+  /**
+   * One read of `model.list`, `model.default` and `provider.list` for `generation`, all or nothing:
+   * if one fails the previous rows stay and `failed` is set. The rows come from {@link toModelRows}
+   * and the default is cut to `{providerID, id, name}`, so no `headers`, `body` or `settings` of
+   * either list reaches the snapshot.
+   * VERIFIED on Windows 11 (08/11/2026, vitest, FABRICATED payloads with planted secrets): the
+   * check "keeps no planted secret from model.list or provider.list in a serialized snapshot" of
+   * `serverConfig.test.ts` (the `describe` "the model catalog") goes through this method. A real
+   * server's payload was not inspected.
+   */
+  private async readModels(generation: number): Promise<void> {
+    const api = this.api;
+    if (api === undefined) return;
+    try {
+      const [models, fallback, providers] = await Promise.all([
+        api.model.list(),
+        api.model.default(),
+        api.provider.list(),
+      ]);
+      if (generation !== this.generation) return;
+      this.models = toModelRows(models.data, providers.data);
+      const chosen = fallback.data;
+      this.serverDefault =
+        chosen === null
+          ? undefined
+          : { providerID: chosen.providerID, id: chosen.id, name: firstLine(chosen.name) };
+      this.modelsLoaded = true;
+      this.modelsFailed = false;
+    } catch (error) {
+      if (generation !== this.generation) return;
+      this.modelsFailed = true;
+      this.warnFailed('model list', error);
     }
     this.notify();
   }

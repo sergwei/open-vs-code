@@ -21,6 +21,8 @@ export interface SettingsStoreState {
   /** `vscode.env.remoteName` of the host; `undefined` in a local window (no remote hint then). */
   remote: string | undefined;
   providers: SettingsState['providers'];
+  models: SettingsState['models'];
+  preference: SettingsState['preference'];
   mcp: SettingsState['mcp'];
   attempt: AuthAttemptView | undefined;
   /** One-shot messages, oldest first; the consumer drains them with `drainNotices`. */
@@ -44,8 +46,13 @@ export interface SettingsStore {
  * DOM (and the field the user is typing in) while the host refreshes the list. A `settings.notice`
  * is NOT state but an order, so it goes to a queue that the consumer drains in order: a single
  * `{ notice }` field would lose the second of two notices that arrive in the same batch
- * (solid-webview section 3). VERIFIED by `settingsStore.test.ts` (fabricated messages: it proves
- * identity and order, not what the real host sends).
+ * (solid-webview section 3). Since issue #186 the state also carries `models` and `preference`:
+ * the model rows are REPLACED whole (not reconciled by `id`, because a catalog id repeats across
+ * providers, so a key by `id` would merge two models into one), `serverDefault` disappears when the
+ * host stops sending it, and `preference` is reconciled in place. VERIFIED by `settingsStore.test.ts`
+ * (fabricated messages: it proves identity, order and, in "keeps two models that share an id across
+ * providers, and drops a default the host stops sending", that two providers' models with the same
+ * id stay two rows; not what the real host sends).
  */
 export function createSettingsStore(): SettingsStore {
   const [state, setState] = createStore<SettingsStoreState>({
@@ -55,6 +62,8 @@ export function createSettingsStore(): SettingsStore {
     serverVersion: undefined,
     remote: undefined,
     providers: { loaded: false, failed: false, rows: [] },
+    models: { loaded: false, failed: false, rows: [], serverDefault: undefined },
+    preference: { value: '', status: 'none', workspaceOverride: false },
     mcp: { loaded: false, failed: false, pendingFirstRead: true, servers: [] },
     attempt: undefined,
     notices: [],
@@ -76,6 +85,12 @@ export function createSettingsStore(): SettingsStore {
         setState('providers', 'loaded', next.providers.loaded);
         setState('providers', 'failed', next.providers.failed);
         setState('providers', 'rows', reconcile(next.providers.rows, { key: 'id', merge: true }));
+        setState('models', 'loaded', next.models.loaded);
+        setState('models', 'failed', next.models.failed);
+        // Plain replace, not `reconcile` by `id`: a catalog id repeats across providers.
+        setState('models', 'rows', next.models.rows);
+        setState('models', 'serverDefault', next.models.serverDefault);
+        setState('preference', reconcile(next.preference));
         setState('mcp', 'loaded', next.mcp.loaded);
         setState('mcp', 'failed', next.mcp.failed);
         setState('mcp', 'pendingFirstRead', next.mcp.pendingFirstRead);
@@ -98,7 +113,10 @@ export function createSettingsStore(): SettingsStore {
 /**
  * The sentence the live region says for a notice. `name` is the provider's display name (the
  * caller looks it up; the id is the fallback). The `message` of the host is appended for the
- * kinds where it explains a problem, as plain text.
+ * kinds where it explains a problem (`failed`, `unsupported` and `modelRefused`), as plain text.
+ * `modelRefused` is a default-model request that was refused or not saved: it names no provider and
+ * never says "Sign-in" (VERIFIED by the check "words a refused model without mentioning sign-in" of
+ * `settingsStore.test.ts`, fabricated notice, vitest, Windows 11, 08/11/2026).
  */
 export function noticeText(notice: SettingsNotice, name: string): string {
   const detail = notice.message === undefined || notice.message === '' ? '' : ` ${notice.message}`;
@@ -113,6 +131,8 @@ export function noticeText(notice: SettingsNotice, name: string): string {
       return l10n.t('Sign-in to {0} expired.', name);
     case 'cancelled':
       return l10n.t('Sign-in to {0} was cancelled.', name);
+    case 'modelRefused':
+      return `${l10n.t('The default model was not changed.')}${detail}`;
     case 'unsupported':
       return `${l10n.t('{0} cannot be set up here. Use opencode auth login in a terminal.', name)}${detail}`;
   }

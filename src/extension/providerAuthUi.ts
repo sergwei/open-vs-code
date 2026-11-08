@@ -83,13 +83,15 @@ function progressMessage(view: AuthProgressView): string {
  * page" without a Copy link and a native box titled "Code for FakeCo" (type=text, focused true)
  * while the webview holds no password input", "ok   K2 Cancel in the card closes the native code
  * box (true) and FakeCo is back in Add a provider (true)" (the close on abort) and "ok   K3 typing
- * FAKE-CODE connects FakeCo: "Signed in · saved by opencode for all projects" and the live region
- * says "Connected to FakeCo."". VERIFIED for the link that is not opened: "ok   Copy link the
+ * FAKE-CODE connects FakeCo: its row says "Signed in" and the live region says "Connected to
+ * FakeCo."" (the text of 7/11/2026, `--steps 36`, after the redesign of issue #186). VERIFIED for the link that is not opened: "ok   Copy link the
  * notification carries the exact notice and a "Copy link" link, and the card shows the notice too",
  * "ok   Copy link the host did not open the link (log "opened: false, link kept for Copy link")"
  * and "ok   Copy link pressing it puts the link on the clipboard INTACT, %2B %3D %26 included".
  * The same lines, with the same text, passed in the full run of 02/11/2026 on the final tree
- * (Windows 11, VS Code 1.144.0, "all visual checks passed").
+ * (Windows 11, VS Code 1.144.0, "all visual checks passed"). The `--steps 36` runs of 7/11/2026
+ * quoted above were on an EARLIER tree than the current one; the final full `test:visual` of the
+ * branch is what covers this tree, and no run of it is claimed here.
  * `progress` is a cancellable
  * notification (`withProgress`, which has no buttons of its own: "Copy code" is a `command:` link
  * in its text, so the title and the instructions are stripped of `[ ] ( )` first,

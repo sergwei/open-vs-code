@@ -469,6 +469,16 @@ function warnSessionFailure(action: 'rename' | 'delete' | 'loadMore', error: unk
  * `ExtensionMode.Test` three uncontributed commands pre-answer the sign-in dialogs, feed the
  * controller a raw settings message and read its state. With the fake/visual seam on, the browser
  * stand-in `fakeOpenExternal` replaces `env.openExternal` and `http://127.0.0.1` links may be opened.
+ * Issue #186 adds two things to that controller: `preferences` (reads `openVsCode.defaultModel` with
+ * `inspect` to tell whether the workspace or the folder overrides it, and writes only the USER
+ * value, `ConfigurationTarget.Global`) and `openSetting` (the native Settings editor filtered to
+ * one `openVsCode.<key>`); a change of `openVsCode.defaultModel` now also calls `settings.changed()`.
+ * VERIFIED by the `fake-server` case "sets the default model from the Settings tab and the chat
+ * proposes it" (VS Code 1.145.2, Windows 11, 7/11/2026, 62 passing): the host wrote the USER value
+ * of `openVsCode.defaultModel` in the isolated profile (read back with `inspect().globalValue`),
+ * refused a model outside the catalog without writing, and cleared it on `''`. UNVERIFIED: `openSetting`
+ * (no test presses a button that sends `settings.openSetting`) and the `workspaceOverride` flag
+ * outside `test:visual` step 47 (M1: "a workspace value of the setting shows the workspace hint").
  *
  * E10-mods (phase 2): the optional `mods` sink (from `registerMods`) is handed to the controller as
  * its `mods` dependency, which forwards every stream event to it. When absent the controller
@@ -678,6 +688,31 @@ export function registerChat(
         restart: RESTART_SERVER_COMMAND_ID,
       }[action];
       void vscode.commands.executeCommand(command);
+    },
+    // Issue #186: the default model of new chats lives in the USER settings (decision P3 of
+    // E10-settings-redesign); a value of the workspace or the folder hides it, and `read` says so.
+    preferences: {
+      read: () => {
+        const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+        const inspected = config.inspect<string>(DEFAULT_MODEL_KEY);
+        return {
+          value: config.get<string>(DEFAULT_MODEL_KEY) ?? '',
+          workspaceOverride:
+            inspected?.workspaceValue !== undefined ||
+            inspected?.workspaceFolderValue !== undefined,
+        };
+      },
+      write: async (value) => {
+        await vscode.workspace
+          .getConfiguration(CONFIG_SECTION)
+          .update(DEFAULT_MODEL_KEY, value, vscode.ConfigurationTarget.Global);
+      },
+    },
+    openSetting: (key) => {
+      void vscode.commands.executeCommand(
+        'workbench.action.openSettings',
+        `${CONFIG_SECTION}.${key}`,
+      );
     },
     log,
   });
@@ -1279,7 +1314,10 @@ export function registerChat(
       });
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration(DEFAULT_MODEL_SETTING)) controller.onPreferencesChanged();
+      if (event.affectsConfiguration(DEFAULT_MODEL_SETTING)) {
+        controller.onPreferencesChanged();
+        settings.changed(); // the Models section shows the setting
+      }
       if (event.affectsConfiguration(CHAT_LOCATION_SETTING)) applyLocation(readLocation());
     }),
     vscode.commands.registerCommand(OPEN_SETTINGS_COMMAND_ID, async () => {

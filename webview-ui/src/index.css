@@ -1458,9 +1458,9 @@ button.jump-latest {
 
 /*
  * ---------- OpenCode Settings tab (issue #128, E10) ----------
- * Same bundle as the chat, another root. D5 language: a centered column of 380 px in a wide tab,
- * the whole width when narrow (the column simply has no room to be centered), round 20px marks,
- * grey descriptions, a primary and a secondary button per card. The cards reuse the `.setup-step`
+ * Same bundle as the chat, another root. D5 language (round 20px marks, grey descriptions, a primary
+ * and a secondary button per card) inside the layout of issue #186: header with four cards, a
+ * navigation and a content column, folded by container queries (see `.settings-shell`). The cards reuse the `.setup-step`
  * family of the setup guide. Colours are `--vscode-*` only and nothing is set through a `style`
  * attribute. The error tone is a border and a background; the text stays in the foreground colour.
  */
@@ -1472,13 +1472,486 @@ button.jump-latest {
   color: var(--vscode-foreground);
 }
 
-.settings-column {
+/*
+ * Issue #186 (the "Fusion"): the 380 px column of D5 is gone. The shell is as wide as the tab up to
+ * 1000 px (200 px of navigation + 760 px of content + the gap), and the container queries below
+ * (on `.settings-root`) fold it: 900 px and more is the full layout, 600-899 px has a narrower
+ * navigation and the cards in 2x2, under 600 px the navigation becomes a strip that scrolls and
+ * the cards lose their secondary buttons, under 360 px the cards are four compact rows.
+ */
+.settings-shell {
   display: flex;
   flex-direction: column;
   gap: 12px;
   width: 100%;
-  max-width: 380px;
+  max-width: 1000px;
   margin-inline: auto;
+}
+
+.settings-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.settings-heading-block {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.settings-header-tools {
+  display: flex;
+  flex: 1 1 16rem;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 28rem;
+}
+
+.settings-search {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.settings-search-list {
+  position: absolute;
+  z-index: 5;
+  top: 100%;
+  inset-inline: 0;
+  box-sizing: border-box;
+  max-height: 50vh;
+  margin: 2px 0 0;
+  padding: 2px;
+  overflow-y: auto;
+  list-style: none;
+  color: var(--vscode-foreground);
+  background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background));
+  border: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder));
+  border-radius: var(--ovc-radius-lg);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, transparent);
+}
+
+.settings-search-option {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: var(--ovc-radius-sm);
+}
+
+.settings-search-option[aria-selected='true'] {
+  color: var(--vscode-list-activeSelectionForeground);
+  background: var(--vscode-list-activeSelectionBackground);
+}
+
+.settings-search-detail {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.settings-search-option[aria-selected='true'] .settings-search-detail {
+  color: inherit;
+}
+
+.settings-search-empty {
+  padding: 4px 8px;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* The four status cards: the title button is stretched over the card with ::after. */
+.status-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.status-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-editorWidget-background, transparent);
+  border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+  border-radius: var(--ovc-radius-lg);
+}
+
+.status-card[data-tone='warning'] {
+  background: var(--vscode-inputValidation-warningBackground);
+  border-color: var(--vscode-inputValidation-warningBorder, transparent);
+}
+
+button.status-card-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+button.status-card-main::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  border: 2px solid transparent;
+  border-radius: inherit;
+}
+
+button.status-card-main[aria-current='true']::after {
+  border-color: var(--vscode-focusBorder);
+}
+
+button.status-card-main:focus-visible {
+  outline: none;
+}
+
+button.status-card-main:focus-visible::after {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.status-card-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vscode-foreground);
+}
+
+.status-card-value {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.status-card-note {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.status-card-actions {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+
+.settings-body {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 760px);
+  gap: 16px;
+  align-items: start;
+}
+
+.settings-content {
+  min-width: 0;
+}
+
+.settings-section-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.settings-section-title:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+.settings-general,
+.settings-facts,
+.settings-links {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-links {
+  gap: 0;
+}
+
+.attention-card {
+  padding: 8px 12px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-inputValidation-warningBackground);
+  border: 1px solid var(--vscode-inputValidation-warningBorder, transparent);
+  border-radius: var(--ovc-radius-lg);
+}
+
+.attention-title {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.attention-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.attention-item {
+  text-align: left;
+}
+
+.facts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+
+.fact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 12px;
+}
+
+.fact dt {
+  flex: 0 0 6rem;
+  color: var(--vscode-descriptionForeground);
+}
+
+.fact dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.link-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--vscode-widget-border, transparent);
+}
+
+.link-row-text {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.link-row-title {
+  display: block;
+  margin: 0;
+  font-weight: 600;
+}
+
+/* Providers: a compact connected row, the "+ Add provider" button and its picker (issue #186). */
+.provider-row {
+  align-items: flex-start;
+}
+
+.provider-monogram {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 24px;
+  height: 24px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
+  border-radius: var(--ovc-radius-pill);
+}
+
+.provider-row-body {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.provider-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.provider-connection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
+}
+
+.provider-connection .step-line {
+  flex: 1 1 10rem;
+  min-width: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.settings-pill {
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--vscode-foreground);
+  border: 1px solid var(--vscode-testing-iconPassed);
+  border-radius: var(--ovc-radius-pill);
+}
+
+.add-provider-button {
+  align-self: flex-start;
+}
+
+.provider-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.provider-picker-list {
+  max-height: 16rem;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  color: var(--vscode-foreground);
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
+  border-radius: var(--ovc-radius-md);
+}
+
+.provider-picker-option {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 12px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.provider-picker-option[aria-selected='true'] {
+  color: var(--vscode-list-activeSelectionForeground);
+  background: var(--vscode-list-activeSelectionBackground);
+}
+
+.provider-picker-detail {
+  color: inherit;
+}
+
+/*
+ * The navigation and its tabs sit BEFORE the container queries below on purpose: at equal
+ * specificity the later rule wins, and while these rules came after the queries the strip at
+ * < 600 px (`flex-direction: row`, `border-bottom`) was overridden and the navigation stayed a
+ * column (seen by `test:visual` step 46, H2: "direction column" at 520 and 300 px).
+ */
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+button.settings-tab {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: none;
+  border: 1px solid transparent;
+  border-left: 2px solid transparent;
+  border-radius: var(--ovc-radius-md);
+}
+
+button.settings-tab[aria-selected='true'] {
+  font-weight: 600;
+  background: var(--vscode-list-inactiveSelectionBackground, transparent);
+  border-left-color: var(--vscode-panelTitle-activeBorder, var(--vscode-focusBorder));
+}
+
+button.settings-tab:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+@container (max-width: 899px) {
+  .status-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .settings-body {
+    grid-template-columns: 170px minmax(0, 1fr);
+  }
+}
+
+@container (max-width: 599px) {
+  .settings-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .status-card-actions {
+    display: none;
+  }
+
+  .settings-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  button.settings-tab {
+    flex: 0 0 auto;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+
+  button.settings-tab[aria-selected='true'] {
+    border-bottom-color: var(--vscode-panelTitle-activeBorder, var(--vscode-focusBorder));
+  }
+}
+
+@container (max-width: 359px) {
+  .status-cards {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .status-card {
+    padding: 6px 10px;
+  }
+
+  button.status-card-main {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 6px;
+  }
+
+  .status-card-label {
+    text-transform: none;
+    letter-spacing: 0;
+  }
+
+  .status-card-label::after {
+    content: ':';
+  }
+
+  .settings-header-tools {
+    flex-basis: 100%;
+    max-width: none;
+  }
 }
 
 .settings-title {
@@ -1500,36 +1973,25 @@ button.jump-latest {
   color: var(--vscode-descriptionForeground);
 }
 
-.settings-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.settings-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-button.settings-tab {
-  padding: 4px 10px;
-  color: var(--vscode-foreground);
-  background: none;
-  border: 1px solid transparent;
-  border-bottom: 2px solid transparent;
-  border-radius: var(--ovc-radius-md);
-}
-
-button.settings-tab[aria-selected='true'] {
+.settings-badge {
+  min-width: 18px;
+  box-sizing: border-box;
+  padding: 0 5px;
+  font-size: 11px;
   font-weight: 600;
-  border-bottom-color: var(--vscode-panelTitle-activeBorder, var(--vscode-focusBorder));
+  line-height: 16px;
+  text-align: center;
+  color: var(--vscode-badge-foreground);
+  background: var(--vscode-badge-background);
+  border: 1px solid transparent;
+  border-radius: var(--ovc-radius-pill);
 }
 
-button.settings-tab:hover {
-  background: var(--vscode-toolbar-hoverBackground);
+/* The warning tone is a border and a background; the number stays in the foreground colour. */
+.settings-badge[data-tone='warning'] {
+  color: var(--vscode-foreground);
+  background: var(--vscode-inputValidation-warningBackground);
+  border-color: var(--vscode-inputValidation-warningBorder, transparent);
 }
 
 .settings-panel[hidden] {
@@ -1685,12 +2147,25 @@ button.settings-toggle {
 [class*='vscode-high-contrast'] .settings-input,
 [class*='vscode-high-contrast'] .settings-code,
 [class*='vscode-high-contrast'] .settings-mark,
+[class*='vscode-high-contrast'] .provider-monogram,
+[class*='vscode-high-contrast'] .settings-pill,
+[class*='vscode-high-contrast'] .provider-picker-list,
 [class*='vscode-high-contrast'] button.settings-tab[aria-selected='true'] {
   border-color: var(--vscode-contrastBorder);
 }
 
-[class*='vscode-high-contrast'] .settings-card[data-status='attention'] {
+[class*='vscode-high-contrast'] .settings-card[data-status='attention'],
+[class*='vscode-high-contrast'] .attention-card,
+[class*='vscode-high-contrast'] .status-card[data-tone='warning'],
+[class*='vscode-high-contrast'] .settings-badge[data-tone='warning'] {
   background: transparent;
+}
+
+[class*='vscode-high-contrast'] .attention-card,
+[class*='vscode-high-contrast'] .status-card,
+[class*='vscode-high-contrast'] .settings-badge,
+[class*='vscode-high-contrast'] .settings-search-list {
+  border-color: var(--vscode-contrastBorder);
 }
 
 /* ---------- request dock: permissions and questions (issues #18, #44) ---------- */
