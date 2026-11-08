@@ -46,6 +46,25 @@ affiliated with opencode or with Microsoft.
   sessions and says so. Folders, pins and the archive are kept per workspace folder by VS Code (see
   [Known limitations](#known-limitations)).
 
+- **Quick start at the top of the container** (with `chatLocation` set to `editor`). A small box:
+  type and press Enter to open a NEW tab that starts the conversation with that tab's model, agent
+  and mods (Shift+Enter breaks the line; text only, no attachments). A status strip shows the
+  server, the model a new session uses, the mode of the next conversation (Manual or Auto) and any
+  MCP server in error; each pill is a button (logs or restart, settings, switch mode). **Running**
+  lists the root sessions that run now with their activity, a clock and Stop (which also stops
+  subagents running in the background); **Waiting for you** lists permissions and questions, and
+  Reply opens the conversation with the card focused.
+
+- **Changes and usage under the Sessions tree** (with `chatLocation` set to `editor`; both start
+  collapsed the first time; VS Code then remembers what you open or close). **Changes of the sessions** lists the sessions that have a tab, that changed files in
+  this window or that are in today's group; expand one to read its files with `+added −deleted`,
+  and click a file to open VS Code's diff of it, also for a session with no tab. **Usage (all
+  projects)** shows cost and tokens for today and the last 7 days by model. It counts EVERY
+  project in your opencode database, not only this folder, and it asks the server nothing while it
+  is collapsed or hidden. A model that reports no cost reads "cost not reported" (or "free" when the
+  catalog says so), and the total then says "≥". The usage route is experimental in opencode, so a
+  future opencode version may change it.
+
 - **Server status in the status bar.** An `OpenCode` item shows whether the server is starting,
   running (with the model a new session will use), not started or unavailable; click it to open the
   chat.
@@ -247,6 +266,8 @@ Command Palette (they act on the active editor); the two Explorer entries are no
 | **OpenCode: Unarchive** | Row menu of an archived session: brings it back to its folder or date group. Not in the Command Palette. |
 | **OpenCode: Filter Sessions…** | Shows only the sessions that are running, wait for your input or are open in a tab (the ones you tick are ORed). Only offered while `chatLocation` is not `sidebar`. Also a button in the Sessions title bar. |
 | **OpenCode: Clear Filters** | Turns the Sessions filters off. Offered only while a filter is on; also a button in the Sessions title bar. |
+| **OpenCode: Refresh Changes** | Button in the title bar of the **Changes of the sessions** view: reads again the files of the sessions you have expanded. Not in the Command Palette. |
+| **OpenCode: Refresh Usage** | Button in the title bar of the **Usage (all projects)** view: reads both periods again. Not in the Command Palette. |
 | **Add to OpenCode Chat** | Explorer right-click menu: attaches the selected files to the prompt. |
 | **Add to OpenCode Chat** | Editor right-click menu: attaches the selection (the whole file when nothing is selected). |
 | **Explain with OpenCode** | Editor right-click menu: sends "Explain what @file#lines does." with the selection (or the file) attached. |
