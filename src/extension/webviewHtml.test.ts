@@ -79,10 +79,14 @@ describe('buildWebviewHtml', () => {
     // issue #128 (E10): `settings` is what makes `index.tsx` mount the OpenCode Settings root, with
     // the same strict CSP as the chat. Fabricated input; a real VS Code is covered by test:visual
     // step 29 cell B7 (view, tab) and, for `settings`, by the `webview ready` of the panel in the
-    // `fake-server` suite.
+    // `fake-server` suite. E9-sidebar-home (#187): `home` mounts the Quick start root, same CSP;
+    // not yet seen in a real window (test:visual step 50 opens it).
     const view = buildWebviewHtml(options({ surface: 'view' }));
     const tab = buildWebviewHtml(options({ surface: 'tab' }));
     const settings = buildWebviewHtml(options({ surface: 'settings' }));
+    const home = buildWebviewHtml(options({ surface: 'home' }));
+    expect(home).toContain('<meta name="open-vs-code-surface" content="home">');
+    expect(cspOf(home)).toBe(cspOf(view));
 
     expect(view).toContain('<meta name="open-vs-code-surface" content="view">');
     expect(tab).toContain('<meta name="open-vs-code-surface" content="tab">');

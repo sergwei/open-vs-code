@@ -48,6 +48,7 @@ import {
   NEW_FOLDER_COMMAND_ID,
   NEW_SESSION_COMMAND_ID,
   NEW_SUBFOLDER_COMMAND_ID,
+  OPEN_CHANGED_FILE_COMMAND_ID,
   OPEN_SERVER_SETTINGS_COMMAND_ID,
   OPEN_SESSION_COMMAND_ID,
   PIN_SESSION_COMMAND_ID,
@@ -59,21 +60,29 @@ import {
   SETTINGS_PANEL_VIEW_TYPE,
   SHOW_REQUEST_COMMAND_ID,
   STOP_RESPONSE_COMMAND_ID,
+  HOME_VIEW_ID,
+  TEST_HOME_MESSAGE_COMMAND_ID,
+  TEST_HOME_STATE_COMMAND_ID,
   TEST_PROVIDER_ANSWERS_COMMAND_ID,
   TEST_SESSION_ANSWERS_COMMAND_ID,
   TEST_SESSION_ORGANIZATION_COMMAND_ID,
   TEST_SETTINGS_MESSAGE_COMMAND_ID,
   TEST_SETTINGS_STATE_COMMAND_ID,
+  TEST_SIDEBAR_VIEWS_COMMAND_ID,
   TOGGLE_WORK_MODE_COMMAND_ID,
   UNARCHIVE_SESSION_COMMAND_ID,
   UNPIN_SESSION_COMMAND_ID,
+  USAGE_VIEW_ID,
   VIEW_CONTAINER_ID,
 } from '../../src/extension/ids';
+import type { SidebarViewsText } from '../../src/extension/sidebarHome';
+import type { HomeHostToWebview, HomeState } from '../../src/shared/homeProtocol';
 import type { SettingsState } from '../../src/shared/settingsProtocol';
 import { PINNED_OPENCODE_VERSION } from '../../src/extension/opencodeServer';
 import { linkChangesWhenOpened } from '../../src/extension/providerAuth';
 import {
   chatTabs,
+  describeChatLayout,
   restoreChatLocation,
   setChatLocation,
   waitForChatTabs,
@@ -1433,6 +1442,368 @@ describe('fake server', function () {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await restoreChatLocation(await openLogCursor());
     }
+  });
+
+  /**
+   * The session of the Changes view (E9-sidebar-home, issue #187, phase 2), shared by the two cases
+   * below: an `EDIT_FILES` turn whose session the side bar then LEAVES, so no chat surface shows it.
+   */
+  let changesSessionID: string | undefined;
+
+  /**
+   * "Changes of the sessions" lists the files of a session that has NO tab and opens its native
+   * diff: an edit turn runs, the side bar moves on to a new session, the view's model lists the old
+   * one (a step with files touched it), expanding it reads four files with their totals, and
+   * opening one opens a diff tab whose left side is served by the provider through the Changes
+   * model (the tab-first source refuses with `DiffNotListed` because no pane shows the session).
+   *
+   * Protects: `controller.onFilesChanged` reaching the model, the lazy first read on expansion, the
+   * description `4 files · +a −d`, `OPEN_CHANGED_FILE_COMMAND_ID`, and the composite source of the
+   * content provider. The trees are read through the Test-mode command, i.e. the real data
+   * providers; what VS Code DRAWS is `test:visual` step 49. Provenance: the SYNTHETIC server.
+   */
+  it('lists the changed files of a session without a tab and opens its native diff', async function () {
+    const file = path.join(workspaceFolderPath(), 'src', 'sample.ts');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, SAMPLE_TS);
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    // The command goes through the webview and comes back as `session.new`: pause before the prompt.
+    await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
+    await sleep(SETTLE_MS);
+    const log = await openLogCursor();
+    await sendPrompt(log, 'EDIT_FILES: change a few files in a session that loses its tab');
+    const sessionID = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+    assert.ok(sessionID, `no session id in the log:\n${log.added()}`);
+    changesSessionID = sessionID;
+    await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+    // The side bar moves on: nothing shows `sessionID` any more.
+    await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
+    await sleep(SETTLE_MS);
+
+    // Listed, not read: no description and no rows until the row is expanded.
+    const closed = await vscode.commands.executeCommand<SidebarViewsText>(
+      TEST_SIDEBAR_VIEWS_COMMAND_ID,
+    );
+    const listed = closed.changes.find((session) => session.sessionID === sessionID);
+    assert.ok(listed, `the session is not listed: ${JSON.stringify(closed.changes)}`);
+    assert.strictEqual(listed.description, undefined);
+
+    const expanded = await vscode.commands.executeCommand<SidebarViewsText>(
+      TEST_SIDEBAR_VIEWS_COMMAND_ID,
+      { expand: sessionID },
+    );
+    const row = expanded.changes.find((session) => session.sessionID === sessionID);
+    assert.ok(row, 'the session vanished after expanding');
+    assert.deepStrictEqual(row.files.map((entry) => entry.label).sort(), [
+      'assets/logo.png',
+      'src/added.ts',
+      'src/removed.ts',
+      'src/sample.ts',
+    ]);
+    assert.match(row.description ?? '', /^4 files · \+\d+ −\d+$/, JSON.stringify(row));
+    const sample = row.files.find((entry) => entry.label === 'src/sample.ts');
+    assert.match(sample?.description ?? '', /^\+\d+ −\d+$/);
+
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    log.mark();
+    await vscode.commands.executeCommand(OPEN_CHANGED_FILE_COMMAND_ID, sessionID, 'src/sample.ts');
+    const deadline = Date.now() + 8_000;
+    let diff: vscode.TabInputTextDiff | undefined;
+    while (diff === undefined) {
+      const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+      if (input instanceof vscode.TabInputTextDiff) diff = input;
+      else {
+        assert.ok(Date.now() < deadline, `no diff tab opened; log:\n${log.added()}`);
+        await sleep(100);
+      }
+    }
+    assert.strictEqual(diff.original.scheme, SESSION_DIFF_SCHEME);
+    assert.strictEqual(diff.modified.scheme, 'file');
+    // The left side is served although no pane lists the session: through the Changes model.
+    assert.strictEqual(
+      (await vscode.workspace.openTextDocument(diff.original)).getText(),
+      '// Sample file for the visual test run.\nexport const value2 = 2;\n',
+    );
+    assert.ok(
+      log.added().includes(`changes view opened a diff for ${sessionID}`),
+      `log:\n${log.added()}`,
+    );
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  });
+
+  /**
+   * The Changes view opens a file only if its model listed it for that session: paths that escape
+   * the folder, one never listed, one for a session the view does not know and arguments of the
+   * wrong type are refused with a log line, and no tab opens. After the refusals the case waits and
+   * asserts nothing opened late. Provenance: the SYNTHETIC server; the session of the previous case.
+   */
+  it('refuses a path the Changes view did not list', async function () {
+    const sessionID = changesSessionID;
+    assert.ok(sessionID, 'the previous case (the session of the Changes view) did not run');
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    const log = await openLogCursor();
+    for (const target of ['../outside.txt', 'src/never-listed.ts', 'C:\\Windows\\win.ini']) {
+      await vscode.commands.executeCommand(OPEN_CHANGED_FILE_COMMAND_ID, sessionID, target);
+    }
+    await vscode.commands.executeCommand(
+      OPEN_CHANGED_FILE_COMMAND_ID,
+      'ses_not_listed_here',
+      'src/sample.ts',
+    );
+    await vscode.commands.executeCommand(OPEN_CHANGED_FILE_COMMAND_ID, 42, { not: 'a path' });
+    await sleep(SETTLE_MS);
+    const text = log.added();
+    assert.strictEqual(countOf(log, 'changes view refused a file: not listed'), 4, `log:\n${text}`);
+    assert.strictEqual(countOf(log, 'rejected: invalid arguments'), 1, `log:\n${text}`);
+    assert.ok(!text.includes('never-listed'), 'the log must not carry the refused path');
+    assert.ok(!text.includes('win.ini'), 'the log must not carry the refused path');
+    assert.strictEqual(vscode.window.tabGroups.all.flatMap((group) => group.tabs).length, 0);
+  });
+
+  /**
+   * "Usage (all projects)" reads nothing while it is not on screen and exactly two periods when it
+   * is shown (E9-sidebar-home, issue #187, phase 3). Order of the case: the suite has run many turns
+   * (the view's model has seen their ends) and the log holds NO `{"fake":"stats"` line; a COSTLY turn
+   * adds one; in `editor` mode, where the view is part of the container but never shown, still none;
+   * `openVsCode.usage.focus` shows it and the log gains the two requests of one load and the line
+   * `usage: read (today, week)`; the tree then says Today with a cost and the view says "All
+   * projects"; hiding the side bar and finishing another turn adds no request within 11.5 s (past the 10 s
+   * throttle of a visible view's refresh, so a view that still believed it was visible would fail).
+   *
+   * Protects: the gate on visibility (the server runs one SQL per 31-day window for each read),
+   * the call counter of the fixture (one stderr line per request, logged by the host), and the
+   * periods in local time. Provenance: the SYNTHETIC server and its own stats route (shape read in
+   * `types.d.ts` of 2.0.32); that a COLLAPSED view reports `visible` false to the extension host is
+   * what the "none while it is not shown" assertions rely on. The `.focus` command reveals a view
+   * the user can also reveal by clicking; a view collapsed inside an open container is the
+   * `test:visual` step 49 case.
+   */
+  it('shows the usage of all projects after a COSTLY turn, and reads nothing while it is not shown', async function () {
+    const needle = '{"fake":"stats"';
+    assert.strictEqual(
+      countOf(await openLogFromStart(), needle),
+      0,
+      'the fixture was asked for stats before the Usage view was ever shown',
+    );
+    // A turn that costs money, in the side bar (the baseline mode of the suite).
+    await vscode.commands.executeCommand(NEW_SESSION_COMMAND_ID);
+    await sleep(SETTLE_MS);
+    const turn = await openLogCursor();
+    await sendPrompt(turn, 'COSTLY: spend a little');
+    await turn.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+
+    const log = await openLogCursor();
+    try {
+      await setChatLocation('editor', log);
+      await waitForChatTabs(1);
+      await log.waitForQuiet();
+      log.mark();
+      await sleep(SETTLE_MS);
+      assert.strictEqual(countOf(log, needle), 0, `read while not shown; log:\n${log.added()}`);
+
+      await vscode.commands.executeCommand(`${USAGE_VIEW_ID}.focus`);
+      await log.waitFor('usage: read (today, week)', 15_000);
+      await sleep(SETTLE_MS);
+      assert.strictEqual(countOf(log, needle), 2, `log:\n${log.added()}`);
+
+      const shown = await vscode.commands.executeCommand<SidebarViewsText>(
+        TEST_SIDEBAR_VIEWS_COMMAND_ID,
+      );
+      assert.strictEqual(shown.usage.state, 'ready');
+      assert.strictEqual(shown.usage.description, 'All projects');
+      assert.deepStrictEqual(
+        shown.usage.periods.map((period) => period.label),
+        ['Today', 'Last 7 days'],
+      );
+      const today = shown.usage.periods[0];
+      assert.match(today?.description ?? '', /^(≥ )?\$0\.\d\d · /, JSON.stringify(today));
+      assert.ok(today?.tooltip?.includes('All projects'), 'the tooltip does not say all projects');
+      const costly = today?.models.find((model) => /^\$0\.\d\d · /.test(model.description ?? ''));
+      assert.ok(costly, `no model row with the COSTLY cost: ${JSON.stringify(today?.models)}`);
+
+      // Hidden side bar and one more finished turn: still no new request. The window is 11.5 s, past
+      // the 10 s throttle of `REFRESH_DEBOUNCE_MS`: a view that still believed it was visible would
+      // refresh at +10 s, so a shorter wait could not tell the two apart (negative window: absence
+      // cannot be waited for).
+      await vscode.commands.executeCommand('workbench.action.closeSidebar');
+      const again = await openLogCursor();
+      await sendPrompt(again, 'say hello with the Usage view hidden');
+      await again.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+      await sleep(11_500);
+      assert.strictEqual(countOf(again, needle), 0, `read while hidden; log:\n${again.added()}`);
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await restoreChatLocation(await openLogCursor());
+    }
+  });
+
+  /**
+   * The Quick start view's intentions (E9-sidebar-home, issue #187, phase 4), fed through the
+   * Test-mode command that runs the SAME guard and controller as the webview (the test API cannot
+   * type into an iframe; `test:visual` step 50 does it for real). Each case starts from the
+   * `editor` location, where the view exists.
+   */
+  describe('the Quick start home view', function () {
+    /** Sends a raw home message and returns the `home.result` the controller answered. */
+    async function homeSend(raw: unknown): Promise<HomeHostToWebview | undefined> {
+      return vscode.commands.executeCommand<HomeHostToWebview | undefined>(
+        TEST_HOME_MESSAGE_COMMAND_ID,
+        raw,
+      );
+    }
+
+    /** The state the home view would get now. */
+    async function homeState(): Promise<HomeState> {
+      return vscode.commands.executeCommand<HomeState>(TEST_HOME_STATE_COMMAND_ID);
+    }
+
+    /**
+     * Starts a conversation in a new tab: the text is composed with `send: true` and the first send
+     * creates the session. Protects: `home.start` opening exactly ONE tab (not two for the double
+     * Enter), the model and agent of the tab applying, and the prompt reaching the server.
+     * Provenance: the SYNTHETIC server.
+     */
+    it('starts a conversation from the home view: one tab, a new session, prompt accepted', async function () {
+      const log = await openLogCursor();
+      try {
+        await setChatLocation('editor', log);
+        await log.waitForQuiet();
+        const before = chatTabs().length;
+        log.mark();
+        const result = await homeSend({
+          type: 'home.start',
+          requestId: 'r1',
+          text: 'say hello from the home view',
+        });
+        assert.deepStrictEqual(result, { type: 'home.result', requestId: 'r1', ok: true });
+        await log.waitFor('home composed a prompt', 10_000);
+        await log.waitFor('prompt accepted for ses_', TURN_WAIT_MS);
+        await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+        assert.strictEqual(chatTabs().length, before + 1, describeChatLayout());
+        assert.strictEqual(countOf(log, 'prompt accepted for'), 1, `log:\n${log.added()}`);
+        assert.strictEqual((await homeState()).running.length, 0);
+      } finally {
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        await restoreChatLocation(await openLogCursor());
+      }
+    });
+
+    /**
+     * Stop from the home view: a SLOW turn started from the box runs for about 5 s, the view lists its
+     * ROOT as running, a forged id is refused (no interrupt, a log line, a failed result) and the real
+     * one is interrupted with the origin suffix of the side bar. Protects the host-side revalidation
+     * of `home.stop` and the shared stop primitive. Provenance: the SYNTHETIC server (no real
+     * background subagent: unit only).
+     */
+    it('stops a SLOW run from the home view', async function () {
+      const log = await openLogCursor();
+      try {
+        await setChatLocation('editor', log);
+        await log.waitForQuiet();
+        log.mark();
+        const started = await homeSend({
+          type: 'home.start',
+          requestId: 'r2',
+          text: 'SLOW: count to a hundred from the home view',
+        });
+        assert.strictEqual(started?.type, 'home.result');
+        const accepted = await matchInLog(
+          log,
+          /prompt accepted for (ses_\S+)/,
+          TURN_WAIT_MS,
+          'the SLOW prompt was never accepted',
+        );
+        const sessionID = accepted[1];
+        assert.ok(sessionID, 'no session id');
+        const deadline = Date.now() + 10_000;
+        while (!(await homeState()).running.some((row) => row.sessionID === sessionID)) {
+          assert.ok(Date.now() < deadline, `not listed as running; log:\n${log.added()}`);
+          await sleep(100);
+        }
+
+        const forged = await homeSend({
+          type: 'home.stop',
+          requestId: 'r3',
+          sessionID: 'ses_nope',
+        });
+        assert.deepStrictEqual(forged?.type === 'home.result' && forged.ok, false);
+        assert.ok(log.added().includes('home refused to stop a session that is not running'));
+        log.assertAbsent('abort requested for ses_nope');
+
+        const stopped = await homeSend({ type: 'home.stop', requestId: 'r4', sessionID });
+        assert.deepStrictEqual(stopped, { type: 'home.result', requestId: 'r4', ok: true });
+        await log.waitFor(
+          `abort requested for ${sessionID} (interrupted: true) from the side bar`,
+          10_000,
+        );
+        await log.waitFor(`turn finished: interrupted for ${sessionID}`, 15_000);
+        log.assertAbsent('turn finished: succeeded');
+      } finally {
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        await restoreChatLocation(await openLogCursor());
+      }
+    });
+
+    /**
+     * The webview guard drops what is not ours: a message with a password, a blank start and an
+     * unknown type produce no result and no tab. Provenance: fabricated messages through the same
+     * guard the webview's messages use.
+     */
+    it('refuses a forged home message without opening a tab', async function () {
+      const log = await openLogCursor();
+      try {
+        await setChatLocation('editor', log);
+        await log.waitForQuiet();
+        const before = chatTabs().length;
+        log.mark();
+        assert.strictEqual(
+          await homeSend({ type: 'home.start', requestId: 'x', text: 'hi', password: 'p' }),
+          undefined,
+        );
+        assert.strictEqual(
+          await homeSend({ type: 'home.start', requestId: 'y', text: '  ' }),
+          undefined,
+        );
+        assert.strictEqual(await homeSend({ type: 'home.nope' }), undefined);
+        await sleep(SETTLE_MS);
+        assert.strictEqual(chatTabs().length, before, describeChatLayout());
+        log.assertAbsent('home composed a prompt');
+        assert.strictEqual(countOf(log, 'rejected a message from the home webview'), 3);
+      } finally {
+        await restoreChatLocation(await openLogCursor());
+      }
+    });
+
+    /**
+     * The home view exists only while the chat is NOT in the side bar: in `sidebar` mode focusing the
+     * chat resolves no home document, and in `editor` mode focusing the home view resolves one whose
+     * document says ready (the `home view resolved` line is not asserted in editor mode: it can
+     * precede the mark, see the comment in the body). Provenance: the real view and the real
+     * bundle, SYNTHETIC server.
+     */
+    it('is not resolved in sidebar mode and resolves with a ready document in editor mode', async function () {
+      const log = await openLogCursor();
+      try {
+        await restoreChatLocation(log); // baseline: sidebar
+        await vscode.commands.executeCommand(`workbench.view.extension.${VIEW_CONTAINER_ID}`);
+        log.mark();
+        await sleep(SETTLE_MS);
+        log.assertAbsent('home view resolved');
+        await setChatLocation('editor', log);
+        log.mark();
+        await vscode.commands.executeCommand(`${HOME_VIEW_ID}.focus`);
+        // Only `home webview ready` is awaited: when the side bar container is already open, the view
+        // resolves as soon as the setting flips, BEFORE the mark above, so its `home view resolved`
+        // line can be missing from `added()` (the full `--label fake-server` run of 08/11/2026 failed
+        // on that, the case alone passes). The ready line can only follow a resolution.
+        await log.waitFor('home webview ready', 15_000);
+        log.assertAbsent('rejected a message from the home webview');
+        log.assertAbsent('Webview bundle file missing');
+      } finally {
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        await restoreChatLocation(await openLogCursor());
+      }
+    });
   });
 
   /**

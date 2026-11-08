@@ -672,6 +672,52 @@ describe('real opencode', function () {
     });
 
     /**
+     * Protects the contract of the Usage view (E9-sidebar-home, issue #187, decision P3=2): the
+     * experimental `session.stats` answers the `SessionStatsInfo` shape for a window with NO
+     * `project` (so the whole opencode database, every project) and `tools: 'none'`, and an invalid
+     * `timezone` is refused with `InvalidRequestError`. Sends no prompt. The numbers are not
+     * asserted (the database is isolated by `XDG_*` but a session of an earlier case may exist);
+     * only that the fields the view reads are there with their types, that the window comes back
+     * as asked and that the model rows, if any, carry the fields the view prints.
+     * VERIFIED against a real server (Windows 11, 07/11/2026, `npm run test:integration -- --label
+     * real-opencode`): this case passed, with the 2.0.32 client against an opencode **2.2.5**
+     * executable (the one installed here, not the pinned 2.0.32: the suite's version cases failed
+     * for that reason on the same run). So the shape and the timezone refusal are seen on 2.2.5;
+     * on 2.0.32 itself they are only read in `types.d.ts` and `core/src/session/stats.ts`
+     * @843a6c51 (UNVERIFIED there). Never asserted: the numbers.
+     */
+    it('reads the usage of a window across all projects and refuses an invalid timezone', async function () {
+      const to = Date.now();
+      const from = to - 24 * 60 * 60 * 1000;
+      const stats = await own.client.session.stats({ from, to, timezone: 'UTC', tools: 'none' });
+      assert.strictEqual(stats.range.from, from);
+      assert.strictEqual(stats.range.to, to);
+      for (const key of ['sessions', 'subagents', 'prompts', 'steps', 'cost'] as const) {
+        assert.strictEqual(typeof stats[key], 'number', `${key} is not a number`);
+      }
+      for (const key of ['input', 'output', 'reasoning'] as const) {
+        assert.strictEqual(typeof stats.tokens[key], 'number', `tokens.${key} is not a number`);
+      }
+      assert.strictEqual(typeof stats.tokens.cache.read, 'number');
+      assert.strictEqual(typeof stats.tokens.cache.write, 'number');
+      assert.deepStrictEqual(stats.tools, { mode: 'none' });
+      assert.ok(Array.isArray(stats.models), 'models is not a list');
+      for (const model of stats.models) {
+        assert.strictEqual(typeof model.model.id, 'string');
+        assert.strictEqual(typeof model.model.providerID, 'string');
+        assert.strictEqual(typeof model.steps, 'number');
+        assert.strictEqual(typeof model.cost, 'number');
+      }
+      await assert.rejects(
+        own.client.session.stats({ from, to, timezone: 'Not/AZone' }),
+        (error: unknown) => {
+          assert.strictEqual((error as { _tag?: string })._tag, 'InvalidRequestError');
+          return true;
+        },
+      );
+    });
+
+    /**
      * The revert contract (issue #32) WITHOUT a model: `session.shell` runs a command with no model
      * and its projection leaves a message of type `shell` in the history, which is enough to stage,
      * clear and commit a revert and see the three events. Checks: an invented message id is

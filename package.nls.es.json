@@ -3,6 +3,9 @@
   "capabilities.untrustedWorkspaces.description": "opencode puede ejecutar comandos y herramientas definidos por el proyecto, como los comandos de barra con !`cmd` en .opencode/command, con los permisos de su usuario. Confíe en la carpeta antes de usar esta extensión.",
   "view.chat.name": "Chat",
   "view.sessions.name": "Sesiones",
+  "view.home.name": "Inicio rápido",
+  "view.sessionChanges.name": "Cambios de las sesiones",
+  "view.usage.name": "Uso (todos los proyectos)",
   "viewsWelcome.sessions.ready": "Todavía no hay sesiones en esta carpeta.\n[Nueva sesión](command:openVsCode.newSession)\n[Abrir configuración de la extensión](command:openVsCode.openSettings)",
   "viewsWelcome.sessions.offline": "OpenCode no se está ejecutando en esta carpeta.\n[Abrir chat](command:openVsCode.openChat)\n[Mostrar registros](command:openVsCode.showLogs)",
   "viewsWelcome.sessions.noFolder": "Abra una carpeta para ver sus sesiones de OpenCode.\n[Abrir carpeta](command:workbench.action.files.openFolder)",
@@ -52,5 +55,7 @@
   "command.archiveSession.title": "Archivar",
   "command.unarchiveSession.title": "Desarchivar",
   "command.filterSessions.title": "Filtrar sesiones…",
-  "command.clearFilters.title": "Borrar filtros"
+  "command.clearFilters.title": "Borrar filtros",
+  "command.refreshChanges.title": "Actualizar cambios",
+  "command.refreshUsage.title": "Actualizar uso"
 }

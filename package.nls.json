@@ -3,6 +3,9 @@
   "capabilities.untrustedWorkspaces.description": "opencode can run commands and tools defined by the project, such as slash commands with !`cmd` in .opencode/command, with the permissions of your user. Trust the folder before using this extension.",
   "view.chat.name": "Chat",
   "view.sessions.name": "Sessions",
+  "view.home.name": "Quick start",
+  "view.sessionChanges.name": "Changes of the sessions",
+  "view.usage.name": "Usage (all projects)",
   "viewsWelcome.sessions.ready": "No sessions in this folder yet.\n[New Session](command:openVsCode.newSession)\n[Open Extension Settings](command:openVsCode.openSettings)",
   "viewsWelcome.sessions.offline": "OpenCode is not running for this folder.\n[Open Chat](command:openVsCode.openChat)\n[Show Logs](command:openVsCode.showLogs)",
   "viewsWelcome.sessions.noFolder": "Open a folder to see its OpenCode sessions.\n[Open Folder](command:workbench.action.files.openFolder)",
@@ -52,5 +55,7 @@
   "command.archiveSession.title": "Archive",
   "command.unarchiveSession.title": "Unarchive",
   "command.filterSessions.title": "Filter Sessions…",
-  "command.clearFilters.title": "Clear Filters"
+  "command.clearFilters.title": "Clear Filters",
+  "command.refreshChanges.title": "Refresh Changes",
+  "command.refreshUsage.title": "Refresh Usage"
 }

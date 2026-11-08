@@ -74,6 +74,8 @@ import type {
   SessionRevertStageInput,
   SessionsResponse,
   SessionSwitchAgentInput,
+  SessionStatsInfo,
+  SessionStatsInput,
   SessionSwitchModelInput,
   SessionUpdateInput,
   V2Event,
@@ -196,6 +198,23 @@ export interface ChatApi {
      * No turn that edited files was observed.
      */
     diff(input: SessionDiffInput): Promise<FileDiffInfo[]>;
+    /**
+     * `GET /api/experimental/session/stats` (issue #187, E9): cost, tokens and per-model usage of
+     * a time window. The answer is the bare `SessionStatsInfo` (the client unwraps `{data}`,
+     * `client.d.ts` of 2.0.32). `from` and `to` are epoch ms. Decision P3=2 of Sergio (07/11/2026):
+     * the host NEVER passes `project`, so the answer covers EVERY project of the opencode database,
+     * and the view that shows it says so. `tools: 'none'` skips the per-tool breakdown (it is one
+     * more `json_each` on the server and nothing shows it); `timezone` only groups `activity`,
+     * which is not shown, and an invalid one is a 400 `InvalidRequestError`. The route is
+     * EXPERIMENTAL: it may change or vanish in another version. `cost` is `sum(cost ?? 0)`, so a
+     * provider that reports no cost reads as 0. READ in `types.d.ts` and the client chunk of 2.0.32
+     * and in `core/src/session/stats.ts` @843a6c51. VERIFIED against a real server (Windows 11,
+     * 07/11/2026): the opt-in case "reads the usage of a window across all projects and refuses an
+     * invalid timezone" of `realOpencode.test.ts` passed, but against an opencode 2.2.5 executable,
+     * not the pinned 2.0.32 (UNVERIFIED on 2.0.32 itself). The synthetic fixture answers the same
+     * shape.
+     */
+    stats(input?: SessionStatsInput): Promise<SessionStatsInfo>;
     /**
      * The revert of a session (issue #32). `stage` is `POST /api/session/:id/revert/stage` with
      * `{ messageID, files? }`: it moves the history boundary AND, unless `files: false`, puts back

@@ -47,7 +47,7 @@ export interface SessionsViewOptions {
   state(): SessionsState;
   /** The name of the served folder when the window has more than one folder, else `undefined`. */
   folderName(): string | undefined;
-  /** How many changed files the tab of a session lists, for its tooltip; `undefined` if unknown. */
+  /** How many changed files the tab of a session lists, for its tooltip (the row asks the tree); `undefined` if unknown. */
   changedFiles?(sessionID: string): number | undefined;
   /** Applies a drop; called by the drag-and-drop controller, never throws. */
   drop?(drag: SessionDrag, target: SessionDropTarget): void;

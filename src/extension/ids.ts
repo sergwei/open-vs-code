@@ -25,6 +25,69 @@ export const CHAT_VIEW_ID = 'openVsCode.chat';
 export const SESSIONS_VIEW_ID = 'openVsCode.sessions';
 
 /**
+ * Quick start webview view above the Sessions tree (E9-sidebar-home, issue #187,
+ * `contributes.views.openVsCode[].id`). Shown with the Sessions view, i.e. while
+ * `openVsCode.chatLocation` is not `sidebar`.
+ */
+export const HOME_VIEW_ID = 'openVsCode.home';
+
+/**
+ * Native "Changes of the sessions" tree below the Sessions tree (E9-sidebar-home, issue #187):
+ * the files the agent changed, per session, each opening VS Code's own diff. Collapsed the first
+ * time it is shown.
+ */
+export const CHANGES_VIEW_ID = 'openVsCode.sessionChanges';
+
+/**
+ * Native "Usage (all projects)" tree (E9-sidebar-home, issue #187, decision P3=2): cost and tokens
+ * of today and of the last 7 days over the WHOLE opencode database. Collapsed the first time it is
+ * shown; it reads nothing from the server while collapsed or hidden.
+ */
+export const USAGE_VIEW_ID = 'openVsCode.usage';
+
+/**
+ * Internal command behind the `command` of every file row of the Changes view (E9-sidebar-home):
+ * opens the native diff of one changed file. Arguments: the session id and the listed path.
+ * Registered always and NOT contributed (it takes arguments), like {@link OPEN_SESSION_COMMAND_ID}.
+ */
+export const OPEN_CHANGED_FILE_COMMAND_ID = 'openVsCode.openChangedFile';
+
+/**
+ * Command id of the refresh button of the Changes view title (contributed, hidden from the palette
+ * with `when: false`; E9-sidebar-home): reloads the files of the sessions already expanded.
+ */
+export const REFRESH_CHANGES_COMMAND_ID = 'openVsCode.refreshChanges';
+
+/**
+ * Command id of the refresh button of the Usage view title (contributed, hidden from the palette
+ * with `when: false`; E9-sidebar-home): reads both periods again.
+ */
+export const REFRESH_USAGE_COMMAND_ID = 'openVsCode.refreshUsage';
+
+/**
+ * Test-mode command (E9-sidebar-home): answers what the Changes and Usage trees would draw
+ * (`{ changes, usage }`, text only), by calling their real data providers. Registered only under
+ * `ExtensionMode.Test`, never contributed; the fake-server suite reads the views through it
+ * because the integration API cannot read a tree. An optional argument `{ expand: sessionID }`
+ * expands that session of the Changes tree first.
+ */
+export const TEST_SIDEBAR_VIEWS_COMMAND_ID = 'openVsCode.test.sidebarViews';
+
+/**
+ * Test-mode command (E9-sidebar-home, Quick start): hands a raw message to the home controller as if
+ * the home webview had sent it, through the SAME guard (`isHomeWebviewToHost`) and revalidation, and
+ * resolves with the `home.result` it posted (or `undefined`). The test API cannot reach into a
+ * webview. Registered only under `ExtensionMode.Test`, never contributed.
+ */
+export const TEST_HOME_MESSAGE_COMMAND_ID = 'openVsCode.test.homeMessage';
+
+/**
+ * Test-mode command: the `home.state` the controller would send now, as plain JSON. Registered only
+ * under `ExtensionMode.Test`, never contributed.
+ */
+export const TEST_HOME_STATE_COMMAND_ID = 'openVsCode.test.homeState';
+
+/**
  * `viewType` of the editor tabs that show the chat (issue #77). Not contributed: a
  * `WebviewPanel` needs no entry in `contributes`. VS Code may prefix the type it reports in
  * `TabInputWebview.viewType` (HYPOTHESIS), so tests compare with `endsWith`.
