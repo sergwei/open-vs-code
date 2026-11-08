@@ -13381,13 +13381,10 @@ try {
 
   /** What the settings document shows of its layout: column, overflow and `style` attributes. */
   function settingsLayout(doc) {
-    const column = doc.querySelector('.settings-column')?.getBoundingClientRect();
     const root = doc.documentElement;
     return {
       docWidth: root.clientWidth,
       overflow: root.scrollWidth - root.clientWidth,
-      columnWidth: column ? column.width : null,
-      columnLeft: column ? column.left : null,
       // Same rule as the other steps: an EMPTY `style=""` (left behind when a script clears it) is
       // not a style; any value is.
       styled: [...doc.querySelectorAll('#root, #root *, body')].filter(
@@ -13396,28 +13393,33 @@ try {
     };
   }
 
-  /** The Providers tab as drawn: headings, connected and addable ids, their lines, the search box. */
+  /**
+   * The Providers section as drawn (issue #186, phase 1.3): its headings, the ids of the compact
+   * connected rows, their lines and pill, the monogram, whether a row has a Disconnect button, the
+   * "+ Add provider" button, and whether the picker is closed. Texts are read from the rows, never
+   * from the settings of the host.
+   */
   function providersShape(doc) {
     const text = (element) => (element?.textContent ?? '').replace(/\s+/g, ' ').trim();
-    const lists = [...doc.querySelectorAll('.settings-providers > ul')];
-    const idsOf = (list) =>
-      [...(list?.querySelectorAll('[data-provider]') ?? [])].map((li) => li.dataset.provider);
-    const card = (id) => doc.querySelector(`[data-provider="${id}"]`);
-    const search = doc.querySelector('input[type="search"]');
-    const removeOf = (id) =>
-      [...(card(id)?.querySelectorAll('button') ?? [])].some((button) =>
-        (button.getAttribute('aria-label') ?? '').startsWith('Remove'),
+    const panel = doc.querySelector('#settings-panel-providers');
+    const list = panel?.querySelector('.settings-providers > ul');
+    const rows = [...(list?.querySelectorAll('li.provider-row') ?? [])];
+    const row = (id) => rows.find((li) => li.dataset.provider === id);
+    const disconnectOf = (id) =>
+      [...(row(id)?.querySelectorAll('button') ?? [])].some((button) =>
+        (button.getAttribute('aria-label') ?? '').startsWith('Disconnect'),
       );
     return {
-      headings: [...doc.querySelectorAll('h2.settings-heading')].map(text),
-      connected: idsOf(lists[0]),
-      addable: idsOf(lists[1]),
-      anthropic: [...(card('anthropic')?.querySelectorAll('.step-line') ?? [])].map(text),
-      vertex: [...(card('google-vertex')?.querySelectorAll('.step-line') ?? [])].map(text),
-      anthropicRemove: removeOf('anthropic'),
-      vertexRemove: removeOf('google-vertex'),
-      placeholder: search?.getAttribute('placeholder') ?? null,
-      searchLabel: search?.getAttribute('aria-label') ?? null,
+      headings: [...(panel?.querySelectorAll('h2.settings-heading') ?? [])].map(text),
+      connected: rows.map((li) => li.dataset.provider),
+      anthropic: [...(row('anthropic')?.querySelectorAll('.step-line') ?? [])].map(text),
+      vertex: [...(row('google-vertex')?.querySelectorAll('.step-line') ?? [])].map(text),
+      pills: rows.map((li) => text(li.querySelector('.settings-pill'))),
+      monograms: rows.map((li) => text(li.querySelector('.provider-monogram'))),
+      anthropicDisconnect: disconnectOf('anthropic'),
+      vertexDisconnect: disconnectOf('google-vertex'),
+      addButton: text(panel?.querySelector('button.add-provider-button')),
+      pickerOpen: panel?.querySelector('[role="listbox"]') != null,
       passwordInputs: doc.querySelectorAll('input[type="password"]').length,
     };
   }
@@ -13444,15 +13446,18 @@ try {
     ...SETTINGS_BASE,
     title: '.settings-title',
     subtitle: '.settings-subtitle',
-    heading: '.settings-heading',
+    heading: '#settings-panel-providers .settings-heading',
     cardTitle: '[data-provider="anthropic"] .step-title',
-    cardLine: '[data-provider="anthropic"] .step-line',
-    cardStatus: '.settings-providers .settings-toggle .step-status',
+    cardLine: '[data-provider="anthropic"] .provider-connection .step-line',
+    vertexLine: '[data-provider="google-vertex"] .provider-connection .step-line',
+    pill: '[data-provider="anthropic"] .settings-pill',
+    monogram: '[data-provider="anthropic"] .provider-monogram',
     tabOn: 'button.settings-tab[aria-selected="true"]',
     tabOff: 'button.settings-tab[aria-selected="false"]',
-    search: 'input[type="search"]',
-    refresh: '.settings-toolbar > button.secondary',
-    remove: '[data-provider="anthropic"] button.secondary',
+    search: '.settings-search-input',
+    refresh: '.settings-header-tools > button.secondary',
+    disconnect: '[data-provider="anthropic"] button.secondary',
+    addButton: '#settings-panel-providers button.add-provider-button',
     footer: '.settings-footer .link-button',
   };
   const MCP_TEXT = {
@@ -13499,12 +13504,25 @@ try {
         'OpenCode: Open Settings… opens ONE tab titled OpenCode Settings whose document says surface=settings',
       );
       const providersReady = await settingsWait(
-        (doc) => doc.querySelectorAll('.settings-providers [data-provider]').length >= 3,
+        (doc) => doc.querySelectorAll('.settings-providers li.provider-row').length >= 2,
         null,
         20_000,
       );
-      check(providersReady === true, 'the Providers tab lists the providers of the fixture');
+      check(
+        providersReady === true,
+        'the Providers section lists the connected providers of the fixture',
+      );
       assertNoSettingsErrors('step 35 start');
+      // A first visit opens General: the Providers cells below need its panel on screen.
+      check(
+        await settingsClick('#settings-tab-providers'),
+        'the Providers section is pressed with the mouse',
+      );
+      await settingsWait(
+        (doc) => doc.querySelector('#settings-panel-providers')?.hidden === false,
+        null,
+        5_000,
+      );
 
       // MCP: the list fills ~300 ms after the fixture starts and the tab follows the events.
       check(
@@ -13554,40 +13572,26 @@ try {
                 await settingsWeb.inDoc(measureText, PROVIDERS_TEXT),
                 Object.keys(PROVIDERS_TEXT).filter((name) => name !== '__base'),
               );
-              const addCount = shape.addable.length;
               check(
-                shape.headings.join('|') === 'Connected|Add a provider' &&
-                  shape.connected.includes('anthropic') &&
-                  shape.connected.includes('google-vertex') &&
-                  !shape.connected.includes('azure') &&
-                  shape.anthropic.includes('API key · saved by opencode for all projects') &&
-                  shape.vertex.includes('From GOOGLE_APPLICATION_CREDENTIALS') &&
-                  shape.anthropicRemove &&
-                  !shape.vertexRemove &&
-                  shape.placeholder === `Search ${String(addCount)} providers…` &&
-                  shape.searchLabel === 'Search providers' &&
+                shape.headings.join('|') === 'Connected' &&
+                  shape.connected.join(',') === 'anthropic,google-vertex' &&
+                  shape.anthropic.some((line) => line.startsWith('API key')) &&
+                  shape.vertex.some((line) =>
+                    line.startsWith('Managed by GOOGLE_APPLICATION_CREDENTIALS'),
+                  ) &&
+                  shape.pills.every((pill) => pill === 'Connected') &&
+                  shape.monograms.join(',') === 'A,G' &&
+                  shape.anthropicDisconnect &&
+                  !shape.vertexDisconnect &&
+                  shape.addButton === '+ Add provider' &&
+                  !shape.pickerOpen &&
                   shape.passwordInputs === 0 &&
-                  addCount >= 4 &&
                   layout.overflow <= 0 &&
                   layout.styled === 0 &&
                   contrast.ok,
-                `V1 ${label} px, ${themeName}: Connected lists Anthropic (API key, Remove) and Google Vertex (From GOOGLE_APPLICATION_CREDENTIALS, no Remove), Add a provider has a search box and ${String(addCount)} providers, no password input, no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+                `V1 ${label} px, ${themeName}: Connected lists Anthropic (API key, Disconnect) and Google Vertex (Managed by GOOGLE_APPLICATION_CREDENTIALS, no button), each with its monogram and Connected pill, "+ Add provider" with its picker closed, no password input, no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
               );
-              if (theme === DARK) {
-                check(
-                  target >= 600
-                    ? Math.abs((layout.columnWidth ?? 0) - 380) <= 1 &&
-                        Math.abs(
-                          (layout.columnLeft ?? 0) -
-                            (layout.docWidth - (layout.columnWidth ?? 0)) / 2,
-                        ) <= 12
-                    : (layout.columnLeft ?? 99) <= 24 &&
-                        layout.docWidth - ((layout.columnLeft ?? 0) + (layout.columnWidth ?? 0)) <=
-                          24,
-                  `V3 ${label} px: the column is ${String(Math.round(layout.columnWidth ?? 0))} px wide at x ${String(Math.round(layout.columnLeft ?? 0))} in a ${String(layout.docWidth)} px document (${target >= 600 ? 'centred, 380 px' : 'the whole width less 24 px of padding at most on each side'})`,
-                );
-                await shot(`35a-providers-${label}`);
-              }
+              if (theme === DARK) await shot(`35a-providers-${label}`);
             } else {
               const servers = await settingsWeb.inDoc(mcpShape);
               const contrast = contrastVerdict(
@@ -13637,34 +13641,52 @@ try {
       }
       assertNoSettingsErrors('step 35 widths');
 
-      // The search box filters the addable list (real keyboard, 620 px, dark).
+      // The picker of "+ Add provider" filters its list (real mouse and keyboard, 620 px, dark).
       await fitSettingsTab(620);
-      check(await settingsClick('input[type="search"]'), 'the search box is clicked');
+      check(
+        await settingsClick('#settings-panel-providers button.add-provider-button'),
+        'the "+ Add provider" button is clicked',
+      );
+      const pickerUp = await settingsWait(
+        (doc) => doc.querySelector('#settings-panel-providers [role="listbox"]') !== null,
+        null,
+        5_000,
+      );
+      const pickerCount = await settingsWeb.inDoc(
+        (doc) => doc.querySelectorAll('#settings-panel-providers [role="option"]').length,
+      );
       await page.keyboard.type('azu');
       const filtered = await settingsWait(
-        (doc) =>
-          [...doc.querySelectorAll('.settings-providers > ul:last-of-type [data-provider]')]
-            .length === 1,
+        (doc) => doc.querySelectorAll('#settings-panel-providers [role="option"]').length === 1,
         null,
         5_000,
       );
       const filteredIds = await settingsWeb.inDoc((doc) =>
-        [...doc.querySelectorAll('.settings-providers > ul:last-of-type [data-provider]')].map(
-          (li) => li.dataset.provider,
+        [...doc.querySelectorAll('#settings-panel-providers [role="option"]')].map(
+          (li) => li.dataset.option,
         ),
       );
-      await shot('35c-search');
+      await shot('35c-picker');
       check(
-        filtered === true && filteredIds.join(',') === 'azure',
-        `V1 typing "azu" in the search box leaves one provider (${JSON.stringify(filteredIds)})`,
+        pickerUp === true &&
+          pickerCount >= 4 &&
+          filtered === true &&
+          filteredIds.join(',') === 'azure',
+        `V1 the picker lists ${String(pickerCount)} providers and typing "azu" in it leaves one (${JSON.stringify(filteredIds)})`,
       );
       await page.keyboard.press('ControlOrMeta+A');
       await page.keyboard.press('Backspace');
-      await settingsWait(
+      await page.keyboard.press('Escape');
+      const pickerClosed = await settingsWait(
         (doc) =>
-          doc.querySelectorAll('.settings-providers > ul:last-of-type [data-provider]').length > 1,
+          doc.querySelector('#settings-panel-providers [role="listbox"]') === null &&
+          doc.activeElement?.classList.contains('add-provider-button') === true,
         null,
         5_000,
+      );
+      check(
+        pickerClosed === true,
+        'V1 Escape closes the picker and the focus goes back to "+ Add provider"',
       );
 
       // --- V4: MCPFLIP in the stream updates the open tab, no reload --------------------------
@@ -13730,7 +13752,7 @@ try {
             buttons: [...doc.querySelectorAll('.connection-card button')].map((b) =>
               b.textContent.trim(),
             ),
-            tabs: doc.querySelectorAll('.settings-tabs').length,
+            tabs: doc.querySelectorAll('.settings-nav, .status-cards, .settings-search').length,
             providers: doc.querySelectorAll('[data-provider]').length,
             overflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
             styled: [...doc.querySelectorAll('#root, #root *, body')].filter(
@@ -13771,7 +13793,7 @@ try {
       const recovered = await settingsWait(
         (doc) =>
           doc.querySelector('.connection-card') === null &&
-          doc.querySelectorAll('.settings-providers [data-provider]').length >= 3,
+          doc.querySelectorAll('.settings-providers li.provider-row').length >= 2,
         null,
         60_000,
       );
@@ -13852,7 +13874,7 @@ try {
             fields: [...(card?.querySelectorAll('[data-field]') ?? [])].map((f) => f.dataset.field),
             removeLabels: [...(card?.querySelectorAll('button') ?? [])]
               .map((b) => b.getAttribute('aria-label') ?? '')
-              .filter((label) => label.startsWith('Remove')),
+              .filter((label) => label.startsWith('Disconnect')),
             focusedCard: card !== null && doc.activeElement === card,
           };
         }, id);
@@ -13860,11 +13882,33 @@ try {
         settingsWeb.inDoc(
           (doc) => doc.querySelector('.visually-hidden[role="status"]')?.textContent ?? '',
         );
+      // Opens the form of a provider the way a user does since issue #186: "+ Add provider", the
+      // provider typed into the picker (the text left from a previous pick is replaced), and its
+      // option pressed with the real mouse. A card that is already open is left as it is.
       const expand = async (id) => {
         if (!(await cardState(id)).expanded) {
           check(
-            await settingsClick(`[data-provider="${id}"] button.settings-toggle`),
-            `${id}: the card is opened with the mouse`,
+            await settingsClick('#settings-panel-providers button.add-provider-button'),
+            `${id}: "+ Add provider" is pressed with the mouse`,
+          );
+          await settingsWait(
+            (doc) => doc.querySelector('#settings-panel-providers [role="listbox"]') !== null,
+            null,
+            5_000,
+          );
+          await page.keyboard.press('ControlOrMeta+A');
+          await page.keyboard.type(id);
+          await settingsWait(
+            (doc, providerId) =>
+              doc.querySelector(
+                `#settings-panel-providers [role="option"][data-option="${providerId}"]`,
+              ) !== null,
+            id,
+            5_000,
+          );
+          check(
+            await settingsClick(`#settings-panel-providers [role="option"][data-option="${id}"]`),
+            `${id}: its option in the picker is opened with the mouse`,
           );
           await settingsWait(
             (doc, providerId) =>
@@ -13912,10 +13956,24 @@ try {
         await openChat(30_000);
         await waitConnected();
         await openSettingsTab();
+        // The toast "All installed extensions are temporarily disabled" of the launch sits over the
+        // lower right of the editor: with the longer Providers section the picker's options are
+        // under it and a real click on one never reaches the webview (step 36, 07/11/2026: no
+        // mousedown, mouseup or click in the document, only the input losing the focus).
+        await command('Notifications: Clear All Notifications');
         await settingsWait(
-          (doc) => doc.querySelectorAll('.settings-providers [data-provider]').length >= 3,
+          (doc) => doc.querySelectorAll('.settings-providers li.provider-row').length >= 2,
           null,
           20_000,
+        );
+        check(
+          await settingsClick('#settings-tab-providers'),
+          'the Providers section is pressed with the mouse',
+        );
+        await settingsWait(
+          (doc) => doc.querySelector('#settings-panel-providers')?.hidden === false,
+          null,
+          5_000,
         );
         await fitSettingsTab(620);
 
@@ -14016,6 +14074,84 @@ try {
             );
             if (theme === DARK) await shot(`36b-copilot-form-${label}`);
           }
+        }
+        // --- P1: the picker of "+ Add provider" open over the Copilot form (issue #186): the list
+        // sits inside the document and its rows inside the list, no sideways overflow, no `style`,
+        // and the texts of the button, the box, a plain and the highlighted option measure >= 4.5.
+        for (const [label, target] of [
+          ['620', 620],
+          ['300', 300],
+        ]) {
+          const measuredWidth = await fitSettingsTab(target);
+          check(
+            await settingsClick('#settings-panel-providers button.add-provider-button'),
+            `P1 ${label}: "+ Add provider" is pressed with the mouse`,
+          );
+          await settingsWait(
+            (doc) => doc.querySelector('#settings-panel-providers [role="listbox"]') !== null,
+            null,
+            5_000,
+          );
+          // The picker keeps the text of the last pick (`github-copilot`): clear it to list them all.
+          await page.keyboard.press('ControlOrMeta+A');
+          await page.keyboard.press('Backspace');
+          for (const [themeName, theme] of PROBLEM_THEMES) {
+            await setSettingsTheme(theme);
+            const layout = await settingsWeb.inDoc(settingsLayout);
+            const picker = await settingsWeb.inDoc((doc) => {
+              const list = doc.querySelector('#settings-panel-providers [role="listbox"]');
+              const box = list?.getBoundingClientRect();
+              const width = doc.documentElement.clientWidth;
+              const options = [...(list?.querySelectorAll('[role="option"]') ?? [])];
+              return {
+                options: options.length,
+                insideDocument: box !== undefined && box.left >= -1 && box.right <= width + 1,
+                rowsInside: options.every((option) => {
+                  const rect = option.getBoundingClientRect();
+                  return (
+                    box !== undefined && rect.left >= box.left - 1 && rect.right <= box.right + 1
+                  );
+                }),
+                formOpen:
+                  doc.querySelector('[data-provider="github-copilot"] .settings-methods') !== null,
+              };
+            });
+            const contrast = contrastVerdict(
+              await settingsWeb.inDoc(measureText, {
+                ...SETTINGS_BASE,
+                addButton: '#settings-panel-providers button.add-provider-button',
+                box: '#settings-panel-providers input[role="combobox"]',
+                plain:
+                  '#settings-panel-providers [role="option"][aria-selected="false"] .provider-picker-name',
+                plainDetail:
+                  '#settings-panel-providers [role="option"][aria-selected="false"] .provider-picker-detail',
+                selected:
+                  '#settings-panel-providers [role="option"][aria-selected="true"] .provider-picker-name',
+                formTitle: '[data-provider="github-copilot"] .step-title',
+              }),
+              ['addButton', 'box', 'plain', 'plainDetail', 'selected', 'formTitle'],
+            );
+            check(
+              picker.options >= 4 &&
+                picker.insideDocument &&
+                picker.rowsInside &&
+                picker.formOpen &&
+                layout.overflow <= 0 &&
+                layout.styled === 0 &&
+                contrast.ok,
+              `P1 ${label} px (${String(measuredWidth)}), ${themeName}: the picker lists ${String(picker.options)} providers inside the document (${String(picker.insideDocument)}) with every row inside the list (${String(picker.rowsInside)}) over the open Copilot form (${String(picker.formOpen)}), no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+            );
+            if (theme === DARK) await shot(`36b2-picker-${label}`);
+          }
+          await setSettingsTheme(DARK);
+          // The button toggles the picker: closing it by the mouse keeps this cell independent of
+          // where the focus is after the theme changes (Escape is judged in step 35).
+          await settingsClick('#settings-panel-providers button.add-provider-button');
+          await settingsWait(
+            (doc) => doc.querySelector('#settings-panel-providers [role="listbox"]') === null,
+            null,
+            5_000,
+          );
         }
         await setSettingsTheme(DARK);
         await fitSettingsTab(620);
@@ -14246,10 +14382,10 @@ try {
         await shot('36e-azure-connected');
         check(
           connected === true &&
-            azure.lines.includes('API key · saved by opencode for all projects') &&
-            azure.removeLabels.some((label) => label.startsWith('Remove Azure')) &&
+            azure.lines.some((line) => line.startsWith('API key')) &&
+            azure.removeLabels.some((label) => label.startsWith('Disconnect Azure')) &&
             announced.includes('Connected to Azure'),
-          `V7 pressing Enter connects Azure: it moves to Connected with "API key · saved by opencode for all projects" and a Remove button, and the live region says ${JSON.stringify(announced.trim())}`,
+          `V7 pressing Enter connects Azure: it moves to Connected as a row with "API key" and a Disconnect button (lines ${JSON.stringify(azure.lines)}), and the live region says ${JSON.stringify(announced.trim())}`,
         );
         // --- F1: after Enter the card is not rebuilt and the button that had the focus is gone, so
         // the focus has to come back to the card from the box (H1 of E10-settings-followup, #143).
@@ -14270,8 +14406,8 @@ try {
         // --- V9: Remove asks in a native modal; declining keeps it; confirming removes it -------
         const dialog = page.locator('.monaco-dialog-box');
         check(
-          await settingsClick('[data-provider="azure"] button[aria-label^="Remove Azure"]'),
-          'V9 Remove is pressed on the Azure card',
+          await settingsClick('[data-provider="azure"] button[aria-label^="Disconnect Azure"]'),
+          'V9 Disconnect is pressed on the Azure row',
         );
         const modalText = await waitFor(
           async () => ((await dialog.count()) ? await dialog.first().innerText() : null),
@@ -14291,11 +14427,11 @@ try {
         const declined = await cardState('azure');
         check(
           declined.inConnected && declined.removeLabels.length === 1,
-          'V9 declining the modal (Escape) keeps Azure connected with its Remove button',
+          'V9 declining the modal (Escape) keeps Azure connected with its Disconnect button',
         );
         check(
-          await settingsClick('[data-provider="azure"] button[aria-label^="Remove Azure"]'),
-          'V9 Remove is pressed again',
+          await settingsClick('[data-provider="azure"] button[aria-label^="Disconnect Azure"]'),
+          'V9 Disconnect is pressed again',
         );
         await waitFor(async () => (await dialog.count()) > 0, 8_000, 150);
         await dialog
@@ -14315,7 +14451,7 @@ try {
         await shot('36g-azure-removed');
         check(
           gone === true && removed.removeLabels.length === 0,
-          `V9 confirming the modal removes the credential: Azure is back in Add a provider with no Remove button (in Connected ${String(removed.inConnected)})`,
+          `V9 confirming the modal removes the credential: Azure is back in Add a provider with no Disconnect button (in Connected ${String(removed.inConnected)})`,
         );
 
         // --- V8: OAuth auto: the card waits, the notification has the instructions, Copy code, Cancel
@@ -14514,7 +14650,7 @@ try {
         await shot('36j-openai-connected');
         check(
           openaiConnected === true && announcedOpenai.includes('Connected to OpenAI'),
-          `V8 an approved OAuth login ends in Connected: OpenAI shows "Signed in · saved by opencode…" and the live region says ${JSON.stringify(announcedOpenai.trim())}`,
+          `V8 an approved OAuth login ends in Connected: OpenAI shows "Signed in" in its row and the live region says ${JSON.stringify(announcedOpenai.trim())}`,
         );
         // --- K1-K3 + Copy link: a `code` login (FakeCo), driven with the native box NOT pre-answered.
         // Method 1 is "Paste a code"; method 2 has a link whose query carries %2B, %3D and %26.
@@ -14672,16 +14808,16 @@ try {
         await shot('36m-fakeco-connected');
         check(
           fakecoConnected === true &&
-            fakecoCard.lines.includes('Signed in · saved by opencode for all projects') &&
+            fakecoCard.lines.some((line) => line.startsWith('Signed in')) &&
             announcedFakeco.includes('Connected to FakeCo'),
-          `K3 typing FAKE-CODE connects FakeCo: "Signed in · saved by opencode for all projects" and the live region says ${JSON.stringify(announcedFakeco.trim())}`,
+          `K3 typing FAKE-CODE connects FakeCo: its row says "Signed in" and the live region says ${JSON.stringify(announcedFakeco.trim())}`,
         );
         assertNoSettingsErrors('step 36 flows');
 
         // --- V10: the fake key is nowhere ---------------------------------------------------------
         check(
-          await settingsClick('input[type="search"]'),
-          'V10 control: the search box is clicked',
+          await settingsClick('.settings-search-input'),
+          'V10 control: the search box of the header is clicked',
         );
         await page.keyboard.type('control-marker-0136');
         let list = [];
@@ -17975,6 +18111,698 @@ try {
       await setSideBarWidth(300).catch(() => undefined);
     }
   });
+
+  // ---------------------------------------------------------------------------------------------
+  // Steps 46-48 (E10-settings-redesign, issue #186): the layout of the redesigned Settings tab, at
+  // four widths (1080, 660, 520, 300) and in the four themes. Each width is a target the side bar
+  // drag only approximates (`fitSettingsTab` lands within 60 px), so every cell expects what the
+  // container queries of `index.css` give for the width the root REALLY has (>= 900 full layout,
+  // 600-899 narrow navigation and 2x2 cards, < 600 horizontal strip, < 360 four compact cards), and
+  // prints that width. Fixture: the fake's MCP servers `broken` (failed) and `linear` (needs
+  // sign-in) are the two items of "Needs attention"; `anthropic` and `google-vertex` are connected.
+  //   46 header (title, search, four cards, the open one marked), navigation (orientation, strip,
+  //      badges, visible focus) and the open search list.
+  //   47 Models (the select, the read-only row of opencode, the workspace hint) and General with
+  //      "Needs attention" (the jump to the row of `linear`).
+  //   48 the sections that only link (Mods, Work mode, Advanced) at 300 px.
+  // ---------------------------------------------------------------------------------------------
+  // 660 and not the plan's 620: the container the queries read is the root WITHOUT its padding and
+  // the scrollbar, 570 px when the tab is 620 px wide, so a 620 px tab is already the horizontal
+  // strip (below 600). 660 px is the narrow side column with the cards in 2x2; 520 is the strip.
+  const FRAME_WIDTHS = [
+    ['1080', 1080],
+    ['660', 660],
+    ['520', 520],
+    ['300', 300],
+  ];
+
+  /** Opens the chat (the settings tab needs the server) and the Settings tab, and waits for its frame. */
+  async function startSettingsStep() {
+    await closeAllEditors();
+    if ((await visibleChatId()) === undefined) {
+      await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+      await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+    }
+    await openChat(30_000);
+    await waitConnected();
+    await openSettingsTab();
+    // The launch toast sits over the lower right of the editor (see step 36).
+    await command('Notifications: Clear All Notifications');
+    const ready = await settingsWait(
+      (doc) =>
+        doc.querySelectorAll('.status-card').length === 4 &&
+        doc.querySelectorAll('[role="tab"]').length === 7 &&
+        doc.querySelectorAll('[data-server]').length === 4 &&
+        doc.querySelectorAll('.settings-providers li.provider-row').length >= 2,
+      null,
+      30_000,
+    );
+    check(ready === true, 'the Settings tab shows the four cards, seven sections and the fixture');
+  }
+
+  /** Presses the navigation tab of `section` with the real mouse and waits for its panel. */
+  async function openSettingsSection(section) {
+    check(await settingsClick(`#settings-tab-${section}`), `the ${section} section is pressed`);
+    const shown = await settingsWait(
+      (doc, id) => doc.querySelector(`#settings-panel-${id}`)?.hidden === false,
+      section,
+      5_000,
+    );
+    check(shown === true, `the ${section} panel is shown`);
+  }
+
+  /** Puts the tab back in the state the next step expects: dark, 300 px, editors closed. */
+  async function endSettingsStep(originalWidth) {
+    await closeAllEditors().catch(() => undefined);
+    settingsWeb?.close();
+    settingsWeb = undefined;
+    await setTheme('Default Dark Modern').catch(() => undefined);
+    await setSideBarWidth(Math.round(originalWidth)).catch(() => undefined);
+  }
+
+  /**
+   * What the header, the cards and the navigation look like, from the root's REAL width: the rows
+   * the four cards form, the orientation and layout of the navigation, whether every text sits
+   * inside its card or the document, and the numbers on the tabs. Self-contained (serialised into
+   * the page).
+   */
+  function frameShape(doc) {
+    const text = (element) => (element?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    const width = doc.documentElement.clientWidth;
+    const root = doc.querySelector('.settings-root')?.getBoundingClientRect();
+    const cards = [...doc.querySelectorAll('.status-card')];
+    const nav = doc.querySelector('.settings-nav');
+    const navBox = nav?.getBoundingClientRect();
+    const content = doc.querySelector('.settings-content')?.getBoundingClientRect();
+    const tabs = [...doc.querySelectorAll('[role="tab"]')];
+    const win = doc.defaultView;
+    const inside = (rect, box) =>
+      rect.left >= box.left - 1 &&
+      rect.right <= box.right + 1 &&
+      rect.top >= box.top - 1 &&
+      rect.bottom <= box.bottom + 1;
+    const rows = new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top))).size;
+    const textsInside = cards.every((card) => {
+      const box = card.getBoundingClientRect();
+      return [...card.querySelectorAll('.status-card-label, .status-card-value, .status-card-note')]
+        .map((element) => element.getBoundingClientRect())
+        .every((rect) => rect.width > 0 && inside(rect, box));
+    });
+    const selected = tabs.find((tab) => tab.getAttribute('aria-selected') === 'true');
+    return {
+      width,
+      // The CONTENT width of the root: the size container the queries of `index.css` read (its
+      // padding of 6 px a side is not in it), 570 px when the tab is 620 px wide (measured).
+      rootWidth:
+        root === undefined
+          ? 0
+          : root.width -
+            Number.parseFloat(
+              win.getComputedStyle(doc.querySelector('.settings-root')).paddingLeft,
+            ) -
+            Number.parseFloat(
+              win.getComputedStyle(doc.querySelector('.settings-root')).paddingRight,
+            ),
+      title: text(doc.querySelector('.settings-title')),
+      searchPresent: doc.querySelector('input[role="combobox"]') !== null,
+      cards: cards.map((card) => text(card.querySelector('.status-card-label'))),
+      cardRows: rows,
+      textsInside,
+      current: cards
+        .filter((card) => card.querySelector('[aria-current="true"]') !== null)
+        .map((card) => card.dataset.card),
+      selectedTab: selected?.id ?? null,
+      tabLabels: tabs.map((tab) => text(tab.querySelector('.settings-tab-label'))),
+      orientation: nav?.getAttribute('aria-orientation') ?? null,
+      navDirection: nav === null ? null : win.getComputedStyle(nav).flexDirection,
+      navOverflowX: nav === null ? null : win.getComputedStyle(nav).overflowX,
+      navBesideContent:
+        navBox !== undefined && content !== undefined ? navBox.right <= content.left + 1 : null,
+      navAboveContent:
+        navBox !== undefined && content !== undefined ? navBox.bottom <= content.top + 1 : null,
+      navWidth: navBox?.width ?? 0,
+      selectedVisible:
+        selected === undefined || navBox === undefined
+          ? false
+          : selected.getBoundingClientRect().right <= navBox.right + 1 &&
+            selected.getBoundingClientRect().left >= navBox.left - 1,
+      badges: Object.fromEntries(
+        tabs.map((tab) => [
+          tab.id.replace('settings-tab-', ''),
+          text(tab.querySelector('.settings-badge')),
+        ]),
+      ),
+      providerRows: doc.querySelectorAll('.settings-providers li.provider-row').length,
+      mcpAttention: doc.querySelectorAll(
+        '[data-server][data-status="failed"], [data-server][data-status="attention"]',
+      ).length,
+    };
+  }
+
+  /** What the container queries of `index.css` give for a root `width` wide (see the block above). */
+  function expectedFrame(width) {
+    return {
+      horizontal: width < 600,
+      rows: width >= 900 ? 1 : width >= 360 ? 2 : 4,
+    };
+  }
+
+  const FRAME_TEXT = {
+    ...SETTINGS_BASE,
+    title: '.settings-title',
+    subtitle: '.settings-subtitle',
+    searchBox: '.settings-search-input',
+    serverLabel: '[data-card="server"] .status-card-label',
+    serverValue: '[data-card="server"] .status-card-value',
+    providersLabel: '[data-card="providers"] .status-card-label',
+    providersValue: '[data-card="providers"] .status-card-value',
+    modelLabel: '[data-card="model"] .status-card-label',
+    modelValue: '[data-card="model"] .status-card-value',
+    mcpLabel: '[data-card="mcp"] .status-card-label',
+    mcpValue: '[data-card="mcp"] .status-card-value',
+    mcpNote: '[data-card="mcp"] .status-card-note',
+    tabSelected: 'button.settings-tab[aria-selected="true"] .settings-tab-label',
+    tabOther: 'button.settings-tab[aria-selected="false"] .settings-tab-label',
+    badge: '.settings-badge',
+    footer: '.settings-footer .link-button',
+  };
+
+  await step(
+    '46 OpenCode Settings: header, navigation and search (E10-settings-redesign)',
+    async () => {
+      const DARK = 'Default Dark Modern';
+      const originalWidth = await sideBarPx();
+      try {
+        await startSettingsStep();
+        assertNoSettingsErrors('step 46 start');
+        // The first visit opens General, with its card marked.
+        const first = await settingsWeb.inDoc(frameShape);
+        check(
+          first.selectedTab === 'settings-tab-general' && first.current.join(',') === 'server',
+          `a first visit opens General and marks the Server card (tab ${String(first.selectedTab)}, cards marked ${JSON.stringify(first.current)})`,
+        );
+
+        for (const [label, target] of FRAME_WIDTHS) {
+          const measured = await fitSettingsTab(target);
+          for (const [themeName, theme] of PROBLEM_THEMES) {
+            await setSettingsTheme(theme);
+            const layout = await settingsWeb.inDoc(settingsLayout);
+            const shape = await settingsWeb.inDoc(frameShape);
+            const want = expectedFrame(shape.rootWidth);
+            const contrast = contrastVerdict(
+              await settingsWeb.inDoc(measureText, FRAME_TEXT),
+              Object.keys(FRAME_TEXT).filter((name) => name !== '__base'),
+            );
+            check(
+              shape.title === 'OpenCode settings' &&
+                shape.searchPresent &&
+                shape.cards.join('|') === 'Server|Providers|Default model|MCP servers' &&
+                shape.cardRows === want.rows &&
+                shape.textsInside &&
+                layout.overflow <= 0 &&
+                layout.styled === 0 &&
+                contrast.ok,
+              `H1 ${label} px (tab ${String(measured)}, root ${String(Math.round(shape.rootWidth))}), ${themeName}: the header has the title, the search and the four cards in ${String(shape.cardRows)} row(s) (expected ${String(want.rows)}), every card text inside its card (${String(shape.textsInside)}), no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+            );
+            check(
+              shape.tabLabels.join('|') ===
+                'General|Providers|Models|MCP servers|Mods|Work mode|Advanced' &&
+                (shape.orientation === 'horizontal') === want.horizontal &&
+                (want.horizontal
+                  ? shape.navDirection === 'row' &&
+                    shape.navOverflowX === 'auto' &&
+                    shape.navAboveContent === true &&
+                    shape.selectedVisible
+                  : shape.navDirection === 'column' && shape.navBesideContent === true) &&
+                shape.badges.providers === String(shape.providerRows) &&
+                shape.badges.mcp === (shape.mcpAttention > 0 ? String(shape.mcpAttention) : ''),
+              `H2 ${label} px (root ${String(Math.round(shape.rootWidth))}), ${themeName}: the navigation is ${String(shape.orientation)} (${want.horizontal ? 'a strip that scrolls, above the content, the open tab inside it' : 'a column beside the content'}), seven sections, numbers Providers ${String(shape.badges.providers)} and MCP ${String(shape.badges.mcp)} (${JSON.stringify(shape.badges)}; direction ${String(shape.navDirection)}, overflow-x ${String(shape.navOverflowX)}, above the content ${String(shape.navAboveContent)}, beside it ${String(shape.navBesideContent)}, open tab inside ${String(shape.selectedVisible)})`,
+            );
+            if (theme === DARK) await shot(`46a-header-${label}`);
+          }
+          // The visible focus of the open tab, with the keyboard as the last input (dark).
+          await setSettingsTheme(DARK);
+          await page.keyboard.press('Shift');
+          const focused = await settingsWeb.inDoc((doc) => {
+            const tab = doc.querySelector('button.settings-tab[aria-selected="true"]');
+            tab?.focus();
+            const style = tab === null ? null : doc.defaultView.getComputedStyle(tab);
+            return {
+              active: doc.activeElement === tab,
+              outline: style === null ? null : `${style.outlineStyle} ${style.outlineWidth}`,
+              focusVisible: tab?.matches(':focus-visible') ?? false,
+            };
+          });
+          check(
+            focused.active &&
+              focused.focusVisible &&
+              focused.outline !== null &&
+              !focused.outline.startsWith('none'),
+            `H2 ${label} px: the open tab takes the keyboard focus and draws an outline (${JSON.stringify(focused)})`,
+          );
+        }
+        assertNoSettingsErrors('step 46 frame');
+
+        // A card opens its section and the card of the open section is marked (real mouse, 1080 px).
+        await fitSettingsTab(1080);
+        await setSettingsTheme(DARK);
+        check(
+          await settingsClick('[data-card="providers"] .status-card-main'),
+          'H1 the Providers card is pressed with the mouse',
+        );
+        const jumped = await settingsWait(
+          (doc) =>
+            doc.querySelector('#settings-panel-providers')?.hidden === false &&
+            doc.querySelector('[data-card="providers"] [aria-current="true"]') !== null &&
+            doc.querySelector('[data-card="server"] [aria-current="true"]') === null,
+          null,
+          5_000,
+        );
+        check(jumped === true, 'H1 the Providers card opens Providers and is the one marked');
+        await openSettingsSection('general');
+
+        // The search: a list of jumps, inside the document and readable in the four themes.
+        for (const [label, target] of [
+          ['1080', 1080],
+          ['300', 300],
+        ]) {
+          const measured = await fitSettingsTab(target);
+          for (const [themeName, theme] of PROBLEM_THEMES) {
+            await setSettingsTheme(theme);
+            const open = await settingsWeb.inDoc(
+              (doc) => doc.querySelector('.settings-search [role="listbox"]') !== null,
+            );
+            if (!open) {
+              check(
+                await settingsClick('.settings-search-input'),
+                `S1 ${label}: the search box is clicked`,
+              );
+              await page.keyboard.press('ControlOrMeta+A');
+              await page.keyboard.type('e');
+              await settingsWait(
+                (doc) => doc.querySelector('.settings-search [role="listbox"]') !== null,
+                null,
+                5_000,
+              );
+            }
+            const list = await settingsWeb.inDoc((doc) => {
+              const box = doc.querySelector('.settings-search-list')?.getBoundingClientRect();
+              const width = doc.documentElement.clientWidth;
+              const options = [...doc.querySelectorAll('.settings-search-option')];
+              return {
+                options: options.length,
+                insideDocument: box !== undefined && box.left >= -1 && box.right <= width + 1,
+                rowsInside: options.every((option) => {
+                  const rect = option.getBoundingClientRect();
+                  return (
+                    box !== undefined && rect.left >= box.left - 1 && rect.right <= box.right + 1
+                  );
+                }),
+                combobox: doc
+                  .querySelector('input[role="combobox"]')
+                  ?.getAttribute('aria-expanded'),
+                active:
+                  doc
+                    .querySelector('input[role="combobox"]')
+                    ?.getAttribute('aria-activedescendant') ?? null,
+              };
+            });
+            const contrast = contrastVerdict(
+              await settingsWeb.inDoc(measureText, {
+                ...SETTINGS_BASE,
+                box: '.settings-search-input',
+                plain: '.settings-search-option[aria-selected="false"] .settings-search-label',
+                plainDetail:
+                  '.settings-search-option[aria-selected="false"] .settings-search-detail',
+                selected: '.settings-search-option[aria-selected="true"] .settings-search-label',
+                selectedDetail:
+                  '.settings-search-option[aria-selected="true"] .settings-search-detail',
+              }),
+              ['box', 'plain', 'plainDetail', 'selected', 'selectedDetail'],
+            );
+            const layout = await settingsWeb.inDoc(settingsLayout);
+            check(
+              list.options >= 2 &&
+                list.options <= 20 &&
+                list.insideDocument &&
+                list.rowsInside &&
+                list.combobox === 'true' &&
+                list.active !== null &&
+                layout.overflow <= 0 &&
+                layout.styled === 0 &&
+                contrast.ok,
+              `S1 ${label} px (${String(measured)}), ${themeName}: the search lists ${String(list.options)} jumps (2 to 20) inside the document (${String(list.insideDocument)}), every row inside the list (${String(list.rowsInside)}), aria-expanded ${String(list.combobox)} and an active option, no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+            );
+            if (theme === DARK) await shot(`46b-search-${label}`);
+          }
+          await settingsWeb.inDoc((doc) => {
+            const input = doc.querySelector('input[role="combobox"]');
+            if (input !== null) input.focus();
+          });
+          await page.keyboard.press('Escape');
+          await page.keyboard.press('Escape');
+          await settingsWait(
+            (doc) => doc.querySelector('input[role="combobox"]')?.value === '',
+            null,
+            5_000,
+          );
+        }
+        assertNoSettingsErrors('step 46');
+        assertNoWebviewErrors('step 46');
+      } finally {
+        await endSettingsStep(originalWidth);
+      }
+    },
+  );
+
+  const MODELS_TEXT = {
+    ...SETTINGS_BASE,
+    title: '#settings-panel-models .settings-section-title',
+    rowTitle: '#settings-panel-models .link-row-title',
+    hint: '#settings-panel-models .settings-hint',
+    select: '#settings-default-model',
+    serverDefault: '#settings-panel-models [data-field="server-default"]',
+    workspaceHint: '#settings-panel-models [data-hint="workspace"]',
+    workspaceButton: '#settings-panel-models [data-hint="workspace"] button',
+  };
+
+  const ATTENTION_TEXT = {
+    ...SETTINGS_BASE,
+    title: '.attention-title',
+    item: '.attention-item',
+    factLabel: '.fact dt',
+    factValue: '.fact dd',
+    restart: '#settings-panel-general .card-actions button.secondary',
+    rowTitle: '#settings-panel-general .link-row-title',
+    rowHint: '#settings-panel-general .settings-hint',
+  };
+
+  await step('47 OpenCode Settings: Models and General (E10-settings-redesign)', async () => {
+    const DARK = 'Default Dark Modern';
+    const MODEL_KEY = 'openVsCode.defaultModel';
+    const originalWidth = await sideBarPx();
+    const vscodeDir = path.join(workspace, '.vscode');
+    const hadVscodeDir = fs.existsSync(vscodeDir);
+    const workspaceFile = path.join(vscodeDir, 'settings.json');
+    const hadWorkspaceFile = fs.existsSync(workspaceFile);
+    const userFile = path.join(vscode.userDataDir, 'User', 'settings.json');
+    const userModel = () =>
+      fs.existsSync(userFile)
+        ? JSON.parse(fs.readFileSync(userFile, 'utf8'))[MODEL_KEY]
+        : undefined;
+    try {
+      await startSettingsStep();
+      await fitSettingsTab(1080);
+      await openSettingsSection('models');
+
+      // Own precondition: no model chosen in the user settings. Step 20 (drop and paste) writes
+      // `opencode/glm-5.3-flash-free` and never restores it, so in a full run M1 saw that model
+      // chosen (pair `--steps 20,47` reproduced it: "value=opencode/glm-5.3-flash-free"). The
+      // select follows the host's file watcher, so wait for it to show "None" before reading.
+      writeSettings(vscode.userDataDir, { [MODEL_KEY]: undefined });
+      await settingsWait(
+        (doc) => doc.querySelector('#settings-default-model')?.value === '',
+        null,
+        10_000,
+      );
+
+      // Behaviour (dark, 1080 px): the select lists the models of the fixture grouped by provider and
+      // changing it writes the USER setting (the host revalidates and writes it once).
+      const base = await settingsWeb.inDoc((doc) => {
+        const select = doc.querySelector('#settings-default-model');
+        return {
+          options: [...(select?.options ?? [])].map((option) => option.value),
+          groups: [...doc.querySelectorAll('#settings-default-model optgroup')].length,
+          value: select?.value ?? null,
+          serverDefault:
+            doc.querySelector('[data-field="server-default"]')?.textContent.trim() ?? null,
+          workspaceHint: doc.querySelector('[data-hint="workspace"]') !== null,
+          small: [...doc.querySelectorAll('#settings-panel-models .settings-hint')].some((hint) =>
+            hint.textContent.includes('picks the small model'),
+          ),
+        };
+      });
+      // Each condition is printed on its own so a FAIL names the one that broke (a step before this
+      // one once left a model in the user setting and only `value` was wrong).
+      const noneFirst = base.options[0] === '' && base.options.length >= 3 && base.groups >= 1;
+      const noneChosen = base.value === '';
+      const showsDefault = /Big Pickle/.test(base.serverDefault ?? '');
+      console.log(
+        `  M1 conditions: noneFirst=${String(noneFirst)} (options ${JSON.stringify(base.options)}, groups ${String(base.groups)}), value=${JSON.stringify(base.value)}, serverDefault=${JSON.stringify(base.serverDefault)}, workspaceHint=${String(base.workspaceHint)}, small=${String(base.small)}`,
+      );
+      check(
+        noneFirst && noneChosen && showsDefault && !base.workspaceHint && base.small,
+        `M1 the Models section offers None and the models of the fixture in ${String(base.groups)} group(s) (${JSON.stringify(base.options)}), none chosen, shows the model of opencode ${JSON.stringify(base.serverDefault)}, no workspace hint, and the small-model line`,
+      );
+      check(
+        await settingsClick('#settings-panel-models label.link-row-title'),
+        'M1 the label of the select is clicked (it focuses the select)',
+      );
+      await page.keyboard.press('ArrowDown');
+      let changed = await settingsWait(
+        (doc) => doc.querySelector('#settings-default-model')?.value !== '',
+        null,
+        3_000,
+      );
+      if (changed === undefined) {
+        await settingsWeb.inDoc((doc, value) => {
+          const select = doc.querySelector('#settings-default-model');
+          select.value = value;
+          select.dispatchEvent(new doc.defaultView.Event('change', { bubbles: true }));
+        }, base.options[1]);
+        settingsUnverified.push('M1 the select was changed by script, not by the keyboard');
+        changed = await settingsWait(
+          (doc) => doc.querySelector('#settings-default-model')?.value !== '',
+          null,
+          3_000,
+        );
+      }
+      const written = await waitFor(async () => userModel() !== undefined, 10_000, 200);
+      const chosen = await settingsWeb.inDoc(
+        (doc) => doc.querySelector('#settings-default-model')?.value ?? null,
+      );
+      await shot('47a-model-chosen');
+      check(
+        changed === true && written === true && userModel() === chosen,
+        `M1 choosing a model writes ${MODEL_KEY} in the user settings and the select follows the state (select ${JSON.stringify(chosen)}, user settings ${JSON.stringify(userModel())})`,
+      );
+      writeSettings(vscode.userDataDir, { [MODEL_KEY]: undefined });
+      await settingsWait(
+        (doc) => doc.querySelector('#settings-default-model')?.value === '',
+        null,
+        10_000,
+      );
+
+      // A workspace value hides the user's one: the hint says so and offers to open the setting.
+      fs.mkdirSync(vscodeDir, { recursive: true });
+      fs.writeFileSync(workspaceFile, JSON.stringify({ [MODEL_KEY]: base.options[2] }, null, 2));
+      const hinted = await settingsWait(
+        (doc) => doc.querySelector('#settings-panel-models [data-hint="workspace"]') !== null,
+        null,
+        20_000,
+      );
+      check(hinted === true, 'M1 a workspace value of the setting shows the workspace hint');
+
+      for (const [label, target] of [
+        ['1080', 1080],
+        ['300', 300],
+      ]) {
+        const measured = await fitSettingsTab(target);
+        for (const [themeName, theme] of PROBLEM_THEMES) {
+          await setSettingsTheme(theme);
+          const layout = await settingsWeb.inDoc(settingsLayout);
+          const inside = await settingsWeb.inDoc((doc) => {
+            const width = doc.documentElement.clientWidth;
+            const names = [
+              '#settings-default-model',
+              '[data-field="server-default"]',
+              '[data-hint="workspace"]',
+              '[data-hint="workspace"] button',
+            ];
+            return names.map((selector) => {
+              const rect = doc
+                .querySelector(`#settings-panel-models ${selector}`)
+                ?.getBoundingClientRect();
+              return (
+                rect !== undefined && rect.width > 0 && rect.left >= -1 && rect.right <= width + 1
+              );
+            });
+          });
+          const contrast = contrastVerdict(
+            await settingsWeb.inDoc(measureText, MODELS_TEXT),
+            Object.keys(MODELS_TEXT).filter((name) => name !== '__base'),
+          );
+          check(
+            inside.every(Boolean) && layout.overflow <= 0 && layout.styled === 0 && contrast.ok,
+            `M2 ${label} px (${String(measured)}), ${themeName}: the select, the row of opencode and the workspace hint with its button are inside the document (${JSON.stringify(inside)}), no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+          );
+          if (theme === DARK) await shot(`47b-models-${label}`);
+        }
+      }
+      if (!hadWorkspaceFile) fs.rmSync(workspaceFile, { force: true });
+      await setSettingsTheme(DARK);
+
+      // General with "Needs attention": the failed and the sign-in MCP servers of the fixture.
+      await fitSettingsTab(1080);
+      await openSettingsSection('general');
+      for (const [label, target] of [
+        ['1080', 1080],
+        ['300', 300],
+      ]) {
+        const measured = await fitSettingsTab(target);
+        for (const [themeName, theme] of PROBLEM_THEMES) {
+          await setSettingsTheme(theme);
+          const layout = await settingsWeb.inDoc(settingsLayout);
+          const general = await settingsWeb.inDoc((doc) => {
+            const width = doc.documentElement.clientWidth;
+            const kinds = [...doc.querySelectorAll('.attention-item')].map(
+              (item) => item.dataset.kind,
+            );
+            const insideAll = [
+              ...doc.querySelectorAll(
+                '#settings-panel-general .attention-item, #settings-panel-general .fact, #settings-panel-general .link-row',
+              ),
+            ].every((element) => {
+              const rect = element.getBoundingClientRect();
+              return rect.width > 0 && rect.left >= -1 && rect.right <= width + 1;
+            });
+            return {
+              kinds,
+              insideAll,
+              facts: doc.querySelectorAll('.fact').length,
+              // `broken` is `failed` unless an MCPFLIP turn of an earlier step flipped it and the
+              // fake was not restarted since: the list must say what the servers say.
+              brokenFailed:
+                doc.querySelector('[data-server="broken"]')?.getAttribute('data-status') ===
+                'failed',
+            };
+          });
+          const contrast = contrastVerdict(
+            await settingsWeb.inDoc(measureText, ATTENTION_TEXT),
+            Object.keys(ATTENTION_TEXT).filter((name) => name !== '__base'),
+          );
+          check(
+            general.kinds.includes('mcpFailed') === general.brokenFailed &&
+              general.kinds.includes('mcpNeedsAuth') &&
+              general.insideAll &&
+              general.facts >= 3 &&
+              layout.overflow <= 0 &&
+              layout.styled === 0 &&
+              contrast.ok,
+            `G1 ${label} px (${String(measured)}), ${themeName}: General lists "Needs attention" with ${JSON.stringify(general.kinds)}, the server facts and the two chat rows, all inside the document (${String(general.insideAll)}), no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+          );
+          if (theme === DARK) await shot(`47c-general-${label}`);
+        }
+      }
+      await setSettingsTheme(DARK);
+      // An attention item jumps to the row of its server and puts the focus on it.
+      check(
+        await settingsClick('.attention-item[data-kind="mcpNeedsAuth"]'),
+        'G1 the sign-in MCP item of "Needs attention" is pressed with the mouse',
+      );
+      const jumped = await settingsWait(
+        (doc) =>
+          doc.querySelector('#settings-panel-mcp')?.hidden === false &&
+          doc.activeElement?.getAttribute('data-server') === 'linear',
+        null,
+        5_000,
+      );
+      check(jumped === true, 'G1 the item opens MCP servers and focuses the card of "linear"');
+      assertNoSettingsErrors('step 47');
+      assertNoWebviewErrors('step 47');
+    } finally {
+      // Leave the run as found: the user setting removed, the workspace file and folder only if the
+      // step created them, dark theme, the side bar as it was.
+      writeSettings(vscode.userDataDir, { [MODEL_KEY]: undefined });
+      if (!hadWorkspaceFile) fs.rmSync(workspaceFile, { force: true });
+      if (!hadVscodeDir) {
+        try {
+          fs.rmdirSync(vscodeDir);
+        } catch {
+          // not empty: something else put a file there, which is not ours to remove
+        }
+      }
+      await endSettingsStep(originalWidth);
+    }
+  });
+
+  const LINKS_TEXT = {
+    ...SETTINGS_BASE,
+    title: '.settings-section-title:not([hidden])',
+    rowTitle: '.link-row-title',
+    hint: '.settings-hint',
+    button: 'button.secondary',
+  };
+
+  await step(
+    '48 OpenCode Settings: Mods, Work mode and Advanced (E10-settings-redesign)',
+    async () => {
+      const DARK = 'Default Dark Modern';
+      const originalWidth = await sideBarPx();
+      const SECTIONS = [
+        ['mods', 1, 'Enable mods'],
+        ['workMode', 0, null],
+        ['advanced', 4, 'opencode executable path'],
+      ];
+      try {
+        await startSettingsStep();
+        await fitSettingsTab(300);
+        for (const [section, buttons, firstTitle] of SECTIONS) {
+          await openSettingsSection(section);
+          const measured = await settingsWeb.inDoc((doc) => doc.documentElement.clientWidth);
+          for (const [themeName, theme] of PROBLEM_THEMES) {
+            await setSettingsTheme(theme);
+            const layout = await settingsWeb.inDoc(settingsLayout);
+            const shape = await settingsWeb.inDoc((doc, id) => {
+              const panel = doc.querySelector(`#settings-panel-${id}`);
+              const width = doc.documentElement.clientWidth;
+              const inside = [
+                ...(panel?.querySelectorAll('.link-row, .settings-hint, button') ?? []),
+              ].every((element) => {
+                const rect = element.getBoundingClientRect();
+                return rect.width > 0 && rect.left >= -1 && rect.right <= width + 1;
+              });
+              return {
+                buttons: panel?.querySelectorAll('button').length ?? 0,
+                firstTitle: panel?.querySelector('.link-row-title')?.textContent.trim() ?? null,
+                inside,
+              };
+            }, section);
+            const scoped = Object.fromEntries(
+              Object.entries(LINKS_TEXT).map(([name, selector]) => [
+                name,
+                name === '__base'
+                  ? selector
+                  : `#settings-panel-${section} ${selector.replace(':not([hidden])', '')}`,
+              ]),
+            );
+            const names = Object.keys(LINKS_TEXT).filter(
+              (name) =>
+                name !== '__base' &&
+                (buttons > 0 || name !== 'button') &&
+                (firstTitle !== null || name !== 'rowTitle'),
+            );
+            const contrast = contrastVerdict(await settingsWeb.inDoc(measureText, scoped), names);
+            check(
+              shape.buttons === buttons &&
+                shape.firstTitle === firstTitle &&
+                shape.inside &&
+                layout.overflow <= 0 &&
+                layout.styled === 0 &&
+                contrast.ok,
+              `L1 ${section} at ${String(measured)} px, ${themeName}: ${String(shape.buttons)} button(s) (expected ${String(buttons)}), first row ${JSON.stringify(shape.firstTitle)}, every row inside the document (${String(shape.inside)}), no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+            );
+            if (theme === DARK) await shot(`48-${section}-300`);
+          }
+          await setSettingsTheme(DARK);
+        }
+        assertNoSettingsErrors('step 48');
+        assertNoWebviewErrors('step 48');
+      } finally {
+        await endSettingsStep(originalWidth);
+      }
+    },
+  );
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
