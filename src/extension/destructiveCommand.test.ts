@@ -1407,3 +1407,426 @@ describe('commandNeedsAsk: commands that are approved', () => {
     expect(commandNeedsAsk('powershell')).toBe(true);
   });
 });
+
+/** A way of reaching a command: `wrap` puts the core command line inside the door. */
+interface Door {
+  name: string;
+  wrap: (core: string) => string;
+  /**
+   * Set when the door asks for ANY command it carries, daily use included: the reason. Such a door
+   * is in the dangerous matrix only (it is trivially green there) and out of {@link HARMLESS_DOORS}.
+   */
+  asksAlone?: string;
+}
+
+/**
+ * The doors the classifier knows (issue #184): every prefix, launcher, separator and spelling that
+ * the reviews of E3-work-mode found open for some family. It is a LIST HERE, not read from
+ * `destructiveCommand.ts`, because those doors are private sets (`TRANSPARENT`, `ELEVATORS`,
+ * `RUNNERS`, the launcher functions) and exporting them only for a test would widen the module's
+ * surface; so adding a door to the classifier means adding it here too. Doors that never ask on
+ * their own (the prefixes that run the next command unchanged) are in {@link HARMLESS_DOORS} as well.
+ */
+const ASKING_DOORS: readonly Door[] = [
+  { name: 'bare', wrap: (c) => c },
+  { name: 'NAME=1 prefix', wrap: (c) => `CI=1 ${c}` },
+  { name: 'env X=1', wrap: (c) => `env CI=1 ${c}` },
+  { name: 'cross-env', wrap: (c) => `cross-env CI=1 ${c}` },
+  { name: 'export X=1;', wrap: (c) => `export CI=1; ${c}` },
+  { name: 'timeout 5', wrap: (c) => `timeout 5 ${c}` },
+  { name: 'nice', wrap: (c) => `nice ${c}` },
+  { name: 'nohup', wrap: (c) => `nohup ${c}` },
+  { name: 'time', wrap: (c) => `time ${c}` },
+  { name: 'command', wrap: (c) => `command ${c}` },
+  { name: 'exec', wrap: (c) => `exec ${c}` },
+  { name: 'builtin', wrap: (c) => `builtin ${c}` },
+  { name: 'nice -n 10', wrap: (c) => `nice -n 10 ${c}` },
+  {
+    name: 'env -i',
+    wrap: (c) => `env -i ${c}`,
+    asksAlone: 'an option of a prefix could take a value',
+  },
+  {
+    name: 'timeout -s KILL 5',
+    wrap: (c) => `timeout -s KILL 5 ${c}`,
+    asksAlone: 'an option of a prefix could take a value',
+  },
+  {
+    name: 'command -p',
+    wrap: (c) => `command -p ${c}`,
+    asksAlone: 'an option of a prefix could take a value',
+  },
+  { name: 'sudo', wrap: (c) => `sudo ${c}`, asksAlone: 'elevation is out of sight' },
+  { name: 'doas', wrap: (c) => `doas ${c}`, asksAlone: 'elevation is out of sight' },
+  { name: 'su -c', wrap: (c) => `su -c '${c}'`, asksAlone: 'elevation is out of sight' },
+  { name: 'npx', wrap: (c) => `npx ${c}` },
+  { name: 'npx -y', wrap: (c) => `npx -y ${c}` },
+  { name: 'pnpm exec', wrap: (c) => `pnpm exec ${c}` },
+  { name: 'pnpm dlx', wrap: (c) => `pnpm dlx ${c}` },
+  { name: 'npm exec --', wrap: (c) => `npm exec -- ${c}` },
+  { name: 'npm exec', wrap: (c) => `npm exec ${c}` },
+  { name: 'npm x', wrap: (c) => `npm x ${c}` },
+  { name: 'pnpm bare', wrap: (c) => `pnpm ${c}` },
+  { name: 'pnpx', wrap: (c) => `pnpx ${c}` },
+  { name: 'yarn', wrap: (c) => `yarn ${c}` },
+  { name: 'yarn exec', wrap: (c) => `yarn exec ${c}` },
+  { name: 'yarn dlx', wrap: (c) => `yarn dlx ${c}` },
+  { name: 'pnpm --filter a exec', wrap: (c) => `pnpm --filter a exec ${c}` },
+  { name: 'npm -w a exec --', wrap: (c) => `npm -w a exec -- ${c}` },
+  { name: 'corepack pnpm', wrap: (c) => `corepack pnpm ${c}` },
+  { name: 'corepack pnpm exec', wrap: (c) => `corepack pnpm exec ${c}` },
+  { name: 'corepack pnpm dlx', wrap: (c) => `corepack pnpm dlx ${c}` },
+  { name: 'corepack yarn', wrap: (c) => `corepack yarn ${c}` },
+  { name: 'corepack npx', wrap: (c) => `corepack npx ${c}` },
+  { name: 'uvx', wrap: (c) => `uvx ${c}` },
+  { name: 'uv tool run', wrap: (c) => `uv tool run ${c}` },
+  {
+    name: 'mise exec --',
+    wrap: (c) => `mise exec -- ${c}`,
+    asksAlone: 'deliberate: `--` after a runner is an option (decision of Sergio, 07/11/2026)',
+  },
+  { name: 'mise x', wrap: (c) => `mise x ${c}`, asksAlone: 'no `--` and no tool: it asks' },
+  { name: 'mise exec node@20 --', wrap: (c) => `mise exec node@20 -- ${c}` },
+  { name: 'mise x node --', wrap: (c) => `mise x node -- ${c}` },
+  { name: 'rtx exec node --', wrap: (c) => `rtx exec node -- ${c}` },
+  { name: 'yarnpkg', wrap: (c) => `yarnpkg ${c}` },
+  { name: 'corepack yarnpkg', wrap: (c) => `corepack yarnpkg ${c}` },
+  {
+    name: 'uv --quiet run',
+    wrap: (c) => `uv --quiet run ${c}`,
+    asksAlone: 'an option before the subcommand may take a value (decision of Sergio, 07/11/2026)',
+  },
+  {
+    name: 'hatch -e test run',
+    wrap: (c) => `hatch -e test run ${c}`,
+    asksAlone: 'an option before the subcommand may take a value (decision of Sergio, 07/11/2026)',
+  },
+  { name: 'bunx', wrap: (c) => `bunx ${c}` },
+  { name: 'bun x', wrap: (c) => `bun x ${c}` },
+  { name: 'uv run', wrap: (c) => `uv run ${c}` },
+  { name: 'poetry run', wrap: (c) => `poetry run ${c}` },
+  { name: 'pipx run', wrap: (c) => `pipx run ${c}` },
+  { name: 'hatch run', wrap: (c) => `hatch run ${c}` },
+  { name: 'dotnet tool run', wrap: (c) => `dotnet tool run ${c}` },
+  {
+    name: 'nix run',
+    wrap: (c) => `nix run ${c}`,
+    asksAlone: 'every nix command asks (decision of Sergio, 07/11/2026)',
+  },
+  { name: 'pdm run', wrap: (c) => `pdm run ${c}` },
+  { name: 'rye run', wrap: (c) => `rye run ${c}` },
+  { name: 'pixi run', wrap: (c) => `pixi run ${c}` },
+  { name: 'rtx exec', wrap: (c) => `rtx exec ${c}`, asksAlone: 'no `--` and no tool: it asks' },
+  { name: 'asdf exec', wrap: (c) => `asdf exec ${c}` },
+  { name: 'bundle exec', wrap: (c) => `bundle exec ${c}` },
+  { name: 'conda run', wrap: (c) => `conda run ${c}` },
+  { name: 'pipenv run', wrap: (c) => `pipenv run ${c}` },
+  { name: 'pyenv exec', wrap: (c) => `pyenv exec ${c}` },
+  { name: 'volta run', wrap: (c) => `volta run ${c}` },
+  { name: 'fnm exec', wrap: (c) => `fnm exec ${c}` },
+  { name: 'lerna exec', wrap: (c) => `lerna exec ${c}` },
+  { name: 'nx exec', wrap: (c) => `nx exec ${c}` },
+  { name: 'bash -c', wrap: (c) => `bash -c '${c}'`, asksAlone: 'inline code cannot be seen' },
+  { name: 'sh -c', wrap: (c) => `sh -c '${c}'`, asksAlone: 'inline code cannot be seen' },
+  { name: 'eval', wrap: (c) => `eval '${c}'`, asksAlone: 'text that cannot be seen' },
+  {
+    name: 'escape in the name',
+    wrap: (c) => `${c.charAt(0)}\\${c.slice(1)}`,
+    asksAlone: 'a command word with a backslash asks',
+  },
+  {
+    name: 'leading backslash',
+    wrap: (c) => `\\${c}`,
+    asksAlone: 'a command word with a backslash asks',
+  },
+  { name: 'after ;', wrap: (c) => `echo hi; ${c}` },
+  { name: 'after &&', wrap: (c) => `cd src && ${c}` },
+  { name: 'after ||', wrap: (c) => `false || ${c}` },
+  { name: 'after a pipe', wrap: (c) => `echo hi | ${c}` },
+  { name: 'in a subshell', wrap: (c) => `(${c})` },
+  { name: 'in an if', wrap: (c) => `if true; then ${c}; fi` },
+  { name: 'in a for', wrap: (c) => `for f in a; do ${c}; done` },
+  { name: 'after a line break', wrap: (c) => `echo hi\n${c}` },
+];
+
+/**
+ * The doors that on their own approve what they carry: {@link ASKING_DOORS} without the ones that
+ * set `asksAlone` (each carries its reason; `mise exec --` is the deliberate one, decision of
+ * Sergio 07/11/2026, pinned by the check "asks for mise exec -- git status, on purpose" below).
+ * `yarn`, `bun x`, `corepack` and `uv tool run` ARE here: they approve every {@link DAILY_CORES}.
+ */
+const HARMLESS_DOORS: readonly Door[] = ASKING_DOORS.filter((door) => door.asksAlone === undefined);
+
+describe('commandNeedsAsk: holes the matrix found', () => {
+  /**
+   * Regression of the hole the matrix found (issue #184): an `exec` that is a binary's own
+   * subcommand was taken for the launcher's, so `yarn kubectl exec pod` read `pod` as the tool.
+   * Fabricated commands; the criterion only.
+   */
+  it('asks for a binary run by yarn or pnpm whose own subcommand is exec', () => {
+    expect(commandNeedsAsk('yarn kubectl exec pod -- sh')).toBe(true);
+    expect(commandNeedsAsk('pnpm kubectl exec pod -- sh')).toBe(true);
+    expect(commandNeedsAsk('pnpm exec tsc --noEmit')).toBe(false);
+  });
+});
+
+describe('commandNeedsAsk: launchers that nest a launcher', () => {
+  /**
+   * Regression of the hole of review #2051: `corepack <pm> …` and `uv tool run …` fell to "other
+   * subcommands are approved", so a deleter behind them was approved. The examples of the review
+   * and the daily use probed beside them. Fabricated commands; the criterion only.
+   */
+  it('asks for what corepack and uv tool run launch, and approves their daily use', () => {
+    for (const command of [
+      'corepack pnpm rm -rf x',
+      'corepack yarn rimraf dist',
+      'corepack npx rimraf dist',
+      'corepack pnpm dlx rimraf dist',
+      'corepack pnpm exec git push',
+      'corepack yarn kubectl delete pod x',
+      'corepack pnpm@9 rm -rf x',
+      'corepack pnpm publish',
+      'uv tool run rimraf x',
+      'uv tool run --from x rimraf x',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(true);
+    }
+    for (const command of [
+      'corepack enable',
+      'corepack prepare pnpm@9 --activate',
+      'corepack pnpm install',
+      'corepack pnpm@9 install',
+      'corepack pnpm run build',
+      'corepack pnpm exec tsc --noEmit',
+      'corepack yarn install',
+      'corepack npm test',
+      'corepack npx prettier --check .',
+      'uv tool run ruff check .',
+      'uv tool install ruff',
+      'uv tool list',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(false);
+    }
+  });
+});
+
+describe('commandNeedsAsk: runners found open by a second probe', () => {
+  /**
+   * Decision of Sergio, 07/11/2026 (option "simple rule"): `hatch run` is a runner, so `hatch run
+   * test:cov` asks ON PURPOSE (a name with `:` is not a literal tool); every `nix …` asks, `nix
+   * build` included; `dotnet tool run X` is classified by `X`. Fabricated commands; the criterion
+   * only.
+   */
+  it('asks for hatch run, nix and dotnet tool run, on purpose', () => {
+    for (const command of [
+      'hatch run rm -rf x',
+      'hatch run test:cov',
+      'nix run nixpkgs#rm -- -rf x',
+      'nix build',
+      'nix develop',
+      'dotnet tool run rimraf x',
+      'dotnet tool run dotnet-ef database drop',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(true);
+    }
+    for (const command of [
+      'hatch run pytest',
+      'hatch build',
+      'dotnet build',
+      'dotnet test',
+      'dotnet tool list',
+      'dotnet tool run dotnet-ef migrations list',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(false);
+    }
+  });
+});
+
+describe('commandNeedsAsk: closing round of runner forms', () => {
+  /**
+   * Review #2058 and decisions of Sergio, 07/11/2026: what follows `--` in `mise|rtx exec <tool>`
+   * is classified; a global option before a runner's subcommand asks (so `uv --quiet run pytest`
+   * asks ON PURPOSE); `yarnpkg` is yarn; `corepack exec|run|x` and `dotnet nuget push tool run`
+   * keep asking as before. Fabricated commands; the criterion only.
+   */
+  it('asks for the closing round of runner forms', () => {
+    for (const command of [
+      'mise exec node -- rm -rf x',
+      'mise exec node@20 -- git push',
+      'mise x node@20 -- rimraf dist',
+      'rtx exec node -- rm -rf x',
+      'mise exec node',
+      'mise exec -- git status',
+      'mise exec node --',
+      'mise exec cargo:x -- ls',
+      'mise exec npm:rimraf -- git status',
+      'uv --quiet run rm -rf x',
+      'uv --quiet run pytest',
+      'uv --quiet tool run rimraf x',
+      'hatch -e test run rm -rf x',
+      'hatch -e test run pytest',
+      'corepack --x pnpm rm -rf x',
+      'yarnpkg rimraf dist',
+      'yarnpkg rm -rf x',
+      'corepack yarnpkg rimraf dist',
+      'corepack exec rm -rf x',
+      'corepack run kubectl delete pod x',
+      'corepack exec -- rm -rf x',
+      'dotnet nuget push tool run',
+      'dotnet nuget push pkg.nupkg tool run',
+      'hatch unpublish x',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(true);
+    }
+    for (const command of [
+      'mise exec node -- git status',
+      'mise x node@20 -- node -v',
+      'rtx exec node -- ls -la',
+      'uv --version',
+      'uv sync',
+      'yarnpkg install',
+      'yarnpkg build',
+      'corepack yarnpkg install',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(false);
+    }
+  });
+});
+
+describe('commandNeedsAsk: deliberate asks the matrix pinned', () => {
+  /**
+   * `mise exec -- <command>` asks even for daily-use commands. DELIBERATE (decision of Sergio,
+   * 07/11/2026, option "keep asking"): after a runner, `--` is treated as an option that may take
+   * a value, so the tool cannot be told apart. Fabricated command; pins the criterion only.
+   */
+  it('asks for mise exec -- git status, on purpose', () => {
+    expect(commandNeedsAsk('mise exec -- git status')).toBe(true);
+  });
+});
+
+/**
+ * Cores that must ask in EVERY door: one per family of the header of `destructiveCommand.ts`
+ * (deleters, git, disk, infrastructure, cloud, publishing, secrets, text that cannot be seen).
+ * Each core is FABRICATED text, none was run.
+ */
+const DANGEROUS_CORES: readonly string[] = [
+  'rm -rf src',
+  'mv a b',
+  'cp a b',
+  'rimraf dist',
+  'git push',
+  'git reset --hard',
+  'git clean -fd',
+  'git branch -D old',
+  'git stash drop',
+  'git rm file.txt',
+  'find . -name x -delete',
+  'dd if=/dev/zero of=x',
+  'truncate -s 0 log.txt',
+  'chmod -R 777 .',
+  'sed -i s/a/b/ f',
+  'kubectl delete pod x',
+  'kubectl apply -f x.yaml',
+  'terraform destroy',
+  'terraform apply -auto-approve',
+  'pulumi destroy',
+  'helm uninstall x',
+  'docker rm x',
+  'docker push img',
+  'aws s3 rb s3://b',
+  'gcloud storage cp . gs://b',
+  'az storage blob upload -f x',
+  'vercel --prod',
+  'firebase deploy',
+  'npm publish',
+  'gh pr merge 1',
+  'rails db:drop',
+  'curl -X POST https://example.com',
+  'scp a host:b',
+  'cat .env',
+  'cat id_rsa',
+  'grep -rn KEY .',
+  'xargs echo',
+  'firebase-tools deploy',
+  'netlify-cli deploy --prod',
+  'aws-cdk destroy',
+  'python -c "x"',
+  'npx rimraf dist',
+  'git push --force origin main',
+  'docker run -v .:/x img',
+  'cat .env.local',
+  'type .env',
+  'Remove-Item x',
+  'Set-Content f x',
+  'echo hi > out.txt',
+  'tee out.txt',
+  'rsync -a --delete a/ b/',
+  'wrangler deploy',
+  'npm unpublish x',
+  'cargo publish',
+  'kubectl exec pod -- sh',
+  'git config alias.x !ls',
+  'git -c core.pager=x log',
+  'powershell -Command x',
+];
+
+/**
+ * Cores of daily use that must stay approved in every harmless door. They are the false positives a
+ * review would otherwise find the hard way (`%` in `date +%Y%m%d`, `%n` in a git format, `-v` of
+ * node, `plan -var x=1` of terraform): the issue asks to probe them before a rule is believed.
+ */
+const DAILY_CORES: readonly string[] = [
+  'date +%Y%m%d',
+  'git log --format=%H%n%B',
+  'git status',
+  'git diff HEAD~1',
+  'git commit -m "fix"',
+  'git checkout main',
+  'node -v',
+  'printf "%s" x',
+  'terraform plan -var x=1',
+  'kubectl get pods',
+  'docker ps',
+  'aws s3 ls',
+  'tsc --noEmit',
+  'ls -la',
+  'cat package.json',
+  'grep -rn foo src',
+  'npm test',
+  'python -m pytest',
+  'git log --oneline -5',
+  'terraform plan',
+  'terraform validate',
+  'kubectl describe pod x',
+  'npm run lint',
+  'eslint src',
+  'vitest run',
+  'cargo test',
+  'go test ./...',
+];
+
+/**
+ * The matrix of issue #184: every dangerous core inside every door asks, and every daily-use core
+ * inside every harmless door is approved. It protects against the pattern of six reviews of
+ * E3-work-mode, where a family already covered was found open by a door nobody had tested.
+ * UNVERIFIED beyond the doors and cores listed above: a door missing from {@link ASKING_DOORS} is
+ * not covered. The commands are fabricated; the matrix pins the classifier's criterion and shows
+ * nothing about what a shell, `npx` or opencode would do with them.
+ */
+describe('commandNeedsAsk: matrix of doors x dangerous cores', () => {
+  const cases = DANGEROUS_CORES.flatMap((core) =>
+    ASKING_DOORS.map((door) => ({ door: door.name, core, command: door.wrap(core) })),
+  );
+  it.each(cases)('asks: $door x $core', ({ command }) => {
+    expect(commandNeedsAsk(command)).toBe(true);
+  });
+});
+
+describe('commandNeedsAsk: matrix of harmless doors x daily use', () => {
+  const cases = DAILY_CORES.flatMap((core) =>
+    HARMLESS_DOORS.map((door) => ({ door: door.name, core, command: door.wrap(core) })),
+  );
+  it.each(cases)('approves: $door x $core', ({ command }) => {
+    expect(commandNeedsAsk(command)).toBe(false);
+  });
+});
