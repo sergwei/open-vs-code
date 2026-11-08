@@ -131,6 +131,18 @@
  * change cost about 1 s each in the steps 35 and 36; 46 makes 16 + 8 theme cells and 6 drags, 47
  * 16 and 6, 48 12 and 1), and they are NOT calibrated with the criterion above. The next branch that
  * runs a full run recalibrates them.
+ * The step 49 (the native Changes and Usage views under the Sessions tree, E9-sidebar-home, issue
+ * #187) needs the 1 and sends three prompts (an edit turn, a COSTLY one and a short one with the
+ * Usage view collapsed). Its `budgetS` of 50 comes from the full run of that branch just before the
+ * budgets were set (Windows 11, VS Code 1.145.2, 08/11/2026; that tree differs from the final one
+ * only in these two `budgetS`): 36.1 s, times 1.25 is 45.1, rounded up to a
+ * multiple of 5; it carries an 11.5 s negative window (a refresh 10 s after a finished turn would
+ * show that a collapsed view still believed it was visible). The step 50 (the Quick start view)
+ * needs the 1 and sends four prompts (MCPFLIP, SLOWER, ASK_PERMISSION and the Auto one) and runs
+ * four matrices of 8 cells with side bar drags and theme switches. Its `budgetS` of 80 comes from
+ * the same full run: 60.1 s, times 1.25 is 75.1, rounded up to 80. That full run had one FAIL, a
+ * check of step 25 that passed 3 of 3 alone (intermittent, no verified cause); the full run on the
+ * final tree passed every check (49 at 35.9 s, 50 at 59.4 s), so the budgets stand.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -193,6 +205,8 @@ export const STEPS = [
   { id: '46', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 60 },
   { id: '47', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 40 },
   { id: '48', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 30 },
+  { id: '49', needs: ['1'], sendsPrompt: true, groups: ['home', 'sessions'], budgetS: 50 },
+  { id: '50', needs: ['1'], sendsPrompt: true, groups: ['home'], budgetS: 80 },
 ];
 
 /** Every valid id, in canonical order. */
