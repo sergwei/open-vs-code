@@ -694,7 +694,30 @@ async function connectWorkbench(timeoutMs = 90_000) {
   browser = connected.browser;
   page = connected.page;
   instrumentPage(page);
+  await page.evaluate(HOME_PROBE_SOURCE);
 }
+
+/**
+ * Defines `globalThis.__ovcIsHome(frame)` in the workbench page (again after every Reload Window,
+ * see `connectWorkbench`, and in the page of every extra window `withWindow` opens: RULE, every
+ * page obtained through `connectPage` needs it, or a check that counts chats sees the Quick start
+ * frame as one, as D0 of step 25 did): true when the webview iframe `frame` is the Quick start view of the side
+ * bar (E9-sidebar-home). A VS Code webview VIEW is an overlay iframe with no attribute that tells
+ * which view it is (HYPOTHESIS: a run printed the attributes and the `src` of five frames and
+ * none carried a `purpose`, but that output was not kept; to check, print them again with
+ * `--steps 50`), so the probe matches its box with the body of the pane whose header
+ * reads "Quick start". The checks that say "the side bar holds no chat" in editor mode skip it.
+ * NOT covered: a Spanish window (the header would read "Inicio rápido").
+ */
+const HOME_PROBE_SOURCE = `globalThis.__ovcIsHome = (frame) => {
+  const header = [...document.querySelectorAll('.part.sidebar .pane-header')].find((candidate) =>
+    (candidate.textContent ?? '').toLowerCase().includes('quick start'),
+  );
+  if (header === undefined) return false;
+  const body = header.getBoundingClientRect();
+  const box = frame.getBoundingClientRect();
+  return box.top >= body.bottom - 2 && box.top <= body.bottom + 4 && Math.abs(box.left - body.left) <= 4;
+};`;
 
 /** Window size the whole run uses (HYPOTHESIS: VS Code's own default for a new window with a folder). */
 const WINDOW_SIZE = { width: 1440, height: 900 };
@@ -962,20 +985,97 @@ async function chatFrameBox(options) {
 let drivenChatId;
 
 /**
+ * The value `setLocation` wrote last (`sidebar` until a step writes `editor`): lets
+ * {@link visibleChatId} tell the Quick start view of the side bar from a chat. Starts at `sidebar`,
+ * the default the profile of the run is written with.
+ */
+let chatLocationNow = 'sidebar';
+
+/**
  * The id of the chat webview that is on screen (the `name` of its {@link CHAT_FRAME}, which is the
  * `id=` of its CDP target), or `undefined` when none is visible. Iframes of other extensions are not
- * looked at. See `webviewTarget`.
+ * looked at. See `webviewTarget`. While the last `setLocation` was `editor`, a webview that sits
+ * inside the side bar is skipped: it is the Quick start view (E9-sidebar-home), not a chat. In any
+ * other mode a webview inside the side bar is asked with {@link isHomeFrame}, because the Quick
+ * start frame lingers there for a moment after a switch to `sidebar` and would be found first (the
+ * same rule that steps 27 to 31 apply locally). A candidate outside the side bar (a chat tab) is
+ * never asked. Costs one short CDP connection per candidate inside the side bar.
+ * VERIFIED: a full `test:visual` (Windows 11, VS Code 1.145.2, 08/11/2026) with this version
+ * passed every step but 25 (a different cause: `withWindow` pages had no `__ovcIsHome`), and
+ * `--steps 29,34,49,50` ended "all visual checks passed". Not observed: that the lingering frame
+ * was actually picked without it.
  */
-function visibleChatId() {
-  return page.evaluate(
-    (selector) =>
-      [...globalThis.document.querySelectorAll(selector)].find(
-        (frame) =>
-          frame.checkVisibility({ checkVisibilityCSS: true }) &&
-          frame.getBoundingClientRect().width > 0,
-      )?.name,
-    CHAT_FRAME,
+async function visibleChatId() {
+  const candidates = await page.evaluate(
+    ({ selector, editorMode }) => {
+      const side = globalThis.document.querySelector('.part.sidebar')?.getBoundingClientRect();
+      return [...globalThis.document.querySelectorAll(selector)].flatMap((frame) => {
+        if (!frame.checkVisibility({ checkVisibilityCSS: true })) return [];
+        const box = frame.getBoundingClientRect();
+        if (box.width <= 0) return [];
+        // E9-sidebar-home: with the chat in editor tabs, a webview inside the side bar is the Quick
+        // start view (`openVsCode.home`), never a chat.
+        const inSideBar =
+          side !== undefined && box.left >= side.left - 1 && box.right <= side.right + 1;
+        return editorMode && inSideBar ? [] : [{ id: frame.name, inSideBar }];
+      });
+    },
+    { selector: CHAT_FRAME, editorMode: chatLocationNow === 'editor' },
   );
+  for (const candidate of candidates) {
+    if (!candidate.inSideBar || !(await isHomeFrame(candidate.id))) return candidate.id;
+  }
+  return undefined;
+}
+
+/**
+ * Whether the webview whose iframe `name` is `id` is the Quick start view (E9-sidebar-home): its
+ * document says `surface` `home`. Opens a short CDP connection to read it; `false` when the target
+ * is gone or does not answer. Used where the side bar may still hold the Quick start frame after a
+ * switch of `chatLocation` to `sidebar`, when the chat and the Quick start view are both webview
+ * views and the DOM cannot tell them apart.
+ */
+async function isHomeFrame(id) {
+  const probe = await openWebview(vscode.port, [], 3_000, id).catch(() => undefined);
+  if (probe === undefined) return false;
+  try {
+    const surface = await probe.inDoc((doc) =>
+      doc.querySelector('meta[name="open-vs-code-surface"]')?.getAttribute('content'),
+    );
+    return surface === 'home';
+  } catch {
+    return false;
+  } finally {
+    probe.close();
+  }
+}
+
+/**
+ * Folds (`folded` true) or unfolds the Quick start pane of the side bar (E9-sidebar-home); does
+ * nothing when the pane is absent or already in that state. Folding gives the Sessions tree the
+ * height of the side bar (its list is virtual: rows below the fold are not in the DOM and a click
+ * on them times out; steps 29 and 34). The fold state is remembered by VS Code for the workspace,
+ * so a step that folds it unfolds it in its `finally`, and step 50 unfolds it first.
+ * It clicks the header only when the pane is NOT yet in the asked state (one click toggles; a
+ * first version clicked in the opposite case and folded the pane when asked to unfold it, which
+ * left step 50 without its webview). VERIFIED by `--steps 29,34,50` (Windows 11, VS Code 1.145.2,
+ * 08/11/2026): the headers read `pane-header actions-always-visible expanded` with
+ * `aria-expanded` "true" (printed by a diagnostic, since removed) and step 29 B5 passed
+ * ("ok   B5 Show more sessions loads the next page (55 -> 63 rows, Seed29 55 loaded true)").
+ */
+async function setQuickStartFolded(folded) {
+  const header = page.locator('.part.sidebar .pane-header', { hasText: /quick start/i }).first();
+  if ((await header.count()) === 0) return;
+  const open = () =>
+    header.evaluate(
+      (element) =>
+        element.getAttribute('aria-expanded') === 'true' || element.classList.contains('expanded'),
+    );
+  // `open()` equal to `folded` means the pane is in the state to leave: one click toggles it.
+  if ((await open()) === folded) {
+    await header.click();
+    await waitFor(async () => (await open()) === !folded, 3_000, 100);
+  }
 }
 
 /**
@@ -2138,6 +2238,7 @@ async function waitConnected(ms = 60_000) {
 
 /** Writes `openVsCode.chatLocation` into the live profile (`sidebar` or `editor`). */
 const setLocation = (value) => {
+  chatLocationNow = value;
   writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
 };
 
@@ -8210,6 +8311,7 @@ try {
             ),
             welcome: flat(side?.querySelector('.welcome-view-content')?.innerText),
             chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+              if (globalThis.__ovcIsHome?.(frame)) return false; // the Quick start view is no chat
               const box = frame.getBoundingClientRect();
               const x = box.left + box.width / 2;
               return (
@@ -8237,6 +8339,10 @@ try {
             ...options,
           });
           connection = await connectPage(instance.port, 90_000);
+          // This page is not the one `connectWorkbench` set up, so it has no `__ovcIsHome` yet:
+          // without it `sideBarState` counts the Quick start frame as a chat (D0, full run of
+          // 08/11/2026: "1 iframe(s)"; step 25 had not run in any batch of that day).
+          await connection.page.evaluate(HOME_PROBE_SOURCE);
           await body(connection.page, instance);
         } finally {
           await connection?.browser.close().catch(() => undefined);
@@ -9013,6 +9119,7 @@ try {
           // A webview is not a DOM child of the side bar (it floats over it), so a chat "in the
           // side bar" is a visible chat iframe whose centre lies inside the side bar's box.
           chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+            if (globalThis.__ovcIsHome?.(frame)) return false; // the Quick start view is no chat
             const sideBox = side?.getBoundingClientRect();
             const box = frame.getBoundingClientRect();
             const x = box.left + box.width / 2;
@@ -9637,6 +9744,7 @@ try {
     const sampleFile = path.join(workspace, 'src', 'sample.ts');
     const sampleBefore = fs.readFileSync(sampleFile, 'utf8');
     const setLocation = (value) => {
+      chatLocationNow = value;
       writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
     };
     const tabsNow = () =>
@@ -10038,7 +10146,16 @@ try {
 
       // --- Reload Window #2 (sidebar mode) ------------------------------------------------------
       setLocation('sidebar');
-      await waitFor(async () => (await chatIds()).side !== undefined, 8_000, 200);
+      // The Quick start view (E9-sidebar-home) leaves the side bar a moment after the switch, and
+      // until then it is the frame in the side bar: wait for the one that is not it.
+      await waitFor(
+        async () => {
+          const side = (await chatIds()).side;
+          return side !== undefined && !(await isHomeFrame(side)) ? side : undefined;
+        },
+        10_000,
+        200,
+      );
       let ids = await chatIds();
       if (ids.side === undefined) {
         await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
@@ -10191,6 +10308,7 @@ try {
     const PROMPT_N = 'Tab29N: Reply with exactly: nu29. Do not use any tools.';
     const PROMPT_N2 = 'Tab29N again: ASK_PERMISSION SLOW';
     const setLocation = (value) => {
+      chatLocationNow = value;
       writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
     };
     const tabsNow = () =>
@@ -10344,6 +10462,7 @@ try {
           ),
           rows: [...(side?.querySelectorAll('.monaco-list-row') ?? [])].length,
           chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+            if (globalThis.__ovcIsHome?.(frame)) return false; // the Quick start view is no chat
             const sideBox = side?.getBoundingClientRect();
             const box = frame.getBoundingClientRect();
             const x = box.left + box.width / 2;
@@ -10366,7 +10485,7 @@ try {
     // that open the view through it passed, "V1 light: the tree reads Needs attention first and
     // Today after it" (and the dark, hc-dark and hc-light ones) and "V2 Default Dark Modern: the
     // row shows [...] on hover"; not observed: the side bar open without actions in this step.
-    const showSessions = async () => {
+    const revealSessions = async () => {
       const shows = async () =>
         (await sideState()).actions.some((label) => label.startsWith('New Session'));
       const sideBarOpen = () =>
@@ -10379,6 +10498,12 @@ try {
       await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
       await waitFor(shows, 5_000, 100);
     };
+    // E9-sidebar-home: Quick start is folded too, or only ~10 rows fit and "Show more sessions" is
+    // below the fold (run of 08/11/2026: B5 "10 -> 10 rows"); the `finally` unfolds it.
+    const showSessions = async () => {
+      await revealSessions();
+      await setQuickStartFolded(true);
+    };
     const menuRows = async () =>
       (await page.locator('.monaco-menu .action-label').allInnerTexts())
         .map((text) => text.trim())
@@ -10387,7 +10512,21 @@ try {
     const scrollTo = async (needle, direction = 1) => {
       const side = await sideBarBox();
       if (side === null) return false;
-      await page.mouse.move(side.left + 60, side.top + side.height / 2);
+      // E9-sidebar-home: the Quick start pane sits above the tree, so the middle of the side bar may be
+      // over it; the wheel goes to the first tree row instead (the Changes and Usage panes start
+      // collapsed and hold none).
+      // A row from the middle of the drawn ones, not the first: with the pane tall enough the first
+      // drawn row is the sticky "Today" header, which does not take the wheel (run of 08/11/2026:
+      // the walk up never left Seed29 19).
+      const drawn = page.locator('.part.sidebar .monaco-list-row');
+      const firstRow = await drawn
+        .nth(Math.floor((await drawn.count()) / 2))
+        .boundingBox({ timeout: 1_000 })
+        .catch(() => null);
+      await page.mouse.move(
+        firstRow === null ? side.left + 60 : firstRow.x + 20,
+        firstRow === null ? side.top + side.height / 2 : firstRow.y + firstRow.height / 2,
+      );
       for (let round = 0; round < 40; round += 1) {
         if ((await rowNamed(needle)) !== undefined) return true;
         await page.mouse.wheel(0, 500 * direction);
@@ -10399,10 +10538,14 @@ try {
     const allRowNames = async () => {
       await scrollTo('~never~', -1);
       const seen = [];
-      for (let round = 0; round < 60; round += 1) {
+      // E9-sidebar-home: with Quick start folded the tree shows ~30 rows, and one read 120 ms after a
+      // wheel can still show the same rows (run of 08/11/2026: 33 names instead of 55), so the walk
+      // ends after three reads in a row that add nothing, not after the first.
+      let stalled = 0;
+      for (let round = 0; round < 80 && stalled < 3; round += 1) {
         const before = seen.length;
         for (const row of await treeRows()) if (!seen.includes(row.name)) seen.push(row.name);
-        if (round > 0 && seen.length === before) break;
+        stalled = seen.length === before && round > 0 ? stalled + 1 : 0;
         await page.mouse.wheel(0, 400);
         await sleep(120); // as in scrollTo
       }
@@ -10975,6 +11118,16 @@ try {
       // --- B7 (view): the side bar chat keeps its Sessions button --------------------------------------------
       await closeAllEditors();
       setLocation('sidebar');
+      // The Quick start frame (E9-sidebar-home) stays in the side bar a moment after the switch and
+      // is what `visibleChatId` finds first: wait until the frame on screen is not it.
+      await waitFor(
+        async () => {
+          const shown = await visibleChatId();
+          return shown !== undefined && !(await isHomeFrame(shown)) ? shown : undefined;
+        },
+        10_000,
+        200,
+      );
       if (
         (await waitFor(async () => (await visibleChatId()) !== undefined, 8_000, 200)) === undefined
       ) {
@@ -10992,6 +11145,7 @@ try {
       // Leave the workspace as the step found it: the server up, no editor open, `sidebar`, the dark
       // theme and the side bar at its width. The sessions of the fixture were wiped by V4.
       fs.rmSync(vscode.downMarker, { force: true });
+      await setQuickStartFolded(false).catch(() => undefined); // while the pane exists (editor mode)
       setLocation('sidebar');
       await closeAllEditors().catch(() => undefined);
       await setTheme(DARK).catch(() => undefined);
@@ -11032,6 +11186,7 @@ try {
     const PROMPT_A = 'Tab30A: Reply with exactly: alpha30. Do not use any tools.';
     const PROMPT_B = 'Tab30B: Reply with exactly: beta30. Do not use any tools.';
     const setLocation = (value) => {
+      chatLocationNow = value;
       writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
     };
     const tabsNow = () =>
@@ -11086,6 +11241,7 @@ try {
           [...globalThis.document.querySelectorAll(selector)]
             .filter(
               (frame) =>
+                !globalThis.__ovcIsHome?.(frame) &&
                 frame.checkVisibility({ checkVisibilityCSS: true }) &&
                 frame.getBoundingClientRect().width > 0,
             )
@@ -11372,10 +11528,15 @@ try {
       // --- D5: sidebar mode, the side bar chat visible and tabs left over ----------------------------
       await command('Notifications: Clear All Notifications');
       setLocation('sidebar');
-      let lateral = await waitFor(() => sidebarChatId(), 8_000, 200);
+      // The Quick start frame (E9-sidebar-home) may still be the one in the side bar for a moment.
+      const lateralChat = async () => {
+        const found = await sidebarChatId();
+        return found !== undefined && !(await isHomeFrame(found)) ? found : undefined;
+      };
+      let lateral = await waitFor(lateralChat, 8_000, 200);
       if (lateral === undefined) {
         await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
-        lateral = await waitFor(() => sidebarChatId(), 15_000, 200);
+        lateral = await waitFor(lateralChat, 15_000, 200);
       }
       await openChat(30_000, lateral);
       await waitConnected();
@@ -11439,6 +11600,7 @@ try {
     const KEY = 'openVsCode.chatLocation';
     const PROMPT_A = 'Tab31A: Reply with exactly: alpha31. Do not use any tools.';
     const setLocation = (value) => {
+      chatLocationNow = value ?? 'editor'; // no key means the default, `editor`
       writeSettings(vscode.userDataDir, { [KEY]: value });
     };
     const keyInProfile = () =>
@@ -11483,6 +11645,7 @@ try {
             (a) => a.getAttribute('aria-label') ?? '',
           ),
           chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+            if (globalThis.__ovcIsHome?.(frame)) return false; // the Quick start view is no chat
             const box = frame.getBoundingClientRect();
             const x = box.left + box.width / 2;
             return (
@@ -11690,10 +11853,15 @@ try {
       // --- D5: writing `sidebar` brings the Chat view back; the tabs stay open --------------------
       const tabsBefore = (await chatTabs()).length;
       setLocation('sidebar');
-      let lateral = await waitFor(() => sidebarChatId(), 8_000, 200);
+      // The Quick start frame (E9-sidebar-home) may still be the one in the side bar for a moment.
+      const lateralChat = async () => {
+        const found = await sidebarChatId();
+        return found !== undefined && !(await isHomeFrame(found)) ? found : undefined;
+      };
+      let lateral = await waitFor(lateralChat, 8_000, 200);
       if (lateral === undefined) {
         await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
-        lateral = await waitFor(() => sidebarChatId(), 15_000, 200);
+        lateral = await waitFor(lateralChat, 15_000, 200);
       }
       await openChat(30_000, lateral);
       await waitConnected();
@@ -12278,6 +12446,7 @@ try {
     const NORMAL = 300;
     const NARROW = 170;
     const setLocation = (value) => {
+      chatLocationNow = value;
       writeSettings(vscode.userDataDir, { 'openVsCode.chatLocation': value });
     };
     const unverified = [];
@@ -12394,7 +12563,7 @@ try {
     // manifest change; the same FAIL reproduced with it): the probe printed "side bar w=300
     // vis=true actions=[]" before the click and "w=0 vis=false" after it, and B9 failed with the
     // side bar closed.
-    const showSessions = async () => {
+    const revealSessions = async () => {
       const shows = async () =>
         (await sideState()).actions.some((label) => label.startsWith('New Session'));
       const sideBarOpen = () =>
@@ -12406,6 +12575,17 @@ try {
       if ((await sideBarOpen()) && (await waitFor(shows, 15_000, 100))) return;
       await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
       await waitFor(shows, 5_000, 100);
+    };
+    // E9-sidebar-home: the Quick start pane sits above the Sessions tree and takes most of the
+    // side bar, so rows below the fold are not in the DOM (the list is virtual) and `rowLoc` times
+    // out (run of 08/11/2026: the click on Org34A under Archived, `--steps 34,37`). Folding that
+    // pane gives the tree the height. HYPOTHESIS: a pane header carries `aria-expanded` or the
+    // class `expanded`; check with `--steps 34`.
+    // Brings the Sessions view on screen and gives it the height of the side bar (the step's
+    // `finally` unfolds Quick start again: step 50 needs its webview alive).
+    const showSessions = async () => {
+      await revealSessions();
+      await setQuickStartFolded(true);
     };
     // The title bar of the view: the description that carries the filter, and the Clear Filters button.
     const headerState = () =>
@@ -13174,6 +13354,7 @@ try {
     } finally {
       // Leave the workspace as the step found it: `sidebar`, no editor, the dark theme, the side bar
       // at its width. The folders and flags it made stay in the workspaceState of the test profile.
+      await setQuickStartFolded(false).catch(() => undefined); // while the pane exists (editor mode)
       setLocation('sidebar');
       await closeAllEditors().catch(() => undefined);
       await setTheme(DARK).catch(() => undefined);
@@ -18803,6 +18984,824 @@ try {
       }
     },
   );
+  // Step 49 (E9-sidebar-home, issue #187): the two native views under the Sessions tree. VERIFIED by
+  // the full run of E9-sidebar-home on its final tree (Windows 11, VS Code 1.145.2, 08/11/2026, "all
+  // visual checks passed"): every check below printed its `ok` line
+  // ("U1 the Changes and Usage panes are in the container and start COLLAPSED", "C3 clicking
+  // src/sample.ts of a session with no tab opens a diff editor", "U4 with the Usage pane collapsed a
+  // finished turn made no stats request (0 new)").
+  await step('49 native Changes and Usage views (E9-sidebar-home)', async () => {
+    const DARK = 'Default Dark Modern';
+    const NORMAL = 300;
+    // The line the fixture writes to stderr for every `GET /api/experimental/session/stats`; the
+    // host logs it, so counting it counts the requests the Usage view made.
+    const STATS = '{"fake":"stats"';
+    const CHANGES = 'changes of the sessions';
+    const USAGE = 'usage (all projects)';
+    const hostLogText = () => {
+      const files = [];
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'OpenCode.log') files.push(full);
+        }
+      };
+      try {
+        walk(path.join(vscode.userDataDir, 'logs'));
+      } catch {
+        return '';
+      }
+      return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+    };
+    const statsCalls = () => hostLogText().split(STATS).length - 1;
+    // What one pane of the side bar shows: its title, whether it is expanded, and its rows with
+    // what is DRAWN of them (the same measure as the outline of step 34: `full`, `cut` or `hidden`).
+    const paneState = (needle) =>
+      page.evaluate((wanted) => {
+        const side = globalThis.document.querySelector('.part.sidebar');
+        const panes = [...(side?.querySelectorAll('.pane') ?? [])];
+        const pane = panes.find((candidate) =>
+          (candidate.querySelector('.pane-header')?.textContent ?? '')
+            .toLowerCase()
+            .includes(wanted),
+        );
+        if (pane === undefined) return { found: false, expanded: false, title: '', rows: [] };
+        const header = pane.querySelector('.pane-header');
+        const sideBox = side?.getBoundingClientRect();
+        const rows = [...pane.querySelectorAll('.monaco-list-row')].map((row) => {
+          const nameElement = row.querySelector('.label-name');
+          const description = row.querySelector('.label-description');
+          const container =
+            row.querySelector('.monaco-icon-label-container') ??
+            row.querySelector('.monaco-icon-label');
+          const containerBox = container?.getBoundingClientRect();
+          const drawn = (element) => {
+            if (!element || !containerBox) return 'hidden';
+            const box = element.getBoundingClientRect();
+            const width = Math.max(
+              0,
+              Math.min(box.right, containerBox.right) - Math.max(box.left, containerBox.left),
+            );
+            if (width < 1) return 'hidden';
+            return element.scrollWidth <= element.clientWidth + 1 &&
+              box.right <= containerBox.right + 1
+              ? 'full'
+              : 'cut';
+          };
+          const rowBox = row.getBoundingClientRect();
+          const icon = row.querySelector('.custom-view-tree-node-item-icon');
+          return {
+            name: (nameElement?.textContent ?? '').trim(),
+            description: (description?.textContent ?? '').trim(),
+            level: Number(row.getAttribute('aria-level') ?? '0'),
+            expanded: row.getAttribute('aria-expanded'),
+            iconClass: icon ? (icon.getAttribute('class') ?? '') : '',
+            nameShown: drawn(nameElement),
+            descriptionShown: description === null ? 'none' : drawn(description),
+            insideSideBar: sideBox !== undefined && rowBox.right <= sideBox.right + 1,
+          };
+        });
+        return {
+          found: true,
+          expanded:
+            header?.getAttribute('aria-expanded') === 'true' ||
+            pane.classList.contains('expanded') ||
+            header?.classList.contains('expanded') === true,
+          title: (header?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+          rows,
+        };
+      }, needle);
+    const paneLoc = (needle) =>
+      page
+        .locator('.part.sidebar .pane', {
+          has: page.locator('.pane-header', {
+            hasText: new RegExp(needle.replace(/[()]/g, '\\$&'), 'i'),
+          }),
+        })
+        .first();
+    const toggle = (needle) =>
+      paneLoc(needle).locator('.pane-header').first().click({ timeout: 5_000 });
+    const rowIn = (needle, text) =>
+      paneLoc(needle).locator('.monaco-list-row', { hasText: text }).first();
+    const waitPane = (needle, predicate, ms = 10_000) =>
+      waitFor(async () => predicate(await paneState(needle)), ms, 150);
+    const rowOf = (state, text) => state.rows.find((row) => row.name.includes(text));
+    // Brings the OpenCode container on screen. The activity bar item TOGGLES, so it is pressed only
+    // when the side bar really has no width (the lesson of step 34's `showSessions`).
+    const showContainer = async () => {
+      const shows = async () => (await paneState(CHANGES)).found;
+      if (await shows()) return;
+      const open = await page.evaluate(() => {
+        const side = globalThis.document.querySelector('.part.sidebar');
+        return side !== null && side.getBoundingClientRect().width > 0 && side.checkVisibility();
+      });
+      if (open && (await waitFor(shows, 15_000, 100))) return;
+      await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+      await waitFor(shows, 5_000, 100);
+    };
+
+    setLocation('sidebar');
+    if (
+      (await waitFor(async () => (await visibleChatId()) !== undefined, 8_000, 200)) === undefined
+    ) {
+      await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+      await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
+    }
+    await openChat(30_000);
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    await closeAllEditors();
+    const originalWidth = await sideBarPx();
+    try {
+      await setTheme(DARK);
+      await command('Notifications: Clear All Notifications');
+      await waitConnected();
+      const callsAtStart = statsCalls();
+      // Two sessions in the side bar: one that edits files, one that costs money. Short prompts, so
+      // the title leaves room for the description at 300 px.
+      for (const prompt of ['Chg49 EDIT_FILES', 'Use49 COSTLY']) {
+        check(await clickButton('New session'), `New session is pressed for ${prompt}`);
+        await waitEmptyView();
+        await send(prompt);
+        check(await waitIdle(30_000), `the turn of ${prompt} ends`);
+      }
+      setLocation('editor');
+      await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
+      await connectToNew(drivenChatId);
+      // No chat tab is left: the session of the edit turn has none, which is the point of the case.
+      await closeAllEditors();
+      await showContainer();
+      await setSideBarWidth(NORMAL);
+
+      // --- U1: both views start collapsed and have read nothing --------------------------------------
+      const changesPane = await paneState(CHANGES);
+      const usagePane = await paneState(USAGE);
+      // Negative window: the Usage view would ask for stats as soon as it believed it was shown.
+      await sleep(1_500);
+      check(
+        changesPane.found &&
+          usagePane.found &&
+          !changesPane.expanded &&
+          !usagePane.expanded &&
+          statsCalls() === callsAtStart,
+        `U1 the Changes and Usage panes are in the container and start COLLAPSED, and the fixture got no stats request (${JSON.stringify({ changes: changesPane.title, usage: usagePane.title, changesExpanded: changesPane.expanded, usageExpanded: usagePane.expanded, calls: statsCalls() - callsAtStart })})`,
+      );
+      check(
+        /all projects/i.test(usagePane.title),
+        `U1 the title of the Usage view says it covers all projects (${JSON.stringify(usagePane.title)})`,
+      );
+
+      // --- C1: Changes lists the edit session and reads its files only when the row is expanded ------
+      await toggle(CHANGES);
+      await waitPane(
+        CHANGES,
+        (state) => state.expanded && rowOf(state, 'Chg49') !== undefined,
+        15_000,
+      );
+      let state = await paneState(CHANGES);
+      const listed = rowOf(state, 'Chg49');
+      check(
+        listed !== undefined &&
+          listed.level === 1 &&
+          listed.expanded === 'false' &&
+          listed.description === '',
+        `C1 expanding the Changes pane lists the session Chg49 folded and with no description yet, because its files are read on expansion (${JSON.stringify(listed)})`,
+      );
+      await rowIn(CHANGES, 'Chg49').click({ timeout: 5_000 });
+      await waitPane(
+        CHANGES,
+        (next) => /^4 files · \+\d+ −\d+$/.test(rowOf(next, 'Chg49')?.description ?? ''),
+        15_000,
+      );
+      state = await paneState(CHANGES);
+      const sessionRow = rowOf(state, 'Chg49');
+      const fileRows = state.rows.filter((row) => row.level === 2);
+      const sampleRow = fileRows.find((row) => row.name === 'src/sample.ts');
+      await shot('49a-changes');
+      check(
+        /^4 files · \+\d+ −\d+$/.test(sessionRow?.description ?? '') &&
+          fileRows
+            .map((row) => row.name)
+            .sort()
+            .join('|') === 'assets/logo.png|src/added.ts|src/removed.ts|src/sample.ts' &&
+          /^\+1 −1$/.test(sampleRow?.description ?? ''),
+        `C1 expanding the session reads its four files, the row says "4 files · +a −d" and src/sample.ts says "+1 −1" (${JSON.stringify({ session: sessionRow?.description, files: fileRows.map((row) => `${row.name} ${row.description}`) })})`,
+      );
+      check(
+        sessionRow?.descriptionShown === 'full' &&
+          sampleRow?.descriptionShown === 'full' &&
+          sampleRow.nameShown === 'full' &&
+          state.rows.every((row) => row.insideSideBar) &&
+          /codicon-diff-modified/.test(sampleRow.iconClass),
+        `C2 at ${String(NORMAL)} px (Dark Modern) the descriptions of the session and of src/sample.ts are drawn whole inside the side bar, with the diff-modified icon (${JSON.stringify({ session: sessionRow?.descriptionShown, sample: sampleRow?.descriptionShown, name: sampleRow?.nameShown, icon: sampleRow?.iconClass })})`,
+      );
+
+      // --- C3: opening a file of a session with no tab opens the native diff ---------------------------
+      await rowIn(CHANGES, 'src/sample.ts').click({ timeout: 5_000 });
+      const diffTab = await waitFor(
+        async () =>
+          (await tabsNow()).find((tab) => /src\/sample\.ts \(OpenCode session\)/.test(tab.label)),
+        15_000,
+        200,
+      );
+      const diffEditors = await page.locator('.monaco-diff-editor').count();
+      const leftText = await page
+        .locator('.monaco-diff-editor .editor.original .view-lines')
+        .first()
+        .innerText({ timeout: 5_000 })
+        .catch(() => '');
+      await shot('49b-changes-diff');
+      check(
+        diffTab !== undefined && diffEditors > 0 && /value2/.test(leftText),
+        `C3 clicking src/sample.ts of a session with no tab opens a diff editor titled "src/sample.ts (OpenCode session)" whose left side is served (tab ${JSON.stringify(diffTab?.label)}, ${String(diffEditors)} diff editor(s), left ${JSON.stringify(leftText.slice(0, 60))})`,
+      );
+      await closeAllEditors();
+
+      // --- U2: Usage reads two periods when expanded, over all projects -----------------------------------
+      await toggle(USAGE);
+      await waitFor(async () => statsCalls() - callsAtStart >= 2, 15_000, 150);
+      await waitPane(USAGE, (next) => rowOf(next, 'Today')?.description.includes('$'), 15_000);
+      // Negative window: a third request would be a read the single load should not make.
+      await sleep(1_500);
+      const usageState = await paneState(USAGE);
+      const today = rowOf(usageState, 'Today');
+      const models = usageState.rows.filter((row) => row.level === 2);
+      const costly = models.find((row) => /^\$0\.\d\d · /.test(row.description));
+      await shot('49c-usage');
+      check(
+        statsCalls() - callsAtStart === 2 &&
+          rowOf(usageState, 'Last 7 days') !== undefined &&
+          /^(≥ )?\$\d+\.\d\d · /.test(today?.description ?? '') &&
+          costly !== undefined,
+        `U2 expanding Usage makes exactly two stats requests (today and the week) and draws Today with a cost and a model row with the COSTLY cost (${JSON.stringify({ calls: statsCalls() - callsAtStart, today: today?.description, models: models.map((row) => `${row.name} ${row.description}`) })})`,
+      );
+      check(
+        today?.descriptionShown === 'full' &&
+          costly?.descriptionShown !== 'hidden' &&
+          usageState.rows.every((row) => row.insideSideBar),
+        `U3 at ${String(NORMAL)} px (Dark Modern) the description of Today is drawn whole and the model row shows its description inside the side bar (${JSON.stringify({ today: today?.descriptionShown, model: costly?.descriptionShown })})`,
+      );
+
+      // --- U4: collapsed, a finished turn asks for nothing; expanded again, one load -------------------------
+      const callsShown = statsCalls();
+      await toggle(USAGE);
+      await waitPane(USAGE, (next) => !next.expanded, 5_000);
+      const previous = drivenChatId;
+      const before = (await chatTabs()).length;
+      await command('OpenCode: New Session');
+      await waitFor(async () => (await chatTabs()).length === before + 1, 10_000, 200);
+      await connectToNew(previous);
+      await send('Use49 hello with the Usage view collapsed');
+      check(await waitIdle(30_000), 'the turn with the Usage view collapsed ends');
+      // Negative window of 11.5 s: a view that still believed it was visible would refresh 10 s after
+      // the turn ended (`REFRESH_DEBOUNCE_MS`); a collapsed one only marks itself stale.
+      await sleep(11_500);
+      check(
+        statsCalls() === callsShown,
+        `U4 with the Usage pane collapsed a finished turn made no stats request (${String(statsCalls() - callsShown)} new)`,
+      );
+      await toggle(USAGE);
+      const reread = await waitFor(async () => statsCalls() - callsShown >= 2, 15_000, 150);
+      await sleep(1_500);
+      check(
+        reread !== undefined && statsCalls() - callsShown === 2,
+        `U4 expanding it again reads once more, two requests, because the turn marked the data stale (${String(statsCalls() - callsShown)} new)`,
+      );
+
+      // --- U5: the same rows in the other three themes (the matrix the plan asks for) -------------------
+      // At 170 px VS Code hides the description (lesson V1), so the matrix is judged at 300 px only.
+      await setSideBarWidth(NORMAL).catch(() => undefined);
+      for (const [themeName, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        await sleep(400);
+        const changes = await paneState(CHANGES);
+        const usage = await paneState(USAGE);
+        const session = rowOf(changes, 'Chg49');
+        const todayRow = rowOf(usage, 'Today');
+        check(
+          session?.descriptionShown === 'full' &&
+            todayRow?.descriptionShown === 'full' &&
+            changes.rows.every((row) => row.insideSideBar) &&
+            usage.rows.every((row) => row.insideSideBar),
+          `U5 at ${String(NORMAL)} px in ${themeName} the description of the Chg49 session and of Today are drawn whole inside the side bar (${JSON.stringify({ session: session?.descriptionShown, today: todayRow?.descriptionShown })})`,
+        );
+        await shot(`49-themes-${themeName}`);
+      }
+      await setTheme(DARK);
+    } finally {
+      await closeAllEditors().catch(() => undefined);
+      setLocation('sidebar');
+      await setTheme(DARK).catch(() => undefined);
+      await setSideBarWidth(Math.round(originalWidth)).catch(() => undefined);
+      await openChat(30_000).catch(() => undefined);
+    }
+  });
+
+  // Step 50 (E9-sidebar-home, issue #187): the Quick start webview view above the Sessions tree.
+  // VERIFIED by the full run of E9-sidebar-home on its final tree (Windows 11, VS Code 1.145.2,
+  // 08/11/2026, "all visual checks passed", this step 59.4 s): e.g. "F1 Enter opened exactly one new tab with one accepted prompt and cleared the box"
+  // and "F4 Stop made the row leave and the turn finished interrupted". The matrix is 2 widths (170 and 300
+  // px) x 4 themes for the box, the status strip and the empty state (idle) and for a running row and
+  // a waiting row; the functional cells type in the real box and click the real pills and buttons.
+  // NOT covered: the contrast of the PLACEHOLDER text (its colour is not read), a screen reader.
+  await step('50 quick start home view (E9-sidebar-home)', async () => {
+    const DARK = 'Default Dark Modern';
+    const NORMAL = 300;
+    const NARROW = 170;
+    const homeLogs = [];
+    let homeWeb;
+    let homeId;
+    const hostLogText = () => {
+      const files = [];
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name === 'OpenCode.log') files.push(full);
+        }
+      };
+      try {
+        walk(path.join(vscode.userDataDir, 'logs'));
+      } catch {
+        return '';
+      }
+      return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+    };
+    const logCount = (needle) => hostLogText().split(needle).length - 1;
+
+    /** (Re)connects `homeWeb` to the CDP target whose document says surface `home`. */
+    async function connectHome(timeoutMs = 30_000) {
+      homeWeb?.close();
+      homeWeb = undefined;
+      homeId = undefined;
+      const end = Date.now() + timeoutMs;
+      while (Date.now() < end) {
+        let list;
+        try {
+          list = await (await fetch(`http://127.0.0.1:${String(vscode.port)}/json`)).json();
+        } catch {
+          list = [];
+        }
+        for (const entry of list) {
+          if (entry.type !== 'iframe' || !entry.url.includes('extensionId=sergwei.open-vs-code')) {
+            continue;
+          }
+          const id = /[?&]id=([^&]+)/.exec(entry.url)?.[1];
+          if (id === undefined) continue;
+          const probe = await openWebview(vscode.port, [], 3_000, id).catch(() => undefined);
+          if (probe === undefined) continue;
+          const surface = await probe
+            .inDoc(
+              (doc) =>
+                doc.querySelector('meta[name="open-vs-code-surface"]')?.getAttribute('content') ??
+                null,
+            )
+            .catch(() => null);
+          probe.close();
+          if (surface !== 'home') continue;
+          homeWeb = await openWebview(vscode.port, homeLogs, 10_000, id);
+          homeId = id;
+          return id;
+        }
+        await rawSleep(300);
+      }
+      throw new Error('the Quick start webview did not appear as a CDP target');
+    }
+    const homeBox = () =>
+      page
+        .locator(`${CHAT_FRAME}[name="${String(homeId)}"]`)
+        .first()
+        .boundingBox();
+    /** A real click on the first element of the home document matching `selector` (and `text`). */
+    async function homeClick(selector, text) {
+      const target = await homeWeb.inDoc(
+        (doc, spec) => {
+          const element = [...doc.querySelectorAll(spec.selector)].find(
+            (candidate) => spec.text === null || candidate.textContent.trim() === spec.text,
+          );
+          if (!element) return null;
+          element.scrollIntoView({ block: 'nearest' });
+          element.setAttribute('data-visual-click', 'true');
+          const rect = element.getBoundingClientRect();
+          return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+        },
+        { selector, text: text ?? null },
+      );
+      if (!target) return false;
+      try {
+        const landed = await homeWeb.inDoc((doc, point) => {
+          const hit = doc.elementFromPoint(point.x, point.y);
+          const mark = doc.querySelector('[data-visual-click="true"]');
+          return hit !== null && mark !== null && (mark === hit || mark.contains(hit));
+        }, target);
+        if (!landed) throw new Error(`the pointer for "${selector}" would land on something else`);
+        const frame = await homeBox();
+        if (!frame) return false;
+        await page.mouse.click(frame.x + target.x, frame.y + target.y);
+        return true;
+      } finally {
+        await homeWeb
+          .inDoc((doc) => {
+            for (const element of doc.querySelectorAll('[data-visual-click]')) {
+              element.removeAttribute('data-visual-click');
+            }
+          })
+          .catch(() => undefined);
+      }
+    }
+    const homeWait = (fn, arg, ms = 10_000) => waitFor(() => homeWeb.inDoc(fn, arg), ms, 150);
+    /** Clears the box, types `text` and, unless `enter` is false, presses Enter (a real key). */
+    async function homeType(text, enter = true) {
+      if (!(await homeClick('.home-box'))) throw new Error('the Quick start box was not found');
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.press('Backspace');
+      await sleep(150); // the first typed character is lost without it (see `send`)
+      await page.keyboard.type(text);
+      if (enter) await page.keyboard.press('Enter');
+    }
+    const boxValue = () => homeWeb.inDoc((doc) => doc.querySelector('.home-box')?.value ?? null);
+    const homeHeaderShown = () =>
+      page.evaluate(() =>
+        [...globalThis.document.querySelectorAll('.part.sidebar .pane-header')].some((header) =>
+          (header.textContent ?? '').toLowerCase().includes('quick start'),
+        ),
+      );
+    /**
+     * `setTheme` while the Quick start webview is the one on screen. `setTheme` waits for the theme
+     * kind in the shared `web` connection, which in `editor` mode is the (hidden or stale) side bar
+     * chat, so the wait timed out; here `web` points to the home document for the call and goes back
+     * after it. VERIFIED: after this change replaced the "did not take the theme Default Light
+     * Modern" FAIL of a `--steps 50` run, the full run of E9-sidebar-home on its final tree
+     * (08/11/2026, "all visual checks passed") printed the matrix cells for that theme, labelled
+     * "light" (e.g. "ok   M1 at 300 (bar 300 px), light: the box does not overflow sideways").
+     */
+    async function setThemeInHome(theme) {
+      const saved = web;
+      if (homeWeb !== undefined) web = homeWeb;
+      try {
+        await setTheme(theme);
+      } finally {
+        web = saved;
+      }
+    }
+    function assertNoHomeErrors(where) {
+      const logged = homeLogs
+        .splice(0)
+        .filter((line) => /Refused to|Content Security Policy|^\[exception\]/i.test(line))
+        .filter((line) => !isVsCodeFrameRace(line));
+      check(
+        logged.length === 0,
+        `${where}: no CSP violation or exception in the Quick start webview${logged.length ? ` (${logged.slice(0, 3).join(' | ')})` : ''}`,
+      );
+    }
+    /** Boxes of the elements of each selector, sideways overflow and `style` attributes. */
+    function measureHomeLayout(doc, selectors) {
+      const root = doc.documentElement;
+      const items = {};
+      for (const [name, selector] of Object.entries(selectors)) {
+        items[name] = [...doc.querySelectorAll(selector)].map((element) => {
+          const rect = element.getBoundingClientRect();
+          return {
+            left: rect.left,
+            right: rect.right,
+            width: rect.width,
+            height: rect.height,
+            cut: element.scrollWidth > element.clientWidth + 1,
+          };
+        });
+      }
+      return {
+        docWidth: root.clientWidth,
+        overflow: root.scrollWidth - root.clientWidth,
+        styled: [...doc.querySelectorAll('#root, #root *')].filter(
+          (element) => (element.getAttribute('style') ?? '').trim() !== '',
+        ).length,
+        items,
+      };
+    }
+    /** Judges the cell: every named component exists, is drawn whole inside the document and has >= 4.5:1. */
+    async function judgeCell(label, selectors, contrastOf) {
+      const layout = await homeWeb.inDoc(measureHomeLayout, selectors);
+      const contrast = await homeWeb.inDoc(measureText, contrastOf);
+      const problems = [];
+      for (const [name, items] of Object.entries(layout.items)) {
+        if (items.length === 0) problems.push(`${name} missing`);
+        for (const item of items) {
+          if (item.width <= 0 || item.height <= 0) problems.push(`${name} has no size`);
+          if (item.left < -0.5 || item.right > layout.docWidth + 0.5)
+            problems.push(`${name} outside`);
+          if (item.cut) problems.push(`${name} cut`);
+        }
+      }
+      if (layout.overflow > 1) problems.push(`sideways overflow ${String(layout.overflow)}`);
+      if (layout.styled !== 0) problems.push(`${String(layout.styled)} style attributes`);
+      const low = Object.entries(contrast ?? {}).filter(
+        ([, value]) => value === null || (typeof value === 'object' && value.ratio < 4.5),
+      );
+      for (const [name, value] of low) {
+        problems.push(
+          `${name} contrast ${value === null ? 'not measured' : value.ratio.toFixed(2)}`,
+        );
+      }
+      check(problems.length === 0, `${label}${problems.length ? ` - ${problems.join(', ')}` : ''}`);
+    }
+    /** Runs `cells()` at 170 and 300 px in the four themes; leaves 300 px and Dark. */
+    async function matrix(name, cells) {
+      for (const [widthName, wanted] of [
+        ['170', NARROW],
+        ['300', NORMAL],
+      ]) {
+        let barPx;
+        try {
+          barPx = await setSideBarWidth(wanted);
+        } catch (error) {
+          barPx = await sideBarPx();
+          warn(`${name}: the side bar did not go to ${String(wanted)} px: ${String(error)}`);
+        }
+        const reached =
+          wanted === NARROW ? barPx < 200 : Math.abs(barPx - NORMAL) <= SIZE_TOLERANCE;
+        if (!reached) {
+          warn(
+            `${name}: width ${widthName} not reached (side bar ${String(barPx)} px): not judged`,
+          );
+          continue;
+        }
+        for (const [themeName, theme] of PROBLEM_THEMES) {
+          await setThemeInHome(theme);
+          await sleep(400);
+          await cells(
+            `${name} at ${widthName} px (bar ${String(Math.round(barPx))}), ${themeName}`,
+          );
+          await shot(`50-${name.replace(/\W+/g, '-')}-${widthName}-${themeName}`);
+        }
+      }
+      await setThemeInHome(DARK);
+      await setSideBarWidth(NORMAL).catch(() => undefined);
+    }
+
+    setLocation('sidebar');
+    await openChat(30_000);
+    check(await waitIdle(60_000), 'no turn is running when the step starts');
+    await closeAllEditors();
+    const originalWidth = await sideBarPx();
+    try {
+      await setTheme(DARK);
+      await command('Notifications: Clear All Notifications');
+      await waitConnected();
+      setLocation('editor');
+      await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
+      await closeAllEditors();
+      const barOpen = await page.evaluate(() => {
+        const side = globalThis.document.querySelector('.part.sidebar');
+        return side !== null && side.getBoundingClientRect().width > 0 && side.checkVisibility();
+      });
+      if (!barOpen) await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
+      await setSideBarWidth(NORMAL);
+      await setQuickStartFolded(false); // another step may have left the pane folded
+      await connectHome();
+
+      // --- H0: the document, the strip and the empty state ---------------------------------------------
+      const first = await homeWeb.inDoc((doc) => ({
+        placeholder: doc.querySelector('.home-box')?.getAttribute('placeholder') ?? null,
+        pills: [...doc.querySelectorAll('.home-pill')].map((pill) => pill.textContent.trim()),
+        empty: doc.querySelector('.home-empty')?.textContent ?? null,
+        titles: [...doc.querySelectorAll('.home-heading')].map((heading) => heading.textContent),
+      }));
+      check(
+        first.placeholder === 'What do you want to do?' &&
+          first.pills[0] === 'Server ready' &&
+          first.pills.includes('Manual') &&
+          first.empty === 'Nothing running',
+        `H0 the Quick start view shows the box, "Server ready", the Manual pill and "Nothing running" (${JSON.stringify(first)})`,
+      );
+      await shot('50a-home-idle');
+      assertNoHomeErrors('H0');
+
+      // --- Matrix A (idle): the box, the status strip, the empty state ---------------------------------
+      await matrix('idle', (label) =>
+        judgeCell(
+          `M1 ${label}: box, pills and "Nothing running" are drawn whole inside the view, no sideways overflow, no style attribute, contrast >= 4.5`,
+          {
+            box: '.home-box',
+            pills: '.home-pill',
+            mode: '.home-pill[data-kind="mode"]',
+            empty: '.home-empty',
+          },
+          { box: '.home-box', pill: '.home-pill[data-kind="mode"]', empty: '.home-empty' },
+        ),
+      );
+
+      // --- B1/B2/B3: Shift+Enter, empty Enter and the focus ring send nothing ---------------------------
+      const promptsAtStart = logCount('prompt accepted for');
+      const tabsAtStart = (await chatTabs()).length;
+      await homeType('first', false);
+      await page.keyboard.press('Shift+Enter');
+      await page.keyboard.type('second');
+      const multi = await boxValue();
+      const ring = await homeWeb.inDoc((doc) => {
+        const style = doc.defaultView.getComputedStyle(doc.querySelector('.home-box'));
+        return { style: style.outlineStyle, width: Number.parseFloat(style.outlineWidth) };
+      });
+      await homeType('', false);
+      await page.keyboard.press('Enter');
+      await sleep(1_000);
+      check(
+        multi === 'first\nsecond' &&
+          logCount('prompt accepted for') === promptsAtStart &&
+          (await chatTabs()).length === tabsAtStart &&
+          ring.style !== 'none' &&
+          ring.width > 0,
+        `B1 Shift+Enter breaks the line (${JSON.stringify(multi)}), an Enter on an empty box sends nothing and opens no tab, and the focused box has a visible ring (${JSON.stringify(ring)})`,
+      );
+
+      // --- F1: Enter in the box opens ONE tab and the prompt reaches the model; MCPFLIP shows the pill --
+      await homeType('H50 MCPFLIP');
+      await waitFor(
+        async () => logCount('prompt accepted for') === promptsAtStart + 1,
+        20_000,
+        200,
+      );
+      await waitFor(
+        async () => logCount('turn finished: succeeded') >= 1 && (await chatTabs()).length >= 1,
+        30_000,
+        200,
+      );
+      await sleep(600);
+      const afterEnter = {
+        tabs: (await chatTabs()).length,
+        accepted: logCount('prompt accepted for') - promptsAtStart,
+        value: await boxValue(),
+      };
+      check(
+        afterEnter.tabs === tabsAtStart + 1 && afterEnter.accepted === 1 && afterEnter.value === '',
+        `F1 Enter opened exactly one new tab with one accepted prompt and cleared the box (${JSON.stringify(afterEnter)})`,
+      );
+      const mcpPill = await homeWait(
+        (doc) => doc.querySelector('.home-pill[data-kind="mcp"]') !== null,
+        undefined,
+        20_000,
+      );
+      check(
+        mcpPill !== undefined,
+        'F2 after the MCPFLIP turn an MCP server in error shows as a pill that says so (the MCP pill is in the strip)',
+      );
+      await shot('50b-home-mcp');
+      await matrix('mcp strip', (label) =>
+        judgeCell(
+          `M2 ${label}: the strip with the MCP pill is drawn whole inside the view, no pill is cut or outside, contrast >= 4.5`,
+          { pills: '.home-pill', mcp: '.home-pill[data-kind="mcp"]' },
+          { mcp: '.home-pill[data-kind="mcp"]', mode: '.home-pill[data-kind="mode"]' },
+        ),
+      );
+
+      // --- F3: Auto in the strip, a SLOW run listed with its time and Stop ------------------------------
+      const autoBefore = logCount('work mode auto for ses_');
+      check(await homeClick('.home-pill[data-kind="mode"]'), 'F3 the Manual pill is clicked');
+      await homeWait(
+        (doc) =>
+          doc.querySelector('.home-pill[data-kind="mode"]')?.getAttribute('data-mode') === 'auto',
+        undefined,
+        10_000,
+      );
+      const tabsBeforeSlow = (await chatTabs()).length;
+      await homeType('H50 SLOWER');
+      await waitFor(async () => logCount('work mode auto for ses_') > autoBefore, 20_000, 200);
+      const running = await homeWait(
+        (doc) => doc.querySelectorAll('.home-row[data-kind="running"]').length === 1,
+        undefined,
+        20_000,
+      );
+      check(
+        running !== undefined && (await chatTabs()).length === tabsBeforeSlow + 1,
+        `F3 with Auto in the strip the new conversation logged "work mode auto for ses_…" and a second tab; "Running" lists one row (tabs ${String((await chatTabs()).length)})`,
+      );
+      await shot('50c-home-running');
+      await matrix('running row', (label) =>
+        judgeCell(
+          `M3 ${label}: the running row with its title, clock and Stop is drawn whole inside the view, Stop is a whole button named "Stop …", contrast >= 4.5`,
+          {
+            row: '.home-row[data-kind="running"]',
+            stop: '.home-action[aria-label^="Stop "]',
+            title: '.home-row[data-kind="running"] .home-row-title',
+          },
+          { title: '.home-row[data-kind="running"] .home-row-title', detail: '.home-row-detail' },
+        ),
+      );
+      const interrupted = logCount('turn finished: interrupted');
+      check(
+        await homeClick('.home-action[aria-label^="Stop "]'),
+        'F4 Stop of the running row is clicked',
+      );
+      const gone = await homeWait(
+        (doc) => doc.querySelectorAll('.home-row[data-kind="running"]').length === 0,
+        undefined,
+        20_000,
+      );
+      await waitFor(async () => logCount('turn finished: interrupted') > interrupted, 20_000, 200);
+      check(
+        gone !== undefined &&
+          logCount('turn finished: interrupted') === interrupted + 1 &&
+          hostLogText().includes('(interrupted: true) from the side bar'),
+        'F4 Stop made the row leave and the turn finished interrupted, with the "from the side bar" log line',
+      );
+      check(
+        await homeClick('.home-pill[data-kind="mode"]'),
+        'F4 the Auto pill is clicked back to Manual',
+      );
+
+      // --- F5: a request that waits shows under "Waiting for you"; Reply opens its card -----------------
+      const tabsBeforeAsk = (await chatTabs()).length;
+      await homeType('H50 ASK_PERMISSION');
+      const waiting = await homeWait(
+        (doc) => doc.querySelectorAll('.home-row[data-kind="waiting"]').length === 1,
+        undefined,
+        30_000,
+      );
+      check(
+        waiting !== undefined && (await chatTabs()).length === tabsBeforeAsk + 1,
+        'F5 the permission request of a new conversation is listed under "Waiting for you" with a Reply button',
+      );
+      await shot('50d-home-waiting');
+      await matrix('waiting row', (label) =>
+        judgeCell(
+          `M4 ${label}: the waiting row with its title and Reply is drawn whole inside the view, contrast >= 4.5`,
+          {
+            row: '.home-row[data-kind="waiting"]',
+            reply: '.home-action[aria-label^="Reply to "]',
+          },
+          {
+            title: '.home-row[data-kind="waiting"] .home-row-title',
+            detail: '.home-row[data-kind="waiting"] .home-row-detail',
+          },
+        ),
+      );
+      await closeAllEditors();
+      check(await homeClick('.home-action[aria-label^="Reply to "]'), 'F6 Reply is clicked');
+      const chatId = await waitFor(async () => visibleChatId(), 15_000, 200);
+      await openChat(30_000, chatId);
+      const focused = await waitFor(
+        () =>
+          web.inDoc(
+            (doc) =>
+              doc.activeElement?.classList.contains('permission-card') === true &&
+              doc.activeElement.getAttribute('tabindex') === '-1',
+          ),
+        10_000,
+        150,
+      );
+      check(
+        focused !== undefined,
+        'F6 Reply put the conversation of the request in a tab and the permission card has the focus (not a button)',
+      );
+      await shot('50e-home-reply');
+      // End the turn from the home view: the same Stop, now while it waits for the permission.
+      check(
+        await homeClick('.home-action[aria-label^="Stop "]'),
+        'F7 Stop of the waiting run is clicked',
+      );
+      check(await waitIdle(30_000), 'F7 the turn that waited for the permission ends after Stop');
+      check(
+        (await homeWait(
+          (doc) => doc.querySelectorAll('.home-row[data-kind="waiting"]').length === 0,
+          undefined,
+          20_000,
+        )) !== undefined,
+        'F7 the "Waiting for you" row is gone once the request is no longer pending',
+      );
+
+      // --- F8: the model and MCP pills open the OpenCode Settings tab (one tab, not two) -------------------
+      await closeAllEditors();
+      check(await homeClick('.home-pill[data-kind="model"]'), 'F8 the model pill is clicked');
+      const settingsTab = () =>
+        tabsNow().then((tabs) => tabs.filter((tab) => tab.label.includes('OpenCode Settings')));
+      await waitFor(async () => (await settingsTab()).length >= 1, 15_000, 200);
+      check(await homeClick('.home-pill[data-kind="mcp"]'), 'F8 the MCP pill is clicked');
+      await sleep(1_000);
+      check(
+        (await settingsTab()).length === 1,
+        `F8 the model pill and the MCP pill open the OpenCode Settings tab, once (${String((await settingsTab()).length)} tab)`,
+      );
+      await closeAllEditors();
+
+      // --- L1: the view exists only while the chat is not in the side bar ---------------------------------
+      setLocation('sidebar');
+      const hidden = await waitFor(async () => !(await homeHeaderShown()), 15_000, 200);
+      setLocation('editor');
+      const back = await waitFor(async () => await homeHeaderShown(), 15_000, 200);
+      check(
+        hidden === true && back === true,
+        `L1 with chatLocation sidebar the Quick start pane is gone and with editor it is back without reloading (gone ${String(hidden)}, back ${String(back)})`,
+      );
+      assertNoHomeErrors('step 50');
+    } finally {
+      await closeAllEditors().catch(() => undefined);
+      homeWeb?.close();
+      setLocation('sidebar');
+      await setTheme(DARK).catch(() => undefined);
+      await setSideBarWidth(Math.round(originalWidth)).catch(() => undefined);
+      await openChat(30_000).catch(() => undefined);
+    }
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;

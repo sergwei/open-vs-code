@@ -304,6 +304,11 @@ export async function startVSCode({
     // VERIFIED by step 13 (Windows 11, VS Code 1.143.0, 21/10/2026): it applies to
     // `showOpenDialog` from an extension. UNVERIFIED on macOS and Linux.
     'files.simpleDialog.enable': true,
+    // E9-sidebar-home: with the Quick start, Sessions, Changes and Usage panes in one container,
+    // VS Code shows the title buttons of a pane only while it is hovered or focused, so the
+    // `.action-label` presses of the Sessions steps (29, 30, 34...) found them "not visible". This
+    // setting keeps them drawn. NOT covered: the hover behaviour a user sees by default.
+    'workbench.view.alwaysShowHeaderActions': true,
     // VS Code's own Chat (Copilot) opened in the secondary side bar of every run, picked up the
     // active editor as context and is one more place that can take the keyboard focus, which is
     // what most flaky checks of this suite are about (Sergio saw it react during a run,
