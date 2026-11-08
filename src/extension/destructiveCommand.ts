@@ -31,7 +31,8 @@
 //   `docker run|exec`, `kubectl run|exec`, SQL clients…), shells and interpreters reading stdin or
 //   inline code (flags alone, `-c`, a heredoc, `--import`), `git -c`, `git config` writes and the
 //   git options that run a command (`rebase --exec`, `submodule foreach`, `--upload-pack`…), `sed
-//   -i`, `awk`; `npx`, `pnpm|yarn|npm|bun exec|dlx|x`, `uv run`, `poetry run`… are classified by the
+//   -i`, `awk`; `npx`, `pnpm|yarn|npm|bun exec|dlx|x`, `uv run`, `uv tool run`, `corepack <pm>`,
+//   `poetry run`… are classified by the
 //   tool they launch;
 // - reading secrets without naming them: recursive `grep` of the current directory, `rg --hidden`,
 //   a recursive `Get-ChildItem`/`dir /s`/`ls -R` that is not a list of names (in Windows a leading
@@ -41,6 +42,23 @@
 // p` for `git push`), the CONTENT of a script (`bash build.sh`, `make clean`, `npm run clean`), and
 // every tool that is not named here. Long options of git count when they are a prefix of a dangerous
 // one (`--har`), because git accepts them.
+//
+// HOW TO CHANGE THIS LIST (issue #184: six reviews reopened a covered family by another door):
+// - Test a family in EVERY door, not in the one that was reported: add the core to
+//   `DANGEROUS_CORES` and the door to `ASKING_DOORS` in `destructiveCommand.test.ts` (prefixes,
+//   `export`, `env`, `sudo`, launchers, `bash -c`, escapes, separators). A new door goes in that
+//   list too: the doors are private sets here (`TRANSPARENT`, `ELEVATORS`, `RUNNERS`, and the
+//   launchers `npx`, `pnpm exec`, `corepack <pm>`, `uv tool run`…), so the test keeps its own copy.
+//   A runner or launcher that classifies the command after it is a door for EVERY family.
+// - An exception is for the EXACT command (`GIT_EDITOR=true`, `git rm --cached`), never for a
+//   whole tool or a whole option family.
+// - Options that take a value are a table per tool (`NPM_VALUE_OPTIONS`, `UVX_VALUE_OPTIONS`,
+//   `TERRAFORM_VALUE_OPTIONS`): a value read as the command is how `-w a rimraf` slipped through.
+// - Probe daily use before believing a rule: add the commands people type all day (`date
+//   +%Y%m%d`, `git log --format=%H%n%B`, `node -v`, `terraform plan -var x=1`) to `DAILY_CORES`,
+//   so a rule that asks for them shows up as a red case, not as a user turning Auto off.
+// - A CLI that is also run through `npx` is classified under the npm PACKAGE name (`firebase-tools`,
+//   `netlify-cli`, `aws-cdk`), so add that name next to the binary's.
 //
 // What the server sends for a `shell` permission (read in the v2.0.32 tag, NOT run against a real
 // server): `resources` holds one entry per simple command the tool's parser found, the text of the
@@ -152,6 +170,7 @@ const OPAQUE = new Set([
   'dotenv',
   'env-cmd',
   'nix-shell',
+  'nix',
   'devbox',
   'direnv',
   'emacs',
@@ -284,6 +303,11 @@ const RUNNERS = new Set([
   'volta',
   'fnm',
   'corepack',
+  'hatch',
+  'pdm',
+  'rye',
+  'pixi',
+  'rtx',
   'lerna',
   'nx',
   'bun',
@@ -866,11 +890,35 @@ function launchedAsks(tool: string, args: readonly string[]): boolean {
   return segmentAsks(words, none, none);
 }
 
+/** The package managers `corepack` runs by name; their line is classified as if typed without it. */
+const PACKAGE_MANAGERS = new Set(['pnpm', 'pnpx', 'yarn', 'yarnpkg', 'npm', 'npx']);
+
+/** Subcommands that launch another program; one after a global option makes a runner line ask. */
+const LAUNCH_WORDS = new Set(['run', 'exec', 'x']);
+
 /**
  * True for `uv run X`, `poetry run X`, `bun x X`, `mise exec -- X`… (the {@link RUNNERS}): after
  * `run`, `exec` or `x` the tool must come right away (an option before it could take a value, so it
- * asks) and is classified with its arguments. `uv publish` and `poetry publish` ask. Other
- * subcommands (`uv sync`, `bun install`) are approved.
+ * asks) and is classified with its arguments. `uv publish` and `poetry publish` ask. Two runners
+ * nest another launcher and are classified by what they run: `corepack <pm> …` (`pnpm`, `yarn`,
+ * `npm`, `npx`, `pnpx`: `corepack pnpm rm -rf x` asks like `pnpm rm -rf x`; `corepack enable` and
+ * `corepack pnpm install` are approved) and `uv tool run X` (as `uvx X`). Other subcommands (`uv
+ * sync`, `bun install`) are approved. `hatch run X` asks like the others, so `hatch run test:cov`
+ * asks too (a name with `:` is not a literal tool): deliberate, decision of Sergio 07/11/2026.
+ * `corepack` followed by a word that is not a package manager goes on to the `run|exec|x` reading
+ * like any runner. `mise|rtx exec|x <tool[@ver]>… -- <command>` is classified by the command after
+ * `--`: with no tool before `--` (`mise exec -- git status`, decision 07/11/2026), no `--`, an
+ * option or a non-literal name among the tools (`mise exec cargo:x -- ls`) or no command, it asks
+ * (`mise exec node -- git status` is approved: the tool is explicit and the command is harmless). A global option before the subcommand (`uv --quiet
+ * run pytest`, `hatch -e test run pytest`) makes the line ask whenever `run`, `exec`, `x` or a
+ * package manager appears, because whether the option takes a value is unknown: asking for those
+ * daily-use lines is deliberate (decision of Sergio 07/11/2026). `unpublish` asks like `publish`.
+ * The nested forms of `corepack`, `uv tool run`, `hatch`, `nix` (all of `nix …` asks, see `OPAQUE`) and
+ * `dotnet tool run` (in `commandAsks`) are the ones PROBED, not a proof that there are no others
+ * (HYPOTHESIS, read from the tools' documentation; no real binary was run). VERIFIED by the checks
+ * "asks for what corepack and uv tool run launch, and approves their daily use", "asks for hatch
+ * run, nix and dotnet tool run, on purpose" and "asks for the closing round of runner forms" of
+ * `destructiveCommand.test.ts` (07/11/2026, Windows 11, Node 24; fabricated text).
  */
 function runnerAsks(command: string, args: readonly string[]): boolean {
   if (command === 'bun' && (cluster(args, 'ep') || longOpt(args, '--eval', '--print'))) return true;
@@ -880,7 +928,44 @@ function runnerAsks(command: string, args: readonly string[]): boolean {
   ) {
     return true;
   }
-  if (hasAny(args, ['publish'])) return true;
+  if (hasAny(args, ['publish', 'unpublish'])) return true;
+  // A global option before the subcommand (`uv --quiet run rm -rf x`, `hatch -e test run …`,
+  // `corepack --x pnpm …`) may or may not take a value, so where the subcommand starts is unknown:
+  // when such a line names a launching subcommand or package manager anywhere, it asks.
+  if (
+    args[0]?.startsWith('-') === true &&
+    args.some((arg) => LAUNCH_WORDS.has(arg) || PACKAGE_MANAGERS.has(toolName(arg)))
+  ) {
+    return true;
+  }
+  if (command === 'corepack') {
+    // `corepack pnpm rm -rf x` runs the package manager it names with the rest of the line; any
+    // other word goes on to the `run|exec|x` reading below, as it did before.
+    const manager = args[0] === undefined ? '' : toolName(args[0]);
+    if (PACKAGE_MANAGERS.has(manager)) return launchedAsks(manager, args.slice(1));
+  }
+  if ((command === 'mise' || command === 'rtx') && (args[0] === 'exec' || args[0] === 'x')) {
+    // `mise exec <tool[@ver]>… -- <command>`: what follows `--` is the command. Without a tool
+    // before `--` (decision of Sergio, 07/11/2026), without `--`, with an option before it or with
+    // no command after it, it asks.
+    const dashes = args.indexOf('--');
+    const tools = args.slice(1, dashes < 0 ? undefined : dashes);
+    const run = dashes < 0 ? [] : args.slice(dashes + 1);
+    const [word, ...rest] = run;
+    // A tool whose name is not literal (`cargo:x`, `npm:rimraf`) asks, as it did before the `--`
+    // reading existed (closing review of #184).
+    const odd = (tool: string): boolean =>
+      tool.startsWith('-') || !LITERAL_NAME.test(toolName(tool));
+    if (tools.length === 0 || tools.some(odd) || word === undefined) {
+      return true;
+    }
+    const name = toolName(word);
+    return !LITERAL_NAME.test(name) || launchedAsks(name, rest);
+  }
+  // `uv tool run X` is `uvx X`: the same launcher, classified by the tool it runs.
+  if (command === 'uv' && args[0] === 'tool' && args[1] === 'run') {
+    return launcherAsks(args.slice(2), 'uvx');
+  }
   const sub = args[0];
   if (sub !== 'run' && sub !== 'exec' && sub !== 'x') return false;
   const word = args[1];
@@ -1052,12 +1137,22 @@ function recursiveSecretSearch(command: string, args: readonly string[]): boolea
 /**
  * True when the command `command` (already a lower-case literal name) with `args` is destructive or
  * runs text that cannot be classified. The cases are grouped by family, see the header of the file.
+ * `dotnet tool run X` is classified by the local tool `X` (`dotnet-ef database drop` asks like
+ * `dotnet ef database drop`); `nix` asks whatever it runs ({@link
+ * OPAQUE}). For `npm|pnpm|yarn`, an `exec`/`dlx` that is the subcommand is classified by the tool it launches,
+ * and an `exec` anywhere else on the line (`yarn kubectl exec pod`) does not end the reading: for
+ * pnpm and yarn the first word is read as a binary too, so the binary's own `exec` asks. VERIFIED by the check "asks
+ * for a binary run by yarn or pnpm whose own subcommand is exec" of `destructiveCommand.test.ts`
+ * (the matrix found the hole on 07/11/2026, Windows 11, Node 24; not run against a real yarn or
+ * pnpm).
  */
 function commandAsks(command: string, args: readonly string[]): boolean {
   if (ELEVATORS.has(command) || OPAQUE.has(command)) return true;
   if (DELETERS.has(command) || ALWAYS_DESTRUCTIVE.has(command) || command.startsWith('mkfs')) {
     return true;
   }
+  // `yarnpkg` is the other name of `yarn`.
+  if (command === 'yarnpkg') return commandAsks('yarn', args);
   if (RUNNERS.has(command)) return runnerAsks(command, args);
   if (recursiveSecretSearch(command, args)) return true;
   switch (command) {
@@ -1320,7 +1415,8 @@ function commandAsks(command: string, args: readonly string[]): boolean {
       // `exec` and `dlx` (after any option with a value: `npm -w a exec`, `pnpm --filter a exec`)
       // and `npm x` run another tool: classified by the tool, like `npx`.
       const exec = args.findIndex((arg) => arg === 'exec' || arg === 'dlx');
-      if (exec >= 0) return launcherAsks(args.slice(exec + 1), command);
+      const execAsks = exec >= 0 && launcherAsks(args.slice(exec + 1), command);
+      if (execAsks) return true;
       // The first word that is not an option nor the value of one (`--filter a`, `-C dir`, `--cwd
       // dir`, `yarn workspace a`): that is the subcommand or the binary.
       let at = 0;
@@ -1337,6 +1433,10 @@ function commandAsks(command: string, args: readonly string[]): boolean {
       }
       if (at >= args.length) at = -1;
       const sub = (args[at] ?? '').toLowerCase();
+      // `exec` as the subcommand was classified above and nothing else is left to read; an `exec`
+      // further on (`yarn kubectl exec pod`, a binary's own subcommand) is not the launcher's, so
+      // the line is still classified as a binary below (matrix of `destructiveCommand.test.ts`).
+      if (exec >= 0 && exec === at) return false;
       if (command === 'npm' && sub === 'x') return launcherAsks(args.slice(at + 1), command);
       if (hasAny(args, ['publish', 'unpublish', 'deprecate'])) return true;
       if ((command === 'yarn' || command === 'pnpm') && at >= 0) {
@@ -1352,16 +1452,26 @@ function commandAsks(command: string, args: readonly string[]): boolean {
     case 'ovsx':
     case 'cargo':
     case 'flit':
-    case 'hatch':
       return hasAny(args, ['publish', 'unpublish']);
     case 'gem':
       return hasAny(args, ['push', 'yank']);
     case 'dotnet':
-    case 'nuget':
+    case 'nuget': {
+      // `dotnet tool run X` runs the local tool `X`: classified by it, like `npx X`.
+      const toolRun = args.findIndex((arg, k) => arg === 'tool' && args[k + 1] === 'run');
+      const word = toolRun >= 0 ? args[toolRun + 2] : undefined;
+      if (command === 'dotnet' && word !== undefined) {
+        const name = toolName(word);
+        if (!LITERAL_NAME.test(name) || launchedAsks(name, args.slice(toolRun + 3))) return true;
+      }
       return (
         hasAny(args, ['push']) ||
         (hasAny(args, ['ef']) && hasAny(args, ['database']) && hasAny(args, ['drop']))
       );
+    }
+    case 'dotnet-ef':
+      // The standalone name of `dotnet ef` (reached by `dotnet tool run dotnet-ef …`).
+      return hasAny(args, ['database']) && hasAny(args, ['drop']);
     case 'mvn':
       return hasAny(args, ['deploy']);
     case 'gradle':
