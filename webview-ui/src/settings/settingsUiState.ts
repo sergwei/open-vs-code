@@ -1,16 +1,27 @@
 /**
- * What only the settings webview knows (issue #128, E10): the tab chosen, the provider search, the
- * provider card that is open and the form fields typed but not sent. It is kept with the webview
- * `getState`/`setState` so it survives the tab being hidden (VS Code destroys the iframe then; the
- * panel has no `retainContextWhenHidden`). The host never sees it.
+ * What only the settings webview knows (issue #128, E10): the section chosen, the provider search,
+ * the provider card that is open and the form fields typed but not sent. It is kept with the
+ * webview `getState`/`setState` so it survives the tab being hidden (VS Code destroys the iframe
+ * then; the panel has no `retainContextWhenHidden`). The host never sees it.
  *
  * It never holds a key: the tab has no field for one, and the drafts are only the answers of the
  * method forms (a resource name, a deployment type…).
  */
 import { createSignal, type Accessor } from 'solid-js';
 
-/** The two tabs. */
-export type SettingsTab = 'providers' | 'mcp';
+/** The seven sections of the tab, in the order of the navigation (issue #186). */
+export const SETTINGS_SECTIONS = [
+  'general',
+  'providers',
+  'models',
+  'mcp',
+  'mods',
+  'workMode',
+  'advanced',
+] as const;
+
+/** One of the {@link SETTINGS_SECTIONS}. */
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
 /** Most integrations with a draft, fields per draft and length of one value we keep. Our caps. */
 const MAX_DRAFTS = 50;
@@ -20,7 +31,7 @@ const MAX_SEARCH = 200;
 
 /** What is persisted. */
 export interface PersistedSettingsUi {
-  tab: SettingsTab;
+  section: SettingsSection;
   search: string;
   expanded?: string;
   drafts: Record<string, Record<string, string>>;
@@ -34,8 +45,9 @@ export interface SettingsStateApi {
 
 /** The reactive view of the persisted state, as the components use it. */
 export interface SettingsUi {
-  tab: Accessor<SettingsTab>;
-  setTab(tab: SettingsTab): void;
+  section: Accessor<SettingsSection>;
+  setSection(section: SettingsSection): void;
+  /** The text typed in the "+ Add provider" picker (the slot of the old provider filter). */
   search: Accessor<string>;
   setSearch(search: string): void;
   /** The integration id whose card is open, if any. */
@@ -50,6 +62,23 @@ export interface SettingsUi {
 /** True for a plain object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** True for one of the seven section ids. */
+function isSection(value: unknown): value is SettingsSection {
+  return SETTINGS_SECTIONS.some((section) => section === value);
+}
+
+/**
+ * The section a saved state opens on. A saved `section` wins when it is one of the seven; the
+ * previous version of the tab saved `tab: 'providers' | 'mcp'`, which maps to the section of the
+ * same name; anything else (nothing saved, junk, another type) opens General, the section of the
+ * header cards and "Needs attention".
+ */
+export function migrateSection(record: Record<string, unknown>): SettingsSection {
+  if (isSection(record.section)) return record.section;
+  if (record.tab === 'providers' || record.tab === 'mcp') return record.tab;
+  return 'general';
 }
 
 /**
@@ -73,16 +102,23 @@ function readDrafts(raw: unknown): Record<string, Record<string, string>> {
 /**
  * Restores the saved state, validating it, and returns the reactive view; every setter persists at
  * once (one small message per keystroke, like `createUiState`; not measured, HYPOTHESIS: negligible
- * at typing speed). A saved tab other than the two known ones becomes `providers`; the search is
- * cut to 200 characters. VERIFIED by `settingsUiState.test.ts` with fabricated states; that the
- * state really survives hiding and showing the tab in VS Code is UNVERIFIED, with no date: no `test:visual` cell hides and shows the tab. In `test:visual` the typed search text only
- * proved to reach the store ("ok   V1 typing "azu" in the search box leaves one provider
- * (["azure"])").
+ * at typing speed). The section goes through {@link migrateSection}, so a state saved by the
+ * two-tab version (`tab`) still opens where it was and a state with nothing valid opens General;
+ * the state it writes carries `section`, never `tab`. The search is cut to 200 characters.
+ * VERIFIED by `settingsUiState.test.ts` with fabricated states (old `tab`, junk, missing, a saved
+ * `section`); that the state really survives hiding and showing the tab in VS Code is UNVERIFIED,
+ * with no date: no `test:visual` cell hides and shows the tab. The `search` it keeps is the text of
+ * the provider picker; in a real VS Code it is VERIFIED to reach the store and filter the picker
+ * (1.145.2, Windows 11, the full `npm run test:visual` of 08/11/2026, step
+ * "35 OpenCode Settings tab: providers and MCP servers (E10-config-views)": "ok   V1 the picker
+ * lists 5 providers and typing "azu"
+ * in it leaves one (["azure"])"), and that the text of the last pick stays in the picker is why step
+ * 36 clears it before measuring (P1).
  */
 export function createSettingsUi(api: SettingsStateApi): SettingsUi {
   const raw: unknown = api.getState();
   const record = isRecord(raw) ? raw : {};
-  const [tab, setTabSignal] = createSignal<SettingsTab>(record.tab === 'mcp' ? 'mcp' : 'providers');
+  const [section, setSectionSignal] = createSignal<SettingsSection>(migrateSection(record));
   const [search, setSearchSignal] = createSignal(
     typeof record.search === 'string' ? record.search.slice(0, MAX_SEARCH) : '',
   );
@@ -94,7 +130,7 @@ export function createSettingsUi(api: SettingsStateApi): SettingsUi {
   const persist = (): void => {
     const id = expanded();
     api.setState({
-      tab: tab(),
+      section: section(),
       search: search(),
       ...(id === undefined ? {} : { expanded: id }),
       drafts: drafts(),
@@ -102,9 +138,9 @@ export function createSettingsUi(api: SettingsStateApi): SettingsUi {
   };
 
   return {
-    tab,
-    setTab(next) {
-      setTabSignal(next);
+    section,
+    setSection(next) {
+      setSectionSignal(next);
       persist();
     },
     search,

@@ -16,6 +16,39 @@ describe('createSettingsStore', () => {
       dispose();
     }));
 
+  it('keeps two models that share an id across providers, and drops a default the host stops sending', () =>
+    createRoot((dispose) => {
+      const store = createSettingsStore();
+      const shared = [
+        { providerID: 'a', id: 'gpt', name: 'GPT A', providerName: 'A' },
+        { providerID: 'b', id: 'gpt', name: 'GPT B', providerName: 'B' },
+      ];
+      store.apply({
+        type: 'settings.state',
+        state: makeState({
+          models: {
+            loaded: true,
+            failed: false,
+            rows: shared,
+            serverDefault: { providerID: 'a', id: 'gpt', name: 'GPT A' },
+          },
+          preference: { value: 'b/gpt', status: 'applied', workspaceOverride: true },
+        }),
+      });
+      expect(store.state.models.rows.map((row) => row.name)).toEqual(['GPT A', 'GPT B']);
+      expect(store.state.models.serverDefault?.name).toBe('GPT A');
+      expect(store.state.preference).toEqual({
+        value: 'b/gpt',
+        status: 'applied',
+        workspaceOverride: true,
+      });
+      store.apply({ type: 'settings.state', state: makeState() });
+      expect(store.state.models.rows).toEqual([]);
+      expect(store.state.models.serverDefault).toBeUndefined();
+      expect(store.state.preference.status).toBe('none');
+      dispose();
+    }));
+
   it('keeps the identity of provider rows, nested connections and servers across states', () =>
     createRoot((dispose) => {
       const store = createSettingsStore();
@@ -120,5 +153,18 @@ describe('noticeText', () => {
     expect(noticeText({ integrationID: 'a', kind: 'unsupported' }, 'Azure')).toContain(
       'opencode auth login',
     );
+  });
+
+  /**
+   * Protects the live region from announcing a sign-in failure for a refused default model (review
+   * W2 of E10-settings-redesign). FABRICATED notice; the wording is checked, not a screen reader.
+   */
+  it('words a refused model without mentioning sign-in', () => {
+    const text = noticeText(
+      { integrationID: '', kind: 'modelRefused', message: 'Unknown model' },
+      '',
+    );
+    expect(text).toBe('The default model was not changed. Unknown model');
+    expect(text).not.toContain('Sign-in');
   });
 });

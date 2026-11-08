@@ -1,7 +1,8 @@
 import * as l10n from '@vscode/l10n';
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js';
-import { plural } from '../../../src/shared/l10n';
 import type { ProviderRow } from '../../../src/shared/settingsProtocol';
+import { AddProviderPicker } from './AddProviderPicker';
+import { ConnectedProviderRow } from './ConnectedProviderRow';
 import {
   createFocusTrace,
   describeActive,
@@ -25,39 +26,44 @@ import type { SettingsUi } from './settingsUiState';
 const POLL_MS = 100;
 const POLL_TICKS = 100;
 
-/** True when `row` matches the search text (name or id, ignoring case and surrounding spaces). */
-export function matchesSearch(row: ProviderRow, search: string): boolean {
-  const needle = search.trim().toLowerCase();
-  if (needle === '') return true;
-  return row.name.toLowerCase().includes(needle) || row.id.toLowerCase().includes(needle);
-}
-
 /**
- * The Providers tab (issue #128, E10): the connected providers (and the one signing in) on top,
- * then "Add a provider" with a search box over the rest.
+ * The Providers section (issue #128, E10; redone by issue #186, phase 1.3): the connected providers
+ * as compact rows (`ConnectedProviderRow`) and the one signing in as its card, then a "+ Add
+ * provider" button that opens `AddProviderPicker`; picking a provider opens its connect form
+ * (`ProviderCard`) under the button.
  *
- * The search filters in a memo BEFORE anything is painted, so a narrow tab never builds the ~236
- * cards of the catalogue when the user has typed a word (the unfiltered list is not capped:
- * HYPOTHESIS that painting 236 collapsed rows is cheap, never measured; if the tab is slow at
- * 300 px, cap the list with a "Show more" button). A provider with a connection, or the one the
- * host is signing in to, lives in the first list and is NOT offered in the second; to change a
- * connection the user removes it first. The three empty states (loading, failed read, nothing
- * listed) are different sentences, so "no providers" is never said while the first read is still
- * running. VERIFIED by `SettingsApp.test.tsx` and `ProviderCard.test.tsx` (jsdom, fabricated
- * rows) and, for the look at 300/620/1080 px in four themes, by `test:visual` step 35 in a real VS
- * Code 1.144.0 on Windows 11 (1/11/2026, synthetic server): "ok   V1 300 px, hc-light: Connected
- * lists Anthropic (API key, Remove) and Google Vertex …" (12 combinations).
+ * A provider with a connection, or the one the host is signing in to, lives in the Connected list
+ * and is NOT offered in the picker; to change a connection the user disconnects it first. The empty
+ * states (loading, failed read, nothing to add) are different sentences, so "no providers" is never
+ * said while the first read is still running. VERIFIED by `SettingsApp.test.tsx`,
+ * `ConnectedProviderRow.test.tsx`, `AddProviderPicker.test.tsx` and `ProviderCard.test.tsx` (jsdom,
+ * fabricated rows) and in a real VS Code 1.145.2 on Windows 11 (7/11/2026, `npm run test:visual --
+ * --steps 36` and `--steps 35,46,47,48`, synthetic server): "ok   V1 300 px, dark: Connected lists
+ * Anthropic (API key, Disconnect) and Google Vertex (Managed by GOOGLE_APPLICATION_CREDENTIALS, no
+ * button) …" (12 combinations), "ok   V6 opening the GitHub Copilot card shows the deploymentType
+ * field only and puts the focus on the card (fields ["deploymentType"], card focused true)" (the
+ * card opened from the picker) and the flows of step 36 (W1, F2, F1, V9, V8, W2, K1-K3), all green.
+ * Those 7/11/2026 runs were on an EARLIER tree than the current one; the final full `test:visual`
+ * of the branch is what covers this tree, and no run of it is claimed here.
+ * After a confirmed Disconnect (the number of connections of that provider went down) an idle focus
+ * goes to "+ Add provider", never to the `body`; VERIFIED by the check "moves the focus to + Add
+ * provider after a confirmed Disconnect, never to the body" of `SettingsApp.test.tsx` (jsdom,
+ * fabricated states; the modal of VS Code is not exercised).
+ * The first run of that step FAILED twice on this section: the picker chose on `mousedown` (the
+ * `click` then closed the new card), and a `<Show>` read its accessor while the card was torn down
+ * ("Stale read from <Show>", an exception only a real browser raised); both are fixed.
  *
- * Focus: pressing a primary button moves its row between the two lists, which rebuilds the card;
+ * Focus: pressing a primary button moves its row between the two places (the form under the button,
+ * and the Connected list while it signs in), which rebuilds the card;
  * the section remembers the provider the user acted on and the rebuilt card takes the focus, in
- * "Connected" while it signs in and back in "Add a provider" if the attempt is cancelled or fails,
+ * "Connected" while it signs in and back under the button if the attempt is cancelled or fails,
  * and only while this document has the focus: a key sign-in opens a native InputBox at the same
  * time, and a card that pulled the focus back would leave that box open but unable to take the key.
  * When the document has no focus the request is parked and served by a `window` `focus` listener
  * or by a poll that starts at every arm (to the card, and only if the focus is idle on the
  * `body`), so the card ends focused
- * on the success path (Enter: the row stays in "Connected" and the card is NOT rebuilt) and on the
- * Escape path, in either order of "the state without the attempt arrives" and "the focus comes
+ * on the success path (Enter: the row becomes a `ConnectedProviderRow`, rebuilt, and that row takes
+ * the focus because it carries `data-provider` and `tabindex="-1"`) and on the Escape path, in either order of "the state without the attempt arrives" and "the focus comes
  * back from the box". The same request is also served when the attempt ends with the document
  * focused. "Never on the `body`" holds for Cancel from the card, VERIFIED in a real VS Code 1.144.0
  * on Windows 11 (1/11/2026, `test:visual` step 36, synthetic server): "ok   W2 after the attempt the
@@ -69,7 +75,9 @@ export function matchesSearch(row: ProviderRow, search: string): boolean {
  * `npm run test:visual -- --steps 36` twice, synthetic server, this code including the poll; the
  * full run printed the same ok texts as below). In all three runs without the mutation F1 and F2
  * were served by the `window-focus` entry with `ticks=0` in the trace: the poll did not act, and
- * only the mutation below proves in a real VS Code that the poll serves. "ok   F1 after Enter in the key box the Azure card has the focus with the document focused
+ * only the mutation below proves in a real VS Code that the poll serves. That run was BEFORE the
+ * redesign of phase 1.3 (the card stayed in place on Enter); the quoted texts below are of that
+ * tree, and step 36 after 1.3 is the new evidence. "ok   F1 after Enter in the key box the Azure card has the focus with the document focused
  * (true; document {"hasFocus":true,"active":"LI","activeProvider":"azure","parked":null}) and the
  * box is closed" and "ok   F2 Escape in the native box closes it (true), Azure is back in Add a
  * provider (true) and its card has the focus with the document focused (true; document
@@ -97,6 +105,12 @@ export function matchesSearch(row: ProviderRow, search: string): boolean {
  * `data-focus-trace` attribute of the container, where `test:visual` step 36 reads it. It stores
  * no value, text or key, and no annotation changes control flow. Not observed: which sequence a
  * failing run had, a screen reader, macOS and Linux.
+ *
+ * After Disconnect, when the provider's connections go down and the focus is idle on the `body`,
+ * the focus goes to "+ Add provider", and only while `document.hasFocus()` (a focus() otherwise
+ * pulls the focus back from the editor, the rule above). VERIFIED in jsdom by the check "does not
+ * move the focus after Disconnect when the document has no focus" of `SettingsApp.test.tsx`
+ * (`hasFocus` stubbed, fabricated states).
  */
 export function ProvidersSection(props: {
   state: SettingsStoreState;
@@ -107,8 +121,17 @@ export function ProvidersSection(props: {
   const isTop = (row: ProviderRow): boolean => row.connections.length > 0 || row.id === attemptID();
   const top = createMemo(() => props.state.providers.rows.filter(isTop));
   const addable = createMemo(() => props.state.providers.rows.filter((row) => !isTop(row)));
-  const shown = createMemo(() => addable().filter((row) => matchesSearch(row, props.ui.search())));
+  // The provider the user picked in "Add provider": its form shows under the button while the row
+  // is still addable (once it signs in it lives in the Connected list instead).
+  const chosen = createMemo(() => addable().find((row) => row.id === props.ui.expanded()));
   const busy = () => props.state.attempt !== undefined;
+  const [pickerOpen, setPickerOpen] = createSignal(false);
+  let addButton: HTMLButtonElement | undefined;
+  /** Closes the picker and returns the focus to the button that opened it (Escape, or a pick). */
+  const closePicker = (): void => {
+    setPickerOpen(false);
+    addButton?.focus();
+  };
 
   // Focus follows the provider the user acted on. Pressing its primary button moves the row to the
   // top list (and back if the attempt is cancelled or fails), which rebuilds the card and drops the
@@ -264,8 +287,46 @@ export function ProvidersSection(props: {
     if (props.state.attempt === undefined) queueMicrotask(() => setFocusID(undefined));
     return true;
   };
+  /** Picking a provider opens its form under the button and puts the focus on its card. */
+  const choose = (id: string): void => {
+    props.ui.setExpanded(id);
+    setPickerOpen(false);
+    cardOf(id)?.focus();
+  };
+  // Disconnect (review W3 of E10-settings-redesign): the host asks for the confirmation, and once
+  // it is confirmed the Disconnect button that held the focus is gone (and its row too when it was
+  // the last connection). A removed element drops the focus to `body`, so the section remembers
+  // the provider and how many connections it had at the press, and when that number goes down it
+  // moves an idle focus to "+ Add provider". A focus the user put elsewhere is left alone; a
+  // refused confirmation changes nothing, so nothing moves.
+  let disconnecting: { id: string; connections: number } | undefined;
+  createEffect(() => {
+    // Reads every row id and connection count so the effect follows the store's in-place updates
+    // (the `rows` array itself is the same object after a new state).
+    const counts = new Map(
+      props.state.providers.rows.map((row) => [row.id, row.connections.length]),
+    );
+    const pending = disconnecting;
+    if (pending === undefined) return;
+    const left = counts.get(pending.id) ?? 0;
+    if (left >= pending.connections) return;
+    disconnecting = undefined;
+    const active = document.activeElement;
+    // `document.hasFocus()`: a focus() here would pull the focus back from the editor into this
+    // webview when the user left it while the confirmation was pending (review W1, closing round).
+    if ((active === null || active === document.body) && document.hasFocus()) addButton?.focus();
+  });
   const send: SendSettings = (message) => {
     if (message.type === 'settings.connect') setFocusID(message.integrationID);
+    if (message.type === 'settings.disconnect') {
+      const id = message.integrationID;
+      disconnecting = {
+        id,
+        connections: untrack(
+          () => props.state.providers.rows.find((row) => row.id === id)?.connections.length ?? 0,
+        ),
+      };
+    }
     props.send(message);
   };
   return (
@@ -311,63 +372,66 @@ export function ProvidersSection(props: {
           <ul class="setup-steps" role="list">
             <For each={top()}>
               {(row) => (
-                <ProviderCard
-                  row={row}
-                  attempt={row.id === attemptID() ? props.state.attempt : undefined}
-                  remote={props.state.remote}
-                  busy={busy()}
-                  ui={props.ui}
-                  send={send}
-                  takeFocus={takeFocus}
-                />
+                <Show
+                  when={row.id === attemptID()}
+                  fallback={<ConnectedProviderRow row={row} busy={busy()} send={send} />}
+                >
+                  <ProviderCard
+                    row={row}
+                    attempt={props.state.attempt}
+                    remote={props.state.remote}
+                    busy={busy()}
+                    ui={props.ui}
+                    send={send}
+                    takeFocus={takeFocus}
+                  />
+                </Show>
               )}
             </For>
           </ul>
         </Show>
-        <h2 class="settings-heading">{l10n.t('Add a provider')}</h2>
-        <input
-          type="search"
-          class="settings-input"
-          aria-label={l10n.t('Search providers')}
-          placeholder={plural(
-            addable().length,
-            l10n.t('Search {0} provider…', addable().length),
-            l10n.t('Search {0} providers…', addable().length),
-          )}
-          autocomplete="off"
-          spellcheck={false}
+        <button
+          type="button"
+          class="secondary add-provider-button"
+          aria-haspopup="listbox"
+          aria-expanded={pickerOpen()}
           ref={(element) => {
-            element.value = untrack(() => props.ui.search());
+            addButton = element;
           }}
-          onInput={(event) => {
-            props.ui.setSearch(event.currentTarget.value);
+          onClick={() => {
+            setPickerOpen(!pickerOpen());
           }}
-        />
-        <Show
-          when={shown().length > 0}
-          fallback={
-            <p class="settings-empty">
-              {addable().length === 0
-                ? l10n.t('The server lists no other providers.')
-                : l10n.t('No provider matches “{0}”.', props.ui.search().trim())}
-            </p>
-          }
         >
-          <ul class="setup-steps" role="list">
-            <For each={shown()}>
-              {(row) => (
-                <ProviderCard
-                  row={row}
-                  attempt={undefined}
-                  remote={props.state.remote}
-                  busy={busy()}
-                  ui={props.ui}
-                  send={send}
-                  takeFocus={takeFocus}
-                />
-              )}
-            </For>
-          </ul>
+          {l10n.t('+ Add provider')}
+        </button>
+        <Show when={pickerOpen()}>
+          <AddProviderPicker
+            rows={addable()}
+            search={props.ui.search()}
+            onSearch={(text) => {
+              props.ui.setSearch(text);
+            }}
+            onChoose={choose}
+            onClose={closePicker}
+          />
+        </Show>
+        {/* keyed: the callback gets the row itself. The accessor form read `row()` while the card
+            was being torn down after Cancel and threw "Stale read from <Show>" (`test:visual`
+            step 36, 07/11/2026; jsdom did not show it). */}
+        <Show when={chosen()} keyed>
+          {(row) => (
+            <ul class="setup-steps" role="list">
+              <ProviderCard
+                row={row}
+                attempt={undefined}
+                remote={props.state.remote}
+                busy={busy()}
+                ui={props.ui}
+                send={send}
+                takeFocus={takeFocus}
+              />
+            </ul>
+          )}
         </Show>
       </Show>
     </div>

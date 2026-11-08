@@ -15,6 +15,8 @@ export function makeState(overrides: Partial<SettingsState> = {}): SettingsState
     folder: 'my-project',
     serverVersion: '2.0.32',
     providers: { loaded: true, failed: false, rows: [] },
+    models: { loaded: true, failed: false, rows: [] },
+    preference: { value: '', status: 'none', workspaceOverride: false },
     mcp: { loaded: true, failed: false, pendingFirstRead: false, servers: [] },
     ...overrides,
   };

@@ -19,12 +19,16 @@ import {
   MAX_SETTINGS_ANSWERS,
   MAX_SETTINGS_VALUE,
   isSettingsWebviewToHost,
+  type ProviderRow,
   type SettingsAction,
   type SettingsHostToWebview,
   type SettingsNotice,
+  type SettingsPreference,
+  type SettingsSettingKey,
   type SettingsState,
   type SettingsWebviewToHost,
 } from '../shared/settingsProtocol';
+import { isAvailable, parseModelSetting } from './modelPreference';
 
 /** The slice of {@link ServerConfig} the controller reads. */
 export type SettingsConfigSource = Pick<ServerConfig, 'snapshot' | 'onDidChange' | 'reloadAll'>;
@@ -44,15 +48,32 @@ export interface SettingsHeader {
   remote?: string;
 }
 
+/**
+ * The `openVsCode.defaultModel` setting, as `chatLifecycle.ts` reads and writes it. The controller
+ * never touches `vscode`: it only asks.
+ */
+export interface SettingsPreferences {
+  /**
+   * The effective text of the setting (`''` when unset) and whether the workspace or the folder
+   * has a value of its own, which hides the user's one.
+   */
+  read(): { value: string; workspaceOverride: boolean };
+  /** Writes the USER (global) value; `undefined` removes it. */
+  write(value: string | undefined): Promise<void>;
+}
+
 /** Everything the controller is given. */
 export interface SettingsControllerDeps {
   config: SettingsConfigSource;
   auth: SettingsAuth;
+  preferences: SettingsPreferences;
   /** Sends one message to the webview (the panel drops it if the webview is not ready). */
   post(message: SettingsHostToWebview): void;
   header(): SettingsHeader;
   /** Runs a footer action with the existing command (logs, extension settings, restart). */
   runAction(action: SettingsAction): void;
+  /** Opens one setting of this extension in the native Settings editor. */
+  openSetting(key: SettingsSettingKey): void;
   log: ServerLog;
 }
 
@@ -70,11 +91,26 @@ export interface SettingsControllerDeps {
  * the log or the state"; those feed the messages through `test.settingsMessage`, which runs the
  * same guard, NOT through a real DOM `postMessage`. VERIFIED with the payloads a real webview posts
  * (Windows 11, VS Code 1.144.0, 1/11/2026, `npm run test:visual -- --group config`, synthetic
- * server): "ok   V7 pressing Enter connects Azure: it moves to Connected with "API key · saved by
- * opencode for all projects" and a Remove button, and the live region says "Connected to Azure."",
- * "ok   V9 confirming the modal removes the credential: Azure is back in Add a provider with no
- * Remove button …" and "ok   V8 Cancel in the notification ends the attempt …". UNVERIFIED, with
- * no date: the controller after the tab is hidden and shown (no `test:visual` cell does it).
+ * server; the texts changed with the redesign of issue #186 and the same cells passed again on
+ * 7/11/2026, VS Code 1.145.2, `--steps 36`): "ok   V7 pressing Enter connects Azure: it moves to
+ * Connected as a row with "API key" and a Disconnect button (lines ["API key · 0 models"]), and the
+ * live region says "Connected to Azure."", "ok   V9 confirming the modal removes the credential:
+ * Azure is back in Add a provider with no Disconnect button …" and "ok   V8 Cancel in the
+ * notification ends the attempt …". Since issue #186 it also builds the models and the
+ * `openVsCode.defaultModel` preference into the state, writes that setting on
+ * `settings.setDefaultModel` (after revalidating it against the catalog) and opens a setting of the
+ * closed list on `settings.openSetting`. The first two are VERIFIED by the `fake-server` case "sets
+ * the default model from the Settings tab and the chat proposes it" (7/11/2026, Windows 11, VS Code
+ * 1.145.2) and by `test:visual` step 47 ("ok   M1 the Models section offers None and the models of
+ * the fixture in 1 group(s) …" for the state, "ok   M1 choosing a model writes openVsCode.defaultModel
+ * in the user settings and the select follows the state …" for the write). `settings.openSetting` is
+ * UNVERIFIED in a real host: no test presses a button that sends it; `settingsController.test.ts`
+ * covers the three with fabricated stores and a fake `preferences`. UNVERIFIED, with no date: the
+ * controller after the tab is hidden and shown (no `test:visual` cell does it). The `--steps 36`
+ * texts above come from a run of 7/11/2026 on an EARLIER tree (the search box, the CSS and the
+ * review fixes came after it, among them the `modelRefused` notice and the fresh state after a
+ * refused default model); the final full `test:visual` of the branch is what covers this tree, and
+ * no run of it is claimed here.
  */
 export class SettingsController {
   private ready = false;
@@ -115,11 +151,36 @@ export class SettingsController {
     this.ready = false;
   }
 
-  /** The `settings.state` of this moment, from the store, the header and the attempt. */
+  /**
+   * The `settings.state` of this moment, from the store, the header, the attempt and the
+   * `openVsCode.defaultModel` setting. Integrations that the server marks `source: 'mcp'` are left
+   * out of `providers` (they are signed in from the MCP section). Each provider gets a
+   * `modelCount` once the models were read: the models whose provider belongs to that integration
+   * (`ProviderInfo.integrationID`, or the provider id when the server names none: HYPOTHESIS that
+   * the ids match then, unchecked against a real server with a second provider). The preference
+   * `status` is judged against the model rows held now, so it is only meaningful once
+   * `models.loaded`.
+   */
   buildState(): SettingsState {
     const snapshot = this.deps.config.snapshot();
     const header = this.deps.header();
     const attempt = this.deps.auth.attempt();
+    const models = snapshot.models;
+    const rows: ProviderRow[] = snapshot.integrations.rows
+      .filter((row) => row.source !== 'mcp')
+      .map((row) => ({
+        id: row.id,
+        name: row.name,
+        connections: row.connections,
+        methods: row.methods,
+        ...(models.loaded
+          ? {
+              modelCount: models.rows.filter(
+                (model) => (model.integrationID ?? model.providerID) === row.id,
+              ).length,
+            }
+          : {}),
+      }));
     return {
       connection: header.connection,
       folder: header.folder,
@@ -128,8 +189,20 @@ export class SettingsController {
       providers: {
         loaded: snapshot.integrations.loaded,
         failed: snapshot.integrations.failed,
-        rows: snapshot.integrations.rows,
+        rows,
       },
+      models: {
+        loaded: models.loaded,
+        failed: models.failed,
+        rows: models.rows.map((model) => ({
+          providerID: model.providerID,
+          id: model.id,
+          name: model.name,
+          providerName: model.providerName,
+        })),
+        ...(models.serverDefault === undefined ? {} : { serverDefault: models.serverDefault }),
+      },
+      preference: this.preference(),
       mcp: {
         loaded: snapshot.mcp.loaded,
         failed: snapshot.mcp.failed,
@@ -158,6 +231,21 @@ export class SettingsController {
     }
   }
 
+  /** The setting, read now, with its status against the model rows the store holds now. */
+  private preference(): SettingsPreference {
+    const { value, workspaceOverride } = this.deps.preferences.read();
+    const parsed = parseModelSetting(value);
+    let status: SettingsPreference['status'];
+    if (parsed.kind === 'none') status = 'none';
+    else if (parsed.kind === 'invalid') status = 'invalid';
+    else {
+      status = isAvailable(parsed.model, this.deps.config.snapshot().models.rows)
+        ? 'applied'
+        : 'unavailable';
+    }
+    return { value, status, workspaceOverride };
+  }
+
   private postState(): void {
     this.deps.post({ type: 'settings.state', state: this.buildState() });
   }
@@ -178,6 +266,12 @@ export class SettingsController {
       case 'settings.action':
         this.deps.runAction(message.action);
         return;
+      case 'settings.openSetting':
+        this.deps.openSetting(message.key);
+        return;
+      case 'settings.setDefaultModel':
+        await this.setDefaultModel(message.model);
+        return;
       case 'settings.connect':
         await this.connect(message.integrationID, message.method, message.answer);
         return;
@@ -193,6 +287,56 @@ export class SettingsController {
         await this.disconnect(message.integrationID, message.credentialID);
         return;
     }
+  }
+
+  /**
+   * Revalidates a default-model request and writes the USER setting once. `''` (after trimming)
+   * clears it. Anything else must parse as `provider/model` AND be in the catalog the store holds
+   * (so a model of a provider that is not connected is refused); a refused request writes nothing,
+   * logs one fixed-reason line and posts a `modelRefused` notice (not a sign-in failure) whose
+   * `integrationID` is the provider half, or `''` when the text did not parse. The value written is
+   * the canonical `providerID/id`, not the raw text. There is no optimistic state: the webview
+   * waits for the next `settings.state`, and this method asks for one on EVERY exit (written,
+   * cleared, refused, or a write that threw), because the native `<select>` already shows the
+   * user's pick and only a fresh state puts the saved value back. A write that throws posts a
+   * `modelRefused` notice and the state, instead of leaving only a log line.
+   * VERIFIED on Windows 11 (08/11/2026, vitest, fabricated `preferences`): the checks "asks for a
+   * fresh state after a refused model" and "tells the webview when the write throws" of
+   * `settingsController.test.ts` passed. UNVERIFIED against a real write failure of the profile.
+   */
+  private async setDefaultModel(text: string): Promise<void> {
+    const parsed = parseModelSetting(text);
+    let providerID = '';
+    let value: string | undefined;
+    if (parsed.kind === 'invalid') {
+      this.refused('settings.setDefaultModel', 'not provider/model');
+      this.refuseModel('', l10n.t('Unknown model'));
+      return;
+    }
+    if (parsed.kind === 'model') {
+      providerID = parsed.model.providerID;
+      if (!isAvailable(parsed.model, this.deps.config.snapshot().models.rows)) {
+        this.refused('settings.setDefaultModel', 'model not in the catalog');
+        this.refuseModel(providerID, l10n.t('Unknown model'));
+        return;
+      }
+      value = `${providerID}/${parsed.model.id}`;
+    }
+    try {
+      await this.deps.preferences.write(value);
+    } catch (error) {
+      const name = error instanceof Error ? error.name : 'unknown';
+      this.deps.log.warn(`settings request failed: settings.setDefaultModel: ${name}`);
+      this.refuseModel(providerID, l10n.t('The setting could not be saved'));
+      return;
+    }
+    this.changed();
+  }
+
+  /** Posts a `modelRefused` notice and then the current state, so the select returns to the saved value. */
+  private refuseModel(providerID: string, message: string): void {
+    this.notice({ integrationID: providerID, kind: 'modelRefused', message });
+    this.changed();
   }
 
   /**

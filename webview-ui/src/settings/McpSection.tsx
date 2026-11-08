@@ -68,7 +68,16 @@ export function countsText(server: SettingsMcpServerRow): string {
  * attribute (0), min contrast …" at 1080, 620 and 300 px in the four themes, and "ok   V4 after a
  * prompt with MCPFLIP the open tab shows broken as connected with a status.md resource, in the same
  * document". NOT observed: the "Reading the MCP servers…" and "No MCP servers are configured." lines
- * (the fixture is never empty for long enough to be read; jsdom only).
+ * (the fixture is never empty for long enough to be read; jsdom only). Since issue #186 each card
+ * has `tabindex="-1"`, so "Needs attention" and the search can focus the card of a server by its
+ * `data-server`. VERIFIED in jsdom by "lists what needs attention in General only when something
+ * does, and jumps to the row with the focus" of `SettingsApp.test.tsx` (`document.activeElement` is
+ * the `broken` card, then the `linear` one); focus on a card in a real iframe is VERIFIED in VS Code
+ * 1.145.2 on Windows 11 (the full `npm run test:visual` of 08/11/2026 on the final tree, "all visual
+ * checks passed", step "47 OpenCode Settings: Models and General (E10-settings-redesign)"): "ok   G1
+ * the item opens MCP servers and focuses the card of "linear"" (the `broken` card is not pressed
+ * there). It is
+ * the MCP servers SECTION of the Settings tab now (a tab until issue #186).
  */
 export function McpSection(props: { mcp: SettingsState['mcp'] }) {
   return (
@@ -103,6 +112,7 @@ export function McpSection(props: { mcp: SettingsState['mcp'] }) {
                 class="setup-step settings-card"
                 data-status={STATUS_TONE[server.status]}
                 data-server={server.name}
+                tabindex="-1"
               >
                 <span class="step-mark settings-mark">
                   <Show when={server.status === 'connected'}>

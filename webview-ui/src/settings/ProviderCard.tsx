@@ -181,7 +181,11 @@ function MethodPanel(props: {
  *
  * - Connected (it has `connections`): one line per connection ("API key · saved by opencode for
  *   all projects", "From GOOGLE_APPLICATION_CREDENTIALS") and a Remove button per stored
- *   credential. Remove only sends `settings.disconnect`; the host asks for the confirmation.
+ *   credential. Remove only sends `settings.disconnect`; the host asks for the confirmation. Since
+ *   issue #186 `ProvidersSection` paints a connected provider as a `ConnectedProviderRow`
+ *   ("Disconnect", "Managed by VARIABLE"), so this face is only reached by a card that is both
+ *   connected and signing in; the Remove button and these lines are covered by
+ *   `ProviderCard.test.tsx` (jsdom) and no longer by `test:visual`.
  * - Signing in (the host's `attempt` is for this provider): "Starting…", then the instructions,
  *   the code with Copy code, and Cancel (`settings.cancel`, idempotent in the host), then
  *   "Finishing…". Copy code sends `settings.copyCode`: the code stays a host matter.

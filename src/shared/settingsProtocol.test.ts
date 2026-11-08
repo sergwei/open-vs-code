@@ -13,7 +13,18 @@ import {
   MAX_SETTINGS_VALUE,
   isSettingsHostToWebview,
   isSettingsWebviewToHost,
+  SETTINGS_SETTING_KEYS,
 } from './settingsProtocol';
+
+/** Spelled out here, not read from the module, so adding a key there fails this list on purpose. */
+const SETTING_KEYS = [
+  'opencodePath',
+  'serverUrl',
+  'defaultModel',
+  'chatLocation',
+  'autoStart',
+  'mods.enabled',
+] as const;
 
 const CONNECT = { type: 'settings.connect', integrationID: 'azure', method: 0, answer: {} };
 
@@ -29,8 +40,45 @@ describe('isSettingsWebviewToHost', () => {
       { type: 'settings.action', action: 'logs' },
       { type: 'settings.action', action: 'extensionSettings' },
       { type: 'settings.action', action: 'restart' },
+      { type: 'settings.setDefaultModel', model: 'anthropic/claude-sonnet' },
+      { type: 'settings.setDefaultModel', model: '' },
+      ...SETTING_KEYS.map((key) => ({ type: 'settings.openSetting', key })),
     ];
     for (const message of valid) expect(isSettingsWebviewToHost(message)).toBe(true);
+  });
+
+  it('rejects a default-model request with extra fields or a model that is too long or not text', () => {
+    const bad: unknown[] = [
+      { type: 'settings.setDefaultModel' },
+      { type: 'settings.setDefaultModel', model: 'a/b', apiKey: 'sk-planted' },
+      { type: 'settings.setDefaultModel', model: 'a/b', secret: 'sk-planted' },
+      { type: 'settings.setDefaultModel', model: 'a/b', key: 'sk-planted' },
+      { type: 'settings.setDefaultModel', model: 'a/b', token: 'sk-planted' },
+      { type: 'settings.setDefaultModel', model: 'x'.repeat(2 * MAX_SETTINGS_ID + 2) },
+      { type: 'settings.setDefaultModel', model: 1 },
+      { type: 'settings.setDefaultModel', model: ['a/b'] },
+    ];
+    for (const message of bad) expect(isSettingsWebviewToHost(message)).toBe(false);
+    expect(
+      isSettingsWebviewToHost({
+        type: 'settings.setDefaultModel',
+        model: 'x'.repeat(2 * MAX_SETTINGS_ID + 1),
+      }),
+    ).toBe(true);
+  });
+
+  it('opens only the settings of the closed list, and takes nothing besides the key', () => {
+    const bad: unknown[] = [
+      { type: 'settings.openSetting' },
+      { type: 'settings.openSetting', key: 'openVsCode.defaultModel' },
+      { type: 'settings.openSetting', key: 'editor.fontSize' },
+      { type: 'settings.openSetting', key: '' },
+      { type: 'settings.openSetting', key: 'defaultModel', apiKey: 'sk-planted' },
+      { type: 'settings.openSetting', key: 'defaultModel', secret: 'sk-planted' },
+      { type: 'settings.openSetting', key: 7 },
+    ];
+    for (const message of bad) expect(isSettingsWebviewToHost(message)).toBe(false);
+    expect([...SETTINGS_SETTING_KEYS]).toEqual([...SETTING_KEYS]);
   });
 
   it('rejects a message that carries a key, an apiKey or a secret (rule 1)', () => {

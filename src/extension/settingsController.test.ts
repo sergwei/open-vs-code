@@ -43,21 +43,63 @@ const ROWS: IntegrationRow[] = [
   },
 ];
 
-function snapshotOf(rows: IntegrationRow[]): ServerConfigSnapshot {
+const MODELS: ServerConfigSnapshot['models'] = {
+  loaded: true,
+  failed: false,
+  rows: [
+    {
+      providerID: 'anthropic',
+      id: 'claude-sonnet',
+      name: 'Claude Sonnet',
+      providerName: 'Anthropic',
+      integrationID: 'anthropic',
+    },
+    {
+      providerID: 'anthropic',
+      id: 'claude-haiku',
+      name: 'Claude Haiku',
+      providerName: 'Anthropic',
+    },
+    { providerID: 'openrouter', id: 'meta/llama', name: 'Llama', providerName: 'OpenRouter' },
+  ],
+  serverDefault: { providerID: 'anthropic', id: 'claude-sonnet', name: 'Claude Sonnet' },
+};
+
+function snapshotOf(
+  rows: IntegrationRow[],
+  models: ServerConfigSnapshot['models'],
+): ServerConfigSnapshot {
   return {
     epoch: 1,
     integrations: { loaded: true, failed: false, rows },
+    models,
     mcp: { loaded: true, failed: false, pendingFirstRead: false, servers: [] },
   };
 }
 
-function setup(rows: IntegrationRow[] = ROWS) {
+function setup(
+  rows: IntegrationRow[] = ROWS,
+  models: ServerConfigSnapshot['models'] = MODELS,
+  initialPreference: { value: string; workspaceOverride: boolean } = {
+    value: '',
+    workspaceOverride: false,
+  },
+) {
+  let preference = initialPreference;
+  const preferences = {
+    read: vi.fn(() => preference),
+    write: vi.fn((value: string | undefined) => {
+      preference = { ...preference, value: value ?? '' };
+      return Promise.resolve();
+    }),
+  };
+  const openSetting = vi.fn();
   const posted: SettingsHostToWebview[] = [];
   const storeListeners = new Set<() => void>();
   const attemptListeners = new Set<(view: AuthAttemptView | undefined) => void>();
   let attempt: AuthAttemptView | undefined;
   const config = {
-    snapshot: vi.fn(() => snapshotOf(rows)),
+    snapshot: vi.fn(() => snapshotOf(rows, models)),
     onDidChange: (listener: () => void) => {
       storeListeners.add(listener);
       return () => storeListeners.delete(listener);
@@ -89,6 +131,8 @@ function setup(rows: IntegrationRow[] = ROWS) {
   const deps: SettingsControllerDeps = {
     config,
     auth,
+    preferences,
+    openSetting,
     post: (message) => posted.push(message),
     header: () => ({
       connection: { state: 'connected', serverVersion: '2.0.32' },
@@ -105,6 +149,8 @@ function setup(rows: IntegrationRow[] = ROWS) {
     posted,
     config,
     auth,
+    preferences,
+    openSetting,
     runAction,
     log,
     setRemote: (name: string | undefined) => {
@@ -342,6 +388,8 @@ describe('SettingsController with the real ProviderAuth', () => {
     const controller = new SettingsController({
       config: t.config,
       auth,
+      preferences: t.preferences,
+      openSetting: t.openSetting,
       post: () => undefined,
       header: () => ({ connection: { state: 'starting' }, folder: 'work' }),
       runAction: () => undefined,
@@ -368,5 +416,179 @@ describe('SettingsController with the real ProviderAuth', () => {
     });
     expect(remove).toHaveBeenCalledOnce();
     expect(confirm).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * Protects issue #186: the default-model picker must write the USER setting only for a model the
+ * catalog offers, once, and never from a text the webview invented; the state must say where the
+ * setting stands; and an MCP integration must not show up as a provider. Provenance: FABRICATED
+ * snapshot and `preferences`, written from `serverConfig.ts` and `modelPreference.ts`; the real
+ * write to the profile is the `fake-server` case of phase 1.3.
+ */
+describe('SettingsController default model', () => {
+  const stateOf = (t: ReturnType<typeof setup>) => {
+    const last = states(t.posted).at(-1);
+    return last?.type === 'settings.state' ? last.state : undefined;
+  };
+
+  it('writes a model the catalog offers once, as provider/id, and publishes the state', async () => {
+    const t = setup();
+    await t.controller.onMessage({ type: 'settings.ready' });
+    await t.controller.onMessage({
+      type: 'settings.setDefaultModel',
+      model: '  anthropic/claude-haiku ',
+    });
+    expect(t.preferences.write).toHaveBeenCalledOnce();
+    expect(t.preferences.write).toHaveBeenCalledWith('anthropic/claude-haiku');
+    await Promise.resolve();
+    expect(stateOf(t)?.preference).toEqual({
+      value: 'anthropic/claude-haiku',
+      status: 'applied',
+      workspaceOverride: false,
+    });
+    expect(notices(t.posted)).toEqual([]);
+  });
+
+  it('keeps a slash inside the model id (openrouter/meta/llama)', async () => {
+    const t = setup();
+    await t.controller.onMessage({
+      type: 'settings.setDefaultModel',
+      model: 'openrouter/meta/llama',
+    });
+    expect(t.preferences.write).toHaveBeenCalledWith('openrouter/meta/llama');
+  });
+
+  it('clears the setting on an empty text', async () => {
+    const t = setup(ROWS, MODELS, { value: 'anthropic/claude-haiku', workspaceOverride: false });
+    await t.controller.onMessage({ type: 'settings.ready' });
+    await t.controller.onMessage({ type: 'settings.setDefaultModel', model: '   ' });
+    expect(t.preferences.write).toHaveBeenCalledWith(undefined);
+    await Promise.resolve();
+    expect(stateOf(t)?.preference.status).toBe('none');
+  });
+
+  it('refuses an unparsable, an unknown and a not offered model: no write, a notice, one log line', async () => {
+    const t = setup();
+    for (const model of ['claude', 'anthropic/', 'anthropic/not-a-model', 'azure/gpt-5']) {
+      await t.controller.onMessage({ type: 'settings.setDefaultModel', model });
+    }
+    expect(t.preferences.write).not.toHaveBeenCalled();
+    expect(notices(t.posted).map((n) => n.kind)).toEqual([
+      'modelRefused',
+      'modelRefused',
+      'modelRefused',
+      'modelRefused',
+    ]);
+    expect(t.log.warn).toHaveBeenCalledTimes(4);
+    for (const call of t.log.warn.mock.calls) {
+      expect(String(call[0])).toMatch(/^settings request refused: settings\.setDefaultModel: /);
+      expect(String(call[0])).not.toContain('azure');
+    }
+  });
+
+  /**
+   * Protects review W1 of E10-settings-redesign: the native select already shows the refused pick,
+   * so a refusal must be followed by a fresh `settings.state` that puts the saved value back.
+   * FABRICATED snapshot and `preferences`.
+   */
+  it('asks for a fresh state after a refused model', async () => {
+    const t = setup();
+    await t.controller.onMessage({ type: 'settings.ready' });
+    const before = states(t.posted).length;
+    await t.controller.onMessage({ type: 'settings.setDefaultModel', model: 'azure/gpt-5' });
+    expect(states(t.posted).length).toBe(before + 1);
+  });
+
+  /**
+   * Protects review W1: a `preferences.write` that throws used to leave only a log line. Now the
+   * webview gets a `modelRefused` notice and the state. FABRICATED rejection; a real profile
+   * write failure was not provoked.
+   */
+  it('tells the webview when the write throws', async () => {
+    const t = setup();
+    await t.controller.onMessage({ type: 'settings.ready' });
+    const before = states(t.posted).length;
+    t.preferences.write.mockRejectedValueOnce(new Error('EACCES'));
+    await t.controller.onMessage({
+      type: 'settings.setDefaultModel',
+      model: 'anthropic/claude-haiku',
+    });
+    expect(notices(t.posted).map((n) => n.kind)).toEqual(['modelRefused']);
+    expect(states(t.posted).length).toBe(before + 1);
+    expect(String(t.log.warn.mock.calls.at(-1)?.[0])).not.toContain('EACCES');
+  });
+
+  it('derives the status and the workspace override from the setting and the catalog', async () => {
+    const cases: [string, string][] = [
+      ['', 'none'],
+      ['anthropic/claude-haiku', 'applied'],
+      ['not-written-right', 'invalid'],
+      ['anthropic/gone', 'unavailable'],
+    ];
+    for (const [value, status] of cases) {
+      const t = setup(ROWS, MODELS, { value, workspaceOverride: true });
+      await t.controller.onMessage({ type: 'settings.ready' });
+      expect(stateOf(t)?.preference).toEqual({ value, status, workspaceOverride: true });
+    }
+  });
+
+  it('sends the models and the server default, with no field beyond the four of a row', async () => {
+    const t = setup();
+    await t.controller.onMessage({ type: 'settings.ready' });
+    expect(stateOf(t)?.models).toEqual({
+      loaded: true,
+      failed: false,
+      rows: [
+        {
+          providerID: 'anthropic',
+          id: 'claude-sonnet',
+          name: 'Claude Sonnet',
+          providerName: 'Anthropic',
+        },
+        {
+          providerID: 'anthropic',
+          id: 'claude-haiku',
+          name: 'Claude Haiku',
+          providerName: 'Anthropic',
+        },
+        { providerID: 'openrouter', id: 'meta/llama', name: 'Llama', providerName: 'OpenRouter' },
+      ],
+      serverDefault: { providerID: 'anthropic', id: 'claude-sonnet', name: 'Claude Sonnet' },
+    });
+  });
+
+  it('counts the models of each provider only once the models were read', async () => {
+    const t = setup();
+    await t.controller.onMessage({ type: 'settings.ready' });
+    expect(stateOf(t)?.providers.rows.map((row) => [row.id, row.modelCount])).toEqual([
+      ['anthropic', 2],
+      ['azure', 0],
+    ]);
+    const unread = setup(ROWS, { loaded: false, failed: false, rows: [] });
+    await unread.controller.onMessage({ type: 'settings.ready' });
+    for (const row of stateOf(unread)?.providers.rows ?? []) {
+      expect('modelCount' in row).toBe(false);
+    }
+  });
+
+  it('leaves the integrations of an MCP server out of the providers', async () => {
+    const rows: IntegrationRow[] = [
+      ...ROWS,
+      { id: 'mcp_ab12', name: 'linear', connections: [], methods: [], source: 'mcp' },
+    ];
+    const t = setup(rows);
+    await t.controller.onMessage({ type: 'settings.ready' });
+    expect(stateOf(t)?.providers.rows.map((row) => row.id)).toEqual(['anthropic', 'azure']);
+    expect(JSON.stringify(t.posted)).not.toContain('mcp_ab12');
+  });
+
+  it('opens a setting of the closed list and nothing else', async () => {
+    const t = setup();
+    await t.controller.onMessage({ type: 'settings.openSetting', key: 'defaultModel' });
+    expect(t.openSetting).toHaveBeenCalledExactlyOnceWith('defaultModel');
+    await t.controller.onMessage({ type: 'settings.openSetting', key: 'editor.fontSize' });
+    expect(t.openSetting).toHaveBeenCalledOnce();
+    expect(t.log.warn).toHaveBeenCalledWith('settings message dropped: invalid');
   });
 });

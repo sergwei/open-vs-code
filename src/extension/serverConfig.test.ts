@@ -9,7 +9,12 @@
 // server's `integration.list` has none, and these tests do not say what a future one will add.
 // They confirm OUR mapping and coalescing, not the contract with the server.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { IntegrationInfo, McpResourceCatalogOutput } from '@opencode/client';
+import type {
+  IntegrationInfo,
+  McpResourceCatalogOutput,
+  ModelInfo,
+  ProviderInfo,
+} from '@opencode/client';
 import {
   MAX_TEXT,
   MCP_FIRST_READ_GRACE_MS,
@@ -62,22 +67,51 @@ interface FakeCalls {
   catalog: number;
 }
 
+/** A model as the wire sends it, with a secret in each place a real `ModelInfo` could carry one. */
+const MODEL_WITH_SECRETS = wire<ModelInfo>(`{
+  "id": "claude-sonnet", "modelID": "claude-sonnet", "providerID": "anthropic",
+  "name": "Claude Sonnet",
+  "headers": {"x-api-key": "sk-planted-api-key"},
+  "body": {"token": "hdr-planted-token"},
+  "settings": {"apiKey": "at-planted-access", "refresh": "rt-planted-refresh"},
+  "capabilities": {"tools": true, "input": [], "output": []}, "variants": [],
+  "time": {"released": 1}, "cost": [], "status": "active", "enabled": true,
+  "limit": {"context": 1, "output": 1}
+}`);
+
+/** A provider as the wire sends it, with secrets in its `settings`, `headers` and `body`. */
+const PROVIDER_WITH_SECRETS = wire<ProviderInfo>(`{
+  "id": "anthropic", "integrationID": "anthropic-int", "name": "Anthropic",
+  "activation": "auto", "package": "x",
+  "settings": {"apiKey": "sk-planted-api-key"},
+  "headers": {"authorization": "Bearer hdr-planted-token"},
+  "body": {"refresh": "rt-planted-refresh"}
+}`);
+
 /** A client whose three reads answer with the (mutable) data and count their calls. */
 function fakeApi(
   initial: {
     integrations?: IntegrationInfo[];
     mcp?: string;
     catalog?: McpResourceCatalogOutput['data'];
+    models?: ModelInfo[];
+    providers?: ProviderInfo[];
+    modelDefault?: ModelInfo | null;
   } = {},
 ) {
   const calls: FakeCalls = { integrations: 0, mcp: 0, catalog: 0 };
+  /** Reads of the model catalog, counted apart so the older `calls` expectations stay exact. */
+  const modelCalls = { list: 0, default: 0, provider: 0 };
   const state = {
+    models: initial.models ?? [],
+    providers: initial.providers ?? [],
+    modelDefault: initial.modelDefault ?? null,
     integrations: initial.integrations ?? [],
     mcp: initial.mcp ?? '[]',
     catalog: initial.catalog ?? { resources: [], templates: [] },
     /** When set, the next read of that source waits for `release()` and answers afterwards. */
     gate: undefined as { promise: Promise<void>; release: () => void } | undefined,
-    fail: undefined as 'integrations' | 'mcp' | 'catalog' | undefined,
+    fail: undefined as 'integrations' | 'mcp' | 'catalog' | 'models' | undefined,
   };
   const hold = async (): Promise<void> => {
     const gate = state.gate;
@@ -93,6 +127,26 @@ function fakeApi(
         return { location: LOCATION, data: state.integrations };
       },
       get: () => Promise.reject(new Error('not used')),
+    },
+    model: {
+      list: async () => {
+        modelCalls.list++;
+        await hold();
+        if (state.fail === 'models') throw new Error(`boom ${SECRETS.url}`);
+        return { location: LOCATION, data: state.models };
+      },
+      default: async () => {
+        modelCalls.default++;
+        await hold();
+        return { location: LOCATION, data: state.modelDefault };
+      },
+    },
+    provider: {
+      list: async () => {
+        modelCalls.provider++;
+        await hold();
+        return { location: LOCATION, data: state.providers };
+      },
     },
     mcp: {
       list: async () => {
@@ -122,7 +176,7 @@ function fakeApi(
     state.gate = { promise, release };
     return release;
   };
-  return { api, calls, state, gate };
+  return { api, calls, modelCalls, state, gate };
 }
 
 /** A store with a recording log and change counter. */
@@ -439,11 +493,154 @@ describe('the reads', () => {
   });
 
   it('reads nothing without a server', async () => {
-    const { api, calls } = fakeApi();
+    const { api, calls, modelCalls } = fakeApi();
     const { store } = setup(api);
     store.detach();
     store.event('server.connected');
     await store.reloadAll();
     expect(calls).toEqual({ integrations: 0, mcp: 0, catalog: 0 });
+    expect(modelCalls).toEqual({ list: 0, default: 0, provider: 0 });
+  });
+});
+
+/**
+ * Protects issue #186: the model picker must never carry a secret from `model.list` or
+ * `provider.list` (both hold `headers`, `body` and `settings`), must follow the events that change
+ * the catalog, and must not read twice at once. Provenance: FABRICATED `ModelInfo` and
+ * `ProviderInfo` written from the types of `@opencode/client@2.0.32`, with planted secrets that a
+ * real server may or may not send; the events are the names of the 2.0.32 types, never seen on a
+ * real stream.
+ */
+describe('the model catalog', () => {
+  it('keeps no planted secret from model.list or provider.list in a serialized snapshot', async () => {
+    const { api } = fakeApi({
+      models: [MODEL_WITH_SECRETS],
+      providers: [PROVIDER_WITH_SECRETS],
+      modelDefault: MODEL_WITH_SECRETS,
+    });
+    const { store } = setup(api);
+    await store.reloadAll();
+    const json = JSON.stringify(store.snapshot());
+    for (const secret of PLANTED) expect(json).not.toContain(secret);
+    // ...while the allowed fields did arrive, so the check is not vacuous.
+    expect(json).toContain('claude-sonnet');
+    expect(json).toContain('anthropic-int');
+  });
+
+  it('joins models with their provider and cuts the default to three fields', async () => {
+    const orphan = { ...MODEL_WITH_SECRETS, id: 'lone', name: 'Lone', providerID: 'ghost' };
+    const { api } = fakeApi({
+      models: [MODEL_WITH_SECRETS, orphan],
+      providers: [PROVIDER_WITH_SECRETS],
+      modelDefault: MODEL_WITH_SECRETS,
+    });
+    const { store } = setup(api);
+    expect(store.snapshot().models).toMatchObject({ loaded: false, failed: false, rows: [] });
+    await store.reloadAll();
+    expect(store.snapshot().models).toEqual({
+      loaded: true,
+      failed: false,
+      rows: [
+        {
+          providerID: 'anthropic',
+          id: 'claude-sonnet',
+          name: 'Claude Sonnet',
+          providerName: 'Anthropic',
+          integrationID: 'anthropic-int',
+        },
+        { providerID: 'ghost', id: 'lone', name: 'Lone', providerName: 'ghost' },
+      ],
+      serverDefault: { providerID: 'anthropic', id: 'claude-sonnet', name: 'Claude Sonnet' },
+    });
+  });
+
+  it('leaves serverDefault out when the server names no default', async () => {
+    const { api } = fakeApi({ models: [MODEL_WITH_SECRETS], providers: [PROVIDER_WITH_SECRETS] });
+    const { store } = setup(api);
+    await store.reloadAll();
+    expect(store.snapshot().models.serverDefault).toBeUndefined();
+    expect('serverDefault' in store.snapshot().models).toBe(false);
+  });
+
+  it('keeps source mcp of an integration and nothing else of its metadata', () => {
+    const row = toIntegrationRow(
+      wire<IntegrationInfo>(
+        `{"id":"mcp_ab12","name":"linear","metadata":{"source":"mcp","token":"hdr-planted-token"},"methods":[],"connections":[]}`,
+      ),
+    );
+    expect(row).toEqual({
+      id: 'mcp_ab12',
+      name: 'linear',
+      connections: [],
+      methods: [],
+      source: 'mcp',
+    });
+    const plain = toIntegrationRow(
+      wire<IntegrationInfo>(
+        `{"id":"x","name":"X","metadata":{"source":"models.dev"},"methods":[],"connections":[]}`,
+      ),
+    );
+    expect('source' in plain).toBe(false);
+  });
+
+  it('re-reads the models on model, provider, config, integration and credential events only', async () => {
+    const { api, modelCalls } = fakeApi();
+    const { store } = setup(api);
+    for (const type of [
+      'model.updated',
+      'provider.updated',
+      'config.updated',
+      'integration.updated',
+      'credential.updated',
+      'credential.switched',
+    ]) {
+      const before = modelCalls.list;
+      store.event(type);
+      // Drain the queue: a macrotask, not a microtask, so the coalesced repeat has run.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(modelCalls.list, type).toBe(before + 1);
+    }
+    const before = { ...modelCalls };
+    store.event('session.created');
+    store.event('mcp.status.changed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(modelCalls).toEqual(before);
+  });
+
+  it('coalesces a burst of model events into one read in flight plus one repeat', async () => {
+    const { api, modelCalls } = fakeApi();
+    const { store } = setup(api);
+    store.event('model.updated');
+    store.event('provider.updated');
+    store.event('config.updated');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(modelCalls).toEqual({ list: 2, default: 2, provider: 2 });
+  });
+
+  it('keeps the previous rows, flags the failure and logs a scrubbed warn line', async () => {
+    const { api, state } = fakeApi({
+      models: [MODEL_WITH_SECRETS],
+      providers: [PROVIDER_WITH_SECRETS],
+    });
+    const { store, lines } = setup(api);
+    await store.reloadAll();
+    state.fail = 'models';
+    await store.reloadAll();
+    expect(store.snapshot().models).toMatchObject({ loaded: true, failed: true });
+    expect(store.snapshot().models.rows).toHaveLength(1);
+    const warn = lines.find((line) => line.startsWith('warn: model list failed'));
+    expect(warn).toBeDefined();
+    expect(warn).not.toContain(SECRETS.url);
+    state.fail = undefined;
+    await store.reloadAll();
+    expect(store.snapshot().models.failed).toBe(false);
+  });
+
+  it('forgets the models with the server', async () => {
+    const { api } = fakeApi({ models: [MODEL_WITH_SECRETS], providers: [PROVIDER_WITH_SECRETS] });
+    const { store } = setup(api);
+    await store.reloadAll();
+    store.detach();
+    expect(store.snapshot().models).toEqual({ loaded: false, failed: false, rows: [] });
   });
 });
