@@ -127,6 +127,13 @@ affiliated with opencode or with Microsoft.
 - **Context and cost:** a line under the session title shows how much of the model's context the
   last step used and, when the model is not free, what the session cost so far, direct subagents
   included.
+- **Subagent monitor:** while a subagent works or waits, a strip above the prompt box reads
+  "Subagents · N" with how many work and how many wait for your answer; open it for one row per
+  subagent (agent, task, current tool, elapsed time) with Open, Answer (only when it waits on a
+  permission or form), Stop and a **Stop all** that never stops the main turn. In the
+  conversation, the block of each `subagent` call becomes a live card (its latest tools, Open,
+  Stop) and folds into "Finished · N tools · cost", "Stopped" or "Failed: reason" when the subagent
+  ends. It works in the side bar and in chat tabs.
 - **Changed files:** a "Changed files (N)" list under the header shows what the agent changed in
   the session (git repositories only); a click opens VS Code's own diff editor with the original on
   the left and the file on the right.
@@ -299,6 +306,12 @@ always `opencode`.
 ## Known limitations
 
 - Only opencode v2; only a server on the local machine.
+- The subagent monitor shows no elapsed time for a subagent that was already running when you
+  opened the session, until that subagent's next event (a decided limit: there is no fallback). It
+  shows no percentage, counts tools up to "200+", and it has only been exercised with the synthetic
+  server: no subagent turn of a real opencode was run, the background case (`background: true`)
+  included, and that stopping one subagent leaves its parent turn going on is read from opencode's
+  source, not observed.
 - VS Code may not see the PATH of a shell that uses a Node version manager such as fnm or nvm,
   depending on how VS Code is launched (for example, not from that shell). If the extension cannot
   find opencode, set `openVsCode.opencodePath` to the executable
