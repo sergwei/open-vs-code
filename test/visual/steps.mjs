@@ -15,7 +15,10 @@
  *   reading the step titles of `run.mjs`; the map is the area the step exercises, so that
  *   `--affected` (`affected.mjs`) can send a changed file to the groups that cover it. The step 18
  *   (changed files and native diff) is in `render` although the plan's table left it out.
- * - `budgetS`: seconds the step is expected to fit in. Criterion: the larger of the durations of
+ * - `budgetS`: seconds the step is expected to fit in (the step 51, subagent monitor, issue #189,
+ *   has 60 s: 47.2 s in `--steps 51` on 08/11/2026, Windows 11, VS Code 1.145.2, times 1.25 is
+ *   59, rounded up to a multiple of 5; the full run on the final tree took 47.6 s, which gives
+ *   the same 60). Criterion: the larger of the durations of
  *   the full runs of 30/10/2026 (Windows 11, VS Code 1.144.0; the phase-0 baseline and the first
  *   phase-1 run, each with 0 FAIL), times 1.25, rounded UP to the next multiple of 5 s (5 s at
  *   least). So a step passes on a normal day and is flagged when it grows by about a quarter.
@@ -207,6 +210,11 @@ export const STEPS = [
   { id: '48', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 30 },
   { id: '49', needs: ['1'], sendsPrompt: true, groups: ['home', 'sessions'], budgetS: 50 },
   { id: '50', needs: ['1'], sendsPrompt: true, groups: ['home'], budgetS: 80 },
+  // E2-subagent-monitor (issue #189): a CREW turn of about 15 s, the Stop and Answer clicks, 16
+  // theme cells with side bar drags, the folded cards, a chat tab and three CREW rounds. Measured:
+  // 47.2 s in `--steps 51` and 47.6 s in the full run on the final tree (08/11/2026, Windows 11,
+  // VS Code 1.145.2).
+  { id: '51', needs: ['1'], sendsPrompt: true, groups: ['subagents', 'requests'], budgetS: 60 },
 ];
 
 /** Every valid id, in canonical order. */

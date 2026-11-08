@@ -19802,6 +19802,466 @@ try {
       await openChat(30_000).catch(() => undefined);
     }
   });
+
+  // E2-subagent-monitor (issue #189): the strip above the composer and the live cards of a CREW
+  // turn (the fake's three subagents: A "Walk the repository" works through nine tools, B "Ask
+  // before reading" waits on a permission, C "Fail on purpose" fails at once). Behaviour (dark, 300
+  // px, real mouse): the bar reads "Subagents · 2 · 1 working · 1 waiting for your answer" and
+  // lists A and B; the elapsed time of A grows between two reads and its current tool changes; the
+  // data arriving does not take the focus from the prompt; Answer puts the focus inside the
+  // permission card of B; Stop on A's row takes A out of the bar, its card says "Stopped" and B is
+  // still waiting; allowing B ends the turn, the bar goes and the three cards fold into
+  // "Finished", "Stopped" and "Failed"; Open on a card shows the child ("‹" crumb) and the crumb
+  // comes back; in a second round "Stop all" empties the bar without stopping the parent turn.
+  // Matrix (bar open, B waiting, A stopped and C folded): width 150, 300 and 900 px x the four
+  // themes = 12 cells in the side bar, plus 4 cells (the four themes) in a chat tab of the editor
+  // (its width is the editor's, not dragged), each: nothing sideways outside the document, no
+  // `style`, text contrast >= 4.5. The tab part switches `chatLocation` to `editor`, opens a new
+  // session tab, runs a third CREW and puts the setting back to `sidebar`. Once the turn ends the
+  // step also checks that no folded card draws the tool's own status word ("a folded card draws no
+  // tool status word beside its summary"), and measures the folded card of B ("Finished · N tools
+  // · cost", B has a cost in the fake) at 300 px in the four themes and in the chat tab in dark:
+  // inside the document, no overflow, no `style`, title and summary contrast >= 4.5 (the
+  // `foldedCells` cells). The screenshots of the dark cells are written: the full run on the final
+  // tree (08/11/2026) listed `51c-folded-300` and `51c-folded-tab` among its shots. NOT covered:
+  // macOS, Linux, a screen reader.
+  await step('51 subagent monitor: bar and live cards (E2-subagent-monitor)', async () => {
+    const DARK = 'Default Dark Modern';
+    const A = 'Walk the repository';
+    const B = 'Ask before reading';
+    const C = 'Fail on purpose';
+    const originalWidth = await sideBarPx();
+    /** What the monitor shows. Self-contained (it is serialized into the page). */
+    const monitor = () =>
+      web.inDoc((doc) => {
+        const text = (element) => (element?.textContent ?? '').trim();
+        const bar = doc.querySelector('.subagent-bar');
+        const toggle = doc.querySelector('.subagent-bar-toggle');
+        const rows = [...doc.querySelectorAll('.subagent-bar .subagent-row')].map((row) => ({
+          task: text(row.querySelector('.subagent-task')),
+          state: row.getAttribute('data-state') ?? '',
+          current: text(row.querySelector('.subagent-current')),
+          elapsed: text(row.querySelector('.subagent-elapsed')),
+          buttons: [...row.querySelectorAll('button')].map(
+            (button) => button.getAttribute('aria-label') ?? text(button),
+          ),
+        }));
+        const cards = [...doc.querySelectorAll('.tool-card[data-tool="subagent"]')].map((card) => ({
+          label: card.querySelector('.tool-toggle')?.getAttribute('aria-label') ?? '',
+          result: text(card.querySelector('.tool-result')),
+          statusWord: card.querySelector('.tool-status') !== null,
+          live: card.querySelector('.subagent-live') !== null,
+          liveState: card.querySelector('.subagent-live')?.getAttribute('data-state') ?? '',
+          tools: [...card.querySelectorAll('.subagent-tools li')].length,
+          stop: card.querySelector('.subagent-live .subagent-stop') !== null,
+          link: card.querySelector('.subagent-link') !== null,
+        }));
+        const active = doc.activeElement;
+        return {
+          bar: bar !== null,
+          summary: text(toggle),
+          expanded: toggle?.getAttribute('aria-expanded') ?? '',
+          rows,
+          cards,
+          activeIsPrompt: active === doc.querySelector('textarea.prompt-text'),
+          activeInPermission: active?.closest('.permission-card') != null,
+          activeInBar: active?.closest('.subagent-bar, .subagent-live') != null,
+          permissionCards: doc.querySelectorAll('.permission-card').length,
+          path: doc.querySelector('nav[aria-label="Session path"]')?.textContent ?? '',
+        };
+      });
+    const cardOf = (state, description) => state.cards.find((c) => c.label.includes(description));
+    const rowOf = (state, description) => state.rows.find((r) => r.task === description);
+    /** "m:ss" or "h:mm:ss" as seconds; NaN when it is neither. */
+    const seconds = (text) => {
+      const parts = text.split(':').map(Number);
+      return parts.some((n) => Number.isNaN(n)) || parts.length < 2
+        ? Number.NaN
+        : parts.reduce((total, n) => total * 60 + n, 0);
+    };
+    const waitFor2 = (predicate, ms) => waitFor(async () => predicate(await monitor()), ms, 150);
+    /** Layout of the monitor in the current cell. Self-contained. */
+    const layout = () =>
+      web.inDoc((doc) => {
+        const width = doc.documentElement.clientWidth;
+        const outside = [
+          ...doc.querySelectorAll(
+            '.subagent-bar button, .subagent-row-info > *, .subagent-live, .subagent-live *',
+          ),
+        ].filter((element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && (rect.left < -1 || rect.right > width + 1);
+        });
+        return {
+          overflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+          outside: outside.map((e) => e.className || e.tagName).slice(0, 3),
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+        };
+      });
+    const TEXTS = {
+      toggle: '.subagent-bar-toggle',
+      task: '.subagent-bar .subagent-task',
+      state: '.subagent-bar .subagent-state',
+      button: '.subagent-bar .subagent-actions button',
+      stopAll: '.subagent-bar .subagent-stop-all',
+      liveState: '.subagent-live .subagent-state',
+      liveStop: '.subagent-live .subagent-stop',
+      stoppedResult: '.tool-card[data-tool="subagent"] .tool-result',
+    };
+    /**
+     * Waits for the bar and leaves its list open. The open/closed choice lives in the webview, so
+     * a bar that was opened in an earlier round of the same chat is still open: it is pressed only
+     * when it is closed (pressing an open one would close it). It presses up to three times while
+     * the list stays closed, because in a chat tab one press was seen not to open it (run of
+     * 08/11/2026: the list was still closed after 3 s); the `ok` line prints how many it took.
+     */
+    const openBar = async (where) => {
+      check((await waitFor2((s) => s.bar, 20_000)) === true, `${where}: the bar appears`);
+      // Up to three presses, each only while the list is still closed: the first click into a
+      // webview that did not have the focus (a chat tab) may only give it the focus.
+      let presses = 0;
+      while (presses < 3 && (await monitor()).expanded !== 'true') {
+        presses += 1;
+        check(await clickIn('.subagent-bar-toggle'), `${where}: the bar header is pressed`);
+        await waitFor2((s) => s.expanded === 'true', 1_500);
+      }
+      const after = await monitor();
+      check(
+        after.expanded === 'true',
+        `${where}: the bar list is open (${String(presses)} press(es), aria-expanded "${after.expanded}", "${after.summary}")`,
+      );
+    };
+    /**
+     * The folded card of B ("Finished · N tools · cost") in each of `themes`: its summary carries
+     * the cost, there is no tool status word, nothing sideways outside the document, no `style`,
+     * and the title and the summary read at contrast >= 4.5. B is tagged `data-visual-b` in the
+     * page (a test-only attribute, like `data-visual-click`) so the selectors can name it. Takes the
+     * screenshot `shotName` in the dark theme. Leaves the dark theme on.
+     */
+    const foldedCells = async (where, shotName, themes = PROBLEM_THEMES) => {
+      const tagged = await web.inDoc((doc, description) => {
+        for (const old of doc.querySelectorAll('[data-visual-b]'))
+          old.removeAttribute('data-visual-b');
+        const card = [...doc.querySelectorAll('.tool-card[data-tool="subagent"]')].find((c) =>
+          (c.querySelector('.tool-toggle')?.getAttribute('aria-label') ?? '').includes(description),
+        );
+        card?.setAttribute('data-visual-b', 'true');
+        return card?.querySelector('.tool-result')?.textContent?.trim() ?? null;
+      }, B);
+      check(
+        tagged !== null && /^Finished · \d+ tools? · \$\d/.test(tagged),
+        `${where}: the folded card of B reads "Finished · N tools · cost" (${JSON.stringify(tagged)})`,
+      );
+      const selectors = {
+        title: '[data-visual-b] .tool-title',
+        summary: '[data-visual-b] .tool-result',
+      };
+      for (const [themeName, theme] of themes) {
+        await setTheme(theme);
+        const cell = await web.inDoc((doc) => {
+          const card = doc.querySelector('[data-visual-b]');
+          const width = doc.documentElement.clientWidth;
+          const rect = card?.getBoundingClientRect();
+          return {
+            inside: rect !== undefined && rect.left >= -1 && rect.right <= width + 1,
+            overflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+            styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+              (e) => (e.getAttribute('style') ?? '').trim() !== '',
+            ).length,
+          };
+        });
+        const measured = await web.inDoc(measureText, selectors);
+        const ratios = Object.keys(selectors)
+          .filter((key) => measured[key])
+          .map((key) => measured[key].ratio);
+        check(
+          cell.inside &&
+            cell.overflow <= 1 &&
+            cell.styled === 0 &&
+            measured.error === undefined &&
+            ratios.length === 2 &&
+            Math.min(...ratios) >= 4.5,
+          `${where}, ${themeName}: the folded card is inside the document (${String(cell.inside)}), no sideways overflow (${String(cell.overflow)} px), no style attribute (${String(cell.styled)}), title and summary contrast >= 4.5 (min ${ratios.length ? Math.min(...ratios).toFixed(2) : 'none'} over ${String(ratios.length)} texts)`,
+        );
+        if (themeName === 'dark') await shot(shotName);
+      }
+      await setTheme(DARK);
+    };
+    /** One cell: layout and text contrast of the monitor in the current width and theme. */
+    const checkCell = async (where) => {
+      const now = await layout();
+      check(
+        now.overflow <= 1 && now.outside.length === 0 && now.styled === 0,
+        `${where}: no sideways overflow (${String(now.overflow)} px), nothing outside the document (${now.outside.join(', ')}), no style attribute (${String(now.styled)})`,
+      );
+      const measured = await web.inDoc(measureText, TEXTS);
+      const names = Object.keys(TEXTS);
+      const missing = names.filter((key) => !measured[key]);
+      const low = names.filter((key) => measured[key] && measured[key].ratio < 4.5);
+      const ratios = names.filter((key) => measured[key]).map((key) => measured[key].ratio);
+      check(
+        measured.error === undefined && missing.length === 0 && low.length === 0,
+        `${where}: text contrast >= 4.5, min ${ratios.length ? Math.min(...ratios).toFixed(2) : 'none'} over ${String(ratios.length)} texts${missing.length ? `, missing ${missing.join('/')}` : ''}${low.length ? `, below 4.5: ${low.join('/')}` : ''}`,
+      );
+    };
+    try {
+      check(await waitIdle(60_000), 'no turn is running when the step starts');
+      check(await clickButton('New session'), 'New session is pressed');
+      await waitEmptyView();
+      assertNoWebviewErrors('before the subagent monitor step');
+      await setSideBarWidth(300).catch(() => undefined);
+      await setTheme(DARK);
+
+      // --- The bar while the crew works -------------------------------------------------------
+      await send('Crew51 CREW');
+      // The rows exist only once the header is open, so the bar alone is waited for first.
+      await openBar('first round');
+      // From here the prompt keeps the focus while the rest of the crew arrives.
+      check(await focusPromptBox(), 'the prompt box has the focus before data arrives');
+      const both = await waitFor2(
+        (s) =>
+          s.rows.some((r) => r.state === 'waiting' && r.task === B) &&
+          s.rows.some((r) => r.state === 'working' && r.task === A),
+        25_000,
+      );
+      let state = await monitor();
+      check(
+        both === true,
+        `the bar lists A working and B waiting (${JSON.stringify(state.rows.map((r) => [r.task, r.state]))})`,
+      );
+      const match = /^Subagents · (\d+) · 1 working · 1 waiting for your answer$/.exec(
+        state.summary,
+      );
+      check(
+        match !== null && Number(match[1]) === state.rows.length,
+        `the header is one string with the counts ("${state.summary}", ${String(state.rows.length)} rows)`,
+      );
+      check(
+        rowOf(state, A)?.buttons.includes(`Stop ${A}`) === true &&
+          rowOf(state, B)?.buttons.includes(`Answer ${B}`) === true &&
+          rowOf(state, A)?.buttons.some((name) => name.startsWith('Answer')) === false,
+        `each row has its Stop and only the waiting one has Answer (${JSON.stringify(state.rows.map((r) => r.buttons))})`,
+      );
+      // The request dock focuses the card of a NEW request when the prompt is empty (its own,
+      // older rule, step 43), so B's permission may have taken the focus; what the monitor must
+      // never do is take it itself.
+      check(
+        !state.activeInBar && (state.activeIsPrompt || state.activeInPermission),
+        `the data that arrived did not move the focus into the bar or the live cards (prompt ${String(state.activeIsPrompt)}, permission card ${String(state.activeInPermission)}, bar ${String(state.activeInBar)})`,
+      );
+      check(await focusPromptBox(), 'the prompt box gets the focus back before Answer');
+      const firstElapsed = seconds(rowOf(state, A)?.elapsed ?? '');
+      const firstTool = rowOf(state, A)?.current ?? '';
+      await sleep(2_200); // the elapsed time moves once a second; two reads 2 s apart need the gap
+      state = await monitor();
+      check(
+        seconds(rowOf(state, A)?.elapsed ?? '') >= firstElapsed + 1,
+        `the elapsed time of A grew between two reads 2 s apart (${String(firstElapsed)} s -> ${String(seconds(rowOf(state, A)?.elapsed ?? ''))} s)`,
+      );
+      const moved = await waitFor2((s) => (rowOf(s, A)?.current ?? '') !== firstTool, 8_000);
+      check(moved === true, `the current tool of A changed from "${firstTool}"`);
+      state = await monitor();
+      const liveA = cardOf(state, A);
+      const liveB = cardOf(state, B);
+      check(
+        liveA?.live === true &&
+          liveA.stop &&
+          liveA.link &&
+          liveA.tools >= 1 &&
+          liveA.tools <= 3 &&
+          liveB?.live === true &&
+          liveB.liveState === 'waiting',
+        `A's card is live with Stop, Open and 1 to 3 latest tools, and B's card says waiting (${JSON.stringify([liveA, liveB])})`,
+      );
+      await shot('51a-bar-live');
+
+      // --- Answer takes the focus to the permission card of B ---------------------------------
+      check(await clickButton(`Answer ${B}`), 'Answer on the row of B is pressed');
+      const answered = await waitFor2((s) => s.activeInPermission, 5_000);
+      check(answered === true, 'Answer moved the focus inside the permission card of B');
+
+      // --- Stop A: only A ---------------------------------------------------------------------
+      check(
+        await clickIn(`.subagent-bar button[aria-label="Stop ${A}"]`),
+        'Stop on the row of A is pressed',
+      );
+      const stopped = await waitFor2((s) => rowOf(s, A) === undefined, 20_000);
+      state = await monitor();
+      check(stopped === true, 'A leaves the bar after Stop');
+      check(
+        cardOf(state, A)?.result === 'Stopped' && cardOf(state, A)?.live === false,
+        `the card of A folds into "Stopped" (${JSON.stringify(cardOf(state, A))})`,
+      );
+      check(
+        rowOf(state, B)?.state === 'waiting' && cardOf(state, B)?.live === true,
+        'B is still waiting after A was stopped (Stop touches one child)',
+      );
+      check(
+        (cardOf(state, C)?.result ?? '').startsWith('Failed'),
+        `the card of C says it failed ("${cardOf(state, C)?.result ?? ''}")`,
+      );
+
+      // --- Matrix: bar open, B waiting, A and C folded ----------------------------------------
+      const WIDTHS = [
+        ['narrow', 150],
+        ['300', 300],
+        ['wide', 900],
+      ];
+      for (const [name, wanted] of WIDTHS) {
+        let barPx;
+        try {
+          barPx = await setSideBarWidth(wanted);
+        } catch (error) {
+          barPx = await sideBarPx();
+          warn(
+            `step 51: the side bar did not go to ${String(wanted)} px (it is ${String(barPx)} px): ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        const reached =
+          name === '300'
+            ? Math.abs(barPx - 300) <= SIZE_TOLERANCE
+            : name === 'wide'
+              ? barPx >= 600
+              : barPx < 200;
+        if (!reached) {
+          warn(`step 51: width "${name}" not reached (side bar ${String(barPx)} px): not judged`);
+          continue;
+        }
+        for (const [themeName, theme] of PROBLEM_THEMES) {
+          await setTheme(theme);
+          await checkCell(
+            `the monitor at ${name} (bar ${String(Math.round(barPx))} px), ${themeName}`,
+          );
+          if (themeName === 'dark') await shot(`51-monitor-${name}`);
+        }
+      }
+      await setTheme(DARK);
+      await setSideBarWidth(300).catch(() => undefined);
+
+      // --- Allowing B ends the turn and folds the cards ---------------------------------------
+      check(await clickButton('Allow once'), 'Allow once is pressed for B (never Always)');
+      check(await waitIdle(60_000), 'the turn ends once B is allowed (the parent was not stopped)');
+      state = await monitor();
+      check(!state.bar, 'the bar is gone once no subagent is active');
+      check(
+        (cardOf(state, B)?.result ?? '').startsWith('Finished') &&
+          cardOf(state, A)?.result === 'Stopped' &&
+          (cardOf(state, C)?.result ?? '').startsWith('Failed'),
+        `the cards fold into Finished, Stopped and Failed (${JSON.stringify(state.cards.map((c) => c.result))})`,
+      );
+      check(
+        state.cards.every((c) => c.label.startsWith('Subagent')),
+        'the card labels still start with "Subagent"',
+      );
+      check(
+        state.cards.every((c) => !c.statusWord),
+        `a folded card draws no tool status word beside its summary (${JSON.stringify(state.cards.map((c) => [c.statusWord, c.label]))})`,
+      );
+      await shot('51b-cards-folded');
+      // The folded "Finished · N tools · cost" card of B, 300 px, four themes (plan matrix).
+      await foldedCells('side bar 300 px', '51c-folded-300');
+
+      // --- Open a card, and back --------------------------------------------------------------
+      check(await clickIn('.subagent-link'), 'Open subagent session is pressed on a card');
+      const inChild = await waitFor2((s) => s.path.startsWith('‹'), 20_000);
+      check(inChild === true, 'Open shows the child with the "‹" crumb');
+      check(await clickIn('nav[aria-label="Session path"] button'), 'the parent crumb is pressed');
+      const backAgain = await waitFor2((s) => s.path === '' && s.cards.length === 3, 20_000);
+      check(backAgain === true, 'the crumb returns to the parent with its three cards');
+
+      // --- Stop all, in a second round --------------------------------------------------------
+      check(await clickButton('New session'), 'New session is pressed for the second round');
+      await waitEmptyView();
+      await send('Crew51b CREW');
+      await openBar('second round');
+      check(
+        (await waitFor2(
+          (s) =>
+            s.rows.some((r) => r.state === 'working') && s.rows.some((r) => r.state === 'waiting'),
+          25_000,
+        )) === true,
+        'the bar shows a working and a waiting subagent in the second round',
+      );
+      check(await clickButton('Stop all'), 'Stop all is pressed');
+      const emptied = await waitFor2((s) => !s.bar, 25_000);
+      check(emptied === true, 'Stop all empties the bar');
+      check(await waitIdle(60_000), 'the parent turn ends by itself after Stop all');
+      state = await monitor();
+      check(
+        state.cards.length === 3 && state.cards.every((c) => !c.live),
+        `the three cards are folded (${JSON.stringify(state.cards.map((c) => c.result))})`,
+      );
+      if (state.permissionCards > 0) {
+        warn(
+          `step 51: ${String(state.permissionCards)} permission card(s) of B remain after Stop all`,
+        );
+      }
+
+      // --- The same state in a chat TAB of the editor (four themes; the tab has the editor's width)
+      const chatTabs = async () =>
+        (await tabsNow()).filter((tab) => !/\.ts\b/.test(`${tab.label} ${tab.text}`));
+      const connectToNewChat = async (previous) => {
+        await waitFor(
+          async () => {
+            const id = await visibleChatId();
+            return id !== undefined && id !== previous ? id : undefined;
+          },
+          10_000,
+          100,
+        );
+        await openChat(30_000);
+      };
+      await closeAllEditors();
+      setLocation('editor');
+      check(
+        (await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200)) === true,
+        'switching to editor mode opens the session in a chat tab',
+      );
+      await connectToNewChat(drivenChatId);
+      const tabsBefore = (await chatTabs()).length;
+      await command('OpenCode: New Session');
+      check(
+        (await waitFor(async () => (await chatTabs()).length === tabsBefore + 1, 10_000, 200)) ===
+          true,
+        'OpenCode: New Session opens one more chat tab',
+      );
+      await connectToNewChat(drivenChatId);
+      await waitEmptyView();
+      await send('Crew51c CREW');
+      await openBar('chat tab');
+      check(
+        (await waitFor2((s) => s.rows.some((r) => r.state === 'waiting'), 25_000)) === true,
+        'the tab shows the bar with B waiting',
+      );
+      check(
+        await clickIn(`.subagent-bar button[aria-label="Stop ${A}"]`),
+        'Stop on the row of A is pressed in the tab',
+      );
+      check(
+        (await waitFor2((s) => rowOf(s, A) === undefined && rowOf(s, B) !== undefined, 20_000)) ===
+          true,
+        'A leaves the bar of the tab and B stays',
+      );
+      for (const [themeName, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        await checkCell(`the monitor in a chat tab, ${themeName}`);
+        if (themeName === 'dark') await shot('51-monitor-tab');
+      }
+      await setTheme(DARK);
+      check(await clickButton('Allow once'), 'Allow once is pressed for B in the tab');
+      check(await waitIdle(60_000), 'the turn of the tab ends once B is allowed');
+      await foldedCells('chat tab', '51c-folded-tab', [['dark', 'Default Dark Modern']]);
+      assertNoWebviewErrors('subagent monitor');
+    } finally {
+      // Leave the workspace as the step found it: `sidebar`, no editor open, the dark theme.
+      setLocation('sidebar');
+      await closeAllEditors().catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+      await setSideBarWidth(originalWidth).catch(() => undefined);
+    }
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
