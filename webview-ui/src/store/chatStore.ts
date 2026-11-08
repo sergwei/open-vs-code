@@ -59,6 +59,10 @@
  *    arrives: opening a file is the component's `session.diff.open`.
  *  - E10-mod-toggles (issue #181) makes `mods.state` also replace `mods.listing` (see
  *    `createChatStore`).
+ *  - E2-subagent-monitor (issue #189) adds `subagents`, the host's digest of each direct child of the
+ *    OPEN session, by child id. `subagent.activity` replaces ONE child's entry (kept as the same
+ *    object, its `recent` tools matched by `id`) and only when its parent is the open session; a
+ *    snapshot replaces the whole record; it is emptied when the open session is removed.
  * VERIFIED by `chatStore.test.ts` with fabricated messages (confirms this logic, not the host
  * contract). UNVERIFIED in a real webview until the F5 of issue #14.
  */
@@ -81,6 +85,7 @@ import type {
   RevertState,
   SessionStatus,
   SessionSummary,
+  SubagentActivity,
   WorkMode,
 } from '../../../src/shared/model';
 import {
@@ -251,6 +256,17 @@ export interface ChatState {
   /** The changed files of the open session (issue #31). */
   diff: ChangedFilesState;
   open: OpenView;
+  /**
+   * The host's digest of each direct child session of the open session, by child id (issue #189).
+   * Empty until the host sends one; belongs to `open.sessionID` only.
+   */
+  subagents: { [childID: string]: SubagentActivity };
+  /**
+   * Child id -> `requestId` of the `subagent.stop` in flight for it (issue #189). The Stop button
+   * shows "Stopping…" and locks while the entry exists; it goes away with the `request.result` of
+   * that id. NOT in `pending`: stopping a child must not lock the prompt box.
+   */
+  stopping: { [childID: string]: string };
   /** Pending permissions and forms of ANY session of the location, in order of arrival. */
   requests: { permissions: PermissionAsk[]; forms: FormAsk[] };
   /**
@@ -373,6 +389,16 @@ export interface ChatStore {
   clearResolved: () => void;
   /** Forgets the pending `ui.focus` target (the dock carried it out). */
   clearFocusTarget: () => void;
+  /**
+   * Asks the dock to focus the card of a pending request (issue #189: "Answer" of the subagent
+   * bar). The same slot a `ui.focus` of the host fills, so the dock's guards apply to it.
+   */
+  requestFocus: (target: FocusTarget) => void;
+  /**
+   * Marks each child of `childIDs` as being stopped by the `subagent.stop` with `requestId`, until
+   * the `request.result` of that id arrives. Does NOT touch `pending`.
+   */
+  beginStop: (childIDs: string[], requestId: string) => void;
   /** Empties the queue of `ui.command`s and returns them, oldest first, as plain values. */
   takeUiCommands: () => UiCommand[];
   /**
@@ -413,6 +439,13 @@ function emptyOpen(): OpenView {
  * keeps its object while its state changes.
  * VERIFIED by `chatStore.test.ts` "keeps the listing row of the same mod and updates it in place"
  * (fabricated messages: the logic, not the host contract).
+ * Since issue #189 it also holds `subagents`: `subagent.activity` upserts one child's digest of the
+ * open session, a snapshot replaces the record and removing the open session empties it.
+ * VERIFIED by the `subagents (issue #189)` cases of `chatStore.test.ts` (fabricated messages).
+ * It also keeps `stopping` (child id -> the `subagent.stop` request in flight; `beginStop` sets it
+ * and the matching `request.result` clears it, `pending` untouched) and `requestFocus`, which fills
+ * the same `focusTarget` slot as a host `ui.focus`.
+ * VERIFIED by the `stopping and requestFocus (issue #189)` cases of `chatStore.test.ts` (fabricated).
  */
 export function createChatStore(): ChatStore {
   const [state, setState] = createStore<ChatState>({
@@ -440,6 +473,8 @@ export function createChatStore(): ChatStore {
     fileSearch: emptyFileSearch(),
     diff: emptyDiff(),
     open: emptyOpen(),
+    subagents: {},
+    stopping: {},
     requests: { permissions: [], forms: [] },
     resolved: [],
     workMode: 'manual',
@@ -616,6 +651,14 @@ export function createChatStore(): ChatStore {
           { key: 'id' },
         ),
       );
+      // #189: the digests of the children of the session this snapshot opens, replacing the old.
+      setState(
+        'subagents',
+        reconcile(
+          Object.fromEntries((open?.subagents ?? []).map((entry) => [entry.sessionID, entry])),
+          { key: 'id' },
+        ),
+      );
       rebuildIndexes();
       dropForeignSelection(open?.sessionID);
       // The list belongs to one session: another one open (or none) must not show it. The host
@@ -706,6 +749,7 @@ export function createChatStore(): ChatStore {
         if (isOpen(m.sessionID)) {
           setState('open', reconcile(emptyOpen(), { key: 'id' }));
           setState('resolutions', reconcile({}));
+          setState('subagents', reconcile({}));
           rebuildIndexes();
           dropForeignSelection(undefined);
           setState('diff', emptyDiff());
@@ -724,6 +768,15 @@ export function createChatStore(): ChatStore {
 
     'session.status': (m) => {
       setState('statuses', m.sessionID, reconcile(m.status));
+    },
+
+    // #189: REPLACES one child's digest. Only for the open session as parent: the host already
+    // routes it to the panes showing the parent, so this guards a pane that changed session since.
+    // `reconcile` keeps the entry object (and each `recent` tool by `id`) so the live card does not
+    // rebuild its DOM on every update.
+    'subagent.activity': (m) => {
+      if (!isOpen(m.sessionID)) return;
+      setState('subagents', m.activity.sessionID, reconcile(m.activity, { key: 'id' }));
     },
 
     'message.upserted': (m) => {
@@ -846,6 +899,19 @@ export function createChatStore(): ChatStore {
       // from `pending` before its failure notice exists.
       batch(() => {
         setState('pending', (pending) => pending.filter((id) => id !== m.requestId));
+        // Issue #189: the stop of one or all children ended; their buttons unlock (a failure
+        // arrives as a notice, and a child that kept running can be stopped again).
+        const stopped = Object.keys(state.stopping).filter(
+          (id) => state.stopping[id] === m.requestId,
+        );
+        if (stopped.length > 0) {
+          setState(
+            'stopping',
+            produce((marks) => {
+              for (const id of stopped) delete marks[id];
+            }),
+          );
+        }
         // Issue #20: the end of a list query or of a rename/delete. The page itself arrives in
         // `sessions.page`; this only unlocks what was waiting (a failure included).
         if (m.requestId === state.browser.requestId) setState('browser', 'loading', false);
@@ -1054,6 +1120,18 @@ export function createChatStore(): ChatStore {
     },
     clearFocusTarget: () => {
       setState('focusTarget', undefined);
+    },
+    requestFocus: (target) => {
+      // A plain copy: the target may come from a store row.
+      setState('focusTarget', { kind: target.kind, sessionID: target.sessionID, id: target.id });
+    },
+    beginStop: (childIDs, requestId) => {
+      setState(
+        'stopping',
+        produce((marks) => {
+          for (const id of childIDs) marks[id] = requestId;
+        }),
+      );
     },
     takeUiCommands: () => {
       const taken = state.uiCommands.map((entry) => entry.command);

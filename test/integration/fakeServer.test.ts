@@ -121,6 +121,58 @@ function countOf(log: LogCursor, text: string): number {
   return log.added().split(text).length - 1;
 }
 
+/** The sessions of a `CREW` turn, told apart by what each one does (see {@link startCrew}). */
+interface Crew {
+  parentID: string;
+  /** "Walk the repository": the long one (nine tools). */
+  walkerID: string;
+  /** "Ask before reading": waits on a permission. */
+  askerID: string;
+  /** "Fail on purpose": fails at once. */
+  failerID: string;
+  permissionID: string;
+}
+
+/**
+ * Sends a `CREW` prompt and returns the ids of the parent and its three children.
+ *
+ * The fake gives no label to a child in the log, so each is told apart by its behaviour: the one
+ * with `permission asked` is the asker, the one with `turn finished: failed` is the failer and the
+ * third is the walker. The children come from the `subagent session <child> created under
+ * <parent>` lines of the controller. Fails if fewer than three appear, or if any role repeats.
+ * VERIFIED on Windows 11 (08/11/2026, `--label fake-server`, 64 passing): both CREW cases below
+ * found the three roles through it. Not observed: macOS and Linux (the CI runs them).
+ */
+async function startCrew(log: LogCursor): Promise<Crew> {
+  await sendPrompt(log, 'CREW: watch the subagents');
+  const parentID = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+  assert.ok(parentID, `no session id in the log:\n${log.added()}`);
+  const asked = await matchInLog(
+    log,
+    /permission asked (per_\S+) for (ses_\S+) \(read\)/,
+    TURN_WAIT_MS,
+    'the permission of the asker',
+  );
+  const failed = await matchInLog(
+    log,
+    /turn finished: failed for (ses_\S+)/,
+    TURN_WAIT_MS,
+    'the failing subagent',
+  );
+  await sleep(300); // the third `created under` line is written within the same tick as the others
+  const created = [...log.added().matchAll(/subagent session (ses_\S+) created under (ses_\S+)/g)];
+  const children = created.filter((line) => line[2] === parentID).map((line) => line[1] ?? '');
+  assert.strictEqual(children.length, 3, `three children of ${parentID}; log:\n${log.added()}`);
+  const [permissionID, askerID] = [asked[1] ?? '', asked[2] ?? ''];
+  const failerID = failed[1] ?? '';
+  const walkerID = children.find((id) => id !== askerID && id !== failerID);
+  assert.ok(
+    askerID !== failerID && walkerID !== undefined,
+    `the roles are distinct (asker ${askerID}, failer ${failerID}); log:\n${log.added()}`,
+  );
+  return { parentID, walkerID, askerID, failerID, permissionID };
+}
+
 describe('fake server', function () {
   this.timeout(60_000);
   // The session of the edit turn (issue #31), for the case that follows it: they share the server.
@@ -355,6 +407,78 @@ describe('fake server', function () {
     await log.waitFor(`turn finished: interrupted for ${sessionID}`, 15_000);
     await sleep(SETTLE_MS);
     log.assertAbsent('turn finished: succeeded');
+  });
+
+  /**
+   * Stopping one subagent of a `CREW` turn interrupts that child and nothing else (issue #189).
+   *
+   * Protects: `subagent.stop` with a `sessionID` reaching `session.interrupt` for the child only,
+   * the parent turn going on and ending `succeeded` once the three children ended (the walker as
+   * "Subagent cancelled", the asker after its permission is allowed, the failer as it failed), and
+   * the line `subagent session <child> created under <parent>`. SYNTHETIC: the fake models a
+   * child's interruption as "Subagent cancelled" and the parent going on; whether the real opencode
+   * does is the HYPOTHESIS of the plan (job.ts read, not run). VERIFIED on Windows 11
+   * (08/11/2026, `npm run test:integration -- --label fake-server`, 64 passing): the line
+   * "✔ monitors a CREW turn and stops one subagent without stopping the others". Not observed:
+   * macOS and Linux.
+   */
+  it('monitors a CREW turn and stops one subagent without stopping the others', async function () {
+    const log = await openLogCursor();
+    const crew = await startCrew(log);
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'subagent.stop',
+      requestId: 'fake-subagent-stop-1',
+      parentID: crew.parentID,
+      sessionID: crew.walkerID,
+    });
+    await log.waitFor(`abort requested for ${crew.walkerID} (interrupted: true)`, 10_000);
+    await log.waitFor(`turn finished: interrupted for ${crew.walkerID}`, 15_000);
+    assert.strictEqual(
+      countOf(log, `abort requested for ${crew.askerID}`),
+      0,
+      `the asker was not stopped; log:\n${log.added()}`,
+    );
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'permission.reply',
+      requestId: 'fake-subagent-allow-1',
+      sessionID: crew.askerID,
+      permissionID: crew.permissionID,
+      decision: 'once',
+    });
+    await log.waitFor(`turn finished: succeeded for ${crew.askerID}`, TURN_WAIT_MS);
+    await log.waitFor(`turn finished: succeeded for ${crew.parentID}`, TURN_WAIT_MS);
+    await sleep(SETTLE_MS);
+    log.assertAbsent(`turn finished: interrupted for ${crew.parentID}`);
+    log.assertAbsent(`abort requested for ${crew.parentID}`);
+    log.assertAbsent(`abort requested for ${crew.failerID}`);
+  });
+
+  /**
+   * "Stop all" of the monitor interrupts the running subagents and not the parent (issue #189).
+   *
+   * Protects: `subagent.stop` without `sessionID` stopping the walker and the asker (it waits on
+   * a permission, so it is running as far as the host knows), leaving the failer (already over) and
+   * the parent alone; the parent still ends `succeeded`. SYNTHETIC, like the case above.
+   * VERIFIED on Windows 11 (08/11/2026, `--label fake-server`, 64 passing): the line "✔ stop all
+   * interrupts the running subagents and not the parent". Not observed: macOS and Linux.
+   */
+  it('stop all interrupts the running subagents and not the parent', async function () {
+    const log = await openLogCursor();
+    const crew = await startCrew(log);
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'subagent.stop',
+      requestId: 'fake-subagent-stop-all',
+      parentID: crew.parentID,
+    });
+    await log.waitFor(`abort requested for ${crew.walkerID} (interrupted: true)`, 10_000);
+    await log.waitFor(`abort requested for ${crew.askerID} (interrupted: true)`, 10_000);
+    await log.waitFor(`turn finished: interrupted for ${crew.walkerID}`, 15_000);
+    await log.waitFor(`turn finished: interrupted for ${crew.askerID}`, 15_000);
+    await log.waitFor(`turn finished: succeeded for ${crew.parentID}`, TURN_WAIT_MS);
+    await sleep(SETTLE_MS);
+    log.assertAbsent(`turn finished: interrupted for ${crew.parentID}`);
+    log.assertAbsent(`abort requested for ${crew.parentID}`);
+    log.assertAbsent(`abort requested for ${crew.failerID}`);
   });
 
   /**

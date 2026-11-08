@@ -73,6 +73,12 @@ describe('routeOf', () => {
       },
       { type: 'session.diff', sessionID: 's', files: [] },
       { type: 'session.revert', sessionID: 's' },
+      // #189: sessionID is the PARENT, so only the panes showing it get the child's digest.
+      {
+        type: 'subagent.activity',
+        sessionID: 's',
+        activity: { sessionID: 'c', parentID: 's', running: true, toolCount: 0, recent: [] },
+      },
     ] satisfies HostToWebview[]) {
       expect(routeOf(message)).toBe('session');
     }

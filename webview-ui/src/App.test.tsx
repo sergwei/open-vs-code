@@ -3707,3 +3707,61 @@ describe('slash commands (issue #33)', () => {
     });
   });
 });
+
+// Protects the wiring of the subagent monitor in `App` (issue #189): the bar sits between the dock
+// and the status strip only while a child works, Stop sends `subagent.stop` with the parent and the
+// child and marks it as stopping, Stop all sends it WITHOUT `sessionID`, and neither locks the
+// prompt box (`pending` stays empty). Provenance: FABRICATED host messages in jsdom.
+describe('subagent bar in the App (issue #189)', () => {
+  const kids = [
+    { id: 'ses_k1', parentID: SES, title: 'First task', agent: 'general' },
+    { id: 'ses_k2', parentID: SES, title: 'Second task', agent: 'explore' },
+  ];
+
+  const withKids = () => {
+    const h = start();
+    h.apply(
+      ...openWith(
+        [{ id: SES }, ...kids],
+        [user('m1', 'go'), assistant('m2')],
+        {},
+        {
+          statuses: { ses_k1: { type: 'busy' }, ses_k2: { type: 'busy' } },
+        },
+      ),
+    );
+    return h;
+  };
+
+  it('appears with the working children, before the status strip, and goes when they end', () => {
+    const h = withKids();
+    const bar = must(h.container, '.subagent-bar');
+    expect(bar.textContent).toBe('Subagents · 2 · 2 working');
+    expect(bar.nextElementSibling?.classList.contains('status-bar')).toBe(true);
+    h.apply(
+      { type: 'session.status', sessionID: 'ses_k1', status: { type: 'idle' } },
+      { type: 'session.status', sessionID: 'ses_k2', status: { type: 'idle' } },
+    );
+    expect(h.container.querySelector('.subagent-bar')).toBeNull();
+  });
+
+  it('Stop all sends one subagent.stop without sessionID and does not lock the prompt', () => {
+    const h = withKids();
+    must<HTMLButtonElement>(h.container, '.subagent-bar-toggle').click();
+    h.button('Stop all').click();
+    expect(h.sent).toHaveLength(1);
+    const { requestId, rest } = splitRequestId(h.sent[0]);
+    expect(rest).toEqual({ type: 'subagent.stop', parentID: SES });
+    expect(h.store.state.stopping).toEqual({ ses_k1: requestId, ses_k2: requestId });
+    expect(h.store.state.pending).toEqual([]);
+  });
+
+  it('Stop on one child names that child and leaves the other unmarked', () => {
+    const h = withKids();
+    must<HTMLButtonElement>(h.container, '.subagent-bar-toggle').click();
+    h.button('Stop Second task').click();
+    const { requestId, rest } = splitRequestId(h.sent[0]);
+    expect(rest).toEqual({ type: 'subagent.stop', parentID: SES, sessionID: 'ses_k2' });
+    expect(h.store.state.stopping).toEqual({ ses_k2: requestId });
+  });
+});
