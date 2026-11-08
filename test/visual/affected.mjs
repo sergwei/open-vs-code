@@ -90,7 +90,8 @@ export const AFFECTED_RULES = [
     groups: ['requests'],
   },
   { pattern: /^webview-ui\/src\/selectors\//, groups: ['selectors'] },
-  { pattern: /^src\/extension\/modelPreference\.ts$/, groups: ['selectors'] },
+  // modelPreference.ts also decides the `preference.status` of the Models section (step 47).
+  { pattern: /^src\/extension\/modelPreference\.ts$/, groups: ['selectors', 'config'] },
   { pattern: /^webview-ui\/src\/(markdown|tools|changes)\//, groups: ['render'] },
   {
     pattern: /^src\/extension\/(chatTabs|chatPanels|chatPane|chatLifecycle|chatSurfaceGate)\.ts$/,

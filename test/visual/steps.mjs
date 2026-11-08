@@ -123,6 +123,14 @@
  * review round removed two waits that expired for 20 s each; the 53.0 s of the first run included
  * them), not from a full run: 34.8 times 1.25 is 43.5, rounded up to a multiple of 5. The next
  * branch that runs a full run recalibrates it.
+ * The steps 46, 47 and 48 (the redesigned Settings tab, E10-settings-redesign, issue #186) need the
+ * 1, send no prompt and are in the group `config`: 46 is the header, the navigation and the search
+ * (4 widths x 4 themes, and 2 widths x 4 themes for the search), 47 is Models and General (2 widths
+ * x 4 themes each) and 48 is the three sections that only link (300 px x 4 themes). Their `budgetS`
+ * of 60, 40 and 30 are ESTIMATES: nobody has timed them in a full run (a side bar drag and a theme
+ * change cost about 1 s each in the steps 35 and 36; 46 makes 16 + 8 theme cells and 6 drags, 47
+ * 16 and 6, 48 12 and 1), and they are NOT calibrated with the criterion above. The next branch that
+ * runs a full run recalibrates them.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -182,6 +190,9 @@ export const STEPS = [
   { id: '43', needs: ['1'], sendsPrompt: true, groups: ['requests'], budgetS: 20 },
   { id: '44', needs: ['1'], sendsPrompt: true, groups: ['composer', 'requests'], budgetS: 40 },
   { id: '45', needs: ['1'], sendsPrompt: true, groups: ['mods', 'composer'], budgetS: 45 },
+  { id: '46', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 60 },
+  { id: '47', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 40 },
+  { id: '48', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 30 },
 ];
 
 /** Every valid id, in canonical order. */
