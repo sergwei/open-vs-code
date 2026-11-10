@@ -23,7 +23,8 @@
  *   phase-1 run, each with 0 FAIL), times 1.25, rounded UP to the next multiple of 5 s (5 s at
  *   least). So a step passes on a normal day and is flagged when it grows by about a quarter.
  *   `== timings` marks the ones that go over; it is not a FAIL or a `warn` (decision P4). The
- *   planner declares the budget of a new step. The final full run of 31/10/2026 (Windows 11, VS Code
+ *   budgets also size the shards of `--shard i/N` ({@link shardPlan}), so a stale budget skews
+ *   the balance between runners, never a check. The planner declares the budget of a new step. The final full run of 31/10/2026 (Windows 11, VS Code
  *   1.144.0, 0 FAIL) is a third run: no step printed `over budget`. UNVERIFIED beyond those three
  *   runs; the steps 22, 24, 28 and 29 are unstable in the background (issue #117), so their durations
  *   vary more.
@@ -219,6 +220,119 @@ export const STEPS = [
 
 /** Every valid id, in canonical order. */
 export const STEP_IDS = STEPS.map((entry) => entry.id);
+
+/**
+ * Splits the steps into `count` CONTIGUOUS runs of the canonical order, balanced by `budgetS`: the
+ * shards of `--shard i/N` (tooling/visual-ci-parallel, issue #199). Returns an array of `count`
+ * arrays of ids, in canonical order, each id in exactly one array.
+ *
+ * Contiguous, not bin-packed, by decision of Sergio (Engram #2146): the full run's order is the
+ * only one ever verified, and steps leak state to their neighbours (20 -> 47, #2092; 32 -> 34), so
+ * a shard that keeps the adjacencies of the full run (only its first step changes predecessor)
+ * sees the failures the full run sees. The split is the optimal one for the largest sum of
+ * `budgetS` (dynamic programming over prefix sums; ties broken by the smaller sum of squares, so
+ * the shards come out even, then by the earliest cut: deterministic). `budgetS` is a ceiling (the
+ * measured time times 1.25), so the sums are a proxy for the wall clock, not the wall clock.
+ * Throws `RangeError` unless `count` is an integer from 1 to the number of steps (a shard cannot
+ * be empty). Pure and independent of the order of `STEPS` entries beyond the canonical one, so a
+ * new step lands in exactly one shard with no extra registration.
+ * VERIFIED on Windows 11 (10/11/2026) by `steps.test.mjs`: "puts every id in exactly one
+ * contiguous run, in canonical order (n=%i)" for n = 1, 2, 3, 4, 6 and every step, and "is no
+ * worse than any other contiguous split (brute force, n=2 and n=3)". For n=4 on this catalogue it
+ * gives runs of 26, 9, 8 and 9 steps whose `budgetS` add up to 420, 425, 435 and 425 s (`node
+ * test/visual/run.mjs --shard i/4 --list` for i = 1..4). NOT observed: the wall clock of a shard.
+ */
+export function shardPlan(count) {
+  const total = STEPS.length;
+  if (!Number.isInteger(count) || count < 1 || count > total) {
+    throw new RangeError(
+      `shard count must be an integer from 1 to ${String(total)}: ${String(count)}`,
+    );
+  }
+  const prefix = [0];
+  for (const entry of STEPS) prefix.push(prefix[prefix.length - 1] + entry.budgetS);
+  // best[k][j]: the best split of the first j steps into k non-empty runs, as the largest run
+  // (`max`), the sum of squares of the runs (`sq`) and where the last run starts (`cut`).
+  const best = [[]];
+  for (let k = 1; k <= count; k += 1) {
+    best[k] = [];
+    for (let j = k; j <= total; j += 1) {
+      let chosen;
+      for (let i = k - 1; i < j; i += 1) {
+        const run = prefix[j] - prefix[i];
+        const before = k === 1 ? { max: 0, sq: 0 } : best[k - 1][i];
+        if (before === undefined || (k === 1 && i !== 0)) continue;
+        const candidate = {
+          max: Math.max(before.max, run),
+          sq: before.sq + run * run,
+          cut: i,
+        };
+        if (
+          chosen === undefined ||
+          candidate.max < chosen.max ||
+          (candidate.max === chosen.max && candidate.sq < chosen.sq)
+        ) {
+          chosen = candidate;
+        }
+      }
+      best[k][j] = chosen;
+    }
+  }
+  const runs = [];
+  let end = total;
+  for (let k = count; k >= 1; k -= 1) {
+    const { cut } = best[k][end];
+    runs.unshift(STEP_IDS.slice(cut, end));
+    end = cut;
+  }
+  return runs;
+}
+
+/**
+ * Reads `--shard i/N` or `--shard=i/N` from `argv` (the arguments after the script name).
+ *
+ * Returns `{ shard: undefined }` when the flag is absent, `{ shard: { index, count } }` (both
+ * integers, `index` from 1) or `{ error }` for a value that is not `i/N`, an `N` outside 1 to the
+ * number of steps, or an `i` outside 1 to `N`. The caller exits with 2 on `error`.
+ */
+export function parseShardArg(argv) {
+  const at = argv.findIndex((arg) => arg === '--shard' || arg.startsWith('--shard='));
+  if (at === -1) return { shard: undefined };
+  const raw = (
+    argv[at].startsWith('--shard=') ? argv[at].slice('--shard='.length) : (argv[at + 1] ?? '')
+  ).trim();
+  const match = /^(\d+)\/(\d+)$/.exec(raw);
+  if (match === null) return { error: `--shard needs i/N, for example --shard 2/4 (got "${raw}")` };
+  const index = Number(match[1]);
+  const count = Number(match[2]);
+  if (count < 1 || count > STEPS.length) {
+    return { error: `--shard ${raw}: N must be from 1 to ${String(STEPS.length)}` };
+  }
+  if (index < 1 || index > count)
+    return { error: `--shard ${raw}: i must be from 1 to N (${String(count)})` };
+  return { shard: { index, count } };
+}
+
+/**
+ * The line a shard run prints to say which steps it OWNS (`SHARD 2/4 owns steps 25, 26, …`),
+ * apart from the prerequisites its `needs` add. One function for the two sides that must agree:
+ * `run.mjs` prints it and `merge-shards.mjs` reads it back with {@link parseShardLine}, the same
+ * pairing as {@link BAIL_BANNER}. It starts with neither `ok`, `FAIL`, `warn` nor `== `.
+ */
+export function shardLine(index, count, ids) {
+  return `SHARD ${String(index)}/${String(count)} owns steps ${ids.join(', ')}`;
+}
+
+/** Reads {@link shardLine} back from a shard's output: `{ index, count, ids }`, or `undefined`. */
+export function parseShardLine(text) {
+  const match = /^SHARD (\d+)\/(\d+) owns steps (.+?)\s*$/m.exec(text);
+  if (match === null) return undefined;
+  return {
+    index: Number(match[1]),
+    count: Number(match[2]),
+    ids: match[3].split(',').map((id) => id.trim()),
+  };
+}
 
 /**
  * The step groups of `--group`: group name to its step ids, in canonical order. Derived from

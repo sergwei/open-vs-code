@@ -23,10 +23,17 @@ npm run test:visual
 - The script builds the host and the webview first (development bundles), then launches VS Code.
   It only needs the `stable` VS Code that `@vscode/test-electron` caches in `.vscode-test/`
   (downloaded the first time).
-- It is still run locally, not in CI (decision of Sergio, 22/10/2026): Linux needs `xvfb` and the
-  focus under it is unverified, macOS needs `Cmd+B` where step 22 sends `Control+b` (step 5 clicks
-  the layout button, and sends it only when the notification has no "Open" link), and contrast and
-  screenshots vary per system.
+- It runs in CI on Windows only, on every pull request to `main`
+  (`.github/workflows/visual.yml`, see "Shards and CI"); it does not run on Linux or macOS. Until
+  10/11/2026 it was local-only (decision of Sergio, 22/10/2026) and the reasons for staying on
+  Windows still hold: Linux needs `xvfb` and the focus under it is unverified, macOS needs `Cmd+B`
+  where step 22 sends `Control+b` (step 5 clicks the layout button, and sends it only when the
+  notification has no "Open" link), and contrast and screenshots vary per system.
+- **Latest full run:** the full run of tooling/visual-ci-parallel on its final tree (10/11/2026,
+  Windows 11, DPR 1.25): 1004.7 s, "all visual checks passed", 1 expired `waitFor` (step 34, cap
+  8000 ms, 8138 ms; the checks after it passed). The run before it on the same tree STOPPED after
+  step 29 because another window took the system focus. Slower than the 570 s below because the
+  suite has since grown (steps up to 31 then, 52 steps now, per `--list`).
 - **Duration.** A clean full run takes about 570 s counted from the moment VS Code starts
   (Windows 11, VS Code 1.144.0, 30/10/2026, steps up to 31: 1382 ok, 0 FAIL, `total 569.0 s since
   VS Code was started`; wall clock 582 s, so the build, the launch and the close add about 13 s).
@@ -220,13 +227,31 @@ npm run test:visual -- --affected main              # changes since the merge-ba
   on a check that passes on the next run: rerun before concluding anything.
 - **`--affected [ref]`** reads the files changed since the merge-base of `HEAD` and `ref` (default
   `origin/main`) plus the untracked ones, and `affected.mjs` maps each one to groups. It prints
-  `affected: <groups | full | none>` with one reason per file. A cross-cutting file (for example
-  `src/shared/**`, the store, `chatController.ts`, `package.json`, the fixture or the harness
-  itself) or one that is not mapped means the **full** run, and so does `git` failing (the reason is
-  printed). If no changed file has a visual effect (tests, Markdown, `test/integration/**`) it
+  `affected: <groups | steps N | full | none>` with one reason per file. A cross-cutting file (for
+  example `src/shared/**`, the store, `chatController.ts`, `package.json`, the fixture or
+  `vscodeProcess.mjs`) or one that is not mapped means the **full** run, and so does `git` failing
+  (the reason is printed). If no changed file has a visual effect (tests, Markdown,
+  `test/integration/**`, `.github/**`, `affected.mjs`, `harnessDiff.mjs`, `merge-shards.mjs`) it
   prints `affected: no changed file has a visual effect; nothing to run` and exits `0`. It does not
-  combine with `--steps` or `--group`. The map is the `AFFECTED_RULES` of `affected.mjs`; add a
-  line there when you add a file that belongs to an area.
+  combine with `--steps`, `--group` or `--shard`. The map is the `AFFECTED_RULES` of `affected.mjs`;
+  add a line there when you add a file that belongs to an area.
+- **`run.mjs` and `steps.mjs` are no longer cross-cutting as a block** (tooling/visual-ci-parallel,
+  issue #199). `harnessDiff.mjs` compares the file at the base with the one on disk as a
+  *skeleton*: in `run.mjs` every `await step('<id>', …)` statement is replaced by a marker, in
+  `steps.mjs` every entry of `STEPS` is taken out. If the skeleton is the same, only the steps whose
+  body (or entry) changed are selected (`affected: steps 51`), **plus the step that follows each one
+  in canonical order** (`STEP_IDS`), printed as `-> steps 49 (+ next 50)`: state leaks forward (the
+  end of steps 49/50 once broke 50/51 in a full run) and a per-step diff cannot see it; the next
+  step brings its `needs` as any selected step does, and the last step has none. An id that is not
+  in `STEP_IDS` gives `full`. A fabricated check of 49 gives `steps 49 (+ next 50)`. A top-level helper that changed, a
+  reordering, duplicate ids or a file that does not parse still gives `full`. A change that is only
+  `budgetS` in `steps.mjs` selects nothing, because it cannot change a check. Real result, read from
+  git on 10/11/2026 (not a unit test): the range `d17ea32..bf1f0c7` (README, `affected.mjs`,
+  `run.mjs` with step 51, `steps.mjs` with entry 51) gives `affected: steps 51` (plus its `needs`),
+  where before it gave `full` (step 51 is the last one, so no next step is added); the range `d8ba69f~1..d8ba69f` (steps 49 and 50) still gives `full`,
+  correctly, because that commit also added `HOME_PROBE_SOURCE` to the helpers (`run.mjs`: "code
+  outside the steps changed"; `steps.mjs`: steps 49, 50). Source: Engram
+  `tooling/visual-ci-parallel/implementation-1`.
 - **`--list`** prints the selection (and `FULL RUN (all N steps)` when nothing filters) and exits `0`
   before starting VS Code, so it is the cheap way to see what a flag combination does. With
   `node test/visual/run.mjs --list` nothing is built; `npm run test:visual -- --list` runs the
@@ -241,6 +266,88 @@ Each step has a `budgetS` in `steps.mjs`: the larger of its duration in two full
 to the next multiple of 5 s. `== timings` appends `over budget (N s)` to a step that exceeds it. It
 is a signal, not a failure: it never prints `warn` or `FAIL` and does not change the exit code, so
 `compare-runs` does not see it. A new step declares its group and its budget when it is added.
+
+### Shards and CI
+
+Since tooling/visual-ci-parallel (issue #199) a pull request to `main` runs `test:visual` in CI,
+split in parallel. Every figure below was read in the runs named next to it (Engram
+`tooling/visual-ci-parallel/implementation-0`, `-2-ci`, `-escala-125`); the workflow is
+`.github/workflows/visual.yml`.
+
+```sh
+node test/visual/run.mjs --shard 2/4 --list     # which steps shard 2 of 4 owns, and their needs
+npm run test:visual -- --shard 2/4              # builds first; runs only that shard
+```
+
+- **`--shard i/N`** (also `--shard=i/N`) runs a contiguous piece of the canonical step order.
+  `shardPlan(n)` in `steps.mjs` picks the cut that minimises the largest sum of `budgetS`
+  (contiguous, so almost every step keeps the predecessor it has in a full run, which matters for
+  state that leaks from one step to the next). With the current budgets and N=4 the shards own steps
+  0-24, 25-33, 34-41 and 43-51 (sum of `budgetS`: 420, 425, 435 and 425). `needs` are added as in
+  `--steps` (shards 2 to 4 add step 1). It is incompatible with `--steps`, `--group` and
+  `--affected` (exit `2`). A shard is a **PARTIAL run**: it prints the PARTIAL banner plus
+  `SHARD i/N owns steps …` and is not evidence on its own.
+- **Jobs.** `shard` runs 4 jobs at once on `windows-latest` (`fail-fast: false`, so a red shard does
+  not hide the others): set the display to 1920x1080, `npm ci`, print the fingerprint, run its
+  shard, upload its output. Then the `visual` job on `ubuntu-latest` (it needs no `npm ci`: it only
+  imports `steps.mjs`) downloads the 4 outputs and runs `node test/visual/merge-shards.mjs`, which
+  checks that they are the pieces of one split of one tree (same fingerprint, same N, every shard
+  once, none `--bail` or `--with-copilot`, the owned steps are exactly all the steps) and writes
+  `visual-full-merged.txt` with the shape of a full run. Exit code of the merge: `0` valid and every
+  shard passed, `1` valid but some shard failed (the file is still written, without "all visual
+  checks passed"), `2` invalid (a shard missing, another fingerprint…; no file, so a bad merge never
+  looks like evidence). The check to require on `main` is the job named `visual`.
+- **Only the merge is evidence**, never a shard. Download it from the run (kept 14 days) and check it
+  against your tree:
+
+  ```sh
+  gh run download <run-id> -n visual-full-merged
+  node test/visual/fingerprint.mjs --check visual-full-merged.txt
+  ```
+
+  Exit `0` means the merge covers the tree you have AND ended "all visual checks passed". Cite it by
+  its run id (and the commit it ran on), not by a local path.
+- **Environment, VERIFIED in the spike.** Run 42796747026 (10/11/2026, `windows-latest` image
+  20261103.298.1): Windows Server 2025 Datacenter 10.0.26100, an interactive console session
+  (SessionId 2, `UserInteractive` true), and the screen starts at 1024x768. `Set-DisplayResolution`
+  to 1920x1080 works (work area 1920x1032) and the run then printed `window 1440x900 CSS px, DPR 1`
+  and `system focus true`; the clipboard worked (step 20 printed "clipboard saved (image)" and
+  "restored (image)"). Runs 42805513483 and 42806479242 tried to get DPR 1.25: `Set-DisplayResolution`
+  accepts 2560x1600, 2560x1440, 1920x1440 and 1920x1200 **without error** but the screen stays at
+  1024x768 (read with WMI `Win32_VideoController`); only up to 1920x1080 applies. At DPR 1.25 that
+  leaves 1536x825 CSS px, less than the 1440x900 `run.mjs` needs. So **CI runs at DPR 1 and the
+  125 % scale is covered only by local runs**; a check that depends on the scale can pass in CI and
+  fail locally, or the reverse. The workflow must therefore not trust that cmdlet silently: read
+  the real mode afterwards.
+- **Wall clock and fingerprint.** Run 42801586833 (two attempts, 10/11/2026): about 8 minutes from
+  the first shard to the end of `visual` (10:43:46 to 10:51:44, and 10:53:09 to 11:01:32), with
+  262-331 s of `test:visual` per shard. The fingerprint computed in CI equals the local one for the
+  same tree, so `--check` recognises the merge as belonging to it. The 5-6 minutes that the issue
+  hoped for were not reached with N=4 (HYPOTHESIS: more shards would help; not tried).
+- **`compare-runs` only between runs of the same environment**: CI with CI, local with local. A CI
+  merge against a local run shows differences that are the scale and the machine, not a regression.
+- **`visual` also runs on a pull request that changes only docs** (about 10 minutes, free on public
+  repositories): the workflow does not look at `--affected`.
+
+### Fixed waits
+
+`run.mjs` has two kinds of wait that are not a condition: `await sleep(` and `.waitForTimeout(`
+(`rawSleep`, the mechanism inside `waitFor`, is not one). Each one carries, on its own line or in the
+block of `//` lines right above it, either `// negative window: …` (the check is that something does
+NOT happen, so it cannot be replaced by a condition) or `// kept: …` (a dodge for a known cause, said
+in the comment). `test/visual/waits.test.mjs` fails otherwise, so a new fixed wait cannot be added
+without saying why.
+
+- A negative window is shortened only if a positive wait comes first (wait for the thing that must
+  happen, then watch a short window for what must not).
+- **`waitIdle` and its floor of 2 s are not touched**: that was reverted twice. Do not remove existing
+  `waitIdle` calls either; only avoid adding new ones.
+- Figures, from `== waits` (milliseconds of `sleep` / `waitForTimeout` / floor of `waitIdle`, and
+  expired `waitFor`s). Before: the CI base (attempt 1 of run 42801586833, the 4 shards added up):
+  213970 / 15494 / 80128 and 19 expired. After: the full run of tooling/visual-ci-parallel on its
+  final tree (local, DPR 1.25, 10/11/2026): 168110 / 15472 / 81070 and 1 expired. **They are not comparable one to one**: different environments (CI at DPR 1 on a runner, local at
+  DPR 1.25 on a PC), so read the direction, not the difference. Engram
+  `tooling/visual-ci-parallel/implementation-3` and `…/full-run-f3`.
 
 ### Code fingerprint
 
@@ -277,9 +384,12 @@ What is hashed:
   `tsconfig*.json`. `src/extension/test-fixtures/**` IS hashed: the synthetic opencode is the
   server the run drives, so a change there moves the checks (and `selectForFiles` calls it
   cross-cutting).
-- `test/visual/*.mjs` except tests, `compare-runs.mjs` and `fingerprint.mjs` (post-processors that
-  never feed the run). `run.mjs`, `steps.mjs`, `affected.mjs`, `vscodeProcess.mjs` and
-  `webviewCdp.mjs` ARE the harness.
+- `test/visual/*.mjs` except tests, `compare-runs.mjs`, `fingerprint.mjs` and `merge-shards.mjs`
+  (post-processors that never feed the run) and `affected.mjs` and `harnessDiff.mjs` (they only
+  choose which steps to run, never change a check). `run.mjs`, `steps.mjs`, `vscodeProcess.mjs` and
+  `webviewCdp.mjs` ARE the harness. Adding those three exclusions (tooling/visual-ci-parallel,
+  10/11/2026) changed the fingerprint once: any saved output from before that branch is stale for
+  the new tree and `--check` will say so.
 - Raw (line endings normalised): `package.json`, `package-lock.json`, `esbuild.mjs`,
   `webview-ui/build.mjs`, `webview-ui/vite.config.mts` and `webview-ui/index.html` when it exists
   (today it does not: Vite's HTML is generated).
@@ -305,13 +415,16 @@ What the fingerprint does NOT see (a stale run can hide any of these):
 | Iteration of the developer | `--affected --bail` (or `--group`) | `--label` of what was touched |
 | End of a phase or of a round of fixes | `--affected`, saved to a file | the affected labels |
 | Evidence of the commit, ONCE per task and on the final tree | the full run, saved to a file | the full run |
+| The pull request to `main` | the merged output of the `Visual` workflow of the PR (`visual-full-merged.txt`) plus `fingerprint --check` on it (see "Shards and CI") | not covered by the `Visual` workflow |
+| Before a release, and when a change touches something scale-sensitive (measures, layout) | a full run LOCAL at 125 % | the full run |
 | After the full run | `fingerprint --check`: same hash, it still holds; changed only in files of some groups, rerun those groups to a file; cross-cutting, the full run | no fingerprint: rerun it whole (about 200 s) if the CODE changed (comments, README and markers do not count; judged from the diff), `test/integration/**` and `.vscode-test.mjs` included |
 
 - Before this, a task paid between 2 and 5 full runs (20-45 minutes of `test:visual`, counted from
   the saved outputs of E8-slash-commands, E9-context-menus, E9-chat-location, E9-sessions-sidebar
   and E9-tab-requests). The policy, not the speed of one run, is what saves the time.
-- **A filtered run (`--steps`, `--group`, `--affected`, `--bail`) is never the evidence of a
-  commit** (rule 6 of `.claude/CLAUDE.md`): the evidence is the full run plus, when
+- **A filtered run (`--steps`, `--group`, `--affected`, `--shard`, `--bail`) is never the evidence
+  of a commit** (rule 6 of `.claude/CLAUDE.md`): the evidence is the full run (on a pull request,
+  the merge of its shards) plus, when
   `fingerprint --check` says the tree changed afterwards, the groups it names, with their own
   fingerprint.
 - A round that only touches headers, README or marks does not change the hash, so it relaunches
@@ -376,7 +489,7 @@ added steps):
 | 30 | 1, 30 | in the full run (43.2 s) | in the full run (see Duration above) |
 | 31 | 1, 31 | in the full run (13.8 s) | in the full run (see Duration above) |
 | 33 | 1, 33 | not measured yet (budget 40 s is an estimate) | in the full run |
-| 34 | 1, 34 | 110.0 s in the full run of E9-sessions-organize (1/11/2026, 705.8 s in total; the budget is 120 s); 65.9 s in `--group sessions`, the same day | in the full run |
+| 34 | 1, 34 | 110.0 s in the full run of E9-sessions-organize (1/11/2026, 705.8 s in total; the budget is 120 s); 65.9 s in `--group sessions`, the same day; 67.0 s in the full run of tooling/visual-ci-parallel on its final tree (10/11/2026, no FAIL; one wait of 8 s expired) | in the full run |
 | 35 | 1, 35 | 21.2 s in the full run of E10-config-views (1/11/2026, 697.2 s in total); 21.4 s in `--group config`, the same day (the budget is 120 s, an estimate) | in the full run |
 | 36 | 1, 36 | 34.2 s in the full run of E10-config-views (1/11/2026); 34.3 s in `--group config`, the same day, before the cells F1, F2, K1-K3 and Copy link of E10-settings-followup; 38.6 s in `--steps 36` and 38.2 s in `--group config` with them (2/11/2026; the budget is 50 s); 38.7 s in the full run of E10-settings-followup on the final tree (2/11/2026, "all visual checks passed") | in the full run |
 | 37 | 1, 37 | 30.2 s in the full run of E11-publish-prep (2/11/2026; the budget is 40 s); 30.7 s in `--steps 37`, the same day, before the budget was recalibrated | in the full run |
@@ -390,9 +503,9 @@ added steps):
 | 46 | 1, 46 | 17.0 s in the full run of E10-settings-redesign on its final tree (08/11/2026, Windows 11, VS Code 1.145.2, 940.5 s in total, "all visual checks passed"). The budget of 60 s is still the first ESTIMATE (24 theme cells and 6 drags); a full run recalibrates it | in the full run |
 | 47 | 1, 47 | 13.6 s in the full run of E10-settings-redesign on its final tree (08/11/2026, the same run as step 46). The budget of 40 s is still the first ESTIMATE; a full run recalibrates it | in the full run |
 | 48 | 1, 48 | 9.1 s in the full run of E10-settings-redesign on its final tree (08/11/2026, the same run as step 46). The budget of 30 s is still the first ESTIMATE; a full run recalibrates it | in the full run |
-| 49 | 1, 49 | 36.1 s in the full run of E9-sidebar-home just before the budgets were set (08/11/2026, Windows 11, VS Code 1.145.2; that tree differs from the final one only in these two `budgetS`; the budget is 50 s: 36.1 times 1.25 is 45.1, rounded up to a multiple of 5; it carries an 11.5 s negative window). That run had one FAIL, a check of step 25 (see the step 25 note below), and none in this step; the full run on the final tree passed every check, with this step at 35.9 s | in the full run |
-| 50 | 1, 50 | 60.1 s in the same full run, 59.4 s in the last one (the budget is 80 s: 60.1 times 1.25 is 75.1, rounded up to a multiple of 5; four prompts and four matrices of 8 cells) | in the full run |
-| 51 | 1, 51 | 47.2 s in `--steps 51` on the final tree of E2-subagent-monitor (08/11/2026, Windows 11, VS Code 1.145.2, "all visual checks passed"); 45.0 s in the earlier full run, before child B got a cost. The budget of 60 s is 47.2 times 1.25 (59) rounded up to a multiple of 5; the full run on the final tree took 47.6 s (the same 60), with no FAIL in this step | in the full run |
+| 49 | 1, 49 | 36.1 s in the full run of E9-sidebar-home just before the budgets were set (08/11/2026, Windows 11, VS Code 1.145.2; that tree differs from the final one only in these two `budgetS`; the budget is 50 s: 36.1 times 1.25 is 45.1, rounded up to a multiple of 5; it carries an 11.5 s negative window). That run had one FAIL, a check of step 25 (see the step 25 note below), and none in this step; the full run on the final tree passed every check, with this step at 35.9 s; 34.5 s in the full run of tooling/visual-ci-parallel on its final tree (10/11/2026, no FAIL) | in the full run |
+| 50 | 1, 50 | 60.1 s in the same full run, 59.4 s in the last one (the budget is 80 s: 60.1 times 1.25 is 75.1, rounded up to a multiple of 5; four prompts and four matrices of 8 cells); 40.0 s in the full run of tooling/visual-ci-parallel on its final tree (10/11/2026, no FAIL) | in the full run |
+| 51 | 1, 51 | 47.2 s in `--steps 51` on the final tree of E2-subagent-monitor (08/11/2026, Windows 11, VS Code 1.145.2, "all visual checks passed"); 45.0 s in the earlier full run, before child B got a cost. The budget of 60 s is 47.2 times 1.25 (59) rounded up to a multiple of 5; the full run on the final tree took 47.6 s (the same 60), with no FAIL in this step; 37.5 s in the full run of tooling/visual-ci-parallel on its final tree (10/11/2026, no FAIL (it printed the #200 warn once, in "first round")) | in the full run |
 
 Step 25 note (full run of E9-sidebar-home, 08/11/2026): the run failed ONE check of step 25, "the
 installed copy resolves %command.showLogs.title% from package.nls.json … no raw key ([])" (the
