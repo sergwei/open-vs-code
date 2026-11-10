@@ -152,8 +152,14 @@
  * full run: 12 cells of rows (3 widths x 4 themes, with the open details of two widths inside the
  * same loop), 3 side bar drags and 4 flows (about 1 s per drag or theme change in the steps 35 and
  * 36; the step 47, with 16 theme cells and 6 drags, took 13.6 s in the full run of 08/11/2026). It
- * leaves `linear` connected in the fake (it is the last step). The next branch that runs a full run
- * recalibrates it.
+ * leaves `linear` connected in the fake. The next branch that runs a full run recalibrates it.
+ * The step 53 (the General, Mods, Work mode and Advanced sections with data, E10-settings-sections,
+ * issue #186 PR3) needs the 1, sends no prompt and is in the groups `config` and `mods` (it installs
+ * mod fixtures and switches them). Its `budgetS` of 60 is an ESTIMATE, nobody has timed it in a full
+ * run: 48 section cells (3 widths x 4 themes x 4 sections) and 8 navigation cells, 12 theme changes,
+ * 3 side bar drags, a Reload Mods with two Worker starts and 5 mouse flows; the step 46, with 17 s
+ * measured in the full run of 08/11/2026, has 16 cells of the header and navigation. It is the last
+ * step of the run. The next branch that runs a full run recalibrates it.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -225,6 +231,8 @@ export const STEPS = [
   { id: '51', needs: ['1'], sendsPrompt: true, groups: ['subagents', 'requests'], budgetS: 60 },
   // E10-settings-mcp (issue #186, PR2): ESTIMATE, see the paragraph of the step 52 above.
   { id: '52', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 40 },
+  // E10-settings-sections (issue #186, PR3): ESTIMATE, see the paragraph of the step 53 above.
+  { id: '53', needs: ['1'], sendsPrompt: false, groups: ['config', 'mods'], budgetS: 60 },
 ];
 
 /** Every valid id, in canonical order. */
