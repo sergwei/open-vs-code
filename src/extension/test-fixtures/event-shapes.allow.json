@@ -27,15 +27,15 @@
   },
   {
     "event": "session.reasoning.started",
-    "path": "data.state.*",
+    "path": "data.native.*",
     "kind": "path-only-real",
-    "reason": "provider bookkeeping the host ignores (0 uses of `reasoningField` or reasoning `data.state` in src/extension and webview-ui/src, grep 23/10/2026)"
+    "reason": "provider bookkeeping the host ignores; 2.2 renamed `state` to `native` (0 uses of `native` or `reasoningField` in src/extension and webview-ui/src, grep 10/11/2026)"
   },
   {
     "event": "session.reasoning.ended",
-    "path": "data.state.*",
+    "path": "data.native.*",
     "kind": "path-only-real",
-    "reason": "provider bookkeeping the host ignores (0 uses of `reasoningField` or reasoning `data.state` in src/extension and webview-ui/src, grep 23/10/2026)"
+    "reason": "provider bookkeeping the host ignores; 2.2 renamed `state` to `native` (0 uses of `native` or `reasoningField` in src/extension and webview-ui/src, grep 10/11/2026)"
   },
   {
     "event": "session.step.ended",

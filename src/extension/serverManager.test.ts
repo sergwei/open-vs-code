@@ -23,6 +23,7 @@ import { useEnglish, useSpanish } from './test-fixtures/spanishCatalog';
 import type { ServerTarget } from './externalServer';
 import type { DetectionResult } from './opencodeBinary';
 import {
+  PINNED_OPENCODE_VERSION,
   ServerInfoError,
   ServerStartError,
   startServer,
@@ -1053,7 +1054,7 @@ describe('ServerManager with an external target', () => {
     manager.setFolder(folderChoice);
     manager.setTarget(ext());
     await reach(manager, 'running');
-    expect(messages.some((m) => m.includes('built against 2.0.32'))).toBe(true);
+    expect(messages.some((m) => m.includes(`built against ${PINNED_OPENCODE_VERSION}`))).toBe(true);
   });
 
   it('does NOT retry by itself when the server is unreachable (decision of Sergio)', async () => {

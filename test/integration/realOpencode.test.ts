@@ -674,7 +674,9 @@ describe('real opencode', function () {
 
     /**
      * Protects the contract of the Usage view (E9-sidebar-home, issue #187, decision P3=2): the
-     * experimental `session.stats` answers the `SessionStatsInfo` shape for a window with NO
+     * experimental `experimental.session.stats` (called by its 2.2 name since issue #191; the
+     * VERIFIED run below used the old `session.stats` alias; the new name passed too, see the
+     * 2.2.7 run below) answers the `SessionStatsInfo` shape for a window with NO
      * `project` (so the whole opencode database, every project) and `tools: 'none'`, and an invalid
      * `timezone` is refused with `InvalidRequestError`. Sends no prompt. The numbers are not
      * asserted (the database is isolated by `XDG_*` but a session of an earlier case may exist);
@@ -686,11 +688,19 @@ describe('real opencode', function () {
      * for that reason on the same run). So the shape and the timezone refusal are seen on 2.2.5;
      * on 2.0.32 itself they are only read in `types.d.ts` and `core/src/session/stats.ts`
      * @843a6c51 (UNVERIFIED there). Never asserted: the numbers.
+     * VERIFIED (10/11/2026, Windows 11, opencode CLI 2.2.7, `npm run test:integration -- --label
+     * real-opencode`, "21 passing"): this case, "reads the usage of a window across all projects
+     * and refuses an invalid timezone", passed through `experimental.session.stats`.
      */
     it('reads the usage of a window across all projects and refuses an invalid timezone', async function () {
       const to = Date.now();
       const from = to - 24 * 60 * 60 * 1000;
-      const stats = await own.client.session.stats({ from, to, timezone: 'UTC', tools: 'none' });
+      const stats = await own.client.experimental.session.stats({
+        from,
+        to,
+        timezone: 'UTC',
+        tools: 'none',
+      });
       assert.strictEqual(stats.range.from, from);
       assert.strictEqual(stats.range.to, to);
       for (const key of ['sessions', 'subagents', 'prompts', 'steps', 'cost'] as const) {
@@ -710,7 +720,7 @@ describe('real opencode', function () {
         assert.strictEqual(typeof model.cost, 'number');
       }
       await assert.rejects(
-        own.client.session.stats({ from, to, timezone: 'Not/AZone' }),
+        own.client.experimental.session.stats({ from, to, timezone: 'Not/AZone' }),
         (error: unknown) => {
           assert.strictEqual((error as { _tag?: string })._tag, 'InvalidRequestError');
           return true;
@@ -999,11 +1009,19 @@ describe('real opencode', function () {
      * The file is written BEFORE the server starts, so it needs no `command.updated` (a hot reload
      * on a new file was not tried: UNVERIFIED). The folder is created and deleted by the case.
      *
-     * The list is polled for up to 10 s, on purpose: the FIRST `GET /api/command` on a server that
-     * has just started answered `data: []` (the location is still loading) and the same request
-     * a moment later answered the three commands; the first version of this case, which read it
-     * once, failed with "command.list lacks \"init\"; got: " for that reason. So a catalog loaded
-     * right after the start can hold an empty command list.
+     * The list is polled for up to 10 s, on purpose, until `init`, `review` AND `hello` are all in
+     * it (issue #191; before, until the first non-empty answer): the FIRST `GET /api/command` on a
+     * server that has just started answered `data: []` (the location is still loading) and the same
+     * request a moment later answered the three commands; the first version of this case, which
+     * read it once, failed with "command.list lacks \"init\"; got: " for that reason. So a catalog
+     * loaded right after the start can hold an empty command list. HYPOTHESIS: on 2.2.x the
+     * built-in and the project commands may load at different moments (the issue saw `goal` listed
+     * and `hello` missing); the new loop logs `command.list: complete after <n> reads` so a run
+     * shows whether it waited. VERIFIED (10/11/2026, Windows 11, opencode CLI 2.2.7, "21
+     * passing"): the case "lists the project commands and refuses an unknown one with
+     * CommandNotFoundError" passed and printed `command.list: first answer empty: true` and
+     * `command.list: complete after 3 reads: true`. The log gives no per-read breakdown, so the
+     * goal/hello race above stays a HYPOTHESIS.
      * VERIFIED (28/10/2026, Windows 11, VS Code 1.144.0, opencode 2.0.32, `npm run test:integration
      * -- --label real-opencode`, "16 passing"): the case "lists the project commands and refuses an
      * unknown one with CommandNotFoundError" passed and printed `command.list: first answer empty:
@@ -1024,15 +1042,21 @@ describe('real opencode', function () {
         let listed = await sub.client.command.list();
         assert.ok(Array.isArray(listed.data), 'command.list().data is not an array');
         const firstWasEmpty = listed.data.length === 0;
+        const wantedNames = ['init', 'review', 'hello'];
+        const complete = (): boolean =>
+          wantedNames.every((wanted) => listed.data.some((entry) => entry.name === wanted));
         const deadline = Date.now() + 10_000;
-        while (listed.data.length === 0 && Date.now() < deadline) {
+        let reads = 1;
+        while (!complete() && Date.now() < deadline) {
           await sleep(500);
           listed = await sub.client.command.list();
+          reads++;
         }
         console.log(`command.list: first answer empty: ${String(firstWasEmpty)}`);
+        console.log(`command.list: complete after ${String(reads)} reads: ${String(complete())}`);
         const options = listed.data.map(toCommandOption);
         const names = options.map((option) => option.name);
-        for (const wanted of ['init', 'review', 'hello']) {
+        for (const wanted of wantedNames) {
           assert.ok(
             names.includes(wanted),
             `command.list lacks "${wanted}"; got: ${names.join(', ')}`,
@@ -1105,13 +1129,28 @@ describe('real opencode', function () {
      *
      * Protects the connect/remove pair of the Providers section and the "no secret in the list"
      * premise of H3 (the host maps `integration.list` without `credential.list`).
+     *
+     * The FIRST `integration.list` after the `{url}` line is empty on 2.2.7: the catalog loads
+     * asynchronously and the server publishes `integration.updated` when it is ready, so the case
+     * polls up to 10 s for a non-empty list instead of reading once (a list that stays empty still
+     * fails with "no integrations listed"). The host is not affected: `ServerConfig.event` re-reads
+     * the integrations on that event.
+     * VERIFIED (10/11/2026, Windows 11, scripted probe against the real CLIs, 3 runs each): 2.2.7
+     * answered `n=0` at ~235 ms and `n=239` at ~1380 ms with `integration.updated` on the stream at
+     * ~860 ms; 2.2.5 answered `n=239` at ~235 ms. Why 2.2.7 answers empty first: UNVERIFIED (the
+     * server source was not read).
      */
     it('lists integrations without secrets, connects a fake key and removes it', async function () {
       this.timeout(60_000);
       const served = fs.mkdtempSync(path.join(os.tmpdir(), 'ovsc-contract-auth-'));
       const sub = await startOwnServer(binary, served, 'auth-pw');
       try {
-        const listed = await sub.client.integration.list({});
+        let listed = await sub.client.integration.list({});
+        const catalogDeadline = Date.now() + 10_000;
+        while (listed.data.length === 0 && Date.now() < catalogDeadline) {
+          await sleep(200);
+          listed = await sub.client.integration.list({});
+        }
         assert.ok(Array.isArray(listed.data) && listed.data.length > 0, 'no integrations listed');
         for (const integration of listed.data) {
           assert.strictEqual(typeof integration.id, 'string');
@@ -1341,9 +1380,9 @@ describe('real opencode', function () {
         assert.strictEqual((await statusOf('remotemcp'))?.integrationID, integrationID, '(b)');
 
         // (c)
-        await sub.client.mcp.disconnect({ server: 'fakemcp' });
+        await sub.client.experimental.mcp.disconnect({ server: 'fakemcp' });
         await until('fakemcp', 'disabled', 10_000);
-        await sub.client.mcp.connect({ server: 'fakemcp' });
+        await sub.client.experimental.mcp.connect({ server: 'fakemcp' });
         const atReturn = (await statusOf('fakemcp'))?.status.status === 'connected';
         console.log(`mcp.connect: connected at return: ${String(atReturn)}`);
         await until('fakemcp', 'connected', 30_000);

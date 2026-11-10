@@ -229,7 +229,8 @@ import { tmpdir } from 'node:os';
 import nodePath from 'node:path';
 
 const args = process.argv.slice(2);
-const version = process.env.FAKE_OPENCODE_VERSION ?? '2.0.32';
+// Default = the pinned opencode version (`PINNED_OPENCODE_VERSION`); `fakeServer.test.ts` expects it.
+const version = process.env.FAKE_OPENCODE_VERSION ?? '2.2.7';
 const modes = (process.env.FAKE_OPENCODE_MODE ?? 'ok').split(',').map((m) => m.trim());
 const has = (mode) => modes.includes(mode);
 
@@ -863,7 +864,7 @@ function subagentTool(a) {
         sessionID: childID,
         projectID: 'prj_fake',
         slug: childID,
-        version: '2.0.32',
+        version: '2.2.7',
         location: parent.location,
         title: input.description,
         parentID: a.sessionID,
@@ -968,7 +969,7 @@ function crewTurn(a, onSettled) {
         sessionID: childID,
         projectID: 'prj_fake',
         slug: childID,
-        version: '2.0.32',
+        version: '2.2.7',
         location: parent.location,
         title: input.description,
         parentID: a.sessionID,
@@ -1329,6 +1330,10 @@ const NOTHING_TO_COMPACT = { type: 'compaction.unavailable', message: 'Nothing t
  * planner's spike against a real opencode 2.0.32 (Windows 11, 22/10/2026), whose REST message had
  * `id` = the `inputID`; the running and failed messages, the delta and the `failed` event come from
  * the types and the source only. The earlier messages stay in the history, as the spike saw.
+ * Since issue #191 neither the message nor the two events carry the kept-tail text field of
+ * 2.0.32: `@opencode/client` 2.2.7 dropped it (types of `SessionCompactionStarted`/`Ended` and
+ * the REST `compaction` message, read); no event of a real 2.2.x compaction was recorded, so
+ * that is UNVERIFIED against a running server (`test:event-shapes` does not cover compactions).
  */
 function compactionSteps(sessionID, inputID, fail = false) {
   const message = {
@@ -1337,13 +1342,12 @@ function compactionSteps(sessionID, inputID, fail = false) {
     status: 'running',
     reason: 'manual',
     summary: '',
-    recent: '',
     time: { created: 0 },
   };
   const started = () => {
     message.time.created = Date.now();
     history.get(sessionID).push(message);
-    broadcast('session.compaction.started', { sessionID, reason: 'manual', recent: '', inputID });
+    broadcast('session.compaction.started', { sessionID, reason: 'manual', inputID });
   };
   if (fail) {
     return [
@@ -1352,7 +1356,6 @@ function compactionSteps(sessionID, inputID, fail = false) {
         message.status = 'failed';
         message.error = NOTHING_TO_COMPACT;
         delete message.summary;
-        delete message.recent;
         broadcast('session.compaction.failed', {
           sessionID,
           reason: 'manual',
@@ -1379,7 +1382,6 @@ function compactionSteps(sessionID, inputID, fail = false) {
         sessionID,
         reason: 'manual',
         text: 'summary',
-        recent: '',
       });
     },
   ];
@@ -1491,7 +1493,7 @@ function playTurn(sessionID, inboxID, text, files = []) {
         sessionID: id,
         projectID: 'prj_fake',
         slug: id,
-        version: '2.0.32',
+        version: '2.2.7',
         location,
         title,
       });
@@ -2654,7 +2656,9 @@ const ENCODED_LINK = 'https://fake.example.test/code?scope=a%2Bb&state=s%3D1&red
  * order the planner's spike saw them for `connect/key` (opencode 2.0.32, Windows 11, 01/11/2026):
  * `credential.updated`, `provider.updated`, `model.updated`, `credential.switched` and
  * `integration.updated`. The `data` of each is SYNTHETIC except `credential.switched`
- * (`{integrationID, credentialID}`, seen in the spike). The fake NEVER logs or stores a key. For an
+ * (`{integrationID, credentialID}`, seen in the spike). The `credential.updated` payload matches
+ * the 2.2.7 type (`{ integrationID, credentialID }`); the 2.2.5 type declares `{}` and 2.0.32's
+ * was `{}` too (types read, never recorded). The fake NEVER logs or stores a key. For an
  * integration with `metadata.source === 'mcp'` it also restarts the MCP server that owns it
  * ({@link reconnectMcp}, INVENTED timing), so approving the sign-in of `linear` ends `connected`.
  */
@@ -3047,7 +3051,7 @@ function handleChat(request, response) {
         sessionID: id,
         projectID: 'prj_fake',
         slug: id,
-        version: '2.0.32',
+        version: '2.2.7',
         location: info.location,
         ...(info.title === undefined ? {} : { title: info.title }),
         ...(info.parentID === undefined ? {} : { parentID: info.parentID }),

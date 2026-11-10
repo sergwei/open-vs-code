@@ -183,14 +183,16 @@ describe('createUsage', () => {
       free: [],
     };
     world.client = {
-      session: {
-        stats: (input: (typeof calls)[number]) => {
-          calls.push(input);
-          if (world.failure !== undefined) {
-            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-            return Promise.reject(world.failure);
-          }
-          return Promise.resolve(answer([['acme/pro', 0.5, 1000, 3]]));
+      experimental: {
+        session: {
+          stats: (input: (typeof calls)[number]) => {
+            calls.push(input);
+            if (world.failure !== undefined) {
+              // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+              return Promise.reject(world.failure);
+            }
+            return Promise.resolve(answer([['acme/pro', 0.5, 1000, 3]]));
+          },
         },
       },
     };
@@ -347,13 +349,14 @@ describe('createUsage', () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const real = (world.client as { session: { stats: (i: unknown) => Promise<StatsAnswer> } })
-      .session.stats;
-    (world.client as { session: { stats: (i: unknown) => Promise<StatsAnswer> } }).session.stats =
-      async (input) => {
-        await gate;
-        return real(input);
-      };
+    type StatsHolder = {
+      experimental: { session: { stats: (i: unknown) => Promise<StatsAnswer> } };
+    };
+    const real = (world.client as StatsHolder).experimental.session.stats;
+    (world.client as StatsHolder).experimental.session.stats = async (input) => {
+      await gate;
+      return real(input);
+    };
     usage.setVisible(true);
     usage.connection(false);
     release();

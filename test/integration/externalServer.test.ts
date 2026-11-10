@@ -33,7 +33,11 @@ import {
   SERVER_URL_KEY,
   TEST_SET_SERVER_PASSWORD_COMMAND_ID,
 } from '../../src/extension/ids';
-import { readUrlLine, waitForExit } from '../../src/extension/opencodeServer';
+import {
+  PINNED_OPENCODE_VERSION,
+  readUrlLine,
+  waitForExit,
+} from '../../src/extension/opencodeServer';
 import { openLogCursor, openLogFromStart, type LogCursor } from './support/extensionLog';
 
 const EXTENSION_ID = 'sergwei.open-vs-code';
@@ -194,7 +198,7 @@ describe('external server', function () {
     await connectTo(fake);
     await log.waitFor(`connecting to the external server at ${fake.origin}`, WAIT_MS);
     await log.waitFor(
-      `connected to the external server at ${fake.origin} (opencode 2.0.32)`,
+      `connected to the external server at ${fake.origin} (opencode ${PINNED_OPENCODE_VERSION})`,
       WAIT_MS,
     );
     await log.waitFor('event stream connected', WAIT_MS);

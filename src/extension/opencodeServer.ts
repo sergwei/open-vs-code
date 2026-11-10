@@ -36,8 +36,11 @@ import { parseOpencodeVersion } from './opencodeBinary';
  * The opencode version the extension is developed against. It moves together with the
  * `@opencode/client` pin (opencode-api skill, references/mantenimiento.md). A different version
  * only produces a warning in the log, never a failure; a different major does fail.
+ * VERIFIED (10/11/2026, Windows 11, opencode CLI 2.2.7, issue #191): `npm run test:integration --
+ * --label real-opencode` ended "21 passing" and "1 pending", and `npm run test:event-shapes`
+ * printed "event shapes: 0 difference(s), 108 accepted, 0 stale allow entries".
  */
-export const PINNED_OPENCODE_VERSION = '2.0.32';
+export const PINNED_OPENCODE_VERSION = '2.2.7';
 
 /** Time to wait for the `{url}` line. Our own choice (upstream gives no figure): HYPOTHESIS. */
 export const STARTUP_TIMEOUT_MS = 30_000;

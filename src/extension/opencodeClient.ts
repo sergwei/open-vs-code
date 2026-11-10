@@ -31,8 +31,9 @@ import type {
   IntegrationOauthConnectOutput,
   IntegrationOauthStatusInput,
   IntegrationOauthStatusOutput,
-  McpConnectInput,
-  McpDisconnectInput,
+  ExperimentalMcpConnectInput,
+  ExperimentalMcpDisconnectInput,
+  ExperimentalSessionStatsInput,
   McpListInput,
   McpListOutput,
   McpResourceCatalogInput,
@@ -77,7 +78,6 @@ import type {
   SessionsResponse,
   SessionSwitchAgentInput,
   SessionStatsInfo,
-  SessionStatsInput,
   SessionSwitchModelInput,
   SessionUpdateInput,
   V2Event,
@@ -201,23 +201,6 @@ export interface ChatApi {
      */
     diff(input: SessionDiffInput): Promise<FileDiffInfo[]>;
     /**
-     * `GET /api/experimental/session/stats` (issue #187, E9): cost, tokens and per-model usage of
-     * a time window. The answer is the bare `SessionStatsInfo` (the client unwraps `{data}`,
-     * `client.d.ts` of 2.0.32). `from` and `to` are epoch ms. Decision P3=2 of Sergio (07/11/2026):
-     * the host NEVER passes `project`, so the answer covers EVERY project of the opencode database,
-     * and the view that shows it says so. `tools: 'none'` skips the per-tool breakdown (it is one
-     * more `json_each` on the server and nothing shows it); `timezone` only groups `activity`,
-     * which is not shown, and an invalid one is a 400 `InvalidRequestError`. The route is
-     * EXPERIMENTAL: it may change or vanish in another version. `cost` is `sum(cost ?? 0)`, so a
-     * provider that reports no cost reads as 0. READ in `types.d.ts` and the client chunk of 2.0.32
-     * and in `core/src/session/stats.ts` @843a6c51. VERIFIED against a real server (Windows 11,
-     * 07/11/2026): the opt-in case "reads the usage of a window across all projects and refuses an
-     * invalid timezone" of `realOpencode.test.ts` passed, but against an opencode 2.2.5 executable,
-     * not the pinned 2.0.32 (UNVERIFIED on 2.0.32 itself). The synthetic fixture answers the same
-     * shape.
-     */
-    stats(input?: SessionStatsInput): Promise<SessionStatsInfo>;
-    /**
      * The revert of a session (issue #32). `stage` is `POST /api/session/:id/revert/stage` with
      * `{ messageID, files? }`: it moves the history boundary AND, unless `files: false`, puts back
      * on disk the files the agent touched after that message, answering the `SessionRevert`
@@ -310,26 +293,66 @@ export interface ChatApi {
   credential: { remove(input: CredentialRemoveInput): Promise<void> };
   /**
    * `GET /api/mcp` (servers with their status) and `GET /api/mcp/resource` (resources and
-   * templates of all of them), both `{ location, data }` and NOT unwrapped; plus the two writes the
-   * Settings tab uses (issue #186, PR2), `POST /api/experimental/mcp/:server/connect` and
-   * `.../disconnect`. Both answer 204 with no body and declare 400, 401 and 404
-   * (`McpServerNotFoundError { server, message }`); the tab never calls the add and remove routes.
-   * They act on the RUNNING server only: connect overrides a disabled configuration "until
-   * restart" and disconnect removes the tools "until reconnected" (descriptions of
-   * `protocol/src/groups/mcp.ts` at the v2.0.32 tag, read), so nothing persists in
-   * `opencode.json`. VERIFIED that the 204 of connect arrives AFTER the handshake of a LOCAL
-   * (stdio) server: the case "registers the integration of a remote MCP server and connects and
-   * disconnects a local one" of `realOpencode.test.ts` printed `mcp.connect: connected at return:
-   * true` (read right after the call returned; Windows 11, 10/11/2026, against an opencode 2.2.5
-   * executable, NOT the pinned 2.0.32). HYPOTHESIS for a remote server, whose handshake may take
-   * longer, and on 2.0.32 itself. The spike saw `mcp.list` answer `[]` for the first seconds of a server that has MCP
-   * servers configured; see `serverConfig.ts`.
+   * templates of all of them), both `{ location, data }` and NOT unwrapped. The spike saw
+   * `mcp.list` answer `[]` for the first seconds of a server that has MCP servers configured; see
+   * `serverConfig.ts`. The writes the Settings tab uses live under `experimental.mcp`.
    */
   mcp: {
     list(input?: McpListInput): Promise<McpListOutput>;
-    connect(input: McpConnectInput): Promise<void>;
-    disconnect(input: McpDisconnectInput): Promise<void>;
     resource: { catalog(input?: McpResourceCatalogInput): Promise<McpResourceCatalogOutput> };
+  };
+  /**
+   * The methods of the `/api/experimental/*` routes, which `@opencode/client` 2.2 moved under
+   * `client.experimental.*` (issue #191); the old names (`session.stats`, `mcp.connect`,
+   * `mcp.disconnect`) stay as `@deprecated` aliases "removed in the next minor", and no lint rule
+   * flags them, so this interface only declares the new ones. Paths and bodies did not change.
+   * VERIFIED by reading `dist/promise/generated/client.d.ts` of `@opencode/client@2.2.7` and the
+   * types of `ExperimentalSessionStatsInput` and `ExperimentalMcp{Connect,Disconnect}Input`;
+   * `check-types` passes against that package, and the opt-in cases of `realOpencode.test.ts` that
+   * call these methods passed against a 2.2.7 CLI (VERIFIED, Windows 11, 10/11/2026: "reads the
+   * usage of a window across all projects and refuses an invalid timezone" and "registers the
+   * integration of a remote MCP server and connects and disconnects a local one").
+   */
+  experimental: {
+    session: {
+      /**
+       * `GET /api/experimental/session/stats` (issue #187, E9): cost, tokens and per-model usage of
+       * a time window. The answer is the bare `SessionStatsInfo` (the client unwraps `{data}`).
+       * `from` and `to` are epoch ms. Decision P3=2 of Sergio (07/11/2026): the host NEVER passes
+       * `project`, so the answer covers EVERY project of the opencode database, and the view that
+       * shows it says so. `tools: 'none'` skips the per-tool breakdown (it is one more `json_each`
+       * on the server and nothing shows it); `timezone` only groups `activity`, which is not
+       * shown, and an invalid one is a 400 `InvalidRequestError`. The route is EXPERIMENTAL: it
+       * may change or vanish in another version. `cost` is `sum(cost ?? 0)`, so a provider that
+       * reports no cost reads as 0. READ in `types.d.ts` and the client chunk of 2.0.32 and in
+       * `core/src/session/stats.ts` @843a6c51. VERIFIED against a real server (Windows 11,
+       * 07/11/2026): the opt-in case "reads the usage of a window across all projects and refuses
+       * an invalid timezone" of `realOpencode.test.ts` passed, but against an opencode 2.2.5
+       * executable, through the old `session.stats` name. The synthetic fixture answers the same
+       * shape.
+       */
+      stats(input?: ExperimentalSessionStatsInput): Promise<SessionStatsInfo>;
+    };
+    /**
+     * The two writes the Settings tab uses (issue #186, PR2), `POST
+     * /api/experimental/mcp/:server/connect` and `.../disconnect`. Both answer 204 with no body and
+     * declare 400, 401 and 404 (`McpServerNotFoundError { server, message }`); the tab never calls
+     * the add and remove routes. They act on the RUNNING server only: connect overrides a disabled
+     * configuration "until restart" and disconnect removes the tools "until reconnected"
+     * (descriptions of `protocol/src/groups/mcp.ts` at the v2.0.32 tag, read), so nothing persists
+     * in `opencode.json`. VERIFIED, through the OLD name `mcp.connect`, that the 204 of connect
+     * arrives AFTER the handshake of a LOCAL (stdio) server: the case "registers the integration
+     * of a remote MCP server and connects and disconnects a local one" of `realOpencode.test.ts`
+     * printed `mcp.connect: connected at return: true` (read right after the call returned;
+     * Windows 11, 10/11/2026, against an opencode 2.2.5 executable). VERIFIED under the new name
+     * `experimental.mcp.connect` against opencode 2.2.7 (Windows 11, 10/11/2026): the same case
+     * printed `mcp.connect: connected at return: true`.
+     * HYPOTHESIS for a remote server, whose handshake may take longer.
+     */
+    mcp: {
+      connect(input: ExperimentalMcpConnectInput): Promise<void>;
+      disconnect(input: ExperimentalMcpDisconnectInput): Promise<void>;
+    };
   };
   agent: { list(input?: AgentListInput): Promise<AgentListOutput> };
   /**
