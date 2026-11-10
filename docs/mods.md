@@ -47,7 +47,10 @@ next section.
 When the mods folder holds at least one mod (or a folder that was skipped), the prompt bar shows a
 puzzle-piece button after **+** and **/**, with the number of active mods on it. It opens a popover
 with one switch per mod, its description, and a line when the mod is starting or failed. Folders that
-were skipped appear without a switch. **Open folder** reveals the mods folder.
+were skipped appear without a switch. **Open folder** reveals the mods folder. The same switches are
+in the **Mods** section of the **OpenCode Settings** tab (**OpenCode: Open Settings…**), with
+**Reload mods** and **Open folder**; it is the same list and the same switch, and a mod that failed
+also shows up in that tab's **Needs attention**.
 
 - **Each switch starts or stops only that mod.** Turning one off removes its band, its commands from
   the `/` menu and its open panels, and stops its worker. The other mods keep running: their
