@@ -167,4 +167,23 @@ describe('noticeText', () => {
     expect(text).toBe('The default model was not changed. Unknown model');
     expect(text).not.toContain('Sign-in');
   });
+
+  /**
+   * Protects the live region from reading out the `mcp_...` id and from mentioning sign-in for a
+   * Connect/Disconnect/Retry of an MCP server (issue #186, PR2). FABRICATED notices; the wording is
+   * checked, not a screen reader. `message` is appended only for the failure.
+   */
+  it("words the three MCP notices with the server's name", () => {
+    const base = { integrationID: '', server: 'docs' } as const;
+    expect(noticeText({ ...base, kind: 'mcpConnected', message: 'ignored' }, 'docs')).toBe(
+      'Connected to docs.',
+    );
+    expect(noticeText({ ...base, kind: 'mcpDisconnected', message: 'ignored' }, 'docs')).toBe(
+      'Disconnected from docs.',
+    );
+    const failed = noticeText({ ...base, kind: 'mcpFailed', message: 'Connection closed' }, 'docs');
+    expect(failed).toBe('docs could not be changed. Connection closed');
+    expect(failed).not.toContain('Sign-in');
+    expect(noticeText({ ...base, kind: 'mcpFailed' }, 'docs')).toBe('docs could not be changed.');
+  });
 });

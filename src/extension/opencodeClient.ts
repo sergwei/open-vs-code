@@ -31,6 +31,8 @@ import type {
   IntegrationOauthConnectOutput,
   IntegrationOauthStatusInput,
   IntegrationOauthStatusOutput,
+  McpConnectInput,
+  McpDisconnectInput,
   McpListInput,
   McpListOutput,
   McpResourceCatalogInput,
@@ -308,12 +310,25 @@ export interface ChatApi {
   credential: { remove(input: CredentialRemoveInput): Promise<void> };
   /**
    * `GET /api/mcp` (servers with their status) and `GET /api/mcp/resource` (resources and
-   * templates of all of them), both `{ location, data }` and NOT unwrapped. Read only: the
-   * `/api/experimental/mcp/*` writes are out of scope. The spike saw `mcp.list` answer `[]` for
-   * the first seconds of a server that has MCP servers configured; see `serverConfig.ts`.
+   * templates of all of them), both `{ location, data }` and NOT unwrapped; plus the two writes the
+   * Settings tab uses (issue #186, PR2), `POST /api/experimental/mcp/:server/connect` and
+   * `.../disconnect`. Both answer 204 with no body and declare 400, 401 and 404
+   * (`McpServerNotFoundError { server, message }`); the tab never calls the add and remove routes.
+   * They act on the RUNNING server only: connect overrides a disabled configuration "until
+   * restart" and disconnect removes the tools "until reconnected" (descriptions of
+   * `protocol/src/groups/mcp.ts` at the v2.0.32 tag, read), so nothing persists in
+   * `opencode.json`. VERIFIED that the 204 of connect arrives AFTER the handshake of a LOCAL
+   * (stdio) server: the case "registers the integration of a remote MCP server and connects and
+   * disconnects a local one" of `realOpencode.test.ts` printed `mcp.connect: connected at return:
+   * true` (read right after the call returned; Windows 11, 10/11/2026, against an opencode 2.2.5
+   * executable, NOT the pinned 2.0.32). HYPOTHESIS for a remote server, whose handshake may take
+   * longer, and on 2.0.32 itself. The spike saw `mcp.list` answer `[]` for the first seconds of a server that has MCP
+   * servers configured; see `serverConfig.ts`.
    */
   mcp: {
     list(input?: McpListInput): Promise<McpListOutput>;
+    connect(input: McpConnectInput): Promise<void>;
+    disconnect(input: McpDisconnectInput): Promise<void>;
     resource: { catalog(input?: McpResourceCatalogInput): Promise<McpResourceCatalogOutput> };
   };
   agent: { list(input?: AgentListInput): Promise<AgentListOutput> };

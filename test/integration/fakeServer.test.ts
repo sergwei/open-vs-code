@@ -3187,6 +3187,105 @@ describe('fake server', function () {
         await config().update(DEFAULT_MODEL_KEY, saved, vscode.ConfigurationTarget.Global);
       }
     });
+
+    /** Sends a `settings.mcp` request through the same guard as a real webview message. */
+    const sendMcp = (server: string, op: string): Thenable<unknown> =>
+      vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+        type: 'settings.mcp',
+        server,
+        op,
+      });
+    const mcpRow = (state: SettingsState, name: string) =>
+      state.mcp.servers.find((row) => row.name === name);
+
+    /**
+     * Disconnects `docs` from the Settings tab and connects it again: the state goes `disabled`
+     * with no resources, then `connected` with its two, and each action reaches the fake exactly
+     * once (one `{"fake":"mcp"` stderr line per write, which the host logs verbatim).
+     *
+     * Protects PR2 of #186 (M1): the host sends `connect`/`disconnect` to the right route with the
+     * right server and the store follows `mcp.status.changed` / `mcp.resources.changed` after it.
+     * Provenance: SYNTHETIC server; the 204-after-handshake order is the fake's, the real one is
+     * `realOpencode.test.ts`. Runs after the MCPFLIP case, so `broken` is not used here.
+     */
+    it('disconnects and reconnects an MCP server from the Settings tab', async function () {
+      const log = await openLogCursor();
+      await sendMcp('docs', 'disconnect');
+      const off = await waitForState((s) => mcpRow(s, 'docs')?.status === 'disabled', 'docs off');
+      assert.strictEqual(mcpRow(off, 'docs')?.resources.length, 0, 'docs kept its resources');
+      await log.waitFor('mcp disconnect: docs', 10_000);
+      assert.strictEqual(countOf(log, '{"fake":"mcp","op":"disconnect","server":"docs"}'), 1);
+
+      await sendMcp('docs', 'connect');
+      const on = await waitForState(
+        (s) =>
+          mcpRow(s, 'docs')?.status === 'connected' &&
+          (mcpRow(s, 'docs')?.resources.length ?? 0) === 2,
+        'docs back with its two resources',
+      );
+      assert.strictEqual(mcpRow(on, 'docs')?.resources.length, 2);
+      await log.waitFor('mcp connect: docs', 10_000);
+      assert.strictEqual(countOf(log, '{"fake":"mcp","op":"connect","server":"docs"}'), 1);
+    });
+
+    /**
+     * Three MCP requests the state does not allow reach no route: `connect` to a connected `docs`,
+     * anything to an invented server, and `connect` to `linear` (needs_auth). The log gets three
+     * `settings request refused: settings.mcp` lines and not one `{"fake":"mcp"` line.
+     *
+     * Protects M1 (the host revalidates against its snapshot instead of trusting the webview).
+     * The negative half waits for the refusal lines first (the positive) and then one
+     * `SETTLE_MS` window, so a late write could still show.
+     */
+    it('refuses an MCP action the state does not allow', async function () {
+      await waitForState((s) => mcpRow(s, 'docs')?.status === 'connected', 'docs connected');
+      const log = await openLogCursor();
+      await sendMcp('docs', 'connect');
+      await sendMcp('ghost', 'connect');
+      await sendMcp('linear', 'connect');
+      const refusal = 'settings request refused: settings.mcp';
+      const deadline = Date.now() + 10_000;
+      while (countOf(log, refusal) < 3) {
+        if (Date.now() >= deadline) assert.fail(`fewer than 3 refusals; log:\n${log.added()}`);
+        await sleep(100);
+      }
+      await sleep(SETTLE_MS); // negative window: a refused action must not reach the fake
+      log.assertAbsent('{"fake":"mcp"');
+    });
+
+    /**
+     * Signs in to `linear` through its integration: the state offers `canSignIn` and the `mcp_…`
+     * integrationID, `settings.mcpSignIn` runs the OAuth flow, the test browser approves the link
+     * and the fake reconnects the server (`needs_auth` -> `connected`). Providers never lists the
+     * `mcp_…` row.
+     *
+     * Protects M2 (the sign-in goes through ProviderAuth with the mcp integration row) and the
+     * filter that keeps `source: 'mcp'` rows out of Providers. SYNTHETIC: the fake's reconnect on
+     * approval imitates `Credential.Event.Switched`; no real MCP OAuth server is involved.
+     */
+    it('signs in to an MCP server through its integration', async function () {
+      const before = await readState();
+      const linear = mcpRow(before, 'linear');
+      assert.strictEqual(linear?.status, 'needs_auth');
+      assert.strictEqual(linear.canSignIn, true);
+      assert.ok(/^mcp_[0-9a-f]{16}$/.test(linear.integrationID ?? ''), 'no mcp_ integrationID');
+      const log = await openLogCursor();
+      await vscode.commands.executeCommand(TEST_PROVIDER_ANSWERS_COMMAND_ID, { approve: true });
+      await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+        type: 'settings.mcpSignIn',
+        server: 'linear',
+      });
+      await log.waitFor(`provider connected: ${linear.integrationID ?? ''} (oauth)`, 15_000);
+      const after = await waitForState(
+        (s) => mcpRow(s, 'linear')?.status === 'connected',
+        'linear connected after the approval',
+        15_000,
+      );
+      assert.ok(
+        after.providers.rows.every((row) => !row.id.startsWith('mcp_')),
+        'Providers lists the mcp_ integration',
+      );
+    });
   });
 
   /**

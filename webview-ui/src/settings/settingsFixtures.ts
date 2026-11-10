@@ -138,11 +138,16 @@ export const openai: ProviderRow = {
   ],
 };
 
-/** The four MCP states, one server each, as the fake server lists them. */
+/**
+ * The four MCP states, one server each, as the fake server lists them. `linear` carries the
+ * (invented, same shape as upstream's) id of its OAuth integration and `canSignIn: true`, which is
+ * what the host sends when the integration list has the matching `source: 'mcp'` row.
+ */
 export const mcpServers: SettingsMcpServerRow[] = [
   {
     name: 'docs',
     status: 'connected',
+    canSignIn: false,
     resources: [{ name: 'readme.md', uri: 'file:///readme.md', mimeType: 'text/markdown' }],
     templates: [{ name: 'files', uriTemplate: 'file:///{path}' }],
   },
@@ -150,9 +155,17 @@ export const mcpServers: SettingsMcpServerRow[] = [
     name: 'broken',
     status: 'failed',
     error: 'Connection closed: MCP server process exited',
+    canSignIn: false,
     resources: [],
     templates: [],
   },
-  { name: 'off', status: 'disabled', resources: [], templates: [] },
-  { name: 'linear', status: 'needs_auth', resources: [], templates: [] },
+  { name: 'off', status: 'disabled', canSignIn: false, resources: [], templates: [] },
+  {
+    name: 'linear',
+    status: 'needs_auth',
+    integrationID: 'mcp_0123456789abcdef',
+    canSignIn: true,
+    resources: [],
+    templates: [],
+  },
 ];

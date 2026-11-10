@@ -11,8 +11,13 @@
 // logs a key: the key is asked by `ProviderAuth` in a native InputBox.
 
 import * as l10n from '@vscode/l10n';
-import type { ProviderAuth } from './providerAuth';
-import type { ServerConfig } from './serverConfig';
+import type { AuthResult, ProviderAuth } from './providerAuth';
+import type {
+  IntegrationRow,
+  McpServerRow,
+  ServerConfig,
+  ServerConfigSnapshot,
+} from './serverConfig';
 import type { ServerLog } from './opencodeServer';
 import type { ConnectionState } from '../shared/protocol';
 import {
@@ -22,6 +27,8 @@ import {
   type ProviderRow,
   type SettingsAction,
   type SettingsHostToWebview,
+  type SettingsMcpOp,
+  type SettingsMcpServerRow,
   type SettingsNotice,
   type SettingsPreference,
   type SettingsSettingKey,
@@ -31,7 +38,10 @@ import {
 import { isAvailable, parseModelSetting } from './modelPreference';
 
 /** The slice of {@link ServerConfig} the controller reads. */
-export type SettingsConfigSource = Pick<ServerConfig, 'snapshot' | 'onDidChange' | 'reloadAll'>;
+export type SettingsConfigSource = Pick<
+  ServerConfig,
+  'snapshot' | 'onDidChange' | 'reloadAll' | 'mcpAction'
+>;
 /** The slice of {@link ProviderAuth} the controller drives. */
 export type SettingsAuth = Pick<
   ProviderAuth,
@@ -115,6 +125,8 @@ export interface SettingsControllerDeps {
 export class SettingsController {
   private ready = false;
   private dirty = false;
+  /** MCP servers with a connect, disconnect or sign-in still running: a second one is refused. */
+  private readonly mcpBusy = new Set<string>();
   private readonly unsubscribe: (() => void)[];
 
   constructor(private readonly deps: SettingsControllerDeps) {
@@ -159,7 +171,8 @@ export class SettingsController {
    * (`ProviderInfo.integrationID`, or the provider id when the server names none: HYPOTHESIS that
    * the ids match then, unchecked against a real server with a second provider). The preference
    * `status` is judged against the model rows held now, so it is only meaningful once
-   * `models.loaded`.
+   * `models.loaded`. Each MCP server gets its `canSignIn` and `integrationID` from {@link mcpRow}
+   * (the second only when it names an `mcp` integration row), and keeps its `detail`.
    */
   buildState(): SettingsState {
     const snapshot = this.deps.config.snapshot();
@@ -207,7 +220,7 @@ export class SettingsController {
         loaded: snapshot.mcp.loaded,
         failed: snapshot.mcp.failed,
         pendingFirstRead: snapshot.mcp.pendingFirstRead,
-        servers: snapshot.mcp.servers,
+        servers: snapshot.mcp.servers.map((server) => this.mcpRow(server, snapshot)),
       },
       ...(attempt === undefined ? {} : { attempt }),
     };
@@ -229,6 +242,42 @@ export class SettingsController {
       const name = error instanceof Error ? error.name : 'unknown';
       this.deps.log.warn(`settings request failed: ${raw.type}: ${name}`);
     }
+  }
+
+  /**
+   * One MCP server as the webview gets it. The server's `integrationID` is passed on (and
+   * `canSignIn` can be true) only when it matches an integration row marked `source: 'mcp'`: an id
+   * the integration list does not know would let the tab show a sign-in that cannot run. `canSignIn`
+   * also needs the status `needs_auth` and an OAuth method the tab can run (`supported`).
+   * VERIFIED by "marks canSignIn and integrationID only with an mcp integration row and an oauth
+   * method" of `settingsController.test.ts` (fabricated snapshot, vitest, Windows 11).
+   */
+  private mcpRow(server: McpServerRow, snapshot: ServerConfigSnapshot): SettingsMcpServerRow {
+    const integration = this.mcpIntegration(server, snapshot);
+    return {
+      name: server.name,
+      status: server.status,
+      ...(server.error === undefined ? {} : { error: server.error }),
+      ...(server.detail === undefined ? {} : { detail: server.detail }),
+      ...(integration === undefined ? {} : { integrationID: integration.id }),
+      canSignIn:
+        server.status === 'needs_auth' &&
+        integration !== undefined &&
+        integration.methods.some((method) => method.type === 'oauth' && method.supported),
+      resources: server.resources,
+      templates: server.templates,
+    };
+  }
+
+  /** The `source: 'mcp'` integration row the server's `integrationID` names, if any. */
+  private mcpIntegration(
+    server: McpServerRow,
+    snapshot: ServerConfigSnapshot,
+  ): IntegrationRow | undefined {
+    if (server.integrationID === undefined) return undefined;
+    return snapshot.integrations.rows.find(
+      (row) => row.id === server.integrationID && row.source === 'mcp',
+    );
   }
 
   /** The setting, read now, with its status against the model rows the store holds now. */
@@ -286,6 +335,142 @@ export class SettingsController {
       case 'settings.disconnect':
         await this.disconnect(message.integrationID, message.credentialID);
         return;
+      case 'settings.mcp':
+        await this.mcpChange(message.server, message.op);
+        return;
+      case 'settings.mcpSignIn':
+        await this.mcpSignIn(message.server);
+        return;
+    }
+  }
+
+  /**
+   * Posts an `mcpFailed` notice for `server` with `message`, then a fresh state (a refused request
+   * leaves the row's busy mark to the webview, which clears it on the next state or notice of that
+   * server). Used for every refusal and failure of the two MCP requests.
+   */
+  private mcpFailed(server: string, message: string): void {
+    this.notice({ integrationID: '', kind: 'mcpFailed', server, message });
+    this.changed();
+  }
+
+  /**
+   * Revalidates a connect or disconnect of an MCP server against the snapshot and runs it. The
+   * server must exist; `connect` is allowed from `disabled` and `failed` only, `disconnect` from
+   * `connected` and `pending` only (`needs_auth` has its own request, and the tab never offers
+   * add or remove: decision P6); a second request for a server whose first has not finished is
+   * refused. Every refusal writes one `settings request refused` line with a fixed reason and posts
+   * an `mcpFailed` notice, without calling the server. After the call the state is READ again
+   * (`ServerConfig.mcpAction` does it) and the notice says what the server became: `connected`
+   * says connected, `disabled` says disconnected, `failed` and `needs_auth` say the error, and
+   * `pending` says nothing yet (the stream will move the row). No optimistic state is posted.
+   * VERIFIED by the checks of "SettingsController MCP requests" in `settingsController.test.ts`
+   * (fabricated snapshot and fake `mcpAction`, vitest, Windows 11, 10/11/2026): "allows connect from
+   * disabled and failed, disconnect from connected and pending, and nothing else" (every state
+   * against both operations), "refuses a second request for a server whose first has not
+   * finished" and "words the notice by the state read after the change". Against the SYNTHETIC
+   * server the `fake-server` cases "disconnects and reconnects an MCP server from the Settings
+   * tab" and "refuses an MCP action the state does not allow" passed (Windows 11, VS Code,
+   * 10/11/2026); the real-server half is `mcpAction` in `serverConfig.ts`.
+   */
+  private async mcpChange(name: string, op: SettingsMcpOp): Promise<void> {
+    const server = this.deps.config.snapshot().mcp.servers.find((row) => row.name === name);
+    if (server === undefined) {
+      this.refused('settings.mcp', 'unknown server');
+      this.mcpFailed(name, l10n.t('Unknown MCP server'));
+      return;
+    }
+    const allowed =
+      op === 'connect'
+        ? server.status === 'disabled' || server.status === 'failed'
+        : server.status === 'connected' || server.status === 'pending';
+    if (!allowed) {
+      this.refused('settings.mcp', `${op} not allowed in this state`);
+      this.mcpFailed(name, l10n.t('That is not possible in the current state of the server.'));
+      return;
+    }
+    if (this.mcpBusy.has(name)) {
+      this.refused('settings.mcp', 'another request in progress');
+      this.mcpFailed(name, l10n.t('Another change of this server is still running.'));
+      return;
+    }
+    this.mcpBusy.add(name);
+    try {
+      const result = await this.deps.config.mcpAction(name, op);
+      if (result.kind === 'failed') {
+        this.mcpFailed(name, result.message);
+        return;
+      }
+      const after = this.deps.config.snapshot().mcp.servers.find((row) => row.name === name);
+      if (after === undefined) {
+        this.mcpFailed(name, l10n.t('Unknown MCP server'));
+        return;
+      }
+      switch (after.status) {
+        case 'connected':
+          this.notice({ integrationID: '', kind: 'mcpConnected', server: name });
+          break;
+        case 'disabled':
+          this.notice({ integrationID: '', kind: 'mcpDisconnected', server: name });
+          break;
+        case 'failed':
+        case 'needs_auth':
+          this.notice({
+            integrationID: '',
+            kind: 'mcpFailed',
+            server: name,
+            ...(after.error === undefined || after.error === '' ? {} : { message: after.error }),
+          });
+          break;
+        case 'pending':
+          break;
+      }
+      this.changed();
+    } finally {
+      this.mcpBusy.delete(name);
+    }
+  }
+
+  /**
+   * Revalidates an MCP sign-in and runs the existing OAuth flow of {@link ProviderAuth} with the
+   * server's integration row (the one `source: 'mcp'`, hidden from Providers) and its first OAuth
+   * method the tab can run. The server must exist, be `needs_auth` and have `canSignIn` (the
+   * same test the state uses), and have no other request running; otherwise the request is
+   * refused with one fixed-reason line and an `mcpFailed` notice, and nothing is started. The
+   * result becomes the same notices as {@link connect}, with the integration id `mcp_...` (the
+   * webview names them with the server).
+   * VERIFIED by "signs in through the mcp integration row and its oauth method, and names the
+   * ending" and "refuses a sign-in without an integration, in another state, for a ghost, or
+   * while busy" of `settingsController.test.ts` (fabricated snapshot and fake `auth`, vitest,
+   * Windows 11, 10/11/2026). UNVERIFIED: a real OAuth sign-in of an MCP
+   * server (no suite has a server that speaks MCP OAuth).
+   */
+  private async mcpSignIn(name: string): Promise<void> {
+    const snapshot = this.deps.config.snapshot();
+    const server = snapshot.mcp.servers.find((row) => row.name === name);
+    if (server === undefined) {
+      this.refused('settings.mcpSignIn', 'unknown server');
+      this.mcpFailed(name, l10n.t('Unknown MCP server'));
+      return;
+    }
+    const integration = this.mcpIntegration(server, snapshot);
+    const method = integration?.methods.find((m) => m.type === 'oauth' && m.supported);
+    if (server.status !== 'needs_auth' || integration === undefined || method === undefined) {
+      this.refused('settings.mcpSignIn', 'cannot sign in to this server');
+      this.mcpFailed(name, l10n.t('That is not possible in the current state of the server.'));
+      return;
+    }
+    if (this.mcpBusy.has(name)) {
+      this.refused('settings.mcpSignIn', 'another request in progress');
+      this.mcpFailed(name, l10n.t('Another change of this server is still running.'));
+      return;
+    }
+    this.mcpBusy.add(name);
+    try {
+      const result = await this.deps.auth.connect(integration, method.index, {});
+      this.announce(integration.id, integration.name, result);
+    } finally {
+      this.mcpBusy.delete(name);
     }
   }
 
@@ -375,12 +560,21 @@ export class SettingsController {
       clean[key] = value.slice(0, MAX_SETTINGS_VALUE);
     }
     const result = await this.deps.auth.connect(row, methodIndex, clean);
+    this.announce(integrationID, row.name, result);
+  }
+
+  /**
+   * Turns the end of a sign-in flow into its notice: `connected`, `cancelled`, `expired`, `failed`
+   * or `unsupported`, all with the integration id (a provider's or an MCP server's `mcp_...`).
+   * Shared by {@link connect} and {@link mcpSignIn}, so both word the five endings the same.
+   */
+  private announce(integrationID: string, name: string, result: AuthResult): void {
     switch (result.kind) {
       case 'connected':
         this.notice({
           integrationID,
           kind: 'connected',
-          message: l10n.t('Connected to {0}', row.name),
+          message: l10n.t('Connected to {0}', name),
         });
         return;
       case 'cancelled':

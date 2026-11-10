@@ -108,11 +108,34 @@ export const SETTINGS_SETTING_KEYS: readonly SettingsSettingKey[] = [
   'mods.enabled',
 ];
 
-/** One MCP server with its resources and templates (read only). */
+/** What the tab may ask of one MCP server's connection. */
+export type SettingsMcpOp = 'connect' | 'disconnect';
+
+/**
+ * One MCP server with its resources and templates. Since issue #186 (PR2) the tab can connect,
+ * disconnect and sign in to it; the host revalidates every such request against its own snapshot.
+ */
 export interface SettingsMcpServerRow {
   name: string;
   status: 'connected' | 'pending' | 'disabled' | 'failed' | 'needs_auth';
+  /** First line of the server's error (at most 200 characters), scrubbed; shown in the row. */
   error?: string;
+  /**
+   * The whole error (at most 20 lines and 2000 characters, scrubbed, CRLF read as line breaks) that
+   * "Show details" unfolds. ABSENT when the error is one line or the server has none.
+   */
+  detail?: string;
+  /**
+   * The id of the integration the server registered for its OAuth sign-in (`mcp_` + hash), only when
+   * it matches a row of the integration list marked `source: 'mcp'`. The webview compares it with
+   * `state.attempt.integrationID` to show the sign-in in progress on this row.
+   */
+  integrationID?: string;
+  /**
+   * True when "Sign in" can work: the server needs auth, its integration is known and has an OAuth
+   * method the tab can run. Computed by the host; the webview never guesses it.
+   */
+  canSignIn: boolean;
   resources: { name: string; uri: string; description?: string; mimeType?: string }[];
   templates: { name: string; uriTemplate: string; description?: string }[];
 }
@@ -157,6 +180,7 @@ export interface SettingsState {
 
 /** A one-shot message ("Connected to X", "Sign-in expired"); never carries a secret. */
 export interface SettingsNotice {
+  /** The integration the notice is about; `''` for the three `mcp*` kinds and an unparsed model. */
   integrationID: string;
   kind:
     | 'connected'
@@ -166,8 +190,14 @@ export interface SettingsNotice {
     | 'cancelled'
     | 'unsupported'
     /** A default-model request was refused or could not be saved; says nothing about sign-in. */
-    | 'modelRefused';
+    | 'modelRefused'
+    /** An MCP server is connected / disconnected / could not be connected after a tab request. */
+    | 'mcpConnected'
+    | 'mcpDisconnected'
+    | 'mcpFailed';
   message?: string;
+  /** The MCP server's name, for the three `mcp*` kinds (the `mcp_...` id is no name to read out). */
+  server?: string;
 }
 
 /** Host to settings webview. */
@@ -196,7 +226,11 @@ export type SettingsWebviewToHost =
   | { type: 'settings.action'; action: SettingsAction }
   /** `''` clears the setting; otherwise `provider/model`, revalidated against the catalog. */
   | { type: 'settings.setDefaultModel'; model: string }
-  | { type: 'settings.openSetting'; key: SettingsSettingKey };
+  | { type: 'settings.openSetting'; key: SettingsSettingKey }
+  /** Connect or disconnect one MCP server of the snapshot; never add or remove (decision P6). */
+  | { type: 'settings.mcp'; server: string; op: SettingsMcpOp }
+  /** Start the OAuth sign-in of a `needs_auth` MCP server through its integration. */
+  | { type: 'settings.mcpSignIn'; server: string };
 
 /** True for a non-empty string of at most {@link MAX_SETTINGS_ID} characters. */
 function isId(value: unknown): value is string {
@@ -252,6 +286,11 @@ function isModelText(value: unknown): boolean {
   return typeof value === 'string' && value.length <= 2 * MAX_SETTINGS_ID + 1;
 }
 
+/** True for one of the two MCP operations the tab may ask for. */
+function isMcpOp(value: unknown): value is SettingsMcpOp {
+  return value === 'connect' || value === 'disconnect';
+}
+
 /** The fields each webview message may have besides `type`, and the check of their values. */
 const WEBVIEW_SHAPES: Record<
   SettingsWebviewToHost['type'],
@@ -275,21 +314,42 @@ const WEBVIEW_SHAPES: Record<
   'settings.action': { keys: ['action'], valid: (m) => isSettingsAction(field(m, 'action')) },
   'settings.setDefaultModel': { keys: ['model'], valid: (m) => isModelText(field(m, 'model')) },
   'settings.openSetting': { keys: ['key'], valid: (m) => isSettingKey(field(m, 'key')) },
+  'settings.mcp': {
+    keys: ['server', 'op'],
+    valid: (m) => isId(field(m, 'server')) && isMcpOp(field(m, 'op')),
+  },
+  'settings.mcpSignIn': { keys: ['server'], valid: (m) => isId(field(m, 'server')) },
 };
 
 /**
  * Guard for messages arriving at the host from the settings webview, which is untrusted input.
  *
- * Accepts only a plain object whose `type` is one of the nine known ones, whose own properties
+ * Accepts only a plain object whose `type` is one of the eleven known ones, whose own properties
  * are EXACTLY `type` plus the ones that type declares (so a `apiKey` or `secret` makes it fail, as
  * does any other extra field; `settings.openSetting` DOES declare a `key`, which must be one of
- * {@link SETTINGS_SETTING_KEYS}, never free text), and whose values pass the bounds above: ids up
+ * {@link SETTINGS_SETTING_KEYS}, never free text; `settings.mcp` declares `server` and an `op` that
+ * is `connect` or `disconnect`, so an `add` or `remove` never gets through), and whose values pass
+ * the bounds above: ids (an MCP `server` name included) up
  * to 200 characters, a method index up to 100, at most 20 answers of at most 2000 characters, a
  * default-model text of at most 401 characters (empty allowed: it clears the setting). Never
  * throws: a throwing getter or a hostile object yields `false`. Whether the integration or method
  * exists is NOT checked here; `settingsController.ts` revalidates against the server's snapshot.
  *
- * VERIFIED by `settingsProtocol.test.ts` with fabricated messages (a message with `key`, `apiKey`
+ * VERIFIED by "takes a connect or disconnect of an MCP server and a sign-in, and nothing else" of
+ * `settingsProtocol.test.ts` (fabricated messages, vitest, Windows 11, 10/11/2026): `settings.mcp`
+ * with `add`, `remove`, an empty or 201-character `server`, or an extra `config`, `key`, `apiKey`,
+ * `secret` or `add` is rejected, and `settings.mcpSignIn` with a `key`, a `secret` or an
+ * `integrationID` is rejected. Through `test.settingsMessage` (the same guard, not a DOM
+ * `postMessage`) the `fake-server` cases "disconnects and reconnects an MCP server from the
+ * Settings tab" and "signs in to an MCP server through its integration" had it accept both
+ * messages (Windows 11, VS Code, 10/11/2026). From the real DOM, VERIFIED in `test:visual` step 52
+ * (VS Code 1.145.2, Windows 11, 10/11/2026): the buttons of the real webview posted both messages
+ * and the host did the work, "ok   F1 Disconnect of docs: its row goes to disabled with [Connect]
+ * and no resources, the busy mark showed while it waited (true), the MCP card says "0 of 4 active"
+ * and the live region says "Disconnected from docs."" and "ok   F3 Sign in of linear: the attempt
+ * showed in its row with [Cancel] (true), the approval connects it [Disconnect] with no attempt
+ * left, the MCP card says "2 of 4 active", the live region says "Connected to linear." (the
+ * server's name, not mcp_...) and Providers has no mcp_ row (0)". VERIFIED by `settingsProtocol.test.ts` with fabricated messages (a message with `key`, `apiKey`
  * or `secret` is rejected on `settings.ready`, `settings.connect`, `settings.cancel` and
  * `settings.setDefaultModel`; `settings.openSetting` accepts a `key` only from the closed list, and
  * rejects `apiKey` and `secret`; Windows 11, vitest, 07/11/2026) and, through `test.settingsMessage` (the same guard,

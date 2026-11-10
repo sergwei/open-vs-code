@@ -595,6 +595,81 @@ describe('announcements', () => {
     apply({ type: 'settings.notice', notice: { integrationID: 'azure', kind: 'connected' } });
     expect(region.textContent).toContain('Connected to Azure.');
   });
+
+  /**
+   * Protects M3 of issue #186 (PR2): the live region names an MCP server by its name. The notices
+   * of Connect/Disconnect/Retry carry `server`; the ones of an MCP sign-in carry the `mcp_...` id of
+   * its integration, which must never be read out. Fabricated notices and the `linear` fixture row.
+   */
+  it('names an MCP server by its name, never by the mcp_ id of its integration', () => {
+    const { container, apply } = setup(
+      makeState({ mcp: { ...makeState().mcp, servers: mcpServers } }),
+    );
+    const region = must(container, '[role="status"].visually-hidden');
+    batch(() => {
+      apply({
+        type: 'settings.notice',
+        notice: { integrationID: '', kind: 'mcpConnected', server: 'off' },
+      });
+      apply({
+        type: 'settings.notice',
+        notice: { integrationID: '', kind: 'mcpDisconnected', server: 'docs' },
+      });
+      apply({
+        type: 'settings.notice',
+        notice: { integrationID: '', kind: 'mcpFailed', server: 'broken', message: 'Boom' },
+      });
+      apply({
+        type: 'settings.notice',
+        notice: { integrationID: 'mcp_0123456789abcdef', kind: 'connected' },
+      });
+      apply({
+        type: 'settings.notice',
+        notice: { integrationID: 'mcp_0123456789abcdef', kind: 'cancelled' },
+      });
+    });
+    expect(region.textContent).toBe(
+      'Connected to off. Disconnected from docs. broken could not be changed. Boom Connected to linear. Sign-in to linear was cancelled.',
+    );
+    expect(region.textContent).not.toContain('mcp_');
+  });
+
+  it('clears the busy mark of an MCP row when a notice names its server, even with the same state', () => {
+    const { container, apply, sent } = setup(
+      makeState({ mcp: { ...makeState().mcp, servers: mcpServers } }),
+      { section: 'mcp', search: '', drafts: {} },
+    );
+    const button = must<HTMLButtonElement>(
+      container,
+      '[data-server="off"] button.settings-mcp-action',
+    );
+    button.click();
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect(sent).toEqual([{ type: 'settings.mcp', server: 'off', op: 'connect' }]);
+    apply({
+      type: 'settings.notice',
+      notice: { integrationID: '', kind: 'mcpFailed', server: 'off', message: 'Not possible' },
+    });
+    expect(button.getAttribute('aria-disabled')).toBeNull();
+  });
+
+  it('clears the busy mark of the Sign in button when the notice carries only the integration id', () => {
+    const { container, apply } = setup(
+      makeState({ mcp: { ...makeState().mcp, servers: mcpServers } }),
+      { section: 'mcp', search: '', drafts: {} },
+    );
+    const button = must<HTMLButtonElement>(
+      container,
+      '[data-server="linear"] button.settings-mcp-action',
+    );
+    button.click();
+    expect(button.getAttribute('aria-busy')).toBe('true');
+    apply({
+      type: 'settings.notice',
+      notice: { integrationID: 'mcp_0123456789abcdef', kind: 'cancelled' },
+    });
+    expect(button.getAttribute('aria-busy')).toBeNull();
+  });
 });
 
 describe('focus when a row changes list', () => {

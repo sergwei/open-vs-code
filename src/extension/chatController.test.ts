@@ -570,6 +570,8 @@ function fakeApi(options: FakeOptions = {}) {
         calls.push('mcp.list');
         return Promise.resolve({ location: LOCATION, data: [] });
       },
+      connect: () => Promise.reject(new Error('mcp.connect is not used by the controller')),
+      disconnect: () => Promise.reject(new Error('mcp.disconnect is not used by the controller')),
       resource: {
         catalog: () => {
           calls.push('mcp.resource.catalog');
