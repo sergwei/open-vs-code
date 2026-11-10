@@ -85,9 +85,26 @@ export const SubagentProvider = Context.Provider;
  *
  * `now()` feeds the elapsed time of the rows; the components render it `aria-hidden` and outside any
  * live region, so a tick announces nothing. Children "active" means `childState` is `working` or
- * `waiting`, with no parent error (the bar does not read the parent's blocks).
+ * `waiting`, with no parent error (the bar does not read the parent's failure blocks).
+ *
+ * Issue #200: a child exists (`session.created`) before its first `session.execution.*`, and in that
+ * gap it has no status, so it would read `done` and the bar would blink away mid-turn (seen in the
+ * fake's event timeline: creation to start took 517 ms with a sibling already finished). The
+ * `startingIds` memo marks as `starting` the children linked (`childForTool`) to a `subagent` block
+ * of the open session that is still `running`, but only while the open session is `busy` or `retry`
+ * (a block left `running` after the parent was interrupted must not pin the bar). It reads `type`,
+ * `name`, `state.status` and the link, never `text`, so a streamed delta does not re-run it
+ * (HYPOTHESIS from the solid-webview store rules, not measured).
+ *
+ * Known limit (decision of Sergio, 10/11/2026): without metadata `childForTool` pairs a block with a
+ * child by title and agent, so an older child with the same description and agent (after a reload,
+ * say) can read `working` with a Stop button while the new block starts. The window is short and
+ * Stop on an inactive child is harmless.
  * VERIFIED by `SubagentBar.test.tsx` "ticks the elapsed time once a second while a child works and
- * stops the interval when none does" (fake timers, fabricated store data).
+ * stops the interval when none does" (fake timers, fabricated store data), and by "keeps the bar
+ * while a child is created but has not started (#200 sequence)", "has no bar for a starting child
+ * when the parent is idle" and "has no bar for a child whose subagent block completed" (fabricated
+ * store data).
  */
 export function createSubagentMonitor(store: ChatStore, actions: SubagentActions): SubagentMonitor {
   const state = store.state;
@@ -99,12 +116,36 @@ export function createSubagentMonitor(store: ChatStore, actions: SubagentActions
     const form = state.requests.forms.find((ask) => ask.sessionID === childID);
     return form === undefined ? undefined : { kind: 'form', sessionID: childID, id: form.id };
   };
+  const startingIds = createMemo(
+    (): ReadonlySet<string> => {
+      const result = new Set<string>();
+      const openID = state.open.sessionID;
+      if (openID === undefined) return result;
+      const parentType = state.statuses[openID]?.type;
+      if (parentType !== 'busy' && parentType !== 'retry') return result;
+      for (const parts of Object.values(state.open.parts)) {
+        for (const part of parts) {
+          if (part.type !== 'tool' || part.name !== 'subagent') continue;
+          if (part.state.status !== 'running') continue;
+          const child = childForTool(part, state.sessions, openID);
+          if (child !== undefined) result.add(child.id);
+        }
+      }
+      return result;
+    },
+    new Set<string>(),
+    {
+      equals: (previous, next) =>
+        previous.size === next.size && [...next].every((id) => previous.has(id)),
+    },
+  );
   const stateOf = (childID: string, parentError?: string): ChildState =>
     childState({
       row: state.sessions[childID],
       status: state.statuses[childID],
       activity: state.subagents[childID],
       waiting: waitingTarget(childID) !== undefined,
+      starting: startingIds().has(childID),
       ...(parentError === undefined ? {} : { parentError }),
     });
   const active = createMemo((): ActiveChild[] => {

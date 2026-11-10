@@ -32,6 +32,12 @@ import { formatElapsed, toolPartOf, toolsText } from './subagentView';
  * so the one-second tick announces nothing. The list of the header ("Subagent sessions") stays (P2 = 1).
  * Without a provider it draws nothing.
  *
+ * The `<Show>` around the whole strip used to hide it for ~0.5 s at the start of a CREW turn
+ * (issue #200): a child that is created but has not started has no status and counted as done.
+ * `SubagentContext` now treats it as `working` (the "starting" state), so the `<Show>` is unchanged
+ * and no longer blinks; the test "keeps the bar while a child is created but has not started
+ * (#200 sequence)" of `SubagentBar.test.tsx` keeps the same `section` node through that sequence.
+ *
  * VERIFIED by `SubagentBar.test.tsx` (jsdom, fabricated store data: hidden without active children,
  * the one-string summary, aria wiring, rows, Answer only when waiting and its `requestFocus`, one
  * `subagent.stop` for Stop all, no focus change when a child arrives, the focus on "Stop One"

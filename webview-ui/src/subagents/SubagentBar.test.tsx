@@ -3,7 +3,8 @@
 // disclosure wiring (`aria-expanded`, `aria-controls`); one row per child with its tool and time;
 // Answer only for a waiting child and through `requestFocus`; Stop and Stop all send the right
 // `subagent.stop` (the second without `sessionID`) and lock with `aria-disabled`, never `disabled`;
-// a child that arrives moves no focus; the one-second tick runs only while a child is active.
+// a child that arrives moves no focus; the one-second tick runs only while a child is active; the
+// bar does not blink away between a child's creation and its start (issue #200).
 //
 // Provenance: FABRICATED store data (`monitorTesting.tsx`) in jsdom with fake timers. They confirm
 // the component logic, not the host contract, the layout or the themes (`test:visual` step 51 covers
@@ -13,6 +14,7 @@ import { must } from '../testing';
 import { SubagentBar } from './SubagentBar';
 import {
   addChild,
+  addSubagentBlock,
   digestTool,
   formOf,
   mountWithMonitor,
@@ -75,6 +77,71 @@ describe('SubagentBar visibility', () => {
     });
     m.store.apply({ type: 'session.status', sessionID: 'c2', status: { type: 'busy' } });
     expect(toggle().textContent).toBe('Subagents · 1 · 1 working');
+  });
+
+  // Protects issue #200 (the bar vanished ~0.5 s at the start of a CREW turn). The order is the one
+  // seen in the fake server's event timeline (10/11/2026): A and B created, C created, C starts and
+  // fails, A and B start 517 ms later. FABRICATED store data: it proves the join, not the real
+  // server's timing.
+  it('keeps the bar while a child is created but has not started (#200 sequence)', () => {
+    const m = mountBar();
+    const block = (child: string, status: 'running' | 'error'): void => {
+      addSubagentBlock(m.store, {
+        messageID: 'msg_1',
+        toolID: `call_${child}`,
+        childID: child,
+        status,
+        description: `task ${child}`,
+      });
+    };
+    addChild(m.store, 'ses_a', { status: null });
+    block('ses_a', 'running');
+    addChild(m.store, 'ses_b', { status: null });
+    block('ses_b', 'running');
+    addChild(m.store, 'ses_c', { status: null });
+    block('ses_c', 'running');
+    const section = must<HTMLElement>(document.body, '.subagent-bar');
+    expect(toggle().textContent).toBe('Subagents · 3 · 3 working');
+    m.store.apply({ type: 'session.status', sessionID: 'ses_c', status: { type: 'busy' } });
+    expect(bar()).toBe(section);
+    m.store.apply({
+      type: 'session.status',
+      sessionID: 'ses_c',
+      status: { type: 'error', error: { code: 'x', message: 'boom' } },
+    });
+    block('ses_c', 'error');
+    // C failed and A and B have not started: the gap in which the bar used to disappear.
+    expect(bar()).toBe(section);
+    expect(toggle().textContent).toBe('Subagents · 2 · 2 working');
+    m.store.apply({ type: 'session.status', sessionID: 'ses_a', status: { type: 'busy' } });
+    m.store.apply({ type: 'session.status', sessionID: 'ses_b', status: { type: 'busy' } });
+    expect(bar()).toBe(section);
+    expect(toggle().textContent).toBe('Subagents · 2 · 2 working');
+  });
+
+  it('has no bar for a starting child when the parent is idle', () => {
+    const m = mountBar();
+    m.store.apply({ type: 'session.status', sessionID: PARENT, status: { type: 'idle' } });
+    addChild(m.store, 'ses_a', { status: null });
+    addSubagentBlock(m.store, {
+      messageID: 'msg_1',
+      toolID: 'call_a',
+      childID: 'ses_a',
+      status: 'running',
+    });
+    expect(bar()).toBeNull();
+  });
+
+  it('has no bar for a child whose subagent block completed and has no status', () => {
+    const m = mountBar();
+    addChild(m.store, 'ses_a', { status: null });
+    addSubagentBlock(m.store, {
+      messageID: 'msg_1',
+      toolID: 'call_a',
+      childID: 'ses_a',
+      status: 'completed',
+    });
+    expect(bar()).toBeNull();
   });
 });
 

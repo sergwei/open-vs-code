@@ -44,6 +44,12 @@ export interface ChildFacts {
   waiting: boolean;
   /** The error text of the PARENT's `subagent` tool block, when that block failed. */
   parentError?: string;
+  /**
+   * True when the PARENT's `subagent` block that created this child is still `running` while the
+   * parent is busy or retrying: the child is about to start (issue #200). Only read when the child
+   * has no status of its own and no finished run.
+   */
+  starting?: boolean;
 }
 
 /**
@@ -53,15 +59,32 @@ export interface ChildFacts {
  *
  * Why the tool block alone cannot say it: with `background: true` the tool returns at once with
  * `status: "running"` while the child keeps going, so liveness comes from the child's own status.
- * With no status known (a child the host has not reported yet) the digest's `running` stands in.
+ * With no status known (a child the host has not reported yet) the digest's `running` stands in, and
+ * so does `starting`: a child is created (`session.created`) before its first `session.execution.*`,
+ * so for that gap it has no status and a digest with `running: false`, and without `starting` it
+ * would read `done` and the bar would blink away (issue #200). `starting` only counts with no status
+ * (any `session.status` of the child wins), with no `endedAt` in the digest and with no `outcome` in
+ * its row (a child that already finished a run does not "start" because of a stale block; same
+ * precedence as `activity.running`, so `failed` and `stopped` still show).
  * VERIFIED by `subagentView.test.ts` "ranks waiting over working over the finished states" and
- * "a background child whose tool already completed is still working" (fabricated facts).
+ * "a background child whose tool already completed is still working" (fabricated facts), and by
+ * "counts a starting child as working only with no status and no finished run" (fabricated facts).
+ * HYPOTHESIS: the creation-to-start gap exists in the real server but lasts milliseconds (read in
+ * subagent.ts@843a6c51, not measured).
  */
 export function childState(facts: ChildFacts): ChildState {
   if (facts.waiting) return 'waiting';
   const type = facts.status?.type;
   if (type === 'busy' || type === 'retry') return 'working';
-  if (type === undefined && facts.activity?.running === true) return 'working';
+  if (
+    type === undefined &&
+    (facts.activity?.running === true ||
+      (facts.starting === true &&
+        facts.activity?.endedAt === undefined &&
+        facts.row?.outcome === undefined))
+  ) {
+    return 'working';
+  }
   if (type === 'error' || facts.row?.outcome === 'failed') return 'failed';
   if (facts.parentError !== undefined && isFailure(facts.parentError)) return 'failed';
   if (facts.row?.outcome === 'interrupted') return 'stopped';
