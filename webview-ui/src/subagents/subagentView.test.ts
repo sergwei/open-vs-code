@@ -80,6 +80,40 @@ describe('childState', () => {
     );
   });
 
+  // Protects issue #200: a child created but not yet started (no status, digest `running: false`)
+  // read `done` and the bar blinked away. Facts are fabricated; the creation-to-start gap itself was
+  // observed only in the fake server's event timeline, not in a real subagent turn.
+  it('counts a starting child as working only with no status and no finished run', () => {
+    expect(childState({ waiting: false, starting: true })).toBe('working');
+    expect(childState({ waiting: false, starting: true, activity: activity(false) })).toBe(
+      'working',
+    );
+    expect(childState({ waiting: false, starting: true, status: { type: 'idle' } })).toBe('done');
+    expect(
+      childState({
+        waiting: false,
+        starting: true,
+        status: { type: 'error', error: { code: 'x', message: 'y' } },
+      }),
+    ).toBe('failed');
+    expect(
+      childState({
+        waiting: false,
+        starting: true,
+        activity: { ...activity(false), endedAt: 5 },
+      }),
+    ).toBe('done');
+    expect(childState({ waiting: false, activity: activity(false) })).toBe('done');
+    expect(childState({ waiting: true, starting: true })).toBe('waiting');
+    // A row outcome wins over a stale `starting` (same precedence as `activity.running`).
+    expect(
+      childState({ waiting: false, starting: true, row: row('c', { outcome: 'failed' }) }),
+    ).toBe('failed');
+    expect(
+      childState({ waiting: false, starting: true, row: row('c', { outcome: 'interrupted' }) }),
+    ).toBe('stopped');
+  });
+
   it.each([
     [
       'status error',

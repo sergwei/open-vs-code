@@ -20185,8 +20185,15 @@ try {
   // · cost", B has a cost in the fake) at 300 px in the four themes and in the chat tab in dark:
   // inside the document, no overflow, no `style`, title and summary contrast >= 4.5 (the
   // `foldedCells` cells). The screenshots of the dark cells are written: the full run on the final
-  // tree (08/11/2026) listed `51c-folded-300` and `51c-folded-tab` among its shots. NOT covered:
-  // macOS, Linux, a screen reader.
+  // tree (08/11/2026) listed `51c-folded-300` and `51c-folded-tab` among its shots. Issue #200: in
+  // each of the three rounds a MutationObserver (`watchBar`, set before the CREW prompt) counts the
+  // bar's appearances and removals, and `checkBarKept` requires "appeared once and never
+  // disappeared" right before the action that ends the bar on purpose. The fake is left as it is on
+  // purpose: A and B play SLOW, so they start ~600 ms after their `session.created` while C fails
+  // within 60 ms, and for ~0.5 s no child works (event timeline of this fake, Windows 11,
+  // 10/11/2026: C failed at 529 ms, A and B started at 1046 and 1061 ms); the real server has a
+  // gap of its own (HYPOTHESIS: it exists in the real server but lasts milliseconds, read in
+  // subagent.ts@843a6c51, not measured), and the fake's gap is the regression the observer exercises. NOT covered: macOS, Linux, a screen reader.
   await step('51 subagent monitor: bar and live cards (E2-subagent-monitor)', async () => {
     const DARK = 'Default Dark Modern';
     const A = 'Walk the repository';
@@ -20280,49 +20287,15 @@ try {
      * 08/11/2026: the list was still closed after 3 s); the `ok` line prints how many it took.
      * The 1.5 s wait after each press ends early when the list opens; when it does not, that
      * expiry is the normal path (the press only gave the focus) and is not listed in `== waits`.
-     * The final read that the check judges is retried for up to 3 s until it sees the list open
-     * (the bar can be mid re-render with nothing in it); if no read does, the last one is judged.
-     * "Appears" waits for the header toggle too, and a press that finds no toggle looks for it
-     * again for up to 5 s. VERIFIED on Windows 11 (10/11/2026): `--steps 51` ended "all visual
-     * checks passed" 4 times in a row with these waits. Before them, 3 earlier runs of the step
-     * failed: "second round: the bar header is pressed" in 2 of them (one also "chat tab: the bar
-     * header is pressed") and "second round: the bar list is open" in 1.
-     *
-     * Why the retries exist: the WHOLE bar (element and toggle) vanishes for an instant in the
-     * middle of a turn, because `SubagentBar.tsx` renders both inside one
-     * `<Show when={ids().length > 0}>`; that looks like a product bug, tracked in issue #200, and
-     * the retries only hide it from the step. They are therefore not silent: every time a read
-     * finds the bar or its toggle gone after an earlier read of the same call saw both, it is
-     * counted (one per episode, not per read), and a non-zero count ends the call with a `warn`
-     * line ("the subagent bar disappeared N time(s) …"). A `warn` line is neither `ok` nor `FAIL`:
-     * it moves no check and `merge-shards.mjs` carries it into the `warnings` list. Remove the
-     * retries, and this count, when #200 is fixed.
-     * HYPOTHESIS that the disappearance is the `<Show>` in `SubagentBar.tsx` (read, not
-     * reproduced in isolation). VERIFIED that the count fires: the full run of
-     * tooling/visual-ci-parallel on its final tree (10/11/2026, Windows 11, "all visual checks
-     * passed") printed "first round: the subagent bar disappeared 1 time(s) while it was being
-     * opened (issue #200)".
+     * "Appears" waits for the header toggle too (the element can exist a moment before its toggle,
+     * and a press in that gap found nothing to click), and the press and the final read are judged
+     * as they are: the bar no longer vanishes mid-turn (issue #200, fixed by the "starting" state
+     * of `SubagentContext.tsx`), so nothing here retries or hides a disappearance; `watchBar` and
+     * `checkBarKept` are what fail if it does.
+     * VERIFIED without the retries: `--steps 51` ended "all visual checks passed" twice in a row
+     * on this tree (10/11/2026, Windows 11, step 51 in 38.0 s and 37.7 s, 0 expired waits).
      */
     const openBar = async (where) => {
-      // Disappearances of the bar seen after it was complete once (issue #200); see the header.
-      let seen = false;
-      let gone = 0;
-      let wasGone = false;
-      const read = async () => {
-        const state = await monitor();
-        const complete = state.bar && state.expanded !== '';
-        if (complete) {
-          seen = true;
-          wasGone = false;
-        } else if (seen && !wasGone) {
-          gone += 1;
-          wasGone = true;
-        }
-        return state;
-      };
-      // The bar element can exist a moment before its header toggle (`expanded` reads ""), and a
-      // press in that gap found nothing to click ("the bar header is pressed" FAILed in 2 of 6
-      // passes of `--steps 40,41,44,45,49,50,51`, 10/11/2026), so "appears" waits for the toggle.
       check(
         (await waitFor2((s) => s.bar && s.expanded !== '', 20_000)) === true,
         `${where}: the bar appears`,
@@ -20330,40 +20303,66 @@ try {
       // Up to three presses, each only while the list is still closed: the first click into a
       // webview that did not have the focus (a chat tab) may only give it the focus.
       let presses = 0;
-      while (presses < 3 && (await read()).expanded !== 'true') {
+      while (presses < 3 && (await monitor()).expanded !== 'true') {
         presses += 1;
-        // The toggle can be re-rendered away between the read above and the click (the bar of the
-        // previous round of the same chat is replaced by the new one), so a missing toggle is
-        // looked for again for up to 5 s before the press counts as failed.
-        check(
-          (await waitFor(() => clickIn('.subagent-bar-toggle'), 5_000, 100)) === true,
-          `${where}: the bar header is pressed`,
-        );
+        check(await clickIn('.subagent-bar-toggle'), `${where}: the bar header is pressed`);
         // Its expiry is the normal path of a press that only gave the focus (see above), so it is
         // not listed in `== waits`; the loop presses again.
-        await waitFor(async () => (await read()).expanded === 'true', 1_500, 150, false);
+        await waitFor(async () => (await monitor()).expanded === 'true', 1_500, 150, false);
       }
-      // The loop above can exit on a read that saw the list open (0 presses) and the read below
-      // find the bar re-rendering with nothing in it ("aria-expanded """, seen once in three
-      // passes of `--steps 40,41,44,45,49,50,51`, 10/11/2026): wait for a read that sees it open,
-      // and judge the last read if none does.
-      const after =
-        (await waitFor(
-          async () => {
-            const latest = await read();
-            return latest.expanded === 'true' ? latest : undefined;
-          },
-          3_000,
-          100,
-        )) ?? (await read());
+      const after = await monitor();
       check(
         after.expanded === 'true',
         `${where}: the bar list is open (${String(presses)} press(es), aria-expanded "${after.expanded}", "${after.summary}")`,
       );
-      if (gone > 0)
-        warn(
-          `${where}: the subagent bar disappeared ${String(gone)} time(s) while it was being opened (issue #200)`,
-        );
+    };
+    /**
+     * Installs, in the CURRENT webview document, a MutationObserver that counts in
+     * `window.__ovcBar` the nodes added and removed that are or contain `.subagent-bar`. Called right
+     * BEFORE each `send(… CREW)`, so it sees the bar from its first render: a poll of the monitor
+     * would miss a disappearance of a few tens of ms (issue #200: C failed 32 ms after starting and
+     * A and B started 517 ms later in the fake). A new chat tab is another document, so it is
+     * installed again there. Replaces a counter left by an earlier call.
+     * VERIFIED in a real VS Code (10/11/2026, Windows 11): `--steps 51` printed "first round: the
+     * subagent bar appeared once and never disappeared until now (appeared 1, removed 0; issue
+     * #200)" (and the same for "second round" and "chat tab") twice in a row; with the `starting`
+     * branch of `childState` removed by hand, the same three checks FAILED with "appeared 2,
+     * removed 1", so the observer catches the disappearance (the mutation was reverted).
+     */
+    const watchBar = () =>
+      web.inDoc((doc) => {
+        const win = doc.defaultView;
+        win.__ovcBarObserver?.disconnect();
+        const counts = { appeared: 0, removed: 0 };
+        const hits = (node) =>
+          node.nodeType === 1 &&
+          (node.matches('.subagent-bar') || node.querySelector('.subagent-bar') !== null);
+        const observer = new win.MutationObserver((records) => {
+          for (const record of records) {
+            for (const node of record.addedNodes) if (hits(node)) counts.appeared += 1;
+            for (const node of record.removedNodes) if (hits(node)) counts.removed += 1;
+          }
+        });
+        observer.observe(doc.documentElement, { subtree: true, childList: true });
+        win.__ovcBarObserver = observer;
+        win.__ovcBar = counts;
+        return true;
+      });
+    /** What `watchBar` counted so far; `{}` when the document was replaced (no counter). */
+    const barWatch = () => web.inDoc((doc) => ({ ...(doc.defaultView.__ovcBar ?? {}) }));
+    /**
+     * One check per round, just before the action that removes the bar on purpose: the bar appeared
+     * exactly once since `watchBar` and was never removed in between (issue #200). A lost counter
+     * (the webview document was recreated) fails with a clear text instead of passing silently.
+     */
+    const checkBarKept = async (where) => {
+      const watch = await barWatch();
+      check(
+        watch.appeared === 1 && watch.removed === 0,
+        watch.appeared === undefined
+          ? `${where}: counter lost (webview document recreated?; issue #200)`
+          : `${where}: the subagent bar appeared once and never disappeared until now (appeared ${String(watch.appeared)}, removed ${String(watch.removed)}; issue #200)`,
+      );
     };
     /**
      * The folded card of B ("Finished · N tools · cost") in each of `themes`: its summary carries
@@ -20447,6 +20446,7 @@ try {
       await setTheme(DARK);
 
       // --- The bar while the crew works -------------------------------------------------------
+      await watchBar();
       await send('Crew51 CREW');
       // The rows exist only once the header is open, so the bar alone is waited for first.
       await openBar('first round');
@@ -20573,6 +20573,7 @@ try {
       await setSideBarWidth(300).catch(() => undefined);
 
       // --- Allowing B ends the turn and folds the cards ---------------------------------------
+      await checkBarKept('first round');
       check(await clickButton('Allow once'), 'Allow once is pressed for B (never Always)');
       check(await waitIdle(60_000), 'the turn ends once B is allowed (the parent was not stopped)');
       state = await monitor();
@@ -20606,6 +20607,7 @@ try {
       // --- Stop all, in a second round --------------------------------------------------------
       check(await clickButton('New session'), 'New session is pressed for the second round');
       await waitEmptyView();
+      await watchBar();
       await send('Crew51b CREW');
       await openBar('second round');
       check(
@@ -20616,6 +20618,7 @@ try {
         )) === true,
         'the bar shows a working and a waiting subagent in the second round',
       );
+      await checkBarKept('second round');
       check(await clickButton('Stop all'), 'Stop all is pressed');
       const emptied = await waitFor2((s) => !s.bar, 25_000);
       check(emptied === true, 'Stop all empties the bar');
@@ -20661,6 +20664,7 @@ try {
       );
       await connectToNewChat(drivenChatId);
       await waitEmptyView();
+      await watchBar();
       await send('Crew51c CREW');
       await openBar('chat tab');
       check(
@@ -20682,6 +20686,7 @@ try {
         if (themeName === 'dark') await shot('51-monitor-tab');
       }
       await setTheme(DARK);
+      await checkBarKept('chat tab');
       check(await clickButton('Allow once'), 'Allow once is pressed for B in the tab');
       check(await waitIdle(60_000), 'the turn of the tab ends once B is allowed');
       await foldedCells('chat tab', '51c-folded-tab', [['dark', 'Default Dark Modern']]);

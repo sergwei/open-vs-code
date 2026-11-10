@@ -6,6 +6,7 @@
 import { createRoot, type JSX } from 'solid-js';
 import type {
   FormAsk,
+  Part,
   PermissionAsk,
   SessionStatus,
   SessionSummary,
@@ -72,14 +73,18 @@ export function mountWithMonitor(view: () => JSX.Element): MonitorMount {
   return { ...mounted, store, opened, stops };
 }
 
-/** Adds a child of `PARENT` to the store with its status and, optionally, its digest. */
+/**
+ * Adds a child of `PARENT` to the store with its status and, optionally, its digest. `status`
+ * defaults to `busy`; `null` applies none, which is a child that exists (`session.created`) but has
+ * not started (issue #200). FABRICATED.
+ */
 export function addChild(
   store: ChatStore,
   id: string,
   options: {
     title?: string;
     agent?: string;
-    status?: SessionStatus;
+    status?: SessionStatus | null;
     outcome?: SessionSummary['outcome'];
     cost?: number;
     activity?: Partial<SubagentActivity>;
@@ -106,11 +111,13 @@ export function addChild(
           }),
     },
   });
-  store.apply({
-    type: 'session.status',
-    sessionID: id,
-    status: options.status ?? { type: 'busy' },
-  });
+  if (options.status !== null) {
+    store.apply({
+      type: 'session.status',
+      sessionID: id,
+      status: options.status ?? { type: 'busy' },
+    });
+  }
   if (options.activity !== undefined) {
     store.apply({
       type: 'subagent.activity',
@@ -125,6 +132,56 @@ export function addChild(
       },
     });
   }
+}
+
+/**
+ * Upserts the `subagent` tool block of `PARENT` that created `childID` (or, with no `childID`, a
+ * block with no link, as REST gives a running tool after a resync). `running` carries
+ * `metadata {sessionID, status: 'running'}` the way `session.tool.progress` does; `completed` and
+ * `error` carry the finished shapes. FABRICATED: the block shapes follow `lineage.ts`, nothing was
+ * recorded from a real subagent turn.
+ */
+export function addSubagentBlock(
+  store: ChatStore,
+  options: {
+    messageID: string;
+    toolID: string;
+    childID?: string;
+    status: 'running' | 'completed' | 'error';
+    description?: string;
+    agent?: string;
+  },
+): void {
+  const input = {
+    description: options.description ?? 'task',
+    agent: options.agent ?? 'general',
+  };
+  const metadata =
+    options.childID === undefined
+      ? {}
+      : {
+          metadata: {
+            sessionID: options.childID,
+            status: options.status === 'running' ? 'running' : 'completed',
+          },
+        };
+  const state: Extract<Part, { type: 'tool' }>['state'] =
+    options.status === 'running'
+      ? { status: 'running', input, ...metadata }
+      : options.status === 'completed'
+        ? { status: 'completed', input, output: [], ...metadata }
+        : {
+            status: 'error',
+            input,
+            error: { code: 'tool.execution', message: 'Subagent failed' },
+            ...metadata,
+          };
+  store.apply({
+    type: 'part.upserted',
+    sessionID: PARENT,
+    messageID: options.messageID,
+    part: { type: 'tool', id: options.toolID, name: 'subagent', state },
+  });
 }
 
 /** A digest tool call. */
