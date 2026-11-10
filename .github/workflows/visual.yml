@@ -1,0 +1,204 @@
+# test:visual in CI (tooling/visual-ci-parallel, issue #199).
+#
+# `npm run test:visual` drives a REAL VS Code over CDP against the synthetic opencode (no model,
+# no quota). Alone it takes ~18 minutes, so a pull request runs it split in N contiguous runs of
+# the steps (`--shard i/N`, `shardPlan` in test/visual/steps.mjs, balanced by `budgetS`), one per
+# `windows-latest` runner, all at once. Then the `visual` job merges the N outputs with
+# test/visual/merge-shards.mjs into ONE file, `visual-full-merged.txt`, which has the shape of a
+# full run: `node test/visual/fingerprint.mjs --check visual-full-merged.txt` accepts it as
+# evidence for the tree (test/visual/README.md). A shard alone is a PARTIAL run and proves nothing.
+#
+# The check to require on `main` is the job named `visual` (not the shards).
+#
+# Decisions:
+# - What the spike of issue #199 (windows-latest, image 20261103.298.1, Windows Server 2025)
+#   showed is needed: an interactive console session exists (SessionId 2), but the screen starts
+#   at 1024x768, and the suite needs a 1440x900 CSS px window, so the display is set to 1920x1080
+#   (`Set-DisplayResolution`, work area 1920x1032) before the run. Without it `run.mjs` exits 2.
+# - `fingerprint.mjs --print` runs only after `npm ci`: it bundles files with esbuild, which is
+#   not installed before. The shard prints it so the hash of CI can be compared with a local one.
+# - Actions are pinned to a commit SHA, with the tag in a comment (same as ci.yml).
+# - `permissions: contents: read`, `persist-credentials: false`: the workflow never pushes.
+# - `fail-fast: false`: a red shard must not cancel the others, so the merge lists every failure.
+# - The aggregator needs no `npm ci`: merge-shards.mjs depends only on steps.mjs.
+# - `include-hidden-files: true` on the evidence artifact: `.vscode-test/` starts with a dot and
+#   upload-artifact skips those by default (the spike's artifacts lacked the traces for it).
+# - `matrix.count` is the N of `--shard i/N`. It must equal the length of `matrix.shard`; if it
+#   does not, the merge refuses ("expected N shard outputs").
+#
+# VERIFIED in the spike of issue #199 (the same jobs with a `push` trigger on the branch
+# `spike/visual-ci`, 10/11/2026, windows-latest):
+# - Run 42801586833: 4 shards in parallel; every shard printed "window 1440x900 CSS px, DPR 1" and
+#   "system focus true"; wall clock about 8 minutes (10:43:46 -> 10:51:44, and 10:53:09 ->
+#   11:01:32 on the re-run); the fingerprint of CI equals the local one, so `fingerprint.mjs
+#   --check` recognises the merged output as the same tree.
+# - The printed ImageVersion (20261103.298.1, Windows Server 2025) comes from the first spike run,
+#   42796747026, not from 42801586833.
+# - A device scale factor of 1.25 is NOT possible on the runner (runs 42805513483 and
+#   42806479242): `Set-DisplayResolution` raises no error for modes above 1920x1080 but the screen
+#   stays at 1024x768, and 1.25 then leaves a window smaller than 1440x900 CSS px. CI runs at DPR 1.
+# Not observed in the spike: the spike ran with a push trigger, so no run of the `pull_request`
+# trigger itself, none of the job on a change that touches only docs (it is expected to run too:
+# about 10 minutes, free on public repositories), and no "SHARD i/N owns steps" line of a CI run
+# is recorded.
+
+name: Visual
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  shard:
+    name: shard ${{ matrix.shard }}/${{ matrix.count }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+        count: [4]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # A new runner image can turn a test red with no change of ours: its version is in the log.
+      - name: Runner image
+        shell: pwsh
+        run: |
+          Write-Host "ImageVersion=$env:ImageVersion"
+          Write-Host "os=$((Get-CimInstance Win32_OperatingSystem).Caption) build=$([Environment]::OSVersion.Version)"
+          Write-Host "SessionId=$((Get-Process -Id $PID).SessionId) UserInteractive=$([Environment]::UserInteractive)"
+
+      # The screen starts at 1024x768 and run.mjs needs a 1440x900 CSS px window (exit 2 otherwise).
+      - name: Set the display to 1920x1080
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
+            Write-Host "screen $($s.DeviceName) primary=$($s.Primary) bounds=$($s.Bounds) workingArea=$($s.WorkingArea)"
+          }
+
+      - name: Install
+        shell: bash
+        run: npm ci
+
+      # After `npm ci` on purpose (esbuild). Compare it with `fingerprint.mjs --print` locally.
+      - name: Fingerprint of the tree
+        shell: bash
+        run: node test/visual/fingerprint.mjs --print
+
+      - name: test:visual --shard ${{ matrix.shard }}/${{ matrix.count }}
+        shell: bash
+        run: npm run test:visual -- --shard ${{ matrix.shard }}/${{ matrix.count }} > visual-shard-${{ matrix.shard }}.txt 2>&1
+
+      # Visible in the log without downloading the artifact.
+      - name: Key lines of the shard
+        if: always()
+        shell: bash
+        run: |
+          grep -nE "^SHARD |^window |^system focus|^STOPPED|^FAILED|^  FAIL|all visual checks passed" visual-shard-${{ matrix.shard }}.txt || true
+          tail -n 40 visual-shard-${{ matrix.shard }}.txt || true
+
+      # What the `visual` job merges. Small: the output of the shard only.
+      - name: Upload the output of the shard
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: visual-shard-${{ matrix.shard }}
+          path: visual-shard-${{ matrix.shard }}.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Evidence to read a red shard: trace of the waits, screenshots and the capture of each FAIL.
+      - name: Upload the evidence of the shard
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: visual-evidence-${{ matrix.shard }}
+          path: |
+            .vscode-test/visual/trace-*.tsv
+            .vscode-test/visual/shots-partial/
+            .vscode-test/visual/FAIL-*.png
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
+  visual:
+    name: visual
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Download the shard outputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: visual-shard-*
+          path: shards
+
+      # Exit 0 every shard passed, 1 a shard failed (the file is still written), 2 the merge is
+      # invalid (a shard is missing, other fingerprint, ...; no file). The code is kept so the
+      # merged file is uploaded before the job fails.
+      - name: Merge the shards
+        id: merge
+        shell: bash
+        run: |
+          set +e
+          ls -R shards
+          node test/visual/merge-shards.mjs visual-full-merged.txt shards/visual-shard-*/visual-shard-*.txt
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          if [ -f visual-full-merged.txt ]; then
+            {
+              echo '```text'
+              sed -n '/^== timings/,$p' visual-full-merged.txt | grep -vE '^  (expired|gap|fixed|trace|longest|waitIdle)'
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
+
+      - name: Upload the merged output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: visual-full-merged
+          path: visual-full-merged.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail unless every shard passed and the merge is valid
+        if: always()
+        shell: bash
+        run: |
+          echo "shards: ${{ needs.shard.result }}; merge-shards exit code: ${{ steps.merge.outputs.code }}"
+          if [ "${{ needs.shard.result }}" != "success" ] || [ "${{ steps.merge.outputs.code }}" != "0" ]; then
+            exit 1
+          fi

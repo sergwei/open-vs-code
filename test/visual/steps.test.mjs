@@ -16,10 +16,14 @@ import {
   parseBailArg,
   parseGroupArg,
   parseListArg,
+  parseShardArg,
+  parseShardLine,
   parseStepsArg,
   parseWithCopilotArg,
   restrictToPresent,
   resolveSelection,
+  shardLine,
+  shardPlan,
   stepIdOf,
   stopLine,
   volatileBetween,
@@ -330,5 +334,97 @@ describe('groupsOf, budgetNote and parseListArg', () => {
   it('reads --list', () => {
     expect(parseListArg(['--list', '--group', 'tabs'])).toBe(true);
     expect(parseListArg(['--group', 'tabs'])).toBe(false);
+  });
+});
+
+/** Sum of the `budgetS` of `ids`. */
+const budgetOf = (ids) =>
+  ids.reduce((total, id) => total + STEPS.find((entry) => entry.id === id).budgetS, 0);
+
+/**
+ * Protects the split of `--shard i/N` (issue #199): the CI runs one shard per runner and the
+ * merge accepts the result only if every step ran exactly once, so a hole or a repeat here would
+ * be a step that silently never runs in CI. Uses the real `STEPS` (the catalogue is the input),
+ * and a brute force over every set of cuts as the oracle for the optimum.
+ */
+describe('shardPlan', () => {
+  it.each([1, 2, 3, 4, 6, STEP_IDS.length])(
+    'puts every id in exactly one contiguous run, in canonical order (n=%i)',
+    (count) => {
+      const plan = shardPlan(count);
+      expect(plan).toHaveLength(count);
+      expect(plan.every((ids) => ids.length > 0)).toBe(true);
+      expect(plan.flat()).toEqual(STEP_IDS);
+    },
+  );
+
+  it('n=1 is the whole run', () => {
+    expect(shardPlan(1)).toEqual([STEP_IDS]);
+  });
+
+  it('is no worse than any other contiguous split (brute force, n=2 and n=3)', () => {
+    const largest = (cuts) => {
+      const bounds = [0, ...cuts, STEP_IDS.length];
+      return Math.max(
+        ...bounds.slice(1).map((end, at) => budgetOf(STEP_IDS.slice(bounds[at], end))),
+      );
+    };
+    let best2 = Infinity;
+    for (let a = 1; a < STEP_IDS.length; a += 1) best2 = Math.min(best2, largest([a]));
+    let best3 = Infinity;
+    for (let a = 1; a < STEP_IDS.length; a += 1) {
+      for (let b = a + 1; b < STEP_IDS.length; b += 1) best3 = Math.min(best3, largest([a, b]));
+    }
+    expect(Math.max(...shardPlan(2).map(budgetOf))).toBe(best2);
+    expect(Math.max(...shardPlan(3).map(budgetOf))).toBe(best3);
+  });
+
+  it('is deterministic', () => {
+    expect(shardPlan(4)).toEqual(shardPlan(4));
+  });
+
+  it('rejects a count that is not an integer from 1 to the number of steps', () => {
+    for (const bad of [0, -1, 1.5, STEP_IDS.length + 1, Number.NaN]) {
+      expect(() => shardPlan(bad)).toThrow(RangeError);
+    }
+  });
+});
+
+describe('parseShardArg', () => {
+  it('returns no shard without the flag', () => {
+    expect(parseShardArg(['--steps', '1'])).toEqual({ shard: undefined });
+  });
+
+  it('reads both spellings', () => {
+    expect(parseShardArg(['--shard', '2/4'])).toEqual({ shard: { index: 2, count: 4 } });
+    expect(parseShardArg(['--shard=4/4'])).toEqual({ shard: { index: 4, count: 4 } });
+  });
+
+  it('rejects a missing, malformed or out of range value', () => {
+    for (const argv of [
+      ['--shard'],
+      ['--shard', '2'],
+      ['--shard', 'a/4'],
+      ['--shard', '0/4'],
+      ['--shard', '5/4'],
+      ['--shard', '1/0'],
+      ['--shard', `1/${String(STEP_IDS.length + 1)}`],
+    ]) {
+      expect(parseShardArg(argv).error, argv.join(' ')).toMatch(/--shard/);
+    }
+  });
+});
+
+describe('shardLine and parseShardLine', () => {
+  it('round-trips, and the line is not a check line', () => {
+    const line = shardLine(2, 4, ['25', '26', '6b']);
+    expect(line).toBe('SHARD 2/4 owns steps 25, 26, 6b');
+    expect(parseShardLine(`x\n${line}\ny`)).toEqual({
+      index: 2,
+      count: 4,
+      ids: ['25', '26', '6b'],
+    });
+    expect(line).not.toMatch(/^\s*(ok|FAIL|warn)\b|^== /);
+    expect(parseShardLine('PARTIAL RUN (steps 1)')).toBeUndefined();
   });
 });

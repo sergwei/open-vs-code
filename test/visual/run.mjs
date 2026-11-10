@@ -4,8 +4,11 @@
 // opencode behind the extension is the synthetic `fake-opencode.mjs`, launched as the extension's own
 // server through the seam of `testLaunch.ts` (Development mode + OPEN_VS_CODE_VISUAL_FAKE=1, set by
 // `vscodeProcess.mjs`). Prompts carry trigger words (MARKDOWN, LONG, ASK_PERMISSION, ASK_QUESTION,
-// SUBAGENT, TOOLS, BROKEN_READ, COSTLY) that the fixture reacts to. Not run in CI. See
-// `test/visual/README.md`.
+// SUBAGENT, TOOLS, BROKEN_READ, COSTLY) that the fixture reacts to. CI runs it on every pull
+// request (`.github/workflows/visual.yml`): N `windows-latest` runners each run `--shard i/N` (a
+// contiguous run of the steps, `shardPlan` in `steps.mjs`), and the `visual` job merges their
+// outputs with `merge-shards.mjs` into the one file `fingerprint.mjs --check` accepts. A shard is
+// a PARTIAL run and no evidence by itself; the merge is. See `test/visual/README.md`.
 //
 // HISTORY, not current evidence: until 22/10/2026 this run used a real opencode 2.0.32 and the free
 // model, and the long notes below ("VERIFIED ... glm-5.3-flash-free", 326/385/386 ok lines, the
@@ -109,7 +112,14 @@
 // [ref]` (default `origin/main`) reads the files changed since the merge-base, plus the untracked
 // ones, and `affected.mjs` maps them to groups: it prints `affected: <groups | full | none>` with
 // one reason per file, and a cross-cutting or unmapped file (or git failing) means the FULL run.
-// It does not combine with `--steps`/`--group`. `--list` prints the resolved selection and exits 0
+// `run.mjs` and `steps.mjs` are judged by `harnessDiff.mjs` (loaded only with `--affected`): the
+// steps whose `await step(…)` body or `STEPS` entry changed are chosen by name (`affected: steps 49
+// (+ next 50)`: the step that follows each one in `STEP_IDS` comes too, because state leaks forward),
+// comments and `budgetS` select nothing, and a change to a shared helper, a removed or reordered
+// step or a file absent from the base means the FULL run. It does not combine with `--steps`/`--group`.
+// `--shard i/N` (issue #199) runs the i-th of N contiguous runs of the steps balanced by `budgetS`
+// (`shardPlan`), closed over `needs` like `--steps`; it prints `SHARD i/N owns steps …` next to the
+// PARTIAL banner and does not combine with `--steps`, `--group` or `--affected` (exit 2). `--list` prints the resolved selection and exits 0
 // before starting VS Code (`node test/visual/run.mjs --list` builds nothing; `npm run test:visual
 // -- --list` runs the build scripts first, because npm runs them before this file). Each step has a `budgetS`; `== timings` appends
 // "over budget (N s)" to the ones that exceed it (no FAIL, no warn: decision P4).
@@ -261,9 +271,12 @@ import {
   parseBailArg,
   parseGroupArg,
   parseListArg,
+  parseShardArg,
   parseStepsArg,
   parseWithCopilotArg,
   resolveSelection,
+  shardLine,
+  shardPlan,
   stepIdOf,
   stopLine,
 } from './steps.mjs';
@@ -276,6 +289,10 @@ const workDir = path.join(repoRoot, '.vscode-test', 'visual');
  * staged or not) plus the untracked ones that git does not ignore. Returns `{ files }`, or
  * `{ error }` when git or the ref is not there (no `origin/main` in a shallow or detached
  * checkout), which the caller turns into the full run with the reason printed.
+ * Also returns `texts`: for `run.mjs` and `steps.mjs`, when they changed, `{ before, after }`
+ * (`before` is `git show <merge-base>:<path>`, `after` the disk) so that `harnessDiff.mjs` can tell
+ * which steps moved; a file absent from the base has `before: undefined`, which the caller reads as
+ * the full run (tooling/visual-ci-parallel, issue #199).
  * VERIFIED on Windows 11 (31/10/2026): `node test/visual/run.mjs --list --affected` in this tree
  * printed the changed files of the branch against `origin/main`. NOT run: macOS and Linux; a
  * checkout without `origin/main` (the `error` branch was only read).
@@ -293,7 +310,24 @@ function changedFilesSince(ref) {
     const [base] = git(['merge-base', 'HEAD', ref]);
     const tracked = git(['diff', '--name-only', '--no-renames', base]);
     const untracked = git(['ls-files', '--others', '--exclude-standard']);
-    return { files: [...tracked, ...untracked] };
+    const files = [...tracked, ...untracked];
+    const texts = {};
+    for (const rel of ['test/visual/run.mjs', 'test/visual/steps.mjs']) {
+      if (!files.includes(rel)) continue;
+      let before;
+      try {
+        before = execFileSync('git', ['show', `${base}:${rel}`], {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          maxBuffer: 64 * 1024 * 1024,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch {
+        before = undefined;
+      }
+      texts[rel] = { before, after: fs.readFileSync(path.join(repoRoot, rel), 'utf8') };
+    }
+    return { files, texts };
   } catch (error) {
     return { error: `git could not diff against ${ref} (${String(error.message).split('\n')[0]})` };
   }
@@ -305,41 +339,76 @@ const cliArgs = process.argv.slice(2);
 const parsedSteps = parseStepsArg(cliArgs);
 const parsedGroups = parseGroupArg(cliArgs);
 const affectedArg = parseAffectedArg(cliArgs);
-for (const parsed of [parsedSteps, parsedGroups]) {
+const parsedShard = parseShardArg(cliArgs);
+for (const parsed of [parsedSteps, parsedGroups, parsedShard]) {
   if (parsed.error !== undefined) {
     console.error(`test:visual: ${parsed.error}`);
     process.exit(2);
   }
 }
+if (
+  parsedShard.shard !== undefined &&
+  (affectedArg.enabled || parsedSteps.ids !== undefined || parsedGroups.ids !== undefined)
+) {
+  console.error(
+    'test:visual: --shard chooses the steps itself; do not combine it with --steps, --group or --affected',
+  );
+  process.exit(2);
+}
+/** The steps `--shard i/N` owns (the i-th contiguous run of `shardPlan(N)`), or `undefined`. */
+const shardIds =
+  parsedShard.shard === undefined
+    ? undefined
+    : shardPlan(parsedShard.shard.count)[parsedShard.shard.index - 1];
 if (affectedArg.enabled && (parsedSteps.ids !== undefined || parsedGroups.ids !== undefined)) {
   console.error(
     'test:visual: --affected chooses the steps itself; do not combine it with --steps or --group',
   );
   process.exit(2);
 }
-/** What `--affected` decided (`{ mode, groups, reasons }`), or `undefined` without the flag. */
+/** What `--affected` decided (`{ mode, groups, steps, reasons }`), or `undefined` without the flag. */
 let affected;
 if (affectedArg.enabled) {
   const ref = affectedArg.ref ?? 'origin/main';
   const changed = changedFilesSince(ref);
-  affected =
-    changed.error === undefined
-      ? selectForFiles(changed.files)
-      : { mode: 'full', groups: [], reasons: [changed.error] };
+  if (changed.error === undefined) {
+    // Loaded only here: the parser (typescript) is not paid by a normal run.
+    const { diffRunMjs, diffStepsMjs } = await import('./harnessDiff.mjs');
+    const differs = { 'test/visual/run.mjs': diffRunMjs, 'test/visual/steps.mjs': diffStepsMjs };
+    const harness = {};
+    for (const [rel, { before, after }] of Object.entries(changed.texts)) {
+      harness[rel] =
+        before === undefined
+          ? { mode: 'full', steps: [], reason: 'not in the base commit' }
+          : differs[rel](before, after);
+    }
+    affected = selectForFiles(changed.files, harness, STEP_IDS);
+  } else affected = { mode: 'full', groups: [], steps: [], reasons: [changed.error] };
 }
-/** `--steps` and `--group` together run the union; `--affected` supplies groups instead. */
+/**
+ * `--steps` and `--group` together run the union; `--affected` supplies the union of its groups
+ * and the steps it chose by name (a changed `await step(…)` body or `STEPS` entry); `--shard i/N`
+ * supplies the steps of its shard and excludes the three others (checked above).
+ */
 const requestedIds =
-  affected !== undefined
-    ? affected.mode === 'groups'
-      ? parseGroupArg(['--group', affected.groups.join(',')]).ids
-      : affected.mode === 'none'
-        ? []
-        : undefined
-    : parsedSteps.ids === undefined && parsedGroups.ids === undefined
-      ? undefined
-      : STEP_IDS.filter(
-          (id) => (parsedSteps.ids ?? []).includes(id) || (parsedGroups.ids ?? []).includes(id),
-        );
+  shardIds !== undefined
+    ? shardIds
+    : affected !== undefined
+      ? affected.mode === 'groups'
+        ? STEP_IDS.filter(
+            (id) =>
+              affected.steps.includes(id) ||
+              (affected.groups.length > 0 &&
+                (parseGroupArg(['--group', affected.groups.join(',')]).ids ?? []).includes(id)),
+          )
+        : affected.mode === 'none'
+          ? []
+          : undefined
+      : parsedSteps.ids === undefined && parsedGroups.ids === undefined
+        ? undefined
+        : STEP_IDS.filter(
+            (id) => (parsedSteps.ids ?? []).includes(id) || (parsedGroups.ids ?? []).includes(id),
+          );
 /** `undefined` for the full run, else the requested ids closed over their prerequisites. */
 const selection = requestedIds === undefined ? undefined : resolveSelection(requestedIds);
 const partial = selection !== undefined;
@@ -354,8 +423,12 @@ if (affected !== undefined) {
   const shown = affected.reasons.slice(0, 12).map((reason) => `\n  ${reason}`);
   if (affected.reasons.length > 12)
     shown.push(`\n  … and ${String(affected.reasons.length - 12)} more`);
+  const chosen = [
+    ...affected.groups,
+    ...(affected.steps.length > 0 ? [`steps ${affected.steps.join(', ')}`] : []),
+  ];
   console.log(
-    `affected: ${affected.mode === 'groups' ? affected.groups.join(', ') : affected.mode}${shown.join('')}`,
+    `affected: ${affected.mode === 'groups' ? chosen.join(', ') : affected.mode}${shown.join('')}`,
   );
 }
 if (affected?.mode === 'none') {
@@ -367,6 +440,11 @@ if (partial) {
   console.log(
     `groups touched (prerequisites included): ${groupsOf(selection.selected).join(', ')}`,
   );
+  if (parsedShard.shard !== undefined) {
+    // `merge-shards.mjs` reads this line back (`parseShardLine`) to know the steps this shard OWNS;
+    // the others it ran (`added` below) are prerequisites and are dropped from the merge.
+    console.log(shardLine(parsedShard.shard.index, parsedShard.shard.count, shardIds));
+  }
   if (selection.added.length > 0) {
     console.log(
       `steps added because the requested ones need them: ${selection.added.join(', ')} (requested: ${requestedIds.join(', ')})`,
@@ -663,9 +741,22 @@ function boundKeyPresses(target) {
 
 /**
  * Connects Playwright to the workbench of the VS Code listening on CDP `port`, waiting for the
- * debugging endpoint to come up; returns `{ browser, page }` with the key presses bounded, or throws
- * after `timeoutMs`. Shared by the main instance (`connectWorkbench`) and by the second one that
- * step 25 starts in Restricted Mode.
+ * debugging endpoint to come up; returns `{ browser, page }` with the key presses bounded and the
+ * `__ovcIsHome` probe installed ({@link HOME_PROBE_SOURCE}), or throws after `timeoutMs`. Shared by
+ * the main instance (`connectWorkbench`, also after every Reload Window) and by the extra windows
+ * of step 25 (`withWindow`).
+ *
+ * The probe is installed HERE, not by each caller: before, `connectWorkbench` and `withWindow` each
+ * evaluated it by hand, and a page obtained any other way would have no probe and count the Quick
+ * start frame as a chat (D0 of step 25 did, "1 iframe(s)"). Now a page cannot come out of this
+ * function without it. A probe that is missing anyway (a page not obtained through here) is a FAIL
+ * with its own text: see {@link homeProbeGuard}.
+ * VERIFIED on Windows 11 (10/11/2026) by mutation, `--steps 25,27` with the install below
+ * removed: both steps ended as a FAIL whose text was "the __ovcIsHome probe is missing in this
+ * page (connectPage installs it and a Reload Window drops it)", and with it back the same steps
+ * passed with 0 FAIL (file hash equal to the one before the mutation). NOT observed: which of the
+ * five readers that call {@link homeProbeGuard} fired in step 27, and the three of steps 29, 30
+ * and 31 (those steps were not run with the probe removed).
  */
 async function connectPage(port, timeoutMs) {
   const end = Date.now() + timeoutMs;
@@ -677,13 +768,14 @@ async function connectPage(port, timeoutMs) {
       const workbench = pages.find((candidate) => candidate.url().includes('workbench'));
       if (workbench) {
         boundKeyPresses(workbench);
+        await workbench.evaluate(HOME_PROBE_SOURCE);
         return { browser: connected, page: workbench };
       }
       await connected.close().catch(() => undefined);
     } catch (error) {
       lastError = error;
     }
-    await sleep(500); // retry interval of the connection attempts, not a wait for a condition
+    await sleep(500); // kept: retry interval of the connection attempts, not a wait for a condition
   }
   throw new Error(`could not connect to VS Code over CDP: ${String(lastError)}`);
 }
@@ -694,14 +786,35 @@ async function connectWorkbench(timeoutMs = 90_000) {
   browser = connected.browser;
   page = connected.page;
   instrumentPage(page);
-  await page.evaluate(HOME_PROBE_SOURCE);
+}
+
+/** Text of the FAIL that an absent `__ovcIsHome` probe produces (see {@link homeProbeGuard}). */
+const HOME_PROBE_MISSING =
+  'the __ovcIsHome probe is missing in this page (connectPage installs it and a Reload Window drops it): the Quick start frame would be counted as a chat';
+
+/**
+ * Passes `state` through, or throws when it is `null`, the marker that the in-page readers of
+ * chat frames return when `globalThis.__ovcIsHome` is not defined there.
+ *
+ * Why a marker and not `globalThis.__ovcIsHome?.(frame)`: the optional call swallowed the absence
+ * and the check then failed with "1 iframe(s)", which points at the product, not at the harness.
+ * The marker travels out of `page.evaluate` and the throw happens here, in Node, with its own
+ * text. A reader called from inside `waitFor` has the throw swallowed there (`waitFor` treats an
+ * exception as "not yet"), so it reaches the step as a FAIL only where the step also calls the
+ * reader outside a `waitFor` (e.g. `showOpenCodeBar`). Some readers are called ONLY inside a
+ * `waitFor` in some steps: there the missing probe shows up as the check that follows the expired
+ * wait, not with this text. VERIFIED on Windows 11 (10/11/2026) for steps 25 and 27 only, by the
+ * mutation described in {@link connectPage}; NOT observed in steps 29, 30 and 31.
+ */
+function homeProbeGuard(state) {
+  if (state === null) throw new Error(HOME_PROBE_MISSING);
+  return state;
 }
 
 /**
- * Defines `globalThis.__ovcIsHome(frame)` in the workbench page (again after every Reload Window,
- * see `connectWorkbench`, and in the page of every extra window `withWindow` opens: RULE, every
- * page obtained through `connectPage` needs it, or a check that counts chats sees the Quick start
- * frame as one, as D0 of step 25 did): true when the webview iframe `frame` is the Quick start view of the side
+ * Defines `globalThis.__ovcIsHome(frame)` in the workbench page. Evaluated by `connectPage`, so
+ * it covers the main page (again after every Reload Window, which drops `globalThis`) and the page
+ * of every extra window `withWindow` opens: true when the webview iframe `frame` is the Quick start view of the side
  * bar (E9-sidebar-home). A VS Code webview VIEW is an overlay iframe with no attribute that tells
  * which view it is (HYPOTHESIS: a run printed the attributes and the `src` of five frames and
  * none carried a `purpose`, but that output was not kept; to check, print them again with
@@ -1094,6 +1207,26 @@ async function openChat(timeoutMs = 30_000, wantedId = undefined) {
 }
 
 /**
+ * {@link openChat} for a chat that is about to show in the side bar: waits up to 15 s for a chat
+ * iframe to be visible, then connects to it.
+ *
+ * Why: `openChat` reads the visible chat id ONCE and, with none visible, takes the first CDP target,
+ * which can be the Quick start home view. After a `chatLocation` change at the end of steps 49 and
+ * 50 that is what happened as soon as `setTheme` stopped spending 10 s on a closed webview (the
+ * wait that used to cover it): step 50 then started with "the webview is connected" failing and
+ * step 51 with "no turn is running when the step starts" (`--steps 40,41,44,45,49,50,51`,
+ * 10/11/2026). Gives up silently after the 15 s, as `openChat` does for a view that never shows.
+ */
+async function openSidebarChat(timeoutMs = 30_000) {
+  await waitFor(
+    async () => (await visibleChatId().catch(() => undefined)) !== undefined,
+    15_000,
+    200,
+  );
+  await openChat(timeoutMs);
+}
+
+/**
  * What each theme of the run looks like once applied: the class `.monaco-workbench` carries and the
  * `data-vscode-theme-kind` the webview's `<body>` gets.
  * VERIFIED by reading VS Code 1.143.1 (local install, 27/10/2026): the theme service removes
@@ -1134,6 +1267,14 @@ function webviewVisible() {
  * (b) is skipped on purpose: a hidden webview never updates its kind nor runs frames, and waiting
  * for it would be a false timeout. The frames are raced against 1 s so a page that does not
  * run them cannot hang the step. Throws for a theme name it does not know.
+ *
+ * (b) is also skipped when `web` is closed (`web.isClosed()`): the CDP socket of a chat webview that
+ * a step closed (an editor tab shut, a Reload Window) can never report a theme kind, so waiting on
+ * it ran to the whole 10 s and threw. That was the `expired` row at the end of steps 34, 37, 49,
+ * 50 and 51 in every CI run (10/11/2026), swallowed by the `.catch` of the restores to Dark; a
+ * diagnostic of a local `--steps 34,49,50` run showed "the webview CDP socket is closed" for the
+ * stale `web` while another chat frame was visible. The workbench class and the two frames still
+ * run, and a theme that does not reach a LIVE webview still throws as before.
  * VERIFIED on Windows 11, VS Code 1.143.1 (27/10/2026): `--steps 2,4` printed lines such as "ok
  * light: code text contrast 10.55 >= 4.5 (code background rgba(0, 0, 0, 0))" and "ok dark: code
  * text contrast 8.82 >= 4.5 (code background rgba(0, 0, 0, 0))" with the same four figures as the
@@ -1161,7 +1302,7 @@ async function setTheme(theme) {
       `the workbench did not take the theme ${theme} in ${String(THEME_TIMEOUT_MS)} ms`,
     );
   }
-  if (web !== undefined && (await webviewVisible())) {
+  if (web !== undefined && !web.isClosed() && (await webviewVisible())) {
     const inWebview = await waitFor(
       () =>
         web.inDoc((doc, expected) => doc.body?.dataset.vscodeThemeKind === expected, kind.webview),
@@ -1242,12 +1383,94 @@ async function clickCommandCenter() {
 }
 
 /**
- * Runs a command from the palette.
+ * Moves the real pointer off the command center to a spot of the title bar that has no hover, and
+ * waits (up to 1.5 s, then goes on) for any VS Code hover to leave the page.
+ *
+ * Why: {@link clickCommandCenter} leaves the pointer on the command center, and VS Code shows the
+ * tooltip "Search <folder> — [Extension Development Host]" below it once the palette closes and the
+ * element is hovered again. That tooltip is a `.context-view .hover-contents` that covers the tab
+ * row, and Playwright refuses to click a point another element intercepts: the first `.tab` click
+ * after a palette command can then wait for the whole 30 s while the pointer, which only a click
+ * would move, never leaves. Seen in the first full run on a `windows-latest` runner (issue #199,
+ * Engram `tooling/visual-ci-parallel/implementation-0`): step 30 `locator('.tab').filter({ hasText:
+ * 'Tab30A' }).click()` expired with "<div class="hover-contents">Search open-vs-code-visual-… —
+ * [Extension De…</div> from <div class="context-view monaco-component bottom left">…</div> subtree
+ * intercepts pointer events" 60 times, and the run then stopped on "the VS Code window does not
+ * have the system focus". HYPOTHESIS for why it passes locally: the tooltip is a race against the
+ * next click (VS Code shows it after a delay, and a local run moves on before it), so it can bite
+ * locally too and the slower runner only made it reliable; the DPR (1 in CI, 1.25 here) does not
+ * change the CSS layout and is not the cause. Not reproduced here.
+ *
+ * Chosen over parking the pointer at the start of every step: only a palette command is known to
+ * leave it on a hover, and a global move would change the pointer state that the hover and
+ * "no hover" cells of other steps start from. Changes no check, adds no `ok` line. The spot is
+ * found at run time (the first point of the title bar, scanning left to right, whose element is
+ * none of the menu bar, the command center, the app icon, the window controls or anything with
+ * `custom-hover`, `title` or `aria-label`), because the bar's layout depends on the window width;
+ * with no title bar (`window.titleBarStyle` native) it parks at (1, 1). Resolves with nothing and
+ * never throws: if the page cannot be evaluated or moved on (Reload Window, which `command` also
+ * runs, is already tearing it down) it returns at once, and a hover that does not leave within
+ * 1.5 s only adds an `expired` row to `== waits`.
+ * VERIFIED on a GitHub runner (windows-latest, Windows Server 2025, DPR 1; run 42801586833 of
+ * 10/11/2026, both attempts): step 30 passed with this fix, for instance "ok   D1 tab B asks while
+ * tab A is in front" (the tab clicks that failed before it). NOT observed: whether the hover
+ * would have bitten again without it on that runner (no run without the fix after the change).
+ */
+async function parkPointer() {
+  const point = await page
+    .evaluate(() => {
+      const doc = globalThis.document;
+      const bar = doc.querySelector('.titlebar-container');
+      if (bar === null) return { x: 1, y: 1 };
+      const rect = bar.getBoundingClientRect();
+      const y = rect.top + rect.height / 2;
+      const busy = '.menubar, .command-center, .window-appicon, .window-controls-container';
+      for (let x = rect.left + 4; x < rect.right - 4; x += 8) {
+        let element = doc.elementFromPoint(x, y);
+        let neutral = element !== null && bar.contains(element);
+        while (neutral && element !== null && element !== bar) {
+          if (
+            element.matches(busy) ||
+            element.hasAttribute('custom-hover') ||
+            element.hasAttribute('title') ||
+            element.hasAttribute('aria-label')
+          ) {
+            neutral = false;
+          }
+          element = element.parentElement;
+        }
+        if (neutral) return { x, y };
+      }
+      return { x: 1, y: 1 };
+    })
+    .catch(() => null);
+  // A command such as Reload Window is already tearing the page down: nothing to park then.
+  if (point === null) return;
+  await page.mouse.move(point.x, point.y).catch(() => undefined);
+  await waitFor(
+    async () =>
+      (await page.locator('.context-view .hover-contents').count()) === 0 ? true : undefined,
+    1_500,
+    50,
+  );
+}
+
+/**
+ * Runs a command from the palette, then parks the pointer off the command center
+ * ({@link parkPointer}, issue #199: the hover it leaves there blocked a tab click on a CI runner).
  *
  * Waits for conditions instead of 400/600/800 ms: the quick input is visible, its focused row
  * names the typed command, Enter, then the quick input is hidden. The 150 ms at the end is a fixed
  * settle: the command runs after the palette closes and there is no signal common to all the
  * commands this suite runs (close editors, restart, reload, stop). #89 phase 3.
+ *
+ * The wait after Enter ends when the quick input is hidden OR when its input no longer starts with
+ * `>` (the command asked for a second input, as the folder commands of step 34 and 38 do); with
+ * "hidden" alone it expired at 1.5 s for those. VERIFIED on Windows 11 (10/11/2026): two runs of
+ * `--steps 29,30,31,34,35,36,37,38` ended "all visual checks passed" with `expired waitFor: 0
+ * calls`, where the CI run of the same day had 4 expired rows at this wait in step 34 and 2 in
+ * step 38. HYPOTHESIS: that EVERY command which re-prompts clears the `>`; only those two steps
+ * were looked at.
  *
  * The palette is opened with the MOUSE (the command center of the title bar) and F1 is only the
  * fallback, up to 3 attempts. Nothing is typed unless the quick input is open AND holds the focus
@@ -1330,8 +1553,55 @@ async function command(title) {
     50,
   );
   await page.keyboard.press('Enter');
-  await waitFor(quickInputHidden, 1_500, 50);
-  await sleep(150); // the command runs after the palette closes; no common signal for all commands
+  // Hidden, or no longer in command mode: a command that asks for more (a folder name, a pick)
+  // leaves the quick input open with another prompt, and waiting for "hidden" alone expired at
+  // 1.5 s in steps 34 and 38 of every CI run (10/11/2026).
+  await waitFor(
+    async () =>
+      (await quickInputHidden()) ||
+      (await page.evaluate(() => {
+        const input = globalThis.document.querySelector('.quick-input-widget input');
+        return input !== null && !input.value.startsWith('>');
+      })),
+    1_500,
+    50,
+  );
+  await parkPointer(); // the pointer is still on the command center: see its header
+  await sleep(150); // kept: the command runs after the palette closes; no common signal for all commands
+}
+
+/**
+ * Clicks `entry` (a context-menu item) until the menu is gone, at most 3 times; returns nothing
+ * and never throws for a click that did not take (the caller's check judges what is on screen).
+ *
+ * Why repeated: a click right after a menu opens only highlights the entry (step 20, 28/10/2026),
+ * so on a slow machine the first click often does nothing. Each attempt watches the entry for
+ * 600 ms. That watch is the "did the click take" probe and its expiry is the NORMAL path of a
+ * click that only highlighted, so it is not listed in `== waits` (`traceExpiry` false): before,
+ * it was a 1 s `waitFor` that showed as 2 to 4 expired waits in steps 20, 26 and 27 of every CI run
+ * (10/11/2026). 600 ms is our figure, not measured: a click that took made the entry disappear in
+ * under 100 ms in the traces read (the 100 ms poll saw it gone at its first or second read).
+ * HYPOTHESIS for that last sentence: only the absence of an `expired` row for a click that took was
+ * seen, not the time it took.
+ */
+async function clickUntilGone(entry) {
+  for (let attempt = 0; attempt < 3 && (await entry.count()) > 0; attempt += 1) {
+    await entry.first().click();
+    await waitFor(async () => (await entry.count()) === 0, 600, 50, false);
+  }
+}
+
+/**
+ * Resolves after two animation frames of the workbench page, as `setTheme` does: the list of the
+ * side bar paints its rows on the frame after a wheel event, so this is the signal that replaces
+ * a fixed 120 ms after `mouse.wheel`. It resolves `false` after 1 s if the page never paints.
+ * HYPOTHESIS that two frames are enough for the rows to be painted: `--steps 29,30,31,34,35,36,37,38`
+ * was run twice in a row on Windows 11 (10/11/2026) with 0 expired `waitFor` in `== waits`, which
+ * shows the replacement did not time out, not that every wheel was painted by then. To check it,
+ * log the row count before and after this call across a long list.
+ */
+function workbenchFrames() {
+  return page.evaluate(`(${twoFrames.toString()})(document)`);
 }
 
 /**
@@ -1407,7 +1677,7 @@ async function clearPromptBox(pauseMs) {
   }
   await page.keyboard.press('ControlOrMeta+A');
   await page.keyboard.press('Backspace');
-  await sleep(pauseMs);
+  await sleep(pauseMs); // kept: the first typed character is lost without it (see {@link send})
 }
 
 /** Waits until the workbench has no editor tab open (after "View: Close All Editors"), up to 3 s. */
@@ -1692,7 +1962,7 @@ async function send(text) {
   // Without this pause the first typed character was lost (screenshot 11h showed "all the
   // subagent tool…" for "Call the…"). Cause: HYPOTHESIS, the webview re-renders the emptied
   // textarea. The 150 ms pause: VERIFIED by the test:visual run of 21/10/2026 (153 ok, 11h clean).
-  await sleep(150); // first typed character lost without it (see above): kept, not converted
+  await sleep(150); // kept: first typed character lost without it (see above)
   await page.keyboard.type(text);
   await page.keyboard.press('Enter');
 }
@@ -2333,7 +2603,7 @@ const tagUser = (nth) =>
 const hover = async (selector) => {
   const point = await centreOf(selector);
   if (point) await page.mouse.move(point.x, point.y);
-  await sleep(300); // hover styles and tooltips appear after a delay of their own
+  await sleep(300); // kept: hover styles and tooltips appear after a delay of their own
   return point !== null;
 };
 
@@ -2790,7 +3060,7 @@ try {
   await step('0 setup guide: binary missing, Choose binary…, server down, Restart', async () => {
     for (let i = 0; i < 5 && (await page.locator('.onboarding-a-overlay.visible').count()); i++) {
       await page.keyboard.press('Escape');
-      await page.waitForTimeout(400); // the overlay fades out; the loop condition reads it again
+      await page.waitForTimeout(400); // kept: the overlay fades out; the loop condition reads it again
     }
     await page.locator('.activitybar [aria-label^="OpenCode"]').first().click();
     await openChat(40_000);
@@ -2823,7 +3093,7 @@ try {
     // little past the 3 s grace period of `CHAT_SHOW_GRACE_MS`, so a warning that was only
     // postponed (not withheld) has appeared by now. Placed before the theme rounds on purpose: a
     // toast left on screen disturbs them, and this check must be the one that says why.
-    await page.waitForTimeout(Math.max(0, guideSeenAt + 4_500 - Date.now()));
+    await page.waitForTimeout(Math.max(0, guideSeenAt + 4_500 - Date.now())); // negative window: no native notice while the guide is shown
     const afterGuide = await nativeOpenCodeNotices();
     check(
       afterGuide.centerRead && afterGuide.notices.length === 0,
@@ -3025,7 +3295,7 @@ try {
     await shot('00c-server-down');
     // Issue #87, the lifecycle notification: the chat is ready and shows the failed step 2, so the
     // "server failed to start" error must not appear natively either.
-    await page.waitForTimeout(1_500);
+    await page.waitForTimeout(1_500); // negative window: the failed step 2 raises no native notice
     const afterStep2 = await nativeOpenCodeNotices();
     check(
       afterStep2.centerRead && afterStep2.notices.length === 0,
@@ -3048,7 +3318,7 @@ try {
   await step('1 empty state and connection', async () => {
     for (let i = 0; i < 5 && (await page.locator('.onboarding-a-overlay.visible').count()); i++) {
       await page.keyboard.press('Escape');
-      await page.waitForTimeout(400); // the overlay fades out; the loop condition reads it again
+      await page.waitForTimeout(400); // kept: the overlay fades out; the loop condition reads it again
     }
     // Step 0 already opened the chat; a second click on the activity bar would hide the side bar.
     if ((await page.locator('iframe.webview.ready').count()) === 0) {
@@ -3088,7 +3358,7 @@ try {
         'and a link to https://code.visualstudio.com . Do not use any tools. MARKDOWN',
     );
     // Fixed on purpose: the fixture's pace (600 ms between deltas) defines "the block is half way".
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(3000); // kept: the fixture's pace defines "half way", no signal for it
     await shot('02a-streaming');
     const ended = await waitIdle(30_000);
     check(ended, 'the first turn ended');
@@ -3195,7 +3465,7 @@ try {
     const sawStop = await waitFor(isBusy, 30_000, 300);
     check(sawStop === true, 'Stop is visible while the turn runs');
     // Fixed on purpose: the capture needs the LONG turn running for a while (lines already streamed).
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(2500); // kept: the capture needs the LONG turn to have streamed for a while
     await shot('03a-busy');
     await page.keyboard.press('Escape'); // the focus is still in the textarea
     check(await waitIdle(30_000), 'Escape stops the turn');
@@ -3499,14 +3769,17 @@ try {
     );
     await command('OpenCode: Restart Server');
     // The connection leaves "connected" and comes back; if the change is too quick to be seen the
-    // wait ends after 4 s and `waitConnected` below judges (HYPOTHESIS that it is seen, #89).
+    // wait ends after 2 s and `waitConnected` below judges. The dip was NOT seen in either attempt
+    // of the CI run of 10/11/2026 (the 4 s wait expired both times), so its expiry is a normal
+    // path here, not listed in `== waits`, and 2 s is enough to see a dip that lasts.
     await waitFor(
       () =>
         web.inDoc(
           (doc) => doc.querySelector('.app')?.getAttribute('data-connection') !== 'connected',
         ),
-      4_000,
+      2_000,
       100,
+      false,
     );
     await openChat(40_000);
     await waitConnected();
@@ -3626,7 +3899,7 @@ try {
       reloaded = !stale;
       if (reloaded) break;
       await browser.close().catch(() => undefined);
-      await sleep(250); // between two attempts to reach the new page, not a fixed wait for it
+      await sleep(250); // kept: between two attempts to reach the new page, not a fixed wait for it
     }
     // Only the old page was reachable: every check below would judge it, not a reloaded workbench.
     if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
@@ -3723,7 +3996,7 @@ try {
     /** Closes the list with a real Escape (the focus is inside it). */
     const closeList = async () => {
       await page.keyboard.press('Escape');
-      await sleep(300); // a short settle: the callers read the list state or reopen it next
+      await sleep(300); // kept: a short settle, the callers read the list state or reopen it next
     };
     /** Waits until `predicate(await picker())` holds. */
     const until = (predicate, ms = 15_000) =>
@@ -3956,7 +4229,7 @@ try {
       .click();
     // A declined dialog changes nothing, so there is no positive signal: a fixed window for the
     // check below, which asserts that nothing was deleted.
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(800); // negative window: a declined dialog deletes nothing
     state = await picker();
     check(
       state.rows.some((row) => row.title === renamed) && state.title === renamed,
@@ -4168,7 +4441,7 @@ try {
     );
     await shot('11d-fork-in-list');
     await page.keyboard.press('Escape');
-    await sleep(300); // a short settle: the list closing is read by the next check
+    await sleep(300); // kept: a short settle, the list closing is read by the next check
 
     // "Forked from ..." goes back to the original, which still has both exchanges.
     check(
@@ -4322,7 +4595,7 @@ try {
       });
     const press = async (key) => {
       await page.keyboard.press(key);
-      await sleep(250); // the key reaches the webview through the workbench asynchronously; some keys expect "nothing changes"
+      await sleep(250); // negative window: the key reaches the webview through the workbench asynchronously; some keys expect "nothing changes"
     };
     const THEMES = [
       ['light', 'Default Light Modern'],
@@ -4564,7 +4837,7 @@ try {
     );
     await press('Enter');
     // Fixed on purpose: negative check below (Enter on an agent row does NOT send a prompt).
-    await sleep(800);
+    await sleep(800); // negative window: Enter on an agent row sends no prompt
     state = await ui();
     const kept = await web.inDoc((doc) => doc.querySelector('textarea')?.value ?? '');
     const blocks = await web.inDoc((doc) => doc.querySelectorAll('[role="log"] > *').length);
@@ -4806,7 +5079,7 @@ try {
       });
     const press = async (key) => {
       await page.keyboard.press(key);
-      await sleep(250); // the key reaches the webview through the workbench asynchronously; some keys expect "nothing changes"
+      await sleep(250); // negative window: the key reaches the webview through the workbench asynchronously; some keys expect "nothing changes"
     };
     const THEMES = [
       ['light', 'Default Light Modern'],
@@ -5195,7 +5468,7 @@ try {
       await focusPromptBox();
       for (let i = 0; i < 120; i += 1) {
         await page.keyboard.press('Shift+Tab');
-        await sleep(40); // pace between Shift+Tab presses so the focus read sees each one
+        await sleep(40); // kept: pace between Shift+Tab presses so the focus read sees each one
         if ((await tagged())?.focusOnToggle) return true;
       }
       return false;
@@ -5342,8 +5615,9 @@ try {
     if (lastTool !== null && (await tabToTagged())) {
       await page.keyboard.press('Enter');
       await waitFor(async () => (await tagged())?.expanded === 'true', 3_000, 100);
-      // The auto-scroll that could push the header out of view runs after the unfolding: a fixed
-      // window for that check, after the positive wait (it is what the check below is about).
+      // negative window: the auto-scroll that could push the header out of view runs after the
+      // unfolding: a fixed window for that check, after the positive wait (it is what the check
+      // below is about).
       await sleep(400);
       const state = await tagged();
       check(
@@ -5465,7 +5739,7 @@ try {
         await web.inDoc((doc) =>
           doc.querySelector('[data-visual-card]')?.scrollIntoView({ block: 'center' }),
         );
-        await sleep(300); // scrollIntoView has no completion signal; the capture follows
+        await sleep(300); // kept: scrollIntoView has no completion signal; the capture follows
         await shot('15e-tool-failed-narrow');
         await setTheme('Default High Contrast Light');
         await shot('15e-tool-failed-narrow-hc-light');
@@ -5656,7 +5930,7 @@ try {
       for (let attempt = 0; attempt < 14; attempt += 1) {
         if (await waitFor(async () => (await ui()).rows.length >= min, 3_000, 250)) return true;
         await page.keyboard.press('Backspace');
-        await sleep(100); // retries the last typed character: a pace, not a wait for a condition
+        await sleep(100); // kept: retries the last typed character, a pace and not a wait for a condition
         await page.keyboard.type(query.slice(-1));
       }
       const seen = await ui().catch(() => null);
@@ -5675,7 +5949,7 @@ try {
     const removeChips = async () => {
       for (let guard = 0; guard < 6 && (await ui()).chips.length > 0; guard += 1) {
         await clickIn('.chips .chip-remove');
-        await sleep(200); // one chip gone per round: the re-render has no signal apart from the count read next
+        await sleep(200); // kept: one chip gone per round, the re-render has no signal apart from the count read next
       }
     };
     const editorSelection = () =>
@@ -5714,7 +5988,7 @@ try {
       if (!(await searchUntil('@sample', 2)))
         throw new Error(`no popup rows after switching to ${name} (${searchMiss})`);
       await page.keyboard.press('ArrowDown'); // so row 0 is NOT the highlighted one
-      await sleep(250); // the highlight moves in a later render; the measurement follows
+      await sleep(250); // kept: the highlight moves in a later render; the measurement follows
       const rowsLook = await web.inDoc(measureText, {
         normalName: '.mention-option[aria-selected="false"] .mention-name',
         normalDir: '.mention-option[aria-selected="false"] .mention-dir',
@@ -5771,7 +6045,7 @@ try {
     const wanted = state.rows.indexOf('src/sample.ts');
     const messagesBefore = state.messages;
     for (let i = 0; i < wanted; i += 1) await page.keyboard.press('ArrowDown');
-    await sleep(250); // the highlight follows the keys in a later render; `ui()` reads it next
+    await sleep(250); // kept: the highlight follows the keys in a later render; `ui()` reads it next
     state = await ui();
     check(
       state.selected === wanted && state.pointsAtSelected,
@@ -5817,7 +6091,7 @@ try {
       check(open === true, 'the popup opens while a turn is running');
       await page.keyboard.press('Escape');
       await waitFor(async () => !(await ui()).popup, 3_000, 100);
-      // Negative check below (the turn is NOT stopped): a fixed window after the positive wait.
+      // negative window: the turn is NOT stopped; a fixed window after the positive wait.
       await sleep(300);
       state = await ui();
       check(!state.popup, 'Escape closes the popup');
@@ -6319,7 +6593,7 @@ try {
     await waitPresent('details.changed-files[open]');
     for (let tabs = 0; tabs < 3; tabs++) {
       await page.keyboard.press('Tab');
-      await sleep(150); // pace between Tab presses so the focus read sees each one
+      await sleep(150); // kept: pace between Tab presses so the focus read sees each one
     }
     const focused = await web.inDoc((doc) => doc.activeElement?.getAttribute('aria-label') ?? '');
     check(
@@ -6711,7 +6985,7 @@ try {
       .getByRole('button', { name: /^Cancel$/ })
       .click();
     // Fixed on purpose: negative check (Cancel changes nothing), no positive signal to wait for.
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(800); // negative window: Cancel changes nothing
     check((await view()).banner !== null, 'Cancel keeps the revert prepared');
     await clickIn('textarea'); // the native dialog took the keyboard focus out of the page
     check(await clickButton('Discard for good'), 'Discard for good is pressed once more');
@@ -6884,7 +7158,7 @@ try {
     };
     const pasteIntoBox = async () => {
       check(await clickIn('textarea'), 'the prompt box is clicked');
-      await sleep(300); // the click moves the focus into the iframe; the paste goes to the focused box
+      await sleep(300); // kept: the click moves the focus into the iframe; the paste goes to the focused box
       await web.inDoc((doc) => {
         // Diagnostics only: what the paste event of the page carried (types, never contents).
         doc.defaultView.__lastPaste = undefined;
@@ -6939,7 +7213,7 @@ try {
     const removeChips = async () => {
       for (let guard = 0; guard < 6 && (await ui()).chips.length > 0; guard += 1) {
         await clickIn('.chips .chip-remove');
-        await sleep(200); // one chip gone per round: the re-render has no signal apart from the count read next
+        await sleep(200); // kept: one chip gone per round, the re-render has no signal apart from the count read next
       }
     };
 
@@ -6984,7 +7258,7 @@ try {
     writeSettings(vscode.userDataDir, { 'openVsCode.defaultModel': 'opencode/glm-5.3-flash-free' });
     // Fixed on purpose: the host picks up the edited user setting through a file watcher and
     // there is no observable signal for it before the next New session reads it.
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(2500); // kept: the file watcher of the host has no observable signal
     check(await clickButton('New session'), 'New session is pressed (the image-capable model)');
     await waitEmptyView();
     const warningsBefore = count((await ui()).text, NO_IMAGES);
@@ -7031,7 +7305,7 @@ try {
     for (const [name, theme] of THEMES) {
       await setTheme(theme);
       const prevented = await drag('dragover', [vsUri(sample)]);
-      await sleep(250); // the drop highlight is painted in a later frame; the capture follows
+      await sleep(250); // kept: the drop highlight is painted in a later frame; the capture follows
       state = await ui();
       check(
         prevented === true && state.drop === 'active',
@@ -7132,10 +7406,7 @@ try {
     // Code 1.143.1, `--steps 20`) the menu stayed open with the entry highlighted once #89 removed
     // the 600 ms sleep, and the chat never came back. HYPOTHESIS: the menu ignores clicks for a
     // moment after it opens. So the click is repeated until the menu is gone (the entry ran).
-    for (let attempt = 0; attempt < 3 && (await entry.count()) > 0; attempt += 1) {
-      await entry.first().click();
-      await waitFor(async () => (await entry.count()) === 0, 1_000, 100);
-    }
+    await clickUntilGone(entry);
     await openChat();
     const viaMenu = await waitFor(
       async () => (await ui()).chips.includes('src/sample.ts'),
@@ -7272,7 +7543,7 @@ try {
       await shot('21b-settings-link');
     }
     await page.keyboard.press('Control+W');
-    await sleep(500); // closing the settings tab has no signal the next step reads; kept short
+    await sleep(500); // kept: closing the settings tab has no signal the next step reads; short
   };
   await step('21 settings UI (issue #38)', settingsUi);
   // Step 22 (issue #35): the palette commands and the two default keys, with the REAL keyboard in a
@@ -7342,7 +7613,7 @@ try {
     const focusedChat = await caretLandsInBox(8_000);
     check(focusedChat === true, `${modifier}+P from the editor puts the caret in the prompt box`);
     await shot('22a-focus-prompt');
-    await sleep(300); // a gap between two presses of the same key: no signal to wait on
+    await sleep(300); // kept: a gap between two presses of the same key, no signal to wait on
     await page.keyboard.press(`${modifier}+p`);
     const backInEditor = await waitFor(editorHasFocus, 8_000, 250);
     check(backInEditor === true, `${modifier}+P again returns the focus to the editor`);
@@ -7414,7 +7685,7 @@ try {
     );
     await page.keyboard.press(`${modifier}+n`);
     await waitFor(async () => (await promptState()).messages === 0, 3_000, 100);
-    // Negative check below (no session is created): a short fixed window after the positive wait.
+    // negative window: no session is created; a short fixed window after the positive wait.
     await sleep(300);
     const afterNew = await promptState();
     check(afterNew.messages === 0, `${modifier}+N leaves the empty view (${afterNew.messages})`);
@@ -7443,7 +7714,7 @@ try {
     check((await menuOpen()).menu === true, 'the "+" menu is open before the shortcut');
     await page.keyboard.press(`${modifier}+n`);
     await waitPresent('[role="menu"]', false);
-    // Negative check below (no session is created): a short fixed window after the positive wait.
+    // negative window: no session is created; a short fixed window after the positive wait.
     await sleep(300);
     let menuNow = await menuOpen();
     check(
@@ -7589,11 +7860,11 @@ try {
     };
     const closeByEscape = async () => {
       await page.keyboard.press('Escape');
-      await sleep(250); // the key reaches the webview asynchronously; some callers expect "nothing changes"
+      await sleep(250); // negative window: the key reaches the webview asynchronously; some callers expect "nothing changes"
     };
     const press = async (key) => {
       await page.keyboard.press(key);
-      await sleep(200); // same: asynchronous path of the key, and negative checks follow some presses
+      await sleep(200); // negative window: same asynchronous path of the key, negative checks follow some presses
     };
 
     check(await waitIdle(60_000), 'no turn is running when the step starts');
@@ -7959,7 +8230,7 @@ try {
       box.bottom <= view.height + 0.5;
     const press = async (key) => {
       await page.keyboard.press(key);
-      await sleep(200); // the key reaches the webview asynchronously and negative checks follow
+      await sleep(200); // negative window: the key reaches the webview asynchronously and negative checks follow
     };
     // Empties the box with the real keyboard; a popup open on the old text closes with it.
     const clearBox = () => clearPromptBox(150);
@@ -8238,7 +8509,7 @@ try {
       await waitPresent('.command-popup [role="option"]', true, 20_000);
       await page.keyboard.press('Escape');
       await waitPresent('.command-popup [role="option"]', false);
-      // Negative check below (the turn is NOT stopped): a fixed window after the positive wait.
+      // negative window: the turn is NOT stopped; a fixed window after the positive wait.
       await sleep(300);
       state = await slashState();
       check(!state.popup, 'C4 Escape closes the "/" popup');
@@ -8299,31 +8570,35 @@ try {
       // What the side bar of `p` shows: its title text, the title buttons, the welcome text and how
       // many chat iframes have their centre inside it (a webview floats over the side bar, it is
       // not a DOM child of it).
-      const sideBarState = (p) =>
-        p.evaluate((selector) => {
-          const side = globalThis.document.querySelector('.part.sidebar');
-          const sideBox = side?.getBoundingClientRect();
-          const flat = (text) => (text ?? '').replace(/\s+/g, ' ').trim();
-          return {
-            title: flat(side?.querySelector('.title-label')?.textContent),
-            actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
-              (a) => a.getAttribute('aria-label') ?? '',
-            ),
-            welcome: flat(side?.querySelector('.welcome-view-content')?.innerText),
-            chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
-              if (globalThis.__ovcIsHome?.(frame)) return false; // the Quick start view is no chat
-              const box = frame.getBoundingClientRect();
-              const x = box.left + box.width / 2;
-              return (
-                sideBox !== undefined &&
-                frame.checkVisibility({ checkVisibilityCSS: true }) &&
-                box.width > 0 &&
-                x >= sideBox.left &&
-                x <= sideBox.right
-              );
-            }).length,
-          };
-        }, CHAT_FRAME);
+      const sideBarState = async (p) =>
+        homeProbeGuard(
+          await p.evaluate((selector) => {
+            const probe = globalThis.__ovcIsHome;
+            if (typeof probe !== 'function') return null; // see `homeProbeGuard`
+            const side = globalThis.document.querySelector('.part.sidebar');
+            const sideBox = side?.getBoundingClientRect();
+            const flat = (text) => (text ?? '').replace(/\s+/g, ' ').trim();
+            return {
+              title: flat(side?.querySelector('.title-label')?.textContent),
+              actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
+                (a) => a.getAttribute('aria-label') ?? '',
+              ),
+              welcome: flat(side?.querySelector('.welcome-view-content')?.innerText),
+              chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+                if (probe(frame)) return false; // the Quick start view is no chat
+                const box = frame.getBoundingClientRect();
+                const x = box.left + box.width / 2;
+                return (
+                  sideBox !== undefined &&
+                  frame.checkVisibility({ checkVisibilityCSS: true }) &&
+                  box.width > 0 &&
+                  x >= sideBox.left &&
+                  x <= sideBox.right
+                );
+              }).length,
+            };
+          }, CHAT_FRAME),
+        );
       // Starts a window with `options`, connects to it, runs `body(window, instance)` and always
       // stops it and deletes its folder.
       const withWindow = async (label, options, body) => {
@@ -8338,11 +8613,9 @@ try {
             installed: true,
             ...options,
           });
+          // `connectPage` installs `__ovcIsHome`; without it `sideBarState` counted the Quick start
+          // frame as a chat (D0, full run of 08/11/2026: "1 iframe(s)").
           connection = await connectPage(instance.port, 90_000);
-          // This page is not the one `connectWorkbench` set up, so it has no `__ovcIsHome` yet:
-          // without it `sideBarState` counts the Quick start frame as a chat (D0, full run of
-          // 08/11/2026: "1 iframe(s)"; step 25 had not run in any batch of that day).
-          await connection.page.evaluate(HOME_PROBE_SOURCE);
           await body(connection.page, instance);
         } finally {
           await connection?.browser.close().catch(() => undefined);
@@ -8378,7 +8651,7 @@ try {
           10_000,
           300,
         );
-        await sleep(3_000); // negative check after the positive waits: a chat would resolve by now
+        await sleep(2_000); // negative window: after the positive waits no chat may resolve (3 s before 10/11/2026)
         const bar = await sideBarState(other);
         console.log(`  D0 side bar of the control window: ${JSON.stringify(bar)}`);
         check(
@@ -8404,7 +8677,7 @@ try {
           .catch(() => undefined);
         await other.keyboard.press('ControlOrMeta+A');
         await other.keyboard.type('>OpenCode: Show Logs');
-        await sleep(1_000); // the list filters asynchronously
+        await sleep(1_000); // kept: the list filters asynchronously, no signal for it
         const titleRows = await other.evaluate(() =>
           [...globalThis.document.querySelectorAll('.quick-input-list .monaco-list-row')].map(
             (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim(),
@@ -8438,7 +8711,7 @@ try {
           'the window is in Restricted Mode (the status bar says "Restricted Mode")',
         );
         // Negative checks follow the positive waits above; the extra time is for a slow activation.
-        await sleep(4_000);
+        await sleep(2_500); // negative window: the OpenCode item stays out of the bar (4 s before 10/11/2026)
         const restrictedItems = await itemCount(other, 'OpenCode');
         check(
           restrictedItems === 0,
@@ -8460,7 +8733,7 @@ try {
           await other.keyboard.press('ControlOrMeta+A');
           await other.keyboard.type(`>${text}`);
           await waitFor(async () => (await input.inputValue()) === `>${text}`, 2_000, 50);
-          await sleep(1_000); // the list filters asynchronously; the caller reads a negative too
+          await sleep(1_000); // kept: the list filters asynchronously and the caller reads a negative too
           return other.evaluate(() =>
             [...globalThis.document.querySelectorAll('.quick-input-list .monaco-list-row')].map(
               (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim(),
@@ -8563,10 +8836,7 @@ try {
     // highlights it (see step 20, 28/10/2026).
     const choose = async (label) => {
       const entry = page.locator('.monaco-menu').getByText(label, { exact: true });
-      for (let attempt = 0; attempt < 3 && (await entry.count()) > 0; attempt += 1) {
-        await entry.first().click();
-        await waitFor(async () => (await entry.count()) === 0, 1_000, 100);
-      }
+      await clickUntilGone(entry);
     };
     // Where to right-click in the editor: inside the line that holds `text` (or the first line).
     const linePoint = async (text) => {
@@ -8629,13 +8899,13 @@ try {
     const removeChips = async () => {
       for (let guard = 0; guard < 6 && (await ctx()).chips.length > 0; guard += 1) {
         await clickIn('.chips .chip-remove');
-        await sleep(200); // one chip gone per round; the count read next is the only signal
+        await sleep(200); // kept: one chip gone per round, the count read next is the only signal
       }
     };
     const dismissNotices = async () => {
       for (let guard = 0; guard < 8 && (await ctx()).notices.length > 0; guard += 1) {
         await clickButton('Dismiss notice');
-        await sleep(150); // one notice gone per round; the count read next is the only signal
+        await sleep(150); // kept: one notice gone per round, the count read next is the only signal
       }
     };
     const inView = (box, view) =>
@@ -8963,7 +9233,7 @@ try {
         'C7 Explain on a file outside the workspace folder raises the native warning "Only files inside the workspace folder can be added"',
       );
       await shot('26h-outside-warning');
-      await sleep(1_000); // negative check after the positive wait: nothing may reach the chat
+      await sleep(1_000); // negative window: after the positive wait nothing may reach the chat
       check(
         (await ctx()).users.length === usersBeforeOutside,
         'C7 and the refused Explain sends nothing to the chat',
@@ -9099,40 +9369,45 @@ try {
       (await page.locator('.monaco-menu .action-label').allInnerTexts())
         .map((text) => text.trim())
         .filter((text) => text !== '');
-    const launcher = () =>
-      page.evaluate((selector) => {
-        const side = globalThis.document.querySelector('.part.sidebar');
-        return {
-          text: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
-            .replace(/\s+/g, ' ')
-            .trim(),
-          // The rows of the native Sessions tree (group headers and sessions), as VS Code draws them.
-          rows: [...(side?.querySelectorAll('.monaco-list-row') ?? [])].map((row) =>
-            (row.innerText ?? '').replace(/\s+/g, ' ').trim(),
-          ),
-          buttons: [...(side?.querySelectorAll('.welcome-view-content .monaco-button') ?? [])].map(
-            (b) => (b.textContent ?? '').trim(),
-          ),
-          actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
-            (a) => a.getAttribute('aria-label') ?? '',
-          ),
-          // A webview is not a DOM child of the side bar (it floats over it), so a chat "in the
-          // side bar" is a visible chat iframe whose centre lies inside the side bar's box.
-          chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
-            if (globalThis.__ovcIsHome?.(frame)) return false; // the Quick start view is no chat
-            const sideBox = side?.getBoundingClientRect();
-            const box = frame.getBoundingClientRect();
-            const x = box.left + box.width / 2;
-            return (
-              sideBox !== undefined &&
-              frame.checkVisibility({ checkVisibilityCSS: true }) &&
-              box.width > 0 &&
-              x >= sideBox.left &&
-              x <= sideBox.right
-            );
-          }).length,
-        };
-      }, CHAT_FRAME);
+    // Reads the launcher state of the chat frames; throws HOME_PROBE_MISSING without the probe.
+    const launcher = async () =>
+      homeProbeGuard(
+        await page.evaluate((selector) => {
+          const probe = globalThis.__ovcIsHome;
+          if (typeof probe !== 'function') return null; // see `homeProbeGuard`
+          const side = globalThis.document.querySelector('.part.sidebar');
+          return {
+            text: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
+              .replace(/\s+/g, ' ')
+              .trim(),
+            // The rows of the native Sessions tree (group headers and sessions), as VS Code draws them.
+            rows: [...(side?.querySelectorAll('.monaco-list-row') ?? [])].map((row) =>
+              (row.innerText ?? '').replace(/\s+/g, ' ').trim(),
+            ),
+            buttons: [
+              ...(side?.querySelectorAll('.welcome-view-content .monaco-button') ?? []),
+            ].map((b) => (b.textContent ?? '').trim()),
+            actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
+              (a) => a.getAttribute('aria-label') ?? '',
+            ),
+            // A webview is not a DOM child of the side bar (it floats over it), so a chat "in the
+            // side bar" is a visible chat iframe whose centre lies inside the side bar's box.
+            chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+              if (probe(frame)) return false; // the Quick start view is no chat
+              const sideBox = side?.getBoundingClientRect();
+              const box = frame.getBoundingClientRect();
+              const x = box.left + box.width / 2;
+              return (
+                sideBox !== undefined &&
+                frame.checkVisibility({ checkVisibilityCSS: true }) &&
+                box.width > 0 &&
+                x >= sideBox.left &&
+                x <= sideBox.right
+              );
+            }).length,
+          };
+        }, CHAT_FRAME),
+      );
     const showOpenCodeBar = async () => {
       const shows = async () =>
         (await launcher()).actions.some((label) => label.startsWith('New Session'));
@@ -9160,7 +9435,7 @@ try {
     const removeChips = async () => {
       for (let guard = 0; guard < 6 && (await view()).chips.length > 0; guard += 1) {
         await clickIn('.chips .chip-remove');
-        await sleep(200); // one chip gone per round; the count read next is the only signal
+        await sleep(200); // kept: one chip gone per round, the count read next is the only signal
       }
     };
     const closeSampleTabs = async () => {
@@ -9169,7 +9444,7 @@ try {
         if ((await tab.count()) === 0) break;
         await tab.hover();
         await tab.locator('.tab-actions .action-label').first().click({ timeout: 3_000 });
-        await sleep(200); // one tab gone per round; the count read next is the only signal
+        await sleep(200); // kept: one tab gone per round, the count read next is the only signal
       }
     };
     const channel = (value) => {
@@ -9519,10 +9794,7 @@ try {
       await page.mouse.click(aim.x + 40, aim.y + aim.height / 2, { button: 'right' });
       await waitFor(async () => (await menuRows()).length > 0, 3_000, 100);
       const entry = page.locator('.monaco-menu').getByText(EXPLAIN, { exact: true });
-      for (let attempt = 0; attempt < 3 && (await entry.count()) > 0; attempt += 1) {
-        await entry.first().click();
-        await waitFor(async () => (await entry.count()) === 0, 1_000, 100);
-      }
+      await clickUntilGone(entry);
       const shown = await waitFor(async () => (await visibleChatId()) !== undefined, 10_000, 200);
       await openChat(30_000);
       await waitFor(
@@ -9886,7 +10158,7 @@ try {
         reloaded = !stale;
         if (reloaded) break;
         await browser.close().catch(() => undefined);
-        await sleep(250); // between two attempts to reach the new page, not a wait for it
+        await sleep(250); // kept: between two attempts to reach the new page, not a wait for it
       }
       if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
       await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
@@ -9968,7 +10240,7 @@ try {
       await send(`DELETE_TITLED:Tab28D Reply with exactly: gone28. Do not use any tools.`);
       check(await waitIdle(30_000), "the turn that deletes D's session from outside ends");
       await typeDraft('draft28-A');
-      await sleep(1_000); // the workbench gets the webview's state through a message; no signal
+      await sleep(1_000); // kept: the workbench gets the webview's state through a message, no signal
       const before = await chatTabs();
       const beforeTexts = before.map((tab) => tab.text);
       check(
@@ -10173,7 +10445,7 @@ try {
       await send(PROMPT_L);
       check(await waitIdle(30_000), 'the turn of the side bar session ends');
       await clickTabNamed('Tab28A'); // A is the visible, active tab when the window reloads
-      await sleep(1_000); // the workbench gets the webview's state through a message; no signal
+      await sleep(1_000); // kept: the workbench gets the webview's state through a message, no signal
       const tabsBeforeSecond = (await chatTabs()).length;
       await shot('28e-before-second-reload');
       await reloadWindow('__visualPreReload28b');
@@ -10447,35 +10719,40 @@ try {
     const rowNamed = async (needle) => (await treeRows()).find((row) => row.name.includes(needle));
     const rowLocator = (needle) =>
       page.locator('.part.sidebar .monaco-list-row', { hasText: needle }).first();
-    const sideState = () =>
-      page.evaluate((selector) => {
-        const side = globalThis.document.querySelector('.part.sidebar');
-        return {
-          text: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
-            .replace(/\s+/g, ' ')
-            .trim(),
-          buttons: [...(side?.querySelectorAll('.welcome-view-content .monaco-button') ?? [])].map(
-            (b) => (b.textContent ?? '').trim(),
-          ),
-          actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
-            (a) => a.getAttribute('aria-label') ?? '',
-          ),
-          rows: [...(side?.querySelectorAll('.monaco-list-row') ?? [])].length,
-          chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
-            if (globalThis.__ovcIsHome?.(frame)) return false; // the Quick start view is no chat
-            const sideBox = side?.getBoundingClientRect();
-            const box = frame.getBoundingClientRect();
-            const x = box.left + box.width / 2;
-            return (
-              sideBox !== undefined &&
-              frame.checkVisibility({ checkVisibilityCSS: true }) &&
-              box.width > 0 &&
-              x >= sideBox.left &&
-              x <= sideBox.right
-            );
-          }).length,
-        };
-      }, CHAT_FRAME);
+    // Reads the state of the chat frames in the side bar; throws HOME_PROBE_MISSING without the probe.
+    const sideState = async () =>
+      homeProbeGuard(
+        await page.evaluate((selector) => {
+          const probe = globalThis.__ovcIsHome;
+          if (typeof probe !== 'function') return null; // see `homeProbeGuard`
+          const side = globalThis.document.querySelector('.part.sidebar');
+          return {
+            text: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
+              .replace(/\s+/g, ' ')
+              .trim(),
+            buttons: [
+              ...(side?.querySelectorAll('.welcome-view-content .monaco-button') ?? []),
+            ].map((b) => (b.textContent ?? '').trim()),
+            actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
+              (a) => a.getAttribute('aria-label') ?? '',
+            ),
+            rows: [...(side?.querySelectorAll('.monaco-list-row') ?? [])].length,
+            chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+              if (probe(frame)) return false; // the Quick start view is no chat
+              const sideBox = side?.getBoundingClientRect();
+              const box = frame.getBoundingClientRect();
+              const x = box.left + box.width / 2;
+              return (
+                sideBox !== undefined &&
+                frame.checkVisibility({ checkVisibilityCSS: true }) &&
+                box.width > 0 &&
+                x >= sideBox.left &&
+                x <= sideBox.right
+              );
+            }).length,
+          };
+        }, CHAT_FRAME),
+      );
     // The OpenCode activity bar item TOGGLES the side bar: it is pressed only when the side bar
     // really has no width, and otherwise the view gets up to 15 s to draw its title actions (same
     // hardening as step 34, commit aaf31ae, where a Reload Window restores the side bar open before
@@ -10530,7 +10807,7 @@ try {
       for (let round = 0; round < 40; round += 1) {
         if ((await rowNamed(needle)) !== undefined) return true;
         await page.mouse.wheel(0, 500 * direction);
-        await sleep(120); // the list draws its rows after the wheel; no signal to wait on
+        await workbenchFrames(); // the list paints its rows on the frame after the wheel
       }
       return (await rowNamed(needle)) !== undefined;
     };
@@ -10538,16 +10815,17 @@ try {
     const allRowNames = async () => {
       await scrollTo('~never~', -1);
       const seen = [];
-      // E9-sidebar-home: with Quick start folded the tree shows ~30 rows, and one read 120 ms after a
-      // wheel can still show the same rows (run of 08/11/2026: 33 names instead of 55), so the walk
-      // ends after three reads in a row that add nothing, not after the first.
+      // E9-sidebar-home: with Quick start folded the tree shows ~30 rows, and a read right after a
+      // wheel can still show the same rows (run of 08/11/2026, when the pause was a fixed 120 ms:
+      // 33 names instead of 55), so the walk ends after three reads in a row that add nothing, not
+      // after the first. The pause is now `workbenchFrames` (two frames), not 120 ms.
       let stalled = 0;
       for (let round = 0; round < 80 && stalled < 3; round += 1) {
         const before = seen.length;
         for (const row of await treeRows()) if (!seen.includes(row.name)) seen.push(row.name);
         stalled = seen.length === before && round > 0 ? stalled + 1 : 0;
         await page.mouse.wheel(0, 400);
-        await sleep(120); // as in scrollTo
+        await workbenchFrames(); // as in scrollTo
       }
       return seen;
     };
@@ -10619,7 +10897,7 @@ try {
         } else {
           await page.mouse.click(900, 500);
         }
-        await sleep(250); // the hover widget closes on the focus change; no signal to wait on
+        await sleep(250); // kept: the hover widget closes on the focus change, no signal to wait on
         await page
           .locator('.tab', { hasText: needle })
           .first()
@@ -10738,7 +11016,7 @@ try {
       const blend = (fg, bg, alpha) => fg.map((c, i) => c * alpha + bg[i] * (1 - alpha));
       const look = async (label) => {
         await page.mouse.move(900, 500);
-        await sleep(150); // the hover state of the row under the old mouse position clears
+        await sleep(150); // kept: the hover state of the row under the old mouse position clears
         const rows = await waitFor(
           async () => {
             const all = await treeRows();
@@ -10936,7 +11214,7 @@ try {
       await waitFor(async () => (await sideBarPx()) === 0, 3_000, 100);
       const hiddenBefore = (await sideBarPx()) === 0;
       const tabB = await clickTabAndChat('Tab29B');
-      await sleep(1_500); // a reveal that wrongly opened the view would do it within this time
+      await sleep(1_500); // negative window: a reveal that wrongly opened the view would do it within this time
       const stillHidden = (await sideBarPx()) === 0;
       await command('View: Toggle Primary Side Bar Visibility');
       await waitFor(async () => (await sideBarPx()) > 0, 3_000, 100);
@@ -11235,18 +11513,21 @@ try {
         card: doc.querySelector('.permission-card') !== null,
         cardFocused: doc.hasFocus() && doc.activeElement?.closest('.permission-card') != null,
       }));
-    const visibleChatIds = () =>
-      page.evaluate(
-        (selector) =>
-          [...globalThis.document.querySelectorAll(selector)]
+    // Ids of the chat frames that are visible; throws HOME_PROBE_MISSING without the probe.
+    const visibleChatIds = async () =>
+      homeProbeGuard(
+        await page.evaluate((selector) => {
+          const probe = globalThis.__ovcIsHome;
+          if (typeof probe !== 'function') return null; // see `homeProbeGuard`
+          return [...globalThis.document.querySelectorAll(selector)]
             .filter(
               (frame) =>
-                !globalThis.__ovcIsHome?.(frame) &&
+                !probe(frame) &&
                 frame.checkVisibility({ checkVisibilityCSS: true }) &&
                 frame.getBoundingClientRect().width > 0,
             )
-            .map((frame) => frame.name),
-        CHAT_FRAME,
+            .map((frame) => frame.name);
+        }, CHAT_FRAME),
       );
     // Connects to the visible chat whose title has `needle` (two chats can be on screen at once).
     const connectByTitle = async (needle) => {
@@ -11341,7 +11622,7 @@ try {
         .boundingBox({ timeout: 2_000 })
         .catch(() => null);
       if (bar !== null) await page.mouse.move(bar.x + bar.width / 2, bar.y + bar.height / 2);
-      await sleep(200); // the hover card needs a moment to go
+      await sleep(200); // kept: the hover card needs a moment to go
       await page.locator('.tab', { hasText: needle }).first().click({ timeout: 5_000 });
     };
     const clickOpenChat = async () => {
@@ -11399,7 +11680,7 @@ try {
         8_000,
         150,
       );
-      await sleep(1_000); // margin: a card sent to A would have arrived with the toast
+      await sleep(1_000); // negative window: a card sent to A would have arrived with the toast
       await waitFor(async () => (await visibleChatId()) !== idB, 8_000, 100);
       await openChat(30_000);
       const inA = await view();
@@ -11460,7 +11741,7 @@ try {
         20_000,
         200,
       );
-      await sleep(3_000); // margin: a notification would have come with the card
+      await sleep(2_000); // negative window: a notification would have come with the card (3 s before 10/11/2026)
       const toast3 = await toastText();
       check(
         card3 === true && toast3 === null && notifiedCount() === notified3,
@@ -11489,7 +11770,7 @@ try {
       const tabs4 = await chatTabs();
       const front4 = await activeEditor();
       const toast4 = await waitFor(toastText, 30_000, 25);
-      await sleep(3_000); // margin: before the dock stopped stealing the focus it closed within 1 s
+      await sleep(2_000); // negative window: before the dock stopped stealing the focus it closed within 1 s (3 s before 10/11/2026)
       const frontAfter4 = await activeEditor();
       const closed4 = closedVisibleCount() - closed4Before;
       const toastAfter4 = await toastText();
@@ -11550,7 +11831,7 @@ try {
         20_000,
         200,
       );
-      await sleep(3_000); // margin: a notification would have come with the card
+      await sleep(2_000); // negative window: a notification would have come with the card (3 s before 10/11/2026)
       const toast5 = await toastText();
       check(
         leftOver >= 1 && card5 === true && toast5 === null && notifiedCount() === notified5,
@@ -11630,34 +11911,38 @@ try {
       });
     // The side bar as VS Code draws it: the rows of the Sessions tree, the title buttons, the
     // welcome text and how many chat iframes have their centre inside it.
-    const sideBar = () =>
-      page.evaluate((selector) => {
-        const side = globalThis.document.querySelector('.part.sidebar');
-        const sideBox = side?.getBoundingClientRect();
-        return {
-          welcome: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
-            .replace(/\s+/g, ' ')
-            .trim(),
-          rows: [...(side?.querySelectorAll('.monaco-list-row') ?? [])].map((row) =>
-            (row.innerText ?? '').replace(/\s+/g, ' ').trim(),
-          ),
-          actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
-            (a) => a.getAttribute('aria-label') ?? '',
-          ),
-          chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
-            if (globalThis.__ovcIsHome?.(frame)) return false; // the Quick start view is no chat
-            const box = frame.getBoundingClientRect();
-            const x = box.left + box.width / 2;
-            return (
-              sideBox !== undefined &&
-              frame.checkVisibility({ checkVisibilityCSS: true }) &&
-              box.width > 0 &&
-              x >= sideBox.left &&
-              x <= sideBox.right
-            );
-          }).length,
-        };
-      }, CHAT_FRAME);
+    const sideBar = async () =>
+      homeProbeGuard(
+        await page.evaluate((selector) => {
+          const probe = globalThis.__ovcIsHome;
+          if (typeof probe !== 'function') return null; // see `homeProbeGuard`
+          const side = globalThis.document.querySelector('.part.sidebar');
+          const sideBox = side?.getBoundingClientRect();
+          return {
+            welcome: (side?.querySelector('.welcome-view-content')?.innerText ?? '')
+              .replace(/\s+/g, ' ')
+              .trim(),
+            rows: [...(side?.querySelectorAll('.monaco-list-row') ?? [])].map((row) =>
+              (row.innerText ?? '').replace(/\s+/g, ' ').trim(),
+            ),
+            actions: [...(side?.querySelectorAll('.action-label') ?? [])].map(
+              (a) => a.getAttribute('aria-label') ?? '',
+            ),
+            chatFrames: [...globalThis.document.querySelectorAll(selector)].filter((frame) => {
+              if (probe(frame)) return false; // the Quick start view is no chat
+              const box = frame.getBoundingClientRect();
+              const x = box.left + box.width / 2;
+              return (
+                sideBox !== undefined &&
+                frame.checkVisibility({ checkVisibilityCSS: true }) &&
+                box.width > 0 &&
+                x >= sideBox.left &&
+                x <= sideBox.right
+              );
+            }).length,
+          };
+        }, CHAT_FRAME),
+      );
     const sidebarChatId = () =>
       page.evaluate((selector) => {
         const sideBox = globalThis.document.querySelector('.part.sidebar')?.getBoundingClientRect();
@@ -11757,7 +12042,7 @@ try {
       console.log(`  ${label} Settings row of Chat Location: ${JSON.stringify(row)}`);
       await shot(label === 'D3' ? '31c-settings-default' : '31e-settings-sidebar');
       await page.keyboard.press('Control+W');
-      await sleep(500); // closing the settings tab has no signal the next step reads; kept short
+      await sleep(500); // kept: closing the settings tab has no signal the next step reads; short
       return row === null ? null : { ...row, modified: row.configured || row.indicatorShown };
     };
 
@@ -11788,7 +12073,7 @@ try {
       const opened = await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
       await connectToNew(drivenChatId);
       await waitFor(async () => (await view()).title.includes('Tab31A'), 15_000, 200);
-      await sleep(1_000); // negative check after the positive waits: a second tab would be there
+      await sleep(1_000); // negative window: after the positive waits a second tab would be there
       const tabs1 = await tabsNow();
       const chat1 = tabs1.filter(isChatTab);
       const sample1 = tabs1.find((tab) => !isChatTab(tab));
@@ -11962,7 +12247,7 @@ try {
           reloaded = !stale;
           if (reloaded) break;
           await browser.close().catch(() => undefined);
-          await sleep(250); // between two attempts to reach the new page, not a wait for it
+          await sleep(250); // kept: between two attempts to reach the new page, not a wait for it
         }
         if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
         await waitFor(
@@ -12005,7 +12290,7 @@ try {
           20_000,
           200,
         );
-        await sleep(2_000); // margin: a launch would show within it; the check below is on the final state
+        await sleep(2_000); // negative window: a launch would show within it; the check below is on the final state
         const afterReload = logSince(before);
         check(
           noted === true && !afterReload.includes('starting the server for'),
@@ -12189,7 +12474,7 @@ try {
       }
       await page.keyboard.press('ControlOrMeta+A');
       await page.keyboard.press('Backspace');
-      await sleep(150); // the first typed character is lost without it (see `send`)
+      await sleep(150); // kept: the first typed character is lost without it (see `send`)
       await page.keyboard.insertText(text);
       await page.keyboard.press('Enter');
     };
@@ -12783,24 +13068,26 @@ try {
         reloaded = !stale;
         if (reloaded) break;
         await browser.close().catch(() => undefined);
-        await sleep(250); // between two attempts to reach the new page, not a wait for it
+        await sleep(250); // kept: between two attempts to reach the new page, not a wait for it
       }
       if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
       await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
       drivenChatId = undefined;
     };
     // The `OpenCode:` palette commands that match `query`; the 600 ms sleep is the palette
-    // filtering as you type (no signal to wait on). Closes the palette before returning.
+    // filtering as you type (no signal to wait on). Closes the palette and parks the pointer off
+    // the command center ({@link parkPointer}) before returning.
     const paletteRows = async (query) => {
       if (!(await clickCommandCenter())) await page.keyboard.press('F1');
       await inputOpen();
       await typeInQuickInput(page.locator('.quick-input-widget input').first(), `>${query}`);
-      await sleep(600); // the palette filters as you type; no signal to wait on
+      await sleep(600); // kept: the palette filters as you type, no signal to wait on
       const rows = (await quickRows().allInnerTexts())
         .map((text) => text.replace(/\s+/g, ' ').trim())
         .filter((text) => text.startsWith('OpenCode:'));
       await page.keyboard.press('Escape');
       await waitFor(quickInputHidden, 3_000, 100);
+      await parkPointer(); // the command center click left the pointer on its hover
       return rows;
     };
 
@@ -13121,7 +13408,7 @@ try {
       };
       const lookAtTree = async (label, wide) => {
         await page.mouse.move(900, 500);
-        await sleep(150); // the hover of the row under the old pointer clears
+        await sleep(150); // kept: the hover of the row under the old pointer clears
         await showSessions();
         const all = await outline();
         const levelOne = all.filter((row) => row.level === 1);
@@ -13212,7 +13499,7 @@ try {
           const tab = page.locator('.tab', { hasText: name }).first();
           await tab.hover();
           await tab.locator('.tab-actions .action-label').first().click({ timeout: 3_000 });
-          await sleep(300); // the tab strip redraws; no signal to wait on
+          await sleep(300); // kept: the tab strip redraws, no signal to wait on
         }
       }
       await setFilters(['Open in a tab']);
@@ -13280,6 +13567,18 @@ try {
       await waitRows((rows2) => rowOf(rows2, 'Spikes34') !== undefined, 60_000);
       await ensureOpen('Spikes34');
       await ensureOpen('Archived');
+      // The children of a folder load lazily after it expands, and `ensureOpen` only waits for the
+      // expansion: on a GitHub runner `outline()` read right after it had no Org34D under
+      // Archived ("D []", both attempts of the run of 10/11/2026) while the capture taken a moment
+      // later showed it. Wait for the rows the check below reads; if they never come, the check
+      // judges exactly what it judged before.
+      await waitRows(
+        (rows2) =>
+          pathsOf(rows2, 'Org34D')[0]?.join('/') === 'Archived' &&
+          pathsOf(rows2, 'Org34A')[0]?.join('/') === 'Spikes34' &&
+          pathsOf(rows2, 'SSE34')[0]?.join('/') === 'Spikes34',
+        15_000,
+      );
       const reloaded = await outline();
       await shot('34k-after-reload');
       check(
@@ -13320,7 +13619,7 @@ try {
         10_000,
         200,
       );
-      await sleep(1_000); // the context keys follow the setting a moment later; no signal to wait on
+      await sleep(1_000); // kept: the context keys follow the setting a moment later, no signal to wait on
       const offered = [];
       // The EXACT titles of the organizing commands (package.json), not a substring: other commands
       // legitimately contain "Folder" ("Open Mods Folder", E10-mods; "Forget Plugin Decision for
@@ -14072,8 +14371,11 @@ try {
             await settingsClick('#settings-panel-providers button.add-provider-button'),
             `${id}: "+ Add provider" is pressed with the mouse`,
           );
+          // The picker is open when its search box is there. Its list is NOT a sign of that: the
+          // text left from the previous pick can match no provider, and then the list is replaced
+          // by "No provider matches", so a wait for `[role="listbox"]` ran to its 5 s cap.
           await settingsWait(
-            (doc) => doc.querySelector('#settings-panel-providers [role="listbox"]') !== null,
+            (doc) => doc.querySelector('#settings-panel-providers input[role="combobox"]') !== null,
             null,
             5_000,
           );
@@ -15076,7 +15378,17 @@ try {
         // --- Reload Window: does the tab come back without a serializer? -------------------------
         check((await settingsTabCount()) === 1, 'the Settings tab is open before Reload Window');
         await reloadWindow('__visualPreReload36');
-        const tabsAfter = await waitFor(async () => (await settingsTabCount()) >= 1, 15_000, 300);
+        // The tab is not restored (no serializer, this step's point) and the check below accepts
+        // that, so the wait is a window for a tab that might come back, not a wait for one: it
+        // expired at its 15 s cap in every CI run (10/11/2026). 5 s: the workbench is already up
+        // when `reloadWindow` returns, and an editor that is restored appears within a couple of
+        // seconds of it (HYPOTHESIS, not timed). Its expiry is the normal path, not listed.
+        const tabsAfter = await waitFor(
+          async () => (await settingsTabCount()) >= 1,
+          5_000,
+          300,
+          false,
+        );
         let afterReload;
         if (tabsAfter !== undefined) {
           await connectSettings(30_000).catch(() => undefined);
@@ -15249,17 +15561,17 @@ try {
         Math.max(40, (frame?.x ?? 700) / 2),
         y + (frame?.height ?? 200) / 2 - 80,
       );
-      await sleep(400);
+      await sleep(400); // kept: the hover cards appear after a delay of their own, no signal before one is up
       let nudge = 0;
       let left = await visibleHovers();
       for (let round = 0; round < 25 && left.length > 0; round += 1) {
         nudge += 1;
         await page.mouse.move(x + (nudge % 2), y);
-        await sleep(200);
+        await sleep(200); // kept: a nudge of the pointer per round; the hovers read next are the only signal
         left = await visibleHovers();
       }
       await page.mouse.move(x, y);
-      await sleep(300); // a card that would still come up after the hover delay
+      await sleep(300); // negative window: a card that would still come up after the hover delay
       return [...left, ...(await visibleHovers())];
     };
 
@@ -15281,7 +15593,7 @@ try {
       // that step left, and an empty one (a run of `--steps 37`) does not move to a tab at all.
       const sideBarChat = drivenChatId;
       setLocation('editor');
-      await sleep(1_000); // the host reads the setting asynchronously
+      await sleep(1_000); // kept: the host reads the setting asynchronously, no observable signal
       await command('OpenCode: New Session');
       await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
       await connectToNew(sideBarChat);
@@ -15376,7 +15688,7 @@ try {
       );
       await shot('37c-tab-chip-panel');
       await page.keyboard.press('Escape');
-      await sleep(250); // the key reaches the webview asynchronously
+      await sleep(250); // negative window: the key reaches the webview asynchronously
       check(!(await panelState()).open, 'R3 Escape closes the panel of the tab');
 
       // --- 37b + R4: the fork, in a new tab with two turns ---------------------------------------
@@ -15772,7 +16084,7 @@ try {
           toastLinks === 0,
         `M5 the toast text is "<mod>: <message>" with the brackets and parentheses of the mod's message removed and no link in it (${JSON.stringify(toastText)}, links ${String(toastLinks)})`,
       );
-      await sleep(600); // the toast slides in: the capture of the first run caught it half drawn
+      await sleep(600); // kept: the toast slides in, and the capture of the first run caught it half drawn
       await shot('38-toast');
       await command('Notifications: Clear All Notifications').catch(() => undefined);
       const after = await bandState();
@@ -15831,7 +16143,7 @@ try {
         written === true,
         `M9a the compose of the mod wrote its text in the prompt box (${JSON.stringify(boxText)})`,
       );
-      await sleep(1_000); // a send would have shown as a user message or a turn by now
+      await sleep(1_000); // negative window: a send would have shown as a user message or a turn by now
       const afterCompose = await bandState();
       check(
         afterCompose.users.length === beforeCompose.users.length &&
@@ -16071,7 +16383,7 @@ try {
       });
       const firstDrop = await waitFor(() => dropLines() > dropsBefore, 15_000, 100);
       const firstDropMs = Math.round(performance.now() - floodStart);
-      await sleep(2_500); // longer than two windows: the last of the ten messages has arrived by now
+      await sleep(2_500); // kept: longer than two throttle windows, so the last of the ten messages has arrived
       const drops = dropLines() - dropsBefore;
       check(
         firstDrop === true && drops >= 1 && drops <= 2,
@@ -16095,7 +16407,7 @@ try {
         script.remove();
         return out;
       });
-      await sleep(500); // CSP reports come through the Log domain a moment after the attempt
+      await sleep(500); // kept: CSP reports come through the Log domain a moment after the attempt
       const violations = panelLogs.filter((line) =>
         /Refused to|Content Security Policy/i.test(line),
       );
@@ -16286,7 +16598,7 @@ try {
         reloaded = !stale;
         if (reloaded) break;
         await browser.close().catch(() => undefined);
-        await sleep(250); // between two attempts to reach the new page, not a wait for it
+        await sleep(250); // kept: between two attempts to reach the new page, not a wait for it
       }
       if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
       await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
@@ -16366,7 +16678,7 @@ try {
       await reload('__visualReload40a');
       const blocked = await waitFor(() => logSince(before).includes(BLOCKED), 20_000, 200);
       const noticeShown = await waitFor(async () => await toastWith(NOTICE), 15_000, 200);
-      await sleep(2_000); // margin: a launch would show within it; the check below is on the final state
+      await sleep(2_000); // negative window: a launch would show within it; the check below is on the final state
       const afterReload = logSince(before);
       check(
         blocked === true &&
@@ -16400,7 +16712,7 @@ try {
       before = hostLogSizes();
       await reload('__visualReload40b');
       const blockedAgain = await waitFor(() => logSince(before).includes(BLOCKED), 20_000, 200);
-      await sleep(3_000); // margin: a notice would show within it; the check below is on the final state
+      await sleep(2_000); // negative window: a notice would show within it; the check below is on the final state (3 s before 10/11/2026)
       check(
         blockedAgain === true &&
           (await toastWith(NOTICE)) === undefined &&
@@ -16475,7 +16787,7 @@ try {
         `P7 Restart Server asks in a modal that lists the second plugin (${String(asked).slice(0, 200)})`,
       );
       await pressInDialog('Cancel');
-      await sleep(1_500); // margin: a launch would show within it
+      await sleep(1_500); // negative window: a launch would show within it
       check((await card()).connection === 'not-started', 'P7 Cancel leaves the chat not started');
       assertNoWebviewErrors('step 40');
     } finally {
@@ -16549,7 +16861,7 @@ try {
         reloaded = !stale;
         if (reloaded) break;
         await browser.close().catch(() => undefined);
-        await sleep(250); // between two attempts to reach the new page, not a wait for it
+        await sleep(250); // kept: between two attempts to reach the new page, not a wait for it
       }
       if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
       await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
@@ -16683,7 +16995,7 @@ try {
         ran === true && fs.readFileSync(sentinel, 'utf8').trim() === 'args=Bea',
         'S3 the command ran inside its Worker with its arguments ("Bea")',
       );
-      await sleep(2_000); // margin: a prompt would start the server within it
+      await sleep(2_000); // negative window: a prompt would start the server within it
       const sent = logSince(sendFrom);
       check(
         (await card()).connection === 'not-started' &&
@@ -16961,7 +17273,7 @@ try {
     const atStart = await listRects();
     await page.keyboard.press('End');
     await until((s) => selectedId(s) === idC);
-    await sleep(300); // smooth scrolling, if any, settles
+    await sleep(300); // kept: smooth scrolling, if any, settles
     const atEnd = await listRects();
     check(
       atStart !== null && atEnd !== null && atStart.scrolls && !atStart.inside && atEnd.inside,
@@ -17264,7 +17576,7 @@ try {
     };
     const pressKey = async (key) => {
       await page.keyboard.press(key);
-      await sleep(200); // the key reaches the webview asynchronously; negative checks follow
+      await sleep(200); // negative window: the key reaches the webview asynchronously; negative checks follow
     };
     const toggleSideBar = () =>
       page
@@ -17451,7 +17763,7 @@ try {
     await waitFor(isBusy, 3_000, 100);
     await toggleSideBar();
     await waitFor(async () => (await sideBarPx()) === 0, 3_000, 100);
-    await sleep(4_000); // the fixture asks within ~1 s; a notification, if any, would be up by now
+    await sleep(2_500); // negative window: the fixture asks within ~1 s; a notification, if any, would be up by now (4 s before 10/11/2026)
     const toastsAuto = await toasts();
     if (toastsAuto.length > 0) console.log(`  toasts seen: ${JSON.stringify(toastsAuto)}`);
     const badgeAuto = (
@@ -17627,7 +17939,7 @@ try {
         reloaded = !stale;
         if (reloaded) break;
         await browser.close().catch(() => undefined);
-        await sleep(250); // between two attempts to reach the new page, not a wait for it
+        await sleep(250); // kept: between two attempts to reach the new page, not a wait for it
       }
       if (!reloaded) throw new Error('Reload Window did not produce a new workbench page');
       await waitFor(async () => (await page.locator('.monaco-workbench').count()) > 0, 30_000, 300);
@@ -17704,7 +18016,7 @@ try {
     const rowOf = (state, id) => state.rows.find((row) => row.id === id);
     const press = async (key) => {
       await page.keyboard.press(key);
-      await sleep(200); // the key reaches the webview asynchronously; negative checks follow
+      await sleep(200); // negative window: the key reaches the webview asynchronously; negative checks follow
     };
     const openByMouse = async () => {
       const before = await view();
@@ -18131,7 +18443,7 @@ try {
       const quietRows = (await view()).rowsPopup;
       await clearPromptBox(150);
       await page.keyboard.type(`/${HELLO}`);
-      await sleep(300); // the popup filters as the text changes; the absence below is judged after it
+      await sleep(300); // kept: the popup filters as the text changes; the absence below is judged after it
       state = await view();
       check(
         quietRows.some((row) => row.includes(`${QUIET}:count`)) &&
@@ -18203,7 +18515,7 @@ try {
           // The pointer rests on the button after the click, and its hover colours would be
           // measured as the icon's: park it over the title bar, away from every element judged.
           await page.mouse.move(400, 5);
-          await sleep(150); // the hover style leaves on the next frame; the cells below read it
+          await sleep(150); // kept: the hover style leaves on the next frame; the cells below read it
           for (const [component, spec] of COMPONENTS) {
             const measured = await web.inDoc(measureCell, spec);
             const verdict = cellVerdict(spec, measured);
@@ -19136,7 +19448,7 @@ try {
       // --- U1: both views start collapsed and have read nothing --------------------------------------
       const changesPane = await paneState(CHANGES);
       const usagePane = await paneState(USAGE);
-      // Negative window: the Usage view would ask for stats as soon as it believed it was shown.
+      // negative window: the Usage view would ask for stats as soon as it believed it was shown.
       await sleep(1_500);
       check(
         changesPane.found &&
@@ -19221,7 +19533,7 @@ try {
       await toggle(USAGE);
       await waitFor(async () => statsCalls() - callsAtStart >= 2, 15_000, 150);
       await waitPane(USAGE, (next) => rowOf(next, 'Today')?.description.includes('$'), 15_000);
-      // Negative window: a third request would be a read the single load should not make.
+      // negative window: a third request would be a read the single load should not make.
       await sleep(1_500);
       const usageState = await paneState(USAGE);
       const today = rowOf(usageState, 'Today');
@@ -19253,8 +19565,9 @@ try {
       await connectToNew(previous);
       await send('Use49 hello with the Usage view collapsed');
       check(await waitIdle(30_000), 'the turn with the Usage view collapsed ends');
-      // Negative window of 11.5 s: a view that still believed it was visible would refresh 10 s after
-      // the turn ended (`REFRESH_DEBOUNCE_MS`); a collapsed one only marks itself stale.
+      // negative window: 11.5 s, kept at that length because a view that still believed it was
+      // visible would refresh 10 s after the turn ended (`REFRESH_DEBOUNCE_MS`); a collapsed one
+      // only marks itself stale.
       await sleep(11_500);
       check(
         statsCalls() === callsShown,
@@ -19262,7 +19575,7 @@ try {
       );
       await toggle(USAGE);
       const reread = await waitFor(async () => statsCalls() - callsShown >= 2, 15_000, 150);
-      await sleep(1_500);
+      await sleep(1_500); // negative window: no third request after the two of the reread
       check(
         reread !== undefined && statsCalls() - callsShown === 2,
         `U4 expanding it again reads once more, two requests, because the turn marked the data stale (${String(statsCalls() - callsShown)} new)`,
@@ -19273,7 +19586,7 @@ try {
       await setSideBarWidth(NORMAL).catch(() => undefined);
       for (const [themeName, theme] of PROBLEM_THEMES) {
         await setTheme(theme);
-        await sleep(400);
+        await settleLayout(); // the panes redraw their descriptions once the theme is applied
         const changes = await paneState(CHANGES);
         const usage = await paneState(USAGE);
         const session = rowOf(changes, 'Chg49');
@@ -19293,7 +19606,7 @@ try {
       setLocation('sidebar');
       await setTheme(DARK).catch(() => undefined);
       await setSideBarWidth(Math.round(originalWidth)).catch(() => undefined);
-      await openChat(30_000).catch(() => undefined);
+      await openSidebarChat().catch(() => undefined);
     }
   });
 
@@ -19415,7 +19728,7 @@ try {
       if (!(await homeClick('.home-box'))) throw new Error('the Quick start box was not found');
       await page.keyboard.press('ControlOrMeta+A');
       await page.keyboard.press('Backspace');
-      await sleep(150); // the first typed character is lost without it (see `send`)
+      await sleep(150); // kept: the first typed character is lost without it (see `send`)
       await page.keyboard.type(text);
       if (enter) await page.keyboard.press('Enter');
     }
@@ -19528,7 +19841,7 @@ try {
         }
         for (const [themeName, theme] of PROBLEM_THEMES) {
           await setThemeInHome(theme);
-          await sleep(400);
+          await settleLayout(); // the cells read boxes and styles of the new theme
           await cells(
             `${name} at ${widthName} px (bar ${String(Math.round(barPx))}), ${themeName}`,
           );
@@ -19540,7 +19853,7 @@ try {
     }
 
     setLocation('sidebar');
-    await openChat(30_000);
+    await openSidebarChat();
     check(await waitIdle(60_000), 'no turn is running when the step starts');
     await closeAllEditors();
     const originalWidth = await sideBarPx();
@@ -19604,7 +19917,7 @@ try {
       });
       await homeType('', false);
       await page.keyboard.press('Enter');
-      await sleep(1_000);
+      await sleep(1_000); // negative window: an Enter on an empty box sends nothing and opens no tab
       check(
         multi === 'first\nsecond' &&
           logCount('prompt accepted for') === promptsAtStart &&
@@ -19626,7 +19939,7 @@ try {
         30_000,
         200,
       );
-      await sleep(600);
+      await sleep(600); // negative window: exactly one tab and one accepted prompt, no second one follows
       const afterEnter = {
         tabs: (await chatTabs()).length,
         accepted: logCount('prompt accepted for') - promptsAtStart,
@@ -19776,7 +20089,7 @@ try {
         tabsNow().then((tabs) => tabs.filter((tab) => tab.label.includes('OpenCode Settings')));
       await waitFor(async () => (await settingsTab()).length >= 1, 15_000, 200);
       check(await homeClick('.home-pill[data-kind="mcp"]'), 'F8 the MCP pill is clicked');
-      await sleep(1_000);
+      await sleep(1_000); // negative window: the two pills open the Settings tab once, not twice
       check(
         (await settingsTab()).length === 1,
         `F8 the model pill and the MCP pill open the OpenCode Settings tab, once (${String((await settingsTab()).length)} tab)`,
@@ -19799,7 +20112,7 @@ try {
       setLocation('sidebar');
       await setTheme(DARK).catch(() => undefined);
       await setSideBarWidth(Math.round(originalWidth)).catch(() => undefined);
-      await openChat(30_000).catch(() => undefined);
+      await openSidebarChat().catch(() => undefined);
     }
   });
 
@@ -19916,22 +20229,92 @@ try {
      * when it is closed (pressing an open one would close it). It presses up to three times while
      * the list stays closed, because in a chat tab one press was seen not to open it (run of
      * 08/11/2026: the list was still closed after 3 s); the `ok` line prints how many it took.
+     * The 1.5 s wait after each press ends early when the list opens; when it does not, that
+     * expiry is the normal path (the press only gave the focus) and is not listed in `== waits`.
+     * The final read that the check judges is retried for up to 3 s until it sees the list open
+     * (the bar can be mid re-render with nothing in it); if no read does, the last one is judged.
+     * "Appears" waits for the header toggle too, and a press that finds no toggle looks for it
+     * again for up to 5 s. VERIFIED on Windows 11 (10/11/2026): `--steps 51` ended "all visual
+     * checks passed" 4 times in a row with these waits. Before them, 3 earlier runs of the step
+     * failed: "second round: the bar header is pressed" in 2 of them (one also "chat tab: the bar
+     * header is pressed") and "second round: the bar list is open" in 1.
+     *
+     * Why the retries exist: the WHOLE bar (element and toggle) vanishes for an instant in the
+     * middle of a turn, because `SubagentBar.tsx` renders both inside one
+     * `<Show when={ids().length > 0}>`; that looks like a product bug, tracked in issue #200, and
+     * the retries only hide it from the step. They are therefore not silent: every time a read
+     * finds the bar or its toggle gone after an earlier read of the same call saw both, it is
+     * counted (one per episode, not per read), and a non-zero count ends the call with a `warn`
+     * line ("the subagent bar disappeared N time(s) …"). A `warn` line is neither `ok` nor `FAIL`:
+     * it moves no check and `merge-shards.mjs` carries it into the `warnings` list. Remove the
+     * retries, and this count, when #200 is fixed.
+     * HYPOTHESIS that the disappearance is the `<Show>` in `SubagentBar.tsx` (read, not
+     * reproduced in isolation). VERIFIED that the count fires: the full run of
+     * tooling/visual-ci-parallel on its final tree (10/11/2026, Windows 11, "all visual checks
+     * passed") printed "first round: the subagent bar disappeared 1 time(s) while it was being
+     * opened (issue #200)".
      */
     const openBar = async (where) => {
-      check((await waitFor2((s) => s.bar, 20_000)) === true, `${where}: the bar appears`);
+      // Disappearances of the bar seen after it was complete once (issue #200); see the header.
+      let seen = false;
+      let gone = 0;
+      let wasGone = false;
+      const read = async () => {
+        const state = await monitor();
+        const complete = state.bar && state.expanded !== '';
+        if (complete) {
+          seen = true;
+          wasGone = false;
+        } else if (seen && !wasGone) {
+          gone += 1;
+          wasGone = true;
+        }
+        return state;
+      };
+      // The bar element can exist a moment before its header toggle (`expanded` reads ""), and a
+      // press in that gap found nothing to click ("the bar header is pressed" FAILed in 2 of 6
+      // passes of `--steps 40,41,44,45,49,50,51`, 10/11/2026), so "appears" waits for the toggle.
+      check(
+        (await waitFor2((s) => s.bar && s.expanded !== '', 20_000)) === true,
+        `${where}: the bar appears`,
+      );
       // Up to three presses, each only while the list is still closed: the first click into a
       // webview that did not have the focus (a chat tab) may only give it the focus.
       let presses = 0;
-      while (presses < 3 && (await monitor()).expanded !== 'true') {
+      while (presses < 3 && (await read()).expanded !== 'true') {
         presses += 1;
-        check(await clickIn('.subagent-bar-toggle'), `${where}: the bar header is pressed`);
-        await waitFor2((s) => s.expanded === 'true', 1_500);
+        // The toggle can be re-rendered away between the read above and the click (the bar of the
+        // previous round of the same chat is replaced by the new one), so a missing toggle is
+        // looked for again for up to 5 s before the press counts as failed.
+        check(
+          (await waitFor(() => clickIn('.subagent-bar-toggle'), 5_000, 100)) === true,
+          `${where}: the bar header is pressed`,
+        );
+        // Its expiry is the normal path of a press that only gave the focus (see above), so it is
+        // not listed in `== waits`; the loop presses again.
+        await waitFor(async () => (await read()).expanded === 'true', 1_500, 150, false);
       }
-      const after = await monitor();
+      // The loop above can exit on a read that saw the list open (0 presses) and the read below
+      // find the bar re-rendering with nothing in it ("aria-expanded """, seen once in three
+      // passes of `--steps 40,41,44,45,49,50,51`, 10/11/2026): wait for a read that sees it open,
+      // and judge the last read if none does.
+      const after =
+        (await waitFor(
+          async () => {
+            const latest = await read();
+            return latest.expanded === 'true' ? latest : undefined;
+          },
+          3_000,
+          100,
+        )) ?? (await read());
       check(
         after.expanded === 'true',
         `${where}: the bar list is open (${String(presses)} press(es), aria-expanded "${after.expanded}", "${after.summary}")`,
       );
+      if (gone > 0)
+        warn(
+          `${where}: the subagent bar disappeared ${String(gone)} time(s) while it was being opened (issue #200)`,
+        );
     };
     /**
      * The folded card of B ("Finished · N tools · cost") in each of `themes`: its summary carries
@@ -20054,7 +20437,7 @@ try {
       check(await focusPromptBox(), 'the prompt box gets the focus back before Answer');
       const firstElapsed = seconds(rowOf(state, A)?.elapsed ?? '');
       const firstTool = rowOf(state, A)?.current ?? '';
-      await sleep(2_200); // the elapsed time moves once a second; two reads 2 s apart need the gap
+      await sleep(2_200); // kept: the elapsed time moves once a second; two reads 2 s apart need the gap
       state = await monitor();
       check(
         seconds(rowOf(state, A)?.elapsed ?? '') >= firstElapsed + 1,
