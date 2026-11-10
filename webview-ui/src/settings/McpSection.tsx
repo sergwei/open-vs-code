@@ -1,5 +1,5 @@
 import * as l10n from '@vscode/l10n';
-import { createSignal, createUniqueId, For, Show } from 'solid-js';
+import { createEffect, createSignal, createUniqueId, For, on, Show, untrack } from 'solid-js';
 import { formatParts, plural } from '../../../src/shared/l10n';
 import type { SettingsMcpServerRow } from '../../../src/shared/settingsProtocol';
 import { CheckIcon, CrossIcon, WarningIcon, WaitingIcon } from '../chat/icons';
@@ -94,9 +94,13 @@ function actionOf(server: SettingsMcpServerRow): RowAction | undefined {
  * the click, so a request the host refuses or that ends in the same state still clears it. The
  * one status change that does NOT clear it is the step to `pending` from another state: the host
  * is still inside its call (it refuses a second change of the server), so the row stays busy
- * until the final notice or a final status. HYPOTHESIS for a slow remote server: the window is
- * the whole handshake, not measured; the test "stays busy while the server is pending" of
- * `McpSection.test.tsx` covers the logic with a synthetic state. A
+ * until the final notice or a final status. That step is remembered (`sawPending`), and the first
+ * status after it that is not `pending` frees the row even when it equals the status at the click:
+ * failed, pending, failed with no notice (issue #202) would otherwise leave the row busy for good.
+ * A click made while already `pending` (Disconnect) never sets the mark. HYPOTHESIS for a slow
+ * remote server: the window is the whole handshake, not measured; the tests "stays busy while the
+ * server is pending" and "frees the row on the first state that is not pending" of
+ * `McpSection.test.tsx` cover the logic with synthetic states. A
  * sign-in also waits while any other sign-in runs (`state.attempt`), like the Providers cards.
  * The card keeps `data-server` and `tabindex="-1"`, which the search, "Needs attention" and the
  * jump focus use.
@@ -108,12 +112,33 @@ function McpRow(props: {
   seq: Record<string, number>;
 }) {
   const titleId = createUniqueId();
-  const [asked, setAsked] = createSignal<{ status: string; seq: number } | undefined>(undefined);
+  const [asked, setAsked] = createSignal<
+    { status: string; seq: number; sawPending: boolean } | undefined
+  >(undefined);
   const seqNow = (): number => props.seq[props.server.name] ?? 0;
+  // Remembers that the row went through `pending` AFTER the click (issue #202).
+  createEffect(
+    on(
+      () => props.server.status,
+      (status) => {
+        const mark = untrack(asked);
+        if (
+          mark !== undefined &&
+          !mark.sawPending &&
+          status === 'pending' &&
+          mark.status !== status
+        ) {
+          setAsked({ ...mark, sawPending: true });
+        }
+      },
+      { defer: true },
+    ),
+  );
   const busy = (): boolean => {
     const mark = asked();
     if (mark === undefined || mark.seq !== seqNow()) return false;
     const status = props.server.status;
+    if (mark.sawPending && status !== 'pending') return false;
     return status === mark.status || (status === 'pending' && mark.status !== 'pending');
   };
   const action = () => actionOf(props.server);
@@ -129,7 +154,7 @@ function McpRow(props: {
   const press = (): void => {
     const current = action();
     if (current === undefined || waiting()) return;
-    setAsked({ status: props.server.status, seq: seqNow() });
+    setAsked({ status: props.server.status, seq: seqNow(), sawPending: false });
     if (current.signIn) {
       props.send({ type: 'settings.mcpSignIn', server: props.server.name });
     } else {
