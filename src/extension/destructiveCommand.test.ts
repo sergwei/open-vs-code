@@ -1424,7 +1424,9 @@ interface Door {
  * the reviews of E3-work-mode found open for some family. It is a LIST HERE, not read from
  * `destructiveCommand.ts`, because those doors are private sets (`TRANSPARENT`, `ELEVATORS`,
  * `RUNNERS`, the launcher functions) and exporting them only for a test would widen the module's
- * surface; so adding a door to the classifier means adding it here too. Doors that never ask on
+ * surface; so adding a door to the classifier means adding it here too. The nested launchers of
+ * #193 (`uv tool --quiet run`, `hatch env run`, `hatch env run -e test`, `dotnet tool --x run`)
+ * are doors too; only `hatch env run` is harmless on its own. Doors that never ask on
  * their own (the prefixes that run the next command unchanged) are in {@link HARMLESS_DOORS} as well.
  */
 const ASKING_DOORS: readonly Door[] = [
@@ -1508,6 +1510,23 @@ const ASKING_DOORS: readonly Door[] = [
   { name: 'pipx run', wrap: (c) => `pipx run ${c}` },
   { name: 'hatch run', wrap: (c) => `hatch run ${c}` },
   { name: 'dotnet tool run', wrap: (c) => `dotnet tool run ${c}` },
+  // The three nested launchers of #193: an option between the group word and `run`.
+  {
+    name: 'uv tool --quiet run',
+    wrap: (c) => `uv tool --quiet run ${c}`,
+    asksAlone: 'an option between tool and run may take a value (decision of Sergio, 07/11/2026)',
+  },
+  { name: 'hatch env run', wrap: (c) => `hatch env run ${c}` },
+  {
+    name: 'hatch env run -e test',
+    wrap: (c) => `hatch env run -e test ${c}`,
+    asksAlone: 'an option before the tool may take a value',
+  },
+  {
+    name: 'dotnet tool --x run',
+    wrap: (c) => `dotnet tool --x run ${c}`,
+    asksAlone: 'an option between tool and run may take a value',
+  },
   {
     name: 'nix run',
     wrap: (c) => `nix run ${c}`,
@@ -1553,7 +1572,7 @@ const ASKING_DOORS: readonly Door[] = [
  * The doors that on their own approve what they carry: {@link ASKING_DOORS} without the ones that
  * set `asksAlone` (each carries its reason; `mise exec --` is the deliberate one, decision of
  * Sergio 07/11/2026, pinned by the check "asks for mise exec -- git status, on purpose" below).
- * `yarn`, `bun x`, `corepack` and `uv tool run` ARE here: they approve every {@link DAILY_CORES}.
+ * `yarn`, `bun x`, `corepack`, `uv tool run` and `hatch env run` ARE here: they approve every {@link DAILY_CORES}.
  */
 const HARMLESS_DOORS: readonly Door[] = ASKING_DOORS.filter((door) => door.asksAlone === undefined);
 
@@ -1567,6 +1586,51 @@ describe('commandNeedsAsk: holes the matrix found', () => {
     expect(commandNeedsAsk('yarn kubectl exec pod -- sh')).toBe(true);
     expect(commandNeedsAsk('pnpm kubectl exec pod -- sh')).toBe(true);
     expect(commandNeedsAsk('pnpm exec tsc --noEmit')).toBe(false);
+  });
+});
+
+describe('commandNeedsAsk: nested launchers with an option in between (#193)', () => {
+  /**
+   * Regression of issue #193: `uv tool <opt> run`, `hatch env run` and `dotnet tool <opt> run` were
+   * approved whatever they launched (`rm -rf x`). An option after the group word may take a value,
+   * so it asks, as `uv --quiet run` does on purpose (decision of Sergio, 07/11/2026); `hatch env
+   * run X` is read as `hatch run X`. Fabricated commands (the `--x` is invented), nothing run
+   * against a real uv, hatch or dotnet; the criterion only.
+   */
+  it('asks for what a nested launcher runs behind an option, and approves the rest', () => {
+    for (const command of [
+      'uv tool --quiet run rm -rf x',
+      'uv tool -q run rimraf dist',
+      'uv tool --quiet run pytest',
+      'uv tool --directory src run rimraf x',
+      'hatch env run rm -rf x',
+      'hatch env run git push',
+      'hatch env run -e test rm -rf x',
+      'hatch env run -- rm -rf x',
+      'hatch env run -- pytest -x',
+      'hatch env -e test run rm -rf x',
+      'hatch env run -e test pytest',
+      'uv tool -q run ruff check .',
+      'hatch env run test:cov',
+      'dotnet tool --x run rimraf x',
+      'dotnet tool --x run dotnet-ef database drop',
+      'dotnet -d tool --x run rimraf x',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(true);
+    }
+    for (const command of [
+      'hatch env run pytest',
+      'hatch env show',
+      'hatch env create test',
+      'uv tool --quiet install ruff',
+      'uv tool -q list',
+      'uv tool run ruff check .',
+      'dotnet tool list',
+      'dotnet tool --x list',
+      'dotnet tool run dotnet-ef migrations list',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(false);
+    }
   });
 });
 

@@ -31,7 +31,7 @@
 //   `docker run|exec`, `kubectl run|exec`, SQL clients…), shells and interpreters reading stdin or
 //   inline code (flags alone, `-c`, a heredoc, `--import`), `git -c`, `git config` writes and the
 //   git options that run a command (`rebase --exec`, `submodule foreach`, `--upload-pack`…), `sed
-//   -i`, `awk`; `npx`, `pnpm|yarn|npm|bun exec|dlx|x`, `uv run`, `uv tool run`, `corepack <pm>`,
+//   -i`, `awk`; `npx`, `pnpm|yarn|npm|bun exec|dlx|x`, `uv run`, `uv tool run`, `hatch env run`, `corepack <pm>`,
 //   `poetry run`… are classified by the
 //   tool they launch;
 // - reading secrets without naming them: recursive `grep` of the current directory, `rg --hidden`,
@@ -48,7 +48,8 @@
 //   `DANGEROUS_CORES` and the door to `ASKING_DOORS` in `destructiveCommand.test.ts` (prefixes,
 //   `export`, `env`, `sudo`, launchers, `bash -c`, escapes, separators). A new door goes in that
 //   list too: the doors are private sets here (`TRANSPARENT`, `ELEVATORS`, `RUNNERS`, and the
-//   launchers `npx`, `pnpm exec`, `corepack <pm>`, `uv tool run`…), so the test keeps its own copy.
+//   launchers `npx`, `pnpm exec`, `corepack <pm>`, `uv tool run`, `hatch env run`, `dotnet tool
+//   run`, each also with an option before `run` (#193)…), so the test keeps its own copy.
 //   A runner or launcher that classifies the command after it is a door for EVERY family.
 // - An exception is for the EXACT command (`GIT_EDITOR=true`, `git rm --cached`), never for a
 //   whole tool or a whole option family.
@@ -919,6 +920,25 @@ const LAUNCH_WORDS = new Set(['run', 'exec', 'x']);
  * "asks for what corepack and uv tool run launch, and approves their daily use", "asks for hatch
  * run, nix and dotnet tool run, on purpose" and "asks for the closing round of runner forms" of
  * `destructiveCommand.test.ts` (07/11/2026, Windows 11, Node 24; fabricated text).
+ * Issue #193 adds the nested launchers with an option in between: `uv tool <opt> run` and `hatch env
+ * <opt> run` ask when a launching word follows the option (the option may take a value, as `uv
+ * --quiet run`), and `hatch env run X` is read as `hatch run X` (`hatch env run pytest` is approved;
+ * `hatch env run -- pytest -x` asks, as any `--` after a runner).
+ * Deliberate false positives of daily use, coherent with the decision of Sergio 07/11/2026 ("an
+ * option before the subcommand that launches asks"; "`--` after a runner asks"): `hatch env run --
+ * pytest -x`, `hatch env run -e test pytest`, `hatch env run test:cov` and `uv tool -q run ruff
+ * check .`.
+ * VERIFIED by the check "asks for what a nested launcher runs behind an option, and approves the
+ * rest" of `destructiveCommand.test.ts` (rows `hatch env run -- pytest -x`, `hatch env run -e test
+ * pytest`, `hatch env run test:cov` and `uv tool -q run ruff check .` ask) and the matrix rows of
+ * the doors `uv tool --quiet run`, `hatch env run` and `hatch env run -e test` (10/11/2026,
+ * Windows 11, Node 24; fabricated text).
+ * HYPOTHESIS, read from https://docs.astral.sh/uv/reference/cli/#uv-tool and
+ * https://hatch.pypa.io/latest/cli/reference/ (not run): that `uv tool --quiet run X` really runs
+ * `X`, and that click makes hatch swallow an `-e` placed after the tool. HYPOTHESIS, read from
+ * https://raw.githubusercontent.com/pypa/hatch/master/src/hatch/cli/env/run.py (click command
+ * without `ignore_unknown_options`): that `hatch env run -- pytest -x` is the form click really
+ * needs. To check it, run `hatch env run rm -rf x` with a real hatch and look for "No such option".
  */
 function runnerAsks(command: string, args: readonly string[]): boolean {
   if (command === 'bun' && (cluster(args, 'ep') || longOpt(args, '--eval', '--print'))) return true;
@@ -937,6 +957,22 @@ function runnerAsks(command: string, args: readonly string[]): boolean {
     args.some((arg) => LAUNCH_WORDS.has(arg) || PACKAGE_MANAGERS.has(toolName(arg)))
   ) {
     return true;
+  }
+  // The same rule one level down (issue #193): an option between the group word of a nested
+  // launcher (`uv tool`, `hatch env`) and `run` may take a value, so a launching word anywhere
+  // after it asks (`uv tool --quiet run rm -rf x`). It is read on the tail only, so `uv tool
+  // install ruff` and `hatch env show` are not touched. It only adds `true`.
+  if (
+    ((command === 'uv' && args[0] === 'tool') || (command === 'hatch' && args[0] === 'env')) &&
+    args[1]?.startsWith('-') === true &&
+    args.slice(2).some((arg) => LAUNCH_WORDS.has(arg))
+  ) {
+    return true;
+  }
+  // `hatch env run X` is `hatch run X` (its documentation calls `hatch run` a wrapper around `env
+  // run`): read as that, so the tool must follow right away and is classified with its arguments.
+  if (command === 'hatch' && args[0] === 'env' && args[1] === 'run') {
+    return runnerAsks(command, args.slice(1));
   }
   if (command === 'corepack') {
     // `corepack pnpm rm -rf x` runs the package manager it names with the rest of the line; any
@@ -1138,7 +1174,13 @@ function recursiveSecretSearch(command: string, args: readonly string[]): boolea
  * True when the command `command` (already a lower-case literal name) with `args` is destructive or
  * runs text that cannot be classified. The cases are grouped by family, see the header of the file.
  * `dotnet tool run X` is classified by the local tool `X` (`dotnet-ef database drop` asks like
- * `dotnet ef database drop`); `nix` asks whatever it runs ({@link
+ * `dotnet ef database drop`); an option between `tool` and `run` (`dotnet tool --x run X`, issue
+ * #193) asks whatever `X` is, because it may take a value. VERIFIED by the check "asks
+ * for what a nested launcher runs behind an option, and approves the rest" and the matrix rows of
+ * the door `dotnet tool --x run` (10/11/2026, Windows 11, Node 24; fabricated text; `--x` is
+ * invented; syntax of `dotnet tool run` read in
+ * https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-tool-run; HYPOTHESIS that dotnet accepts options there, learn.microsoft.com 404 on `dotnet
+ * tool`); `nix` asks whatever it runs ({@link
  * OPAQUE}). For `npm|pnpm|yarn`, an `exec`/`dlx` that is the subcommand is classified by the tool it launches,
  * and an `exec` anywhere else on the line (`yarn kubectl exec pod`) does not end the reading: for
  * pnpm and yarn the first word is read as a binary too, so the binary's own `exec` asks. VERIFIED by the check "asks
@@ -1457,6 +1499,17 @@ function commandAsks(command: string, args: readonly string[]): boolean {
       return hasAny(args, ['push', 'yank']);
     case 'dotnet':
     case 'nuget': {
+      // An option between `tool` and `run` may take a value (issue #193, as `uv tool --quiet
+      // run`): a launching word after it asks, whatever it launches.
+      const group = args.indexOf('tool');
+      if (
+        command === 'dotnet' &&
+        group >= 0 &&
+        args[group + 1]?.startsWith('-') === true &&
+        args.slice(group + 2).some((arg) => LAUNCH_WORDS.has(arg))
+      ) {
+        return true;
+      }
       // `dotnet tool run X` runs the local tool `X`: classified by it, like `npx X`.
       const toolRun = args.findIndex((arg, k) => arg === 'tool' && args[k + 1] === 'run');
       const word = toolRun >= 0 ? args[toolRun + 2] : undefined;
