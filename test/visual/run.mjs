@@ -13904,21 +13904,88 @@ try {
     };
   }
 
-  /** The MCP tab as drawn: per server its title, error, lines and resource lists. */
-  function mcpShape(doc) {
+  /**
+   * The MCP section as drawn (E10-settings-mcp, steps 35 and 52). Per server: the `data-status`
+   * (`done` connected, `running` connecting, `waiting` disabled, `failed`, `attention` needs
+   * sign-in), title and the state word, the label of its ONE button with its `aria-disabled` and
+   * `aria-busy`, the error line (text, `title`, how many text lines tall it is (a `line-height:
+   * normal`, which computes to a word, counts as 1.2 em per line), whether CSS cuts it
+   * with an ellipsis and whether it IS cut), the other `step-line`s, every `<details>` (summary
+   * text, open or not), the text of "Show details" and how many lines it takes, the resource rows,
+   * and whether the card and its button sit inside the document and the card. Plus the section
+   * note and the value of the MCP card of the header. Self-contained (serialised into the page);
+   * texts are read from the DOM, never from the host.
+   */
+  function mcpRows(doc) {
     const text = (element) => (element?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    const win = doc.defaultView;
     const width = doc.documentElement.clientWidth;
-    return [...doc.querySelectorAll('[data-server]')].map((li) => ({
-      name: li.dataset.server,
-      tone: li.dataset.status,
-      title: text(li.querySelector('.step-title')),
-      error: li.querySelector('.settings-error')?.textContent ?? null,
-      lines: [...li.querySelectorAll('.step-line')].map(text),
-      lists: [...li.querySelectorAll('.settings-resources')].map((ul) =>
-        [...ul.querySelectorAll('li')].map(text),
-      ),
-      inside: li.getBoundingClientRect().right <= width + 1,
-    }));
+    const linesOf = (element) => {
+      if (element === null) return null;
+      // `line-height: normal` computes to the word "normal": then a line is about 1.2 em tall.
+      const style = win.getComputedStyle(element);
+      const parsed = Number.parseFloat(style.lineHeight);
+      const lineHeight = Number.isNaN(parsed) ? Number.parseFloat(style.fontSize) * 1.2 : parsed;
+      return Math.round(element.getBoundingClientRect().height / lineHeight);
+    };
+    const rows = [...doc.querySelectorAll('[data-server]')].map((li) => {
+      const card = li.getBoundingClientRect();
+      const button = li.querySelector('.settings-mcp-action');
+      const buttonBox = button?.getBoundingClientRect();
+      const error = li.querySelector('.settings-error');
+      const errorStyle = error === null ? null : win.getComputedStyle(error);
+      const detail = li.querySelector('.settings-detail-text');
+      const detailBox = detail?.getBoundingClientRect();
+      return {
+        name: li.dataset.server,
+        tone: li.dataset.status,
+        title: text(li.querySelector('.step-title')),
+        word: text(li.querySelector('.step-title .step-status')).replace(/^— /, ''),
+        button: button === null ? null : text(button),
+        ariaDisabled: button?.getAttribute('aria-disabled') ?? null,
+        ariaBusy: button?.getAttribute('aria-busy') ?? null,
+        error: error?.textContent ?? null,
+        errorTitle: error?.getAttribute('title') ?? null,
+        errorLines: linesOf(error),
+        errorEllipsis:
+          errorStyle !== null &&
+          errorStyle.textOverflow === 'ellipsis' &&
+          errorStyle.whiteSpace === 'nowrap' &&
+          errorStyle.overflowX === 'hidden',
+        errorCut: error !== null && error.scrollWidth > error.clientWidth,
+        lines: [...li.querySelectorAll('.step-line:not(.settings-error)')].map(text),
+        summaries: [...li.querySelectorAll('details')].map((details) => ({
+          text: text(details.querySelector('summary')),
+          open: details.open,
+        })),
+        detail: detail === null ? null : (detail.textContent ?? ''),
+        detailLines: detail === null || detailBox.height === 0 ? null : linesOf(detail),
+        detailInside:
+          detailBox !== undefined &&
+          detailBox.width > 0 &&
+          detailBox.left >= card.left - 1 &&
+          detailBox.right <= card.right + 1,
+        resources: [...li.querySelectorAll('.settings-resources li')].map(text),
+        resourcesInside: [...li.querySelectorAll('.settings-resources li')].every((item) => {
+          const box = item.getBoundingClientRect();
+          return box.width > 0 && box.left >= card.left - 1 && box.right <= card.right + 1;
+        }),
+        inside: card.right <= width + 1 && card.left >= -1,
+        buttonInside:
+          buttonBox === undefined ||
+          (buttonBox.left >= card.left - 1 && buttonBox.right <= card.right + 1),
+        attempt: li.querySelector('.settings-attempt') !== null,
+        cancel: [...li.querySelectorAll('.settings-attempt button')].map(text),
+      };
+    });
+    const hint = doc.querySelector('.settings-mcp > .settings-hint');
+    const hintBox = hint?.getBoundingClientRect();
+    return {
+      rows,
+      hint: text(hint),
+      hintInside: hintBox !== undefined && hintBox.left >= -1 && hintBox.right <= width + 1,
+      card: text(doc.querySelector('[data-card="mcp"] .status-card-value')),
+    };
   }
 
   const SETTINGS_BASE = { __base: '--vscode-editor-background' };
@@ -13940,20 +14007,42 @@ try {
     addButton: '#settings-panel-providers button.add-provider-button',
     footer: '.settings-footer .link-button',
   };
+  /**
+   * The texts of the MCP rows whose contrast step 52 measures in L1: the title and state word of
+   * each server, the ONE button of each state (Disconnect, Retry, Connect, Sign in), the error line
+   * of `broken`, the summaries of the folded details and the section note.
+   */
   const MCP_TEXT = {
     ...SETTINGS_BASE,
-    title: '.settings-title',
+    heading: '.settings-title',
     docsTitle: '[data-server="docs"] .step-title',
-    docsStatus: '[data-server="docs"] .step-title .step-status',
-    docsCounts: '[data-server="docs"] .step-line.step-status',
-    resource: '[data-server="docs"] .settings-res-name',
-    resourceKind: '[data-server="docs"] .settings-resources .step-status',
+    docsWord: '[data-server="docs"] .step-title .step-status',
+    brokenWord: '[data-server="broken"] .step-title .step-status',
+    offWord: '[data-server="off"] .step-title .step-status',
+    linearWord: '[data-server="linear"] .step-title .step-status',
+    docsButton: '[data-server="docs"] .settings-mcp-action',
+    brokenButton: '[data-server="broken"] .settings-mcp-action',
+    offButton: '[data-server="off"] .settings-mcp-action',
+    linearButton: '[data-server="linear"] .settings-mcp-action',
     brokenError: '[data-server="broken"] .settings-error',
-    needsAuth: '[data-server="linear"] .step-line',
-    offTitle: '[data-server="off"] .step-title',
+    brokenSummary: '[data-server="broken"] .settings-details > summary',
+    docsSummary: '[data-server="docs"] .settings-details > summary',
     hint: '.settings-mcp > .settings-hint',
     tabOn: 'button.settings-tab[aria-selected="true"]',
     tabOff: 'button.settings-tab[aria-selected="false"]',
+  };
+  /** L2: the whole error of `broken` once "Show details" is open. */
+  const MCP_DETAIL_TEXT = {
+    ...SETTINGS_BASE,
+    brokenDetail: '[data-server="broken"] .settings-detail-text',
+    brokenSummary: '[data-server="broken"] .settings-details > summary',
+  };
+  /** L3: the unfolded resources and template of `docs`. */
+  const MCP_RESOURCE_TEXT = {
+    ...SETTINGS_BASE,
+    resource: '[data-server="docs"] .settings-res-name',
+    resourceKind: '[data-server="docs"] .settings-resources .step-status',
+    docsSummary: '[data-server="docs"] .settings-details > summary',
   };
 
   await step('35 OpenCode Settings tab: providers and MCP servers (E10-config-views)', async () => {
@@ -14022,7 +14111,7 @@ try {
         5_000,
       );
 
-      // --- V1, V2, V3: three widths of the tab, four themes ----------------------------------
+      // --- V1: three widths of the tab, four themes (the MCP rows are step 52) ---------------
       for (const [label, target] of WIDTHS) {
         const measuredWidth = await fitSettingsTab(target);
         const ok = Math.abs(measuredWidth - target) <= 60;
@@ -14032,92 +14121,37 @@ try {
         );
         if (!ok) settingsUnverified.push(`width ${label}`);
 
-        // Providers tab (V1), then MCP tab (V2), each in the four themes.
-        for (const tab of ['providers', 'mcp']) {
-          if (tab === 'mcp') {
-            await setSettingsTheme(DARK);
-            check(await settingsClick('#settings-tab-mcp'), `V2 ${label}: the MCP tab is pressed`);
-            await settingsWait(
-              (doc) => doc.querySelector('#settings-panel-mcp')?.hidden === false,
-              null,
-              5_000,
-            );
-          }
-          for (const [themeName, theme] of PROBLEM_THEMES) {
-            await setSettingsTheme(theme);
-            const layout = await settingsWeb.inDoc(settingsLayout);
-            if (tab === 'providers') {
-              const shape = await settingsWeb.inDoc(providersShape);
-              const contrast = contrastVerdict(
-                await settingsWeb.inDoc(measureText, PROVIDERS_TEXT),
-                Object.keys(PROVIDERS_TEXT).filter((name) => name !== '__base'),
-              );
-              check(
-                shape.headings.join('|') === 'Connected' &&
-                  shape.connected.join(',') === 'anthropic,google-vertex' &&
-                  shape.anthropic.some((line) => line.startsWith('API key')) &&
-                  shape.vertex.some((line) =>
-                    line.startsWith('Managed by GOOGLE_APPLICATION_CREDENTIALS'),
-                  ) &&
-                  shape.pills.every((pill) => pill === 'Connected') &&
-                  shape.monograms.join(',') === 'A,G' &&
-                  shape.anthropicDisconnect &&
-                  !shape.vertexDisconnect &&
-                  shape.addButton === '+ Add provider' &&
-                  !shape.pickerOpen &&
-                  shape.passwordInputs === 0 &&
-                  layout.overflow <= 0 &&
-                  layout.styled === 0 &&
-                  contrast.ok,
-                `V1 ${label} px, ${themeName}: Connected lists Anthropic (API key, Disconnect) and Google Vertex (Managed by GOOGLE_APPLICATION_CREDENTIALS, no button), each with its monogram and Connected pill, "+ Add provider" with its picker closed, no password input, no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
-              );
-              if (theme === DARK) await shot(`35a-providers-${label}`);
-            } else {
-              const servers = await settingsWeb.inDoc(mcpShape);
-              const contrast = contrastVerdict(
-                await settingsWeb.inDoc(measureText, MCP_TEXT),
-                Object.keys(MCP_TEXT).filter((name) => name !== '__base'),
-              );
-              const by = (name) => servers.find((server) => server.name === name);
-              const docs = by('docs');
-              const broken = by('broken');
-              const linear = by('linear');
-              check(
-                servers.map((server) => server.name).join(',') === 'docs,broken,off,linear' &&
-                  docs?.title.includes('connected') &&
-                  docs.lines.includes('2 resources · 1 template') &&
-                  docs.lists.flat().includes('readme.md text/markdown') &&
-                  docs.lists.flat().includes('api.md file:///docs/api.md') &&
-                  docs.lists.flat().includes('files file:///docs/{path}') &&
-                  broken?.title.includes('failed') &&
-                  typeof broken.error === 'string' &&
-                  broken.error.length <= 201 &&
-                  broken.error.startsWith('Connection closed') &&
-                  !/[\r\n]/.test(broken.error) &&
-                  !broken.error.includes('second stderr line') &&
-                  by('off')?.title.includes('disabled') &&
-                  linear?.title.includes('needs sign-in') &&
-                  linear.lines.includes('Sign in with the opencode CLI; this view is read-only.') &&
-                  servers.every((server) => server.inside) &&
-                  layout.overflow <= 0 &&
-                  layout.styled === 0 &&
-                  contrast.ok,
-                `V2 ${label} px, ${themeName}: docs connected with 2 resources and 1 template, broken failed with the first line of its error (${String(broken?.error?.length)} chars, one line), off disabled, linear needs sign-in, nothing outside the document, no overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
-              );
-              if (theme === DARK) await shot(`35b-mcp-${label}`);
-            }
-          }
+        // The Providers tab is the open one, in the four themes.
+        for (const [themeName, theme] of PROBLEM_THEMES) {
+          await setSettingsTheme(theme);
+          const layout = await settingsWeb.inDoc(settingsLayout);
+          const shape = await settingsWeb.inDoc(providersShape);
+          const contrast = contrastVerdict(
+            await settingsWeb.inDoc(measureText, PROVIDERS_TEXT),
+            Object.keys(PROVIDERS_TEXT).filter((name) => name !== '__base'),
+          );
+          check(
+            shape.headings.join('|') === 'Connected' &&
+              shape.connected.join(',') === 'anthropic,google-vertex' &&
+              shape.anthropic.some((line) => line.startsWith('API key')) &&
+              shape.vertex.some((line) =>
+                line.startsWith('Managed by GOOGLE_APPLICATION_CREDENTIALS'),
+              ) &&
+              shape.pills.every((pill) => pill === 'Connected') &&
+              shape.monograms.join(',') === 'A,G' &&
+              shape.anthropicDisconnect &&
+              !shape.vertexDisconnect &&
+              shape.addButton === '+ Add provider' &&
+              !shape.pickerOpen &&
+              shape.passwordInputs === 0 &&
+              layout.overflow <= 0 &&
+              layout.styled === 0 &&
+              contrast.ok,
+            `V1 ${label} px, ${themeName}: Connected lists Anthropic (API key, Disconnect) and Google Vertex (Managed by GOOGLE_APPLICATION_CREDENTIALS, no button), each with its monogram and Connected pill, "+ Add provider" with its picker closed, no password input, no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+          );
+          if (theme === DARK) await shot(`35a-providers-${label}`);
         }
         await setSettingsTheme(DARK);
-        check(
-          await settingsClick('#settings-tab-providers'),
-          `${label}: back to the Providers tab`,
-        );
-        await settingsWait(
-          (doc) => doc.querySelector('#settings-panel-providers')?.hidden === false,
-          null,
-          5_000,
-        );
       }
       assertNoSettingsErrors('step 35 widths');
 
@@ -14180,6 +14214,9 @@ try {
         doc.defaultView.__visualMark36 = 'still the same document';
       });
       await shot('35d-before-flip');
+      const beforeFlip = (await settingsWeb.inDoc(mcpRows)).rows.find(
+        (row) => row.name === 'broken',
+      );
       await openChat(30_000, chatId);
       await send('MCPFLIP now');
       const flipped = await settingsWait(
@@ -14199,10 +14236,22 @@ try {
       const sameDocument = await settingsWeb.inDoc(
         (doc) => doc.defaultView.__visualMark36 === 'still the same document',
       );
+      const afterFlip = (await settingsWeb.inDoc(mcpRows)).rows.find(
+        (row) => row.name === 'broken',
+      );
       await shot('35e-after-flip');
       check(
-        flipped === true && sameDocument === true,
-        `V4 after a prompt with MCPFLIP the open tab shows broken as connected with a status.md resource, in the same document (flipped ${String(flipped)}, same document ${String(sameDocument)})`,
+        flipped === true &&
+          sameDocument === true &&
+          beforeFlip?.tone === 'failed' &&
+          beforeFlip.button === 'Retry' &&
+          beforeFlip.error !== null &&
+          afterFlip?.tone === 'done' &&
+          afterFlip.button === 'Disconnect' &&
+          afterFlip.error === null &&
+          afterFlip.summaries.some((summary) => summary.text === '1 resource') &&
+          afterFlip.resources.some((line) => line.includes('status.md')),
+        `V4 after a prompt with MCPFLIP the row of broken goes from failed (button ${JSON.stringify(beforeFlip?.button)}, one-line error ${String(beforeFlip?.error !== null)}) to connected (button ${JSON.stringify(afterFlip?.button)}, no error line, summary ${JSON.stringify(afterFlip?.summaries.map((summary) => summary.text))} holding status.md), in the same document (flipped ${String(flipped)}, same document ${String(sameDocument)})`,
       );
       check(await waitIdle(30_000), 'V4 the MCPFLIP turn ends');
 
@@ -20643,6 +20692,385 @@ try {
       await closeAllEditors().catch(() => undefined);
       await setTheme(DARK).catch(() => undefined);
       await setSideBarWidth(originalWidth).catch(() => undefined);
+    }
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // Step 52 (E10-settings-mcp, PR2 of issue #186): the MCP servers section with actions. The fake
+  // keeps four servers: `docs` connected (2 resources, 1 template), `broken` failed (an error whose
+  // first line is 200 characters, with CRLF and more lines), `off` disabled and `linear` needing
+  // sign-in with the integration `mcp_0123456789abcdef`. A state-changing step before this one may
+  // have left `broken` connected (35 and 50 send MCPFLIP), so the step first brings it back to
+  // failed with Disconnect and Connect (the fake's `broken` always fails again).
+  //   L1 the four rows (state word, ONE button, the error of `broken` in one line cut with an
+  //      ellipsis, folded details, the section note, contrast) at 1080, 660 and 300 px x 4 themes.
+  //   L2 the whole error of `broken` under "Show details", 1080 and 300 px x 4 themes (the same loop).
+  //   L3 the resources of `docs` unfolded with the real mouse (300 px, dark).
+  //   F1-F4 (660 px, dark, real mouse): Disconnect/Connect of `docs` and `off` with the busy mark and
+  //      the "x of y active" card, Retry of `broken`, Sign in of `linear` with its attempt, and the
+  //      focus on the button of the row after each action.
+  // Leaves `docs` connected, `off` disabled and `linear` CONNECTED (the last step of the run).
+  // ---------------------------------------------------------------------------------------------
+  await step('52 OpenCode Settings: MCP servers with actions (E10-settings-mcp)', async () => {
+    const DARK = 'Default Dark Modern';
+    const MCP_WIDTHS = [
+      ['1080', 1080],
+      ['660', 660],
+      ['300', 300],
+    ];
+    const NOTE =
+      'Connect and Disconnect last until opencode restarts. To change it for good, edit mcp.servers in opencode.json.';
+    const originalWidth = await sideBarPx();
+
+    const readMcp = () => settingsWeb.inDoc(mcpRows);
+    const rowOf = async (name) => (await readMcp()).rows.find((row) => row.name === name);
+    const waitTone = (name, tone, ms = 15_000) =>
+      settingsWait(
+        (doc, spec) =>
+          doc.querySelector(`[data-server="${spec.name}"]`)?.dataset.status === spec.tone,
+        { name, tone },
+        ms,
+      );
+    const waitLive = (needle) =>
+      settingsWait(
+        (doc, text) =>
+          (doc.querySelector('.visually-hidden[role="status"]')?.textContent ?? '').includes(text),
+        needle,
+        10_000,
+      );
+    const liveText = () =>
+      settingsWeb.inDoc(
+        (doc) => doc.querySelector('.visually-hidden[role="status"]')?.textContent ?? '',
+      );
+    const press = (name) => settingsClick(`[data-server="${name}"] button.settings-mcp-action`);
+    /** Records every change of the row (state, busy mark, label, sign-in attempt) from now on. */
+    const watchRow = (name) =>
+      settingsWeb.inDoc((doc, serverName) => {
+        const win = doc.defaultView;
+        win.__mcpWatch?.observer.disconnect();
+        const li = doc.querySelector(`[data-server="${serverName}"]`);
+        const log = [];
+        const snap = () => {
+          const button = li.querySelector('.settings-mcp-action');
+          log.push({
+            tone: li.dataset.status,
+            busy: button?.getAttribute('aria-busy') ?? null,
+            label: button?.textContent.trim() ?? null,
+            attempt: li.querySelector('.settings-attempt') !== null,
+            cancel: li.querySelector('.settings-attempt button')?.textContent.trim() ?? null,
+          });
+        };
+        const observer = new win.MutationObserver(snap);
+        observer.observe(li, {
+          attributes: true,
+          childList: true,
+          subtree: true,
+          characterData: true,
+        });
+        snap();
+        win.__mcpWatch = { observer, log };
+      }, name);
+    const watched = () => settingsWeb.inDoc((doc) => doc.defaultView.__mcpWatch?.log ?? []);
+    /** Whether the button of the row holds the focus of a document that has it. */
+    const focusOn = (name) =>
+      settingsWeb.inDoc((doc, serverName) => {
+        const button = doc.querySelector(`[data-server="${serverName}"] .settings-mcp-action`);
+        return {
+          documentFocused: doc.hasFocus(),
+          onButton: button !== null && doc.activeElement === button,
+        };
+      }, name);
+    const focusLog = [];
+    const noteFocus = async (what, name) => {
+      const focus = await focusOn(name);
+      focusLog.push(
+        `${what}: ${focus.documentFocused ? (focus.onButton ? 'on the button' : 'NOT on the button') : 'document without focus'}`,
+      );
+      return focus.documentFocused && focus.onButton;
+    };
+    let focusOk = true;
+
+    try {
+      await startSettingsStep();
+      assertNoSettingsErrors('step 52 start');
+      await openSettingsSection('mcp');
+
+      // --- Precondition: broken failed, docs connected, off disabled, linear needing sign-in ----
+      const broken = await rowOf('broken');
+      if (broken.tone !== 'failed') {
+        if (broken.tone !== 'waiting') {
+          check(await press('broken'), 'broken is connected: its Disconnect is pressed');
+          await waitTone('broken', 'waiting');
+        }
+        check(await press('broken'), 'broken is disabled: its Connect is pressed');
+        await waitTone('broken', 'failed');
+      }
+      const start = await readMcp();
+      check(
+        start.rows.map((row) => `${row.name}:${row.tone}`).join(',') ===
+          'docs:done,broken:failed,off:waiting,linear:attention' && start.card === '1 of 4 active',
+        `the MCP section starts as the fixture: ${start.rows.map((row) => `${row.name} ${row.word}`).join(', ')} and the MCP card says "${start.card}"`,
+      );
+
+      // --- L1 + L2: three widths x four themes ---------------------------------------------------
+      for (const [label, target] of MCP_WIDTHS) {
+        const measured = await fitSettingsTab(target);
+        const widthOk = Math.abs(measured - target) <= 60;
+        check(
+          widthOk,
+          `the Settings tab is ${String(measured)} px wide for the ${label} px cells (within 60 px of ${String(target)})`,
+        );
+        if (!widthOk) settingsUnverified.push(`width ${label}`);
+        for (const [themeName, theme] of PROBLEM_THEMES) {
+          await setSettingsTheme(theme);
+          const layout = await settingsWeb.inDoc(settingsLayout);
+          const shape = await readMcp();
+          const contrast = contrastVerdict(
+            await settingsWeb.inDoc(measureText, MCP_TEXT),
+            Object.keys(MCP_TEXT).filter((name) => name !== '__base'),
+          );
+          const by = (name) => shape.rows.find((row) => row.name === name);
+          const docs = by('docs');
+          const failed = by('broken');
+          check(
+            shape.rows.map((row) => row.name).join(',') === 'docs,broken,off,linear' &&
+              docs.word === 'connected' &&
+              docs.button === 'Disconnect' &&
+              docs.summaries.length === 1 &&
+              docs.summaries[0].text === '2 resources · 1 template' &&
+              !docs.summaries[0].open &&
+              failed.word === 'failed' &&
+              failed.button === 'Retry' &&
+              failed.error.startsWith('Connection closed') &&
+              failed.error.length <= 201 &&
+              !/[\r\n]/.test(failed.error) &&
+              !failed.error.includes('second stderr line') &&
+              failed.errorTitle === failed.error &&
+              failed.errorLines === 1 &&
+              failed.errorEllipsis &&
+              failed.errorCut &&
+              failed.summaries.length === 1 &&
+              failed.summaries[0].text === 'Show details' &&
+              !failed.summaries[0].open &&
+              by('off').word === 'disabled' &&
+              by('off').button === 'Connect' &&
+              by('linear').word === 'needs sign-in' &&
+              by('linear').button === 'Sign in' &&
+              shape.rows.every((row) => row.inside && row.buttonInside) &&
+              shape.hint === NOTE &&
+              shape.hintInside &&
+              layout.overflow <= 0 &&
+              layout.styled === 0 &&
+              contrast.ok,
+            `L1 ${label} px (tab ${String(measured)}), ${themeName}: docs connected [Disconnect] with its resources folded under "2 resources · 1 template", broken failed [Retry] with its error in ${String(failed.errorLines)} line (${String(failed.error.length)} chars, cut with an ellipsis ${String(failed.errorCut)}) and "Show details" folded, off disabled [Connect], linear needs sign-in [Sign in], the section note once, every row and button inside the document, no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+          );
+          if (theme === DARK) await shot(`52a-mcp-${label}`);
+
+          if (label === '660') continue;
+          // L2: the same themes, with "Show details" of broken open (no extra theme change).
+          await settingsWeb.inDoc((doc) => {
+            for (const details of doc.querySelectorAll('[data-server="broken"] details')) {
+              details.open = true;
+            }
+          });
+          const open = await rowOf('broken');
+          const openLayout = await settingsWeb.inDoc(settingsLayout);
+          const detailContrast = contrastVerdict(
+            await settingsWeb.inDoc(measureText, MCP_DETAIL_TEXT),
+            Object.keys(MCP_DETAIL_TEXT).filter((name) => name !== '__base'),
+          );
+          check(
+            open.summaries[0].open &&
+              open.detail.startsWith('Connection closed') &&
+              open.detail.includes('second stderr line') &&
+              open.detail.includes('third stderr line') &&
+              open.detailInside &&
+              open.detailLines >= 3 &&
+              open.inside &&
+              openLayout.overflow <= 0 &&
+              openLayout.styled === 0 &&
+              detailContrast.ok,
+            `L2 ${label} px, ${themeName}: "Show details" of broken opens the whole error (${String(open.detail.length)} chars in ${String(open.detailLines)} lines, with the second and third stderr lines) inside the card, no sideways overflow (${String(openLayout.overflow)} px), no style attribute (${String(openLayout.styled)}), ${detailContrast.text}`,
+          );
+          if (theme === DARK) await shot(`52b-details-${label}`);
+          await settingsWeb.inDoc((doc) => {
+            for (const details of doc.querySelectorAll('[data-server="broken"] details')) {
+              details.open = false;
+            }
+          });
+        }
+      }
+      assertNoSettingsErrors('step 52 matrix');
+
+      // --- L3: the resources of docs unfolded with the real mouse (300 px, dark) -----------------
+      await setSettingsTheme(DARK);
+      check(
+        await settingsClick('[data-server="docs"] .settings-details > summary'),
+        'L3: the summary of docs is pressed with the mouse',
+      );
+      const unfolded = await settingsWait(
+        (doc) => doc.querySelector('[data-server="docs"] details')?.open === true,
+        null,
+        5_000,
+      );
+      const resourcesShape = await rowOf('docs');
+      const resourcesLayout = await settingsWeb.inDoc(settingsLayout);
+      const resourcesContrast = contrastVerdict(
+        await settingsWeb.inDoc(measureText, MCP_RESOURCE_TEXT),
+        Object.keys(MCP_RESOURCE_TEXT).filter((name) => name !== '__base'),
+      );
+      await shot('52c-resources-300');
+      check(
+        unfolded === true &&
+          resourcesShape.resources.includes('readme.md text/markdown') &&
+          resourcesShape.resources.includes('api.md file:///docs/api.md') &&
+          resourcesShape.resources.includes('files file:///docs/{path}') &&
+          resourcesShape.resourcesInside &&
+          resourcesLayout.overflow <= 0 &&
+          resourcesLayout.styled === 0 &&
+          resourcesContrast.ok,
+        `L3 300 px, dark: the summary of docs unfolds its two resources and its template (${JSON.stringify(resourcesShape.resources)}) inside the card, no sideways overflow (${String(resourcesLayout.overflow)} px), no style attribute (${String(resourcesLayout.styled)}), ${resourcesContrast.text}`,
+      );
+      check(
+        await settingsClick('[data-server="docs"] .settings-details > summary'),
+        'L3: the summary of docs is pressed again',
+      );
+      await settingsWait(
+        (doc) => doc.querySelector('[data-server="docs"] details')?.open === false,
+        null,
+        5_000,
+      );
+
+      // --- F1: Disconnect and Connect of docs, and of off (660 px, dark, real mouse) -----------
+      await fitSettingsTab(660);
+      await setSettingsTheme(DARK);
+      await watchRow('docs');
+      check(await press('docs'), 'F1: Disconnect of docs is pressed');
+      const docsOff = await waitTone('docs', 'waiting');
+      const docsOffLive = await waitLive('Disconnected from docs.');
+      focusOk = (await noteFocus('Disconnect of docs', 'docs')) && focusOk;
+      const docsOffShape = await readMcp();
+      const docsOffLog = await watched();
+      await shot('52d-docs-disconnected');
+      check(
+        docsOff === true &&
+          docsOffLive === true &&
+          docsOffShape.rows.find((row) => row.name === 'docs').button === 'Connect' &&
+          docsOffShape.rows.find((row) => row.name === 'docs').summaries.length === 0 &&
+          docsOffShape.card === '0 of 4 active' &&
+          docsOffLog.some((entry) => entry.busy === 'true' && entry.label === 'Disconnect'),
+        `F1 Disconnect of docs: its row goes to disabled with [Connect] and no resources, the busy mark showed while it waited (${String(docsOffLog.some((entry) => entry.busy === 'true'))}), the MCP card says "${docsOffShape.card}" and the live region says "Disconnected from docs."`,
+      );
+      await watchRow('docs');
+      check(await press('docs'), 'F1: Connect of docs is pressed');
+      const docsOn = await waitTone('docs', 'done');
+      await waitLive('Connected to docs.');
+      await settingsWait(
+        (doc) => doc.querySelectorAll('[data-server="docs"] details').length === 1,
+        null,
+        10_000,
+      );
+      focusOk = (await noteFocus('Connect of docs', 'docs')) && focusOk;
+      const docsOnShape = await readMcp();
+      const docsOnLog = await watched();
+      check(
+        docsOn === true &&
+          docsOnShape.rows.find((row) => row.name === 'docs').button === 'Disconnect' &&
+          docsOnShape.rows.find((row) => row.name === 'docs').summaries[0].text ===
+            '2 resources · 1 template' &&
+          docsOnShape.card === '1 of 4 active' &&
+          docsOnLog.some((entry) => entry.tone === 'running') &&
+          docsOnLog.some((entry) => entry.busy === 'true' && entry.label === 'Connect') &&
+          docsOnLog.some((entry) => entry.tone === 'running' && entry.busy === 'true'),
+        `F1 Connect of docs: its row passes through connecting (${String(docsOnLog.some((entry) => entry.tone === 'running'))}) with the busy mark (${String(docsOnLog.some((entry) => entry.busy === 'true'))}), still busy while connecting (${String(docsOnLog.some((entry) => entry.tone === 'running' && entry.busy === 'true'))}) and ends connected [Disconnect] with its resources back, the MCP card says "${docsOnShape.card}"`,
+      );
+      await watchRow('off');
+      check(await press('off'), 'F1: Connect of off is pressed');
+      const offOn = await waitTone('off', 'done');
+      const offOnLive = await waitLive('Connected to off.');
+      focusOk = (await noteFocus('Connect of off', 'off')) && focusOk;
+      const offOnShape = await readMcp();
+      const offOnLog = await watched();
+      await shot('52e-off-connected');
+      check(
+        offOn === true &&
+          offOnLive === true &&
+          offOnShape.rows.find((row) => row.name === 'off').button === 'Disconnect' &&
+          offOnShape.card === '2 of 4 active' &&
+          offOnLog.some((entry) => entry.tone === 'running') &&
+          offOnLog.some((entry) => entry.busy === 'true') &&
+          offOnLog.some((entry) => entry.tone === 'running' && entry.busy === 'true'),
+        `F1 Connect of off: disabled -> connecting (${String(offOnLog.some((entry) => entry.tone === 'running'))}) -> connected [Disconnect], busy mark ${String(offOnLog.some((entry) => entry.busy === 'true'))}, busy while connecting ${String(offOnLog.some((entry) => entry.tone === 'running' && entry.busy === 'true'))}, the MCP card says "${offOnShape.card}" and the live region says "Connected to off."`,
+      );
+      check(await press('off'), 'F1: Disconnect of off is pressed to restore it');
+      const offBack = await waitTone('off', 'waiting');
+      const offBackLive = await waitLive('Disconnected from off.');
+      focusOk = (await noteFocus('Disconnect of off', 'off')) && focusOk;
+      const offBackShape = await readMcp();
+      check(
+        offBack === true &&
+          offBackLive === true &&
+          offBackShape.rows.find((row) => row.name === 'off').button === 'Connect' &&
+          offBackShape.card === '1 of 4 active',
+        `F1 off is disabled again [Connect] and the MCP card says "${offBackShape.card}"`,
+      );
+
+      // --- F2: Retry of broken ends failed again, in one line, with a notice that names it -------
+      await watchRow('broken');
+      check(await press('broken'), 'F2: Retry of broken is pressed');
+      const brokenAgain = await waitTone('broken', 'failed');
+      const brokenLive = await waitLive('broken could not be changed.');
+      focusOk = (await noteFocus('Retry of broken', 'broken')) && focusOk;
+      const brokenShape = await rowOf('broken');
+      const brokenLog = await watched();
+      await shot('52f-broken-retried');
+      check(
+        brokenAgain === true &&
+          brokenLive === true &&
+          brokenLog.some((entry) => entry.tone === 'running') &&
+          brokenLog.some((entry) => entry.busy === 'true') &&
+          brokenShape.button === 'Retry' &&
+          brokenShape.ariaBusy === null &&
+          brokenShape.errorLines === 1 &&
+          brokenShape.error.startsWith('Connection closed'),
+        `F2 Retry of broken: failed -> connecting (${String(brokenLog.some((entry) => entry.tone === 'running'))}) -> failed [Retry] again, busy mark cleared, its error still in ${String(brokenShape.errorLines)} line, and the live region says ${JSON.stringify((await liveText()).trim().slice(0, 60))}`,
+      );
+
+      // --- F3: Sign in of linear through its integration ---------------------------------------
+      await watchRow('linear');
+      check(await press('linear'), 'F3: Sign in of linear is pressed');
+      const linearOn = await waitTone('linear', 'done', 20_000);
+      const linearLive = await waitLive('Connected to linear.');
+      focusOk = (await noteFocus('Sign in of linear', 'linear')) && focusOk;
+      const linearShape = await readMcp();
+      const linearLog = await watched();
+      const linearText = await liveText();
+      const mcpProviders = await settingsWeb.inDoc(
+        (doc) => doc.querySelectorAll('[data-provider^="mcp_"]').length,
+      );
+      await shot('52g-linear-signed-in');
+      check(
+        linearOn === true &&
+          linearLive === true &&
+          linearLog.some((entry) => entry.attempt && entry.cancel === 'Cancel') &&
+          linearShape.rows.find((row) => row.name === 'linear').button === 'Disconnect' &&
+          !linearShape.rows.find((row) => row.name === 'linear').attempt &&
+          linearShape.card === '2 of 4 active' &&
+          !linearText.includes('mcp_') &&
+          mcpProviders === 0,
+        `F3 Sign in of linear: the attempt showed in its row with [Cancel] (${String(linearLog.some((entry) => entry.attempt && entry.cancel === 'Cancel'))}), the approval connects it [Disconnect] with no attempt left, the MCP card says "${linearShape.card}", the live region says ${JSON.stringify(linearText.trim())} (the server's name, not mcp_...) and Providers has no mcp_ row (${String(mcpProviders)})`,
+      );
+
+      // --- F4: the focus stayed on the button of the row after every action ----------------------
+      check(
+        focusOk && focusLog.length === 6,
+        `F4 after each action the focus is on the button of its row (${focusLog.join('; ')})`,
+      );
+      assertNoSettingsErrors('step 52');
+      assertNoWebviewErrors('step 52');
+    } finally {
+      // The fake keeps `linear` connected: this is the last step. Dark theme and width back.
+      await endSettingsStep(originalWidth);
     }
   });
 } catch (error) {

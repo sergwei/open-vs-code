@@ -147,6 +147,13 @@
  * the same full run: 60.1 s, times 1.25 is 75.1, rounded up to 80. That full run had one FAIL, a
  * check of step 25 that passed 3 of 3 alone (intermittent, no verified cause); the full run on the
  * final tree passed every check (49 at 35.9 s, 50 at 59.4 s), so the budgets stand.
+ * The step 52 (the MCP servers with actions, E10-settings-mcp, issue #186 PR2) needs the 1, sends no
+ * prompt and is in the group `config`. Its `budgetS` of 40 is an ESTIMATE, nobody has timed it in a
+ * full run: 12 cells of rows (3 widths x 4 themes, with the open details of two widths inside the
+ * same loop), 3 side bar drags and 4 flows (about 1 s per drag or theme change in the steps 35 and
+ * 36; the step 47, with 16 theme cells and 6 drags, took 13.6 s in the full run of 08/11/2026). It
+ * leaves `linear` connected in the fake (it is the last step). The next branch that runs a full run
+ * recalibrates it.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -216,6 +223,8 @@ export const STEPS = [
   // 47.2 s in `--steps 51` and 47.6 s in the full run on the final tree (08/11/2026, Windows 11,
   // VS Code 1.145.2).
   { id: '51', needs: ['1'], sendsPrompt: true, groups: ['subagents', 'requests'], budgetS: 60 },
+  // E10-settings-mcp (issue #186, PR2): ESTIMATE, see the paragraph of the step 52 above.
+  { id: '52', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 40 },
 ];
 
 /** Every valid id, in canonical order. */
