@@ -28,9 +28,11 @@
 //    `tsconfig*.json`. `src/extension/test-fixtures/**` IS hashed: the synthetic opencode is the
 //    server the run drives, so a change there moves the checks (and `selectForFiles` calls it
 //    cross-cutting).
-//  - `test/visual/*.mjs` except tests, `compare-runs.mjs` and this file (post-processors that
-//    never feed the run). `run.mjs`, `steps.mjs`, `affected.mjs`, `vscodeProcess.mjs` and
-//    `webviewCdp.mjs` ARE the harness.
+//  - `test/visual/*.mjs` except tests and `HASH_EXCLUDED` (`compare-runs.mjs`, this file,
+//    `merge-shards.mjs`, `affected.mjs`, `harnessDiff.mjs`: post-processors and the `--affected`
+//    selector, none feeds the run). `run.mjs`, `steps.mjs`, `vscodeProcess.mjs` and
+//    `webviewCdp.mjs` ARE the harness. Excluding the last three of the list changed the
+//    fingerprint once (tooling/visual-ci-parallel): every output saved before is stale.
 //  - Raw (line endings normalised): `package.json`, `package-lock.json`, `esbuild.mjs`,
 //    `webview-ui/build.mjs`, `webview-ui/vite.config.mts` and `webview-ui/index.html` when it exists
 //    (today it does not: Vite's HTML is generated).
@@ -91,6 +93,19 @@ const TEXT_EXTENSIONS = new Set(['.svg', '.json', '.html', '.txt']);
 /** A test file: same shape as the no-effect rule of `affected.mjs`. */
 const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
 
+/**
+ * `test/visual/*.mjs` that are not hashed although they are not tests: the post-processors
+ * (`compare-runs`, `fingerprint`, `merge-shards`) and the `--affected` selector (`affected`,
+ * `harnessDiff`). None feeds a check; they are the `NO_EFFECT` entries of `affected.mjs`.
+ */
+const HASH_EXCLUDED = new Set([
+  'compare-runs.mjs',
+  'fingerprint.mjs',
+  'merge-shards.mjs',
+  'affected.mjs',
+  'harnessDiff.mjs',
+]);
+
 /** Files of a source tree that are not code: Markdown and tsconfigs. */
 const NOT_CODE = /(\.md$|(^|\/)tsconfig[^/]*\.json$)/;
 
@@ -110,7 +125,10 @@ function walk(root, dir) {
 
 /**
  * The relative paths (`/` separators, sorted) that make up the fingerprint of the tree at `root`.
- * The rule and the reasons for each include or exclude are in the header of this file.
+ * The rule and the reasons for each include or exclude are in the header of this file. In
+ * `test/visual/`, `HASH_EXCLUDED` (compare-runs, fingerprint, merge-shards, affected, harnessDiff)
+ * is left out; the case "hashes the synthetic server and leaves out the post-processors and the --affected
+ * selector" of `fingerprint.test.mjs` checks it with fabricated files.
  */
 export function hashedFiles(root) {
   const files = [];
@@ -122,7 +140,8 @@ export function hashedFiles(root) {
   for (const rel of walk(root, 'test/visual')) {
     const name = rel.slice('test/visual/'.length);
     if (name.includes('/') || !name.endsWith('.mjs') || TEST_FILE.test(name)) continue;
-    if (name === 'compare-runs.mjs' || name === 'fingerprint.mjs') continue;
+    // Post-processors and the `--affected` selector feed no check (see `NO_EFFECT` in affected.mjs).
+    if (HASH_EXCLUDED.has(name)) continue;
     files.push(rel);
   }
   files.push(...walk(root, 'media'));

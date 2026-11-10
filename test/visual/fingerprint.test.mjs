@@ -91,14 +91,19 @@ describe('fingerprint', () => {
     expect(fingerprint(root).hash).not.toBe(pkg);
   });
 
-  it('hashes the synthetic server and leaves out the post-processors', () => {
+  it('hashes the synthetic server and leaves out the post-processors and the --affected selector', () => {
     put('src/extension/test-fixtures/fake-opencode.mjs', 'export const f = 1;\n');
     put('test/visual/compare-runs.mjs', 'export const c = 1;\n');
     put('test/visual/fingerprint.mjs', 'export const c = 1;\n');
+    put('test/visual/merge-shards.mjs', 'export const c = 1;\n');
+    put('test/visual/affected.mjs', 'export const c = 1;\n');
+    put('test/visual/harnessDiff.mjs', 'export const c = 1;\n');
     const files = hashedFiles(root);
     expect(files).toContain('src/extension/test-fixtures/fake-opencode.mjs');
-    expect(files).not.toContain('test/visual/compare-runs.mjs');
-    expect(files).not.toContain('test/visual/fingerprint.mjs');
+    expect(files).toContain('test/visual/run.mjs');
+    for (const name of ['compare-runs', 'fingerprint', 'merge-shards', 'affected', 'harnessDiff']) {
+      expect(files, name).not.toContain(`test/visual/${name}.mjs`);
+    }
   });
 
   /**

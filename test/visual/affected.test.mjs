@@ -114,8 +114,87 @@ describe('selectForFiles', () => {
     expect(result).toEqual({
       mode: 'full',
       groups: [],
+      steps: [],
       reasons: ['scripts/unknown.mjs: not mapped'],
     });
+  });
+
+  // Protects tooling/visual-ci-parallel (issue #199): without `harness`, run.mjs and steps.mjs stay
+  // cross-cutting (what `fingerprint.mjs` `checkRun` relies on); with it they are judged per step.
+  // The harness results are FABRICATED here; the real ones come from `harnessDiff.mjs`.
+  it('judges run.mjs and steps.mjs by the harness diff when it is given', () => {
+    const files = ['test/visual/run.mjs', 'test/visual/steps.mjs', 'README.md'];
+    expect(selectForFiles(files).mode).toBe('full');
+    const harness = {
+      'test/visual/run.mjs': { mode: 'steps', steps: ['51'], reason: 'step bodies changed' },
+      'test/visual/steps.mjs': { mode: 'steps', steps: ['51', '52'], reason: 'x' },
+    };
+    expect(selectForFiles(files, harness)).toEqual({
+      mode: 'groups',
+      groups: [],
+      steps: ['51', '52'],
+      reasons: ['test/visual/run.mjs -> steps 51', 'test/visual/steps.mjs -> steps 51, 52'],
+    });
+  });
+
+  // Protects the decision of Sergio on tooling/visual-ci-parallel (Engram
+  // `tooling/visual-ci-parallel/decisions/review-w1-w2`): a step chosen by its body drags the NEXT
+  // one in canonical order (state leaks forward: the end of steps 49/50 broke 50/51). The order and
+  // the diffs are FABRICATED; the real ids come from `STEP_IDS` (see harnessDiff.test.mjs).
+  it('adds the next step in canonical order to a step chosen by its body or entry', () => {
+    const order = ['1', '6', '6b', '7', '8'];
+    const pick = (steps) => ({ 'test/visual/run.mjs': { mode: 'steps', steps, reason: 'x' } });
+    expect(selectForFiles(['test/visual/run.mjs'], pick(['6']), order)).toEqual({
+      mode: 'groups',
+      groups: [],
+      steps: ['6', '6b'],
+      reasons: ['test/visual/run.mjs -> steps 6 (+ next 6b)'],
+    });
+    // Two adjacent changed steps: the next of the first is already chosen, so only 8 is added.
+    expect(selectForFiles(['test/visual/run.mjs'], pick(['6b', '7']), order).steps).toEqual([
+      '6b',
+      '7',
+      '8',
+    ]);
+    // The last step has no next.
+    expect(selectForFiles(['test/visual/run.mjs'], pick(['8']), order)).toMatchObject({
+      steps: ['8'],
+      reasons: ['test/visual/run.mjs -> steps 8'],
+    });
+  });
+
+  it('is full when a step id chosen by the harness diff is not in the canonical order', () => {
+    const harness = { 'test/visual/run.mjs': { mode: 'steps', steps: ['99'], reason: 'x' } };
+    expect(selectForFiles(['test/visual/run.mjs'], harness, ['1', '2'])).toEqual({
+      mode: 'full',
+      groups: [],
+      steps: [],
+      reasons: ['test/visual/run.mjs: cross-cutting (step 99 is not a known step id)'],
+    });
+  });
+
+  it('unites groups and steps, selects nothing for a none diff and is full for a full diff', () => {
+    const none = { 'test/visual/run.mjs': { mode: 'none', steps: [], reason: 'comments' } };
+    expect(selectForFiles(['test/visual/run.mjs'], none).mode).toBe('none');
+    const steps = { 'test/visual/run.mjs': { mode: 'steps', steps: ['51'], reason: 'x' } };
+    expect(
+      selectForFiles(['webview-ui/src/selectors/A.tsx', 'test/visual/run.mjs'], steps),
+    ).toMatchObject({ mode: 'groups', groups: ['selectors'], steps: ['51'] });
+    const full = { 'test/visual/run.mjs': { mode: 'full', steps: [], reason: 'helper changed' } };
+    expect(selectForFiles(['test/visual/run.mjs'], full)).toMatchObject({
+      mode: 'full',
+      reasons: ['test/visual/run.mjs: cross-cutting (helper changed)'],
+    });
+  });
+
+  it('has no effect for the selector itself, the shard merger and the workflows', () => {
+    const result = selectForFiles([
+      'test/visual/affected.mjs',
+      'test/visual/harnessDiff.mjs',
+      'test/visual/merge-shards.mjs',
+      '.github/workflows/visual.yml',
+    ]);
+    expect(result.mode).toBe('none');
   });
 
   it('has no visual effect for tests, markdown, the integration suite and .claude', () => {
@@ -132,7 +211,7 @@ describe('selectForFiles', () => {
       'test/integration/support/extensionLog.ts',
       '.claude/CLAUDE.md',
     ]);
-    expect(result).toEqual({ mode: 'none', groups: [], reasons: [] });
+    expect(result).toEqual({ mode: 'none', groups: [], steps: [], reasons: [] });
   });
 
   it('is none for an empty list', () => {
