@@ -681,7 +681,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@opencode/client": "2.0.32",
+    "@opencode/client": "2.2.7",
     "@types/mocha": "10.0.10",
     "@types/node": "22.x",
     "@types/vscode": "1.105.0",

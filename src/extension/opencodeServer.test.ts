@@ -23,6 +23,7 @@ import {
   fetchServerInfo,
   ServerInfoError,
   parseUrlLine,
+  PINNED_OPENCODE_VERSION,
   safeLog,
   serveArgs,
   ServerStartError,
@@ -228,7 +229,7 @@ describe('pure helpers', () => {
   });
 
   it('checkServerVersion: pin ok; other minor or unparseable warns; other major is unsupported', () => {
-    expect(checkServerVersion('2.0.32').kind).toBe('ok');
+    expect(checkServerVersion(PINNED_OPENCODE_VERSION).kind).toBe('ok');
     expect(checkServerVersion('2.0.40').kind).toBe('warn');
     expect(checkServerVersion('local').kind).toBe('warn');
     expect(checkServerVersion('1.19.3').kind).toBe('unsupported');
@@ -411,7 +412,7 @@ describe('against the synthetic fixture (real processes)', () => {
     // The fixture answers 401 unless the password is the one WE generated, so this also proves
     // that the user-defined OPENCODE_PASSWORD was overridden.
     const info = await fetchServerInfo(server.url, server.password);
-    expect(info.version).toBe('2.0.32');
+    expect(info.version).toBe(PINNED_OPENCODE_VERSION);
     expect(checkServerVersion(info.version).kind).toBe('ok');
 
     const { log } = captureLog();

@@ -344,7 +344,10 @@ export function createUsage(deps: UsageDeps): Usage {
     for (const listener of listeners) listener();
   };
 
-  /** One read of both periods; publishes unless the server changed meanwhile. */
+  /**
+   * One read of both periods; publishes unless the server changed meanwhile. Uses
+   * `client.experimental.session.stats` (the 2.2 name; `session.stats` is a deprecated alias, #191).
+   */
   const readOnce = async (at: number): Promise<void> => {
     const client = deps.client();
     if (client === undefined) {
@@ -360,8 +363,8 @@ export function createUsage(deps: UsageDeps): Usage {
     const timezone = deps.timezone();
     try {
       const [today, week] = await Promise.all([
-        client.session.stats({ ...ranges.today, timezone, tools: 'none' }),
-        client.session.stats({ ...ranges.week, timezone, tools: 'none' }),
+        client.experimental.session.stats({ ...ranges.today, timezone, tools: 'none' }),
+        client.experimental.session.stats({ ...ranges.week, timezone, tools: 'none' }),
       ]);
       if (at !== epoch) return;
       const catalog = deps.catalog();

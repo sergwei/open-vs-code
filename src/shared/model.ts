@@ -317,7 +317,9 @@ export type ToolOutput =
  *
  * Tool names in opencode 2.0.32 (`plugin/internal.ts@843a6c51`, read): `shell`, `read`, `edit`,
  * `write`, `patch`, `grep`, `glob`, `webfetch`, `websearch`, `skill`, `question`, `subagent`, plus
- * MCP tools with free names. (v1 called them `bash` and `task`; `list` and `todowrite` are gone.)
+ * MCP tools with free names. (v1 called them `bash` and `task`; `list` is gone. `todowrite` is
+ * back in 2.2, in `core/src/tool/plugin/todo.ts@v2.2.7`, behind the `todo` flag, which is off in
+ * release builds (`core/src/flag.ts`, read, never run); the extension has no todo UI.)
  */
 export type ToolState =
   | { status: 'streaming'; input: string }

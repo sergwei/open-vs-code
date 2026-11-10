@@ -26,6 +26,8 @@ import type { ProviderAuthApi } from './providerAuth';
 export type ServerConfigApi = {
   integration: Pick<ChatApi['integration'], 'list' | 'get'>;
   mcp: ChatApi['mcp'];
+  /** The MCP writes, which live under `client.experimental.mcp` since 2.2 (issue #191). */
+  experimental: Pick<ChatApi['experimental'], 'mcp'>;
   /** The catalog reads of the model picker (issue #186): `model.list`, `model.default`. */
   model: ChatApi['model'];
   /** `provider.list`, for the provider names and the link provider to integration. */
@@ -808,7 +810,8 @@ export class ServerConfig implements ServerConfigSink {
    * since the last read). Never throws. Writes one `info` line `mcp <op>: <server>` or one `warn`
    * line `mcp <op> failed: <server>: <code>`, never the message of the error; EXCEPT when there is
    * no server (no `api`) or it was restarted during the call (the generation changed): both return
-   * `failed` and write no line.
+   * `failed` and write no line. Calls `client.experimental.mcp.connect/disconnect`, the 2.2 names
+   * (the old `mcp.*` ones are deprecated aliases; same routes, issue #191).
    *
    * VERIFIED that the 204 of connect arrives only after the handshake of a LOCAL server, so the
    * re-read sees `connected` and not `pending`: the case "registers the integration of a remote
@@ -829,8 +832,8 @@ export class ServerConfig implements ServerConfigSink {
     }
     const generation = this.generation;
     try {
-      if (op === 'connect') await api.mcp.connect({ server });
-      else await api.mcp.disconnect({ server });
+      if (op === 'connect') await api.experimental.mcp.connect({ server });
+      else await api.experimental.mcp.disconnect({ server });
     } catch (error) {
       const info = toErrorInfo(error, this.secrets);
       this.log.warn(`mcp ${op} failed: ${server}: ${info.code}`);

@@ -258,8 +258,9 @@ const questionForm = (id: string, sessionID = 'ses_old'): FormInfo =>
   );
 
 /**
- * A fake client recording its calls; every method has a harmless default (`session.stats`, which
- * the controller never calls, answers an empty window only so the type is whole).
+ * A fake client recording its calls; every method has a harmless default (the `experimental`
+ * stubs, which the controller never calls, `experimental.session.stats` answering an empty window
+ * only so the type is whole).
  */
 function fakeApi(options: FakeOptions = {}) {
   const calls: string[] = [];
@@ -386,22 +387,6 @@ function fakeApi(options: FakeOptions = {}) {
         diffInputs.push(input);
         return (options.diffImpl ?? (() => Promise.resolve([])))(input);
       },
-      // E9-sidebar-home: the controller never reads usage; the stub only keeps `ChatApi` whole.
-      stats: () =>
-        Promise.resolve({
-          range: { from: 0, to: 1 },
-          sessions: 0,
-          subagents: 0,
-          prompts: 0,
-          steps: 0,
-          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          cost: 0,
-          tools: { mode: 'none' },
-          activeDays: 0,
-          streak: 0,
-          activity: [],
-          models: [],
-        }),
       switchAgent: (input) => {
         calls.push('session.switchAgent');
         switches.push(`agent:${input.agent}`);
@@ -570,13 +555,37 @@ function fakeApi(options: FakeOptions = {}) {
         calls.push('mcp.list');
         return Promise.resolve({ location: LOCATION, data: [] });
       },
-      connect: () => Promise.reject(new Error('mcp.connect is not used by the controller')),
-      disconnect: () => Promise.reject(new Error('mcp.disconnect is not used by the controller')),
       resource: {
         catalog: () => {
           calls.push('mcp.resource.catalog');
           return Promise.resolve({ location: LOCATION, data: { resources: [], templates: [] } });
         },
+      },
+    },
+    // The controller never reads usage nor writes MCP state; these stubs only keep `ChatApi` whole.
+    experimental: {
+      session: {
+        stats: () =>
+          Promise.resolve({
+            range: { from: 0, to: 1 },
+            sessions: 0,
+            subagents: 0,
+            prompts: 0,
+            steps: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            cost: 0,
+            tools: { mode: 'none' },
+            activeDays: 0,
+            streak: 0,
+            activity: [],
+            models: [],
+          }),
+      },
+      mcp: {
+        connect: () =>
+          Promise.reject(new Error('experimental.mcp.connect is not used by the controller')),
+        disconnect: () =>
+          Promise.reject(new Error('experimental.mcp.disconnect is not used by the controller')),
       },
     },
     agent: {
@@ -1607,7 +1616,7 @@ describe('context usage (issue #25)', () => {
   const compaction = (status: string, created: number): SessionMessageInfo =>
     wire<SessionMessageInfo>(
       // A failed message carries `error` (types of 2.0.32), which the notice line now reads.
-      `{"id":"msg_c${String(created)}","type":"compaction","status":"${status}","reason":"manual","summary":"s","recent":"r","error":{"type":"compaction.unavailable","message":"Nothing to compact yet"},"time":{"created":${String(created)}}}`,
+      `{"id":"msg_c${String(created)}","type":"compaction","status":"${status}","reason":"manual","summary":"s","error":{"type":"compaction.unavailable","message":"Nothing to compact yet"},"time":{"created":${String(created)}}}`,
     );
   const usageRow = (id: string, input: number): SessionInfo =>
     wire<SessionInfo>(
@@ -1705,7 +1714,6 @@ describe('context usage (issue #25)', () => {
       sessionID: 'ses_other',
       reason: 'manual',
       text: 't',
-      recent: 'r',
     });
     await flush();
     expect(calls.filter((c) => c === 'session.list')).toHaveLength(before);
@@ -1713,7 +1721,6 @@ describe('context usage (issue #25)', () => {
       sessionID: 'ses_open',
       reason: 'manual',
       text: 't',
-      recent: 'r',
     });
     await flush();
     expect(calls.filter((c) => c === 'session.list')).toHaveLength(before + 1);
@@ -1731,14 +1738,12 @@ describe('context usage (issue #25)', () => {
     emit(streams, 'session.compaction.started', {
       sessionID: 'ses_open',
       reason: 'manual',
-      recent: '',
       inputID: 'msg_in',
     });
     emit(streams, 'session.compaction.ended', {
       sessionID: 'ses_open',
       reason: 'manual',
       text: 't',
-      recent: 'r',
     });
     await flush();
     const lines = posted.flatMap((m) =>

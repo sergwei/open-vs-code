@@ -114,14 +114,17 @@ function fakeApi(
     /** When set, the next read of that source waits for `release()` and answers afterwards. */
     gate: undefined as { promise: Promise<void>; release: () => void } | undefined,
     fail: undefined as 'integrations' | 'mcp' | 'catalog' | 'models' | undefined,
-    /** What `mcp.connect` and `mcp.disconnect` throw, when set. */
+    /** What `experimental.mcp.connect` and `.disconnect` throw, when set. */
     writeError: undefined as unknown,
     /** Runs when a write succeeds: the test changes `mcp` there, like the server would. */
     onWrite: undefined as (() => void) | undefined,
   };
   /** The writes the store made, in order: `connect docs`, `disconnect docs`. */
   const writes: string[] = [];
-  /** One write of `mcp.connect` or `mcp.disconnect`: records it, then fails or succeeds as told. */
+  /**
+   * One write of `experimental.mcp.connect` or `.disconnect`: records it, then fails or succeeds
+   * as told.
+   */
   const write = (label: string): Promise<void> => {
     writes.push(label);
     if (state.writeError !== undefined) {
@@ -167,6 +170,12 @@ function fakeApi(
         return { location: LOCATION, data: state.providers };
       },
     },
+    experimental: {
+      mcp: {
+        connect: (input) => write(`connect ${input.server}`),
+        disconnect: (input) => write(`disconnect ${input.server}`),
+      },
+    },
     mcp: {
       list: async () => {
         calls.mcp++;
@@ -177,8 +186,6 @@ function fakeApi(
           data: wire<Awaited<ReturnType<ServerConfigApi['mcp']['list']>>['data']>(state.mcp),
         };
       },
-      connect: (input) => write(`connect ${input.server}`),
-      disconnect: (input) => write(`disconnect ${input.server}`),
       resource: {
         catalog: async () => {
           calls.catalog++;
