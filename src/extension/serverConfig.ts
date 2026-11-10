@@ -36,6 +36,10 @@ export type ServerConfigApi = {
 export const MAX_TEXT = 200;
 /** Longest URI or URI template kept. */
 const MAX_URI = 500;
+/** Most lines of an MCP error the "Show details" text keeps (chosen by Sergio, issue #186 PR2). */
+export const MAX_DETAIL_LINES = 20;
+/** Most characters of an MCP error the "Show details" text keeps (same decision as above). */
+export const MAX_DETAIL = 2000;
 /** How long an empty first MCP list is shown as "still loading" before it is believed (ms). */
 export const MCP_FIRST_READ_GRACE_MS = 2000;
 
@@ -107,9 +111,20 @@ export interface McpServerRow {
   status: McpStatusName;
   /** First line of the server's error, at most {@link MAX_TEXT} characters, scrubbed. */
   error?: string;
+  /**
+   * The whole error, scrubbed, at most {@link MAX_DETAIL_LINES} lines and {@link MAX_DETAIL}
+   * characters (see {@link detailText}); ABSENT when it says nothing the first line does not.
+   */
+  detail?: string;
+  /** `McpServer.integrationID` as the server sent it: the OAuth integration, for remote servers. */
+  integrationID?: string;
   resources: { name: string; uri: string; description?: string; mimeType?: string }[];
   templates: { name: string; uriTemplate: string; description?: string }[];
 }
+
+/** What {@link ServerConfig.mcpAction} resolves: it worked, or why it did not. */
+export type McpActionResult =
+  { kind: 'done' } | { kind: 'failed'; message: string; notFound: boolean };
 
 /** Everything the tab shows about the server's configuration. */
 export interface ServerConfigSnapshot {
@@ -175,6 +190,31 @@ export function firstLine(text: string, max: number = MAX_TEXT): string {
       .map((part) => part.trim())
       .find((part) => part !== '') ?? '';
   return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
+}
+
+/**
+ * The whole of `text` for "Show details": CR, LF and CRLF are line breaks, the lines lose their
+ * trailing blanks, blank lines at both ends go, and it is cut to `maxLines` lines and `max`
+ * characters (the last one is `…` when anything was cut). The caller scrubs `text` BEFORE this (a
+ * secret cut in half would escape {@link sanitizeText}), so the result is as safe as its input.
+ * VERIFIED by "keeps the whole error as a scrubbed, bounded detail" of `serverConfig.test.ts`
+ * (fabricated CRLF text, vitest, Windows 11). A real server's stderr was not inspected beyond the
+ * `\r\n`-separated text the planner spike saw (01/11/2026).
+ */
+export function detailText(
+  text: string,
+  maxLines: number = MAX_DETAIL_LINES,
+  max: number = MAX_DETAIL,
+): string {
+  const lines = text.split(/\r\n|\r|\n/).map((line) => line.trimEnd());
+  while (lines.length > 0 && lines[0]?.trim() === '') lines.shift();
+  while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop();
+  const cutLines = lines.length > maxLines;
+  const joined = lines.slice(0, maxLines).join('\n');
+  if (joined.length > max || (cutLines && joined.length + 1 > max)) {
+    return `${joined.slice(0, max - 1)}…`;
+  }
+  return cutLines ? `${joined}…` : joined;
 }
 
 /** Narrow shape of the form fields read here, so the mapper never touches the rest of them. */
@@ -317,23 +357,40 @@ export function toModelRows(
   });
 }
 
-/** One `McpServer` of the wire reduced to the fields kept, with the error scrubbed and cut. */
+/**
+ * One `McpServer` of the wire reduced to the fields kept. A `failed` or `needs_auth` error is
+ * scrubbed ONCE ({@link sanitizeText}) and then cut two ways: `error` is its first line (at most
+ * {@link MAX_TEXT}) and `detail` the bounded whole ({@link detailText}), present only when it
+ * adds something to the first line. The `integrationID` is kept as sent; whether it names a real
+ * integration is for the controller to judge against the integration rows.
+ */
 function toMcpStatus(
   server: Awaited<ReturnType<ServerConfigApi['mcp']['list']>>['data'][number],
   secrets: ErrorSecrets,
-): { status: McpStatusName; error?: string } {
+): { status: McpStatusName; error?: string; detail?: string; integrationID?: string } {
   const state = server.status;
+  const integration =
+    server.integrationID === undefined ? {} : { integrationID: firstLine(server.integrationID) };
   switch (state.status) {
     case 'connected':
     case 'pending':
     case 'disabled':
-      return { status: state.status };
+      return { status: state.status, ...integration };
     case 'failed':
-    case 'needs_auth':
-      return { status: state.status, error: firstLine(sanitizeText(state.error, secrets)) };
+    case 'needs_auth': {
+      const clean = sanitizeText(state.error, secrets);
+      const error = firstLine(clean);
+      const detail = detailText(clean);
+      return {
+        status: state.status,
+        error,
+        ...(detail === error ? {} : { detail }),
+        ...integration,
+      };
+    }
     default:
       // A status a newer server may add: shown as pending rather than invented (HYPOTHESIS).
-      return { status: 'pending' };
+      return { status: 'pending', ...integration };
   }
 }
 
@@ -432,7 +489,9 @@ class CoalescedRead {
  * The store: four coalesced reads (integrations, models, MCP list, MCP resource catalog) of the
  * server attached, each REPLACING its rows whole (an integration or server that left must disappear),
  * and a snapshot to read them. A failed read keeps the previous rows, sets `failed` and logs one
- * `warn` line; a read for a server that went away meanwhile is dropped (generation check).
+ * `warn` line; a read for a server that went away meanwhile is dropped (generation check). Since
+ * issue #186 (PR2) it also WRITES, in one place: {@link ServerConfig.mcpAction} connects or
+ * disconnects an MCP server at runtime and then re-reads the list.
  *
  * VERIFIED by unit tests with fake clients (coalescing, replacement, stale generation, the
  * pending-first-read rule, the allow-list with a planted secret, the catalog re-read on a status
@@ -465,7 +524,13 @@ export class ServerConfig implements ServerConfigSink {
   private modelsLoaded = false;
   private modelsFailed = false;
 
-  private mcpList: { name: string; status: McpStatusName; error?: string }[] = [];
+  private mcpList: {
+    name: string;
+    status: McpStatusName;
+    error?: string;
+    detail?: string;
+    integrationID?: string;
+  }[] = [];
   private catalog: McpCatalogRows = { resources: new Map(), templates: new Map() };
   private mcpLoaded = false;
   private mcpFailed = false;
@@ -503,6 +568,8 @@ export class ServerConfig implements ServerConfigSink {
         templates: this.catalog.templates.get(server.name) ?? [],
       };
       if (server.error !== undefined) row.error = server.error;
+      if (server.detail !== undefined) row.detail = server.detail;
+      if (server.integrationID !== undefined) row.integrationID = server.integrationID;
       return row;
     });
     return {
@@ -728,9 +795,77 @@ export class ServerConfig implements ServerConfigSink {
   }
 
   /**
+   * Connects or disconnects the MCP server `server` of the running opencode, at runtime only (the
+   * server forgets it on restart; nothing is written to `opencode.json`), and reads the list again
+   * before it resolves, so the caller judges the state AFTER the change and no optimistic row is
+   * ever shown. The caller has already checked that the server exists in the snapshot and that
+   * the state allows `op`; this method does not.
+   *
+   * Resolves `{ kind: 'done' }` once the 204 came back AND the re-read ended (a read that fails
+   * still resolves: it flags `mcp.failed` as always), or `{ kind: 'failed', message, notFound }`
+   * with the scrubbed message of the error when there is no server, the server changed meanwhile,
+   * or the call threw; `notFound` is true for `McpServerNotFoundError` (the server left the config
+   * since the last read). Never throws. Writes one `info` line `mcp <op>: <server>` or one `warn`
+   * line `mcp <op> failed: <server>: <code>`, never the message of the error; EXCEPT when there is
+   * no server (no `api`) or it was restarted during the call (the generation changed): both return
+   * `failed` and write no line.
+   *
+   * VERIFIED that the 204 of connect arrives only after the handshake of a LOCAL server, so the
+   * re-read sees `connected` and not `pending`: the case "registers the integration of a remote
+   * MCP server and connects and disconnects a local one" of `realOpencode.test.ts` printed
+   * `mcp.connect: connected at return: true` (Windows 11, 10/11/2026, an opencode 2.2.5
+   * executable, not the pinned 2.0.32). HYPOTHESIS for a remote server (a slow handshake or a
+   * `failed` outcome was not run). The unit side is VERIFIED only against the fabricated client of
+   * "the MCP actions" in `serverConfig.test.ts` (Windows 11, vitest).
+   */
+  async mcpAction(server: string, op: 'connect' | 'disconnect'): Promise<McpActionResult> {
+    const api = this.api;
+    if (api === undefined) {
+      return {
+        kind: 'failed',
+        message: l10n.t('The opencode server is not running'),
+        notFound: false,
+      };
+    }
+    const generation = this.generation;
+    try {
+      if (op === 'connect') await api.mcp.connect({ server });
+      else await api.mcp.disconnect({ server });
+    } catch (error) {
+      const info = toErrorInfo(error, this.secrets);
+      this.log.warn(`mcp ${op} failed: ${server}: ${info.code}`);
+      return {
+        kind: 'failed',
+        message: info.message,
+        notFound: info.code === 'McpServerNotFoundError',
+      };
+    }
+    if (generation !== this.generation) {
+      return {
+        kind: 'failed',
+        message: l10n.t('The opencode server is not running'),
+        notFound: false,
+      };
+    }
+    this.log.info(`mcp ${op}: ${server}`);
+    await this.mcpRead.request();
+    return { kind: 'done' };
+  }
+
+  /**
    * One read of `mcp.list` for `generation`. `afterEvent` is sampled BEFORE the request: only a
    * read that started after an `mcp.status.changed` may believe an empty list. The grace timer
    * (one per attach) covers a server with no MCP servers at all, which never sends the event.
+   * Each row keeps the `integrationID` and the whole error ({@link detailText}) the server sent.
+   * When a server names an integration the integration rows do not have (and they were already
+   * read once), the integrations are read again: the server registers the `mcp_...` integration
+   * with its MCP state, and a list read just before that would leave "Sign in" without its row.
+   * VERIFIED that a remote server's `mcp_...` integration (`metadata.source === 'mcp'`, an oauth
+   * method) is in `integration.list` of a running server and that `mcp.list` gives the server the
+   * same `integrationID`: the case "registers the integration of a remote MCP server and connects
+   * and disconnects a local one" of `realOpencode.test.ts` passed (Windows 11, 10/11/2026, an
+   * opencode 2.2.5 executable, not the pinned 2.0.32). That case polls up to 30 s, so whether the
+   * integration is there in the FIRST read stays HYPOTHESIS; that is what the re-read covers.
    */
   private async readMcp(generation: number): Promise<void> {
     const api = this.api;
@@ -745,6 +880,16 @@ export class ServerConfig implements ServerConfigSink {
       }));
       this.mcpLoaded = true;
       this.mcpFailed = false;
+      if (
+        this.integrationsLoaded &&
+        this.mcpList.some(
+          (server) =>
+            server.integrationID !== undefined &&
+            !this.integrations.some((row) => row.id === server.integrationID),
+        )
+      ) {
+        void this.integrationRead.request();
+      }
       // An empty list is believed once it was read after an `mcp.status.changed`, when something
       // came in it, or when the grace period ends (see `ServerConfigSnapshot.mcp.pendingFirstRead`).
       if (afterEvent || this.mcpList.length > 0) this.mcpSettled = true;

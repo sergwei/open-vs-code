@@ -45,6 +45,7 @@
 // plain Node (spike of 2026-10-20) but NOT through `deactivate` in VS Code.
 import * as assert from 'node:assert';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -1267,6 +1268,85 @@ describe('real opencode', function () {
           catalog.templates.some((t) => t.server === 'fakemcp' && t.name === 'fake-file'),
           `templates: ${JSON.stringify(catalog.templates)}`,
         );
+      } finally {
+        await sub.stop();
+        fs.rmSync(served, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      }
+    });
+
+    /**
+     * The three facts PR2 of #186 (MCP actions) rests on, against a real server and no prompt:
+     * (a) a REMOTE MCP server registers an integration `mcp_` + sha1(name NUL url)[0:16] with
+     * `metadata.source === 'mcp'` and one oauth method, and `integration.list` returns it; (b)
+     * `mcp.list` gives that server the same `integrationID`; (c) `mcp.disconnect` leaves a local
+     * server `disabled` and `mcp.connect` brings it back to `connected`. It prints
+     * `mcp.connect: connected at return: <bool>`: whether the 204 came after the handshake or
+     * before it (the status is read right after the call returns, before any polling).
+     *
+     * Protects the sign-in button (a, b: without the integration row there is nothing to run the
+     * OAuth flow with) and the host's "read the state after the 204" (c). The remote server is a
+     * closed port (`127.0.0.1:1`), so it never connects and the case never touches the network;
+     * the OAuth flow itself (discovery, browser, callback) is NOT exercised: it needs an MCP
+     * server with OAuth.
+     */
+    it('registers the integration of a remote MCP server and connects and disconnects a local one', async function () {
+      this.timeout(120_000);
+      const node = process.env['OPEN_VS_CODE_TEST_NODE'];
+      const script = process.env['OPEN_VS_CODE_TEST_FAKE_MCP'];
+      assert.ok(node && script, 'OPEN_VS_CODE_TEST_NODE / OPEN_VS_CODE_TEST_FAKE_MCP are not set');
+      const remoteUrl = 'http://127.0.0.1:1/mcp';
+      const integrationID = `mcp_${createHash('sha1').update(`remotemcp\0${remoteUrl}`).digest('hex').slice(0, 16)}`;
+      const served = fs.mkdtempSync(path.join(os.tmpdir(), 'ovsc-contract-mcp-actions-'));
+      const config = JSON.stringify({
+        mcp: {
+          servers: {
+            fakemcp: { type: 'local', command: [node, script] },
+            remotemcp: { type: 'remote', url: remoteUrl },
+          },
+        },
+      });
+      const sub = await startOwnServer(binary, served, 'mcp-actions-pw', {
+        OPENCODE_CONFIG_CONTENT: config,
+      });
+      const statusOf = async (name: string) =>
+        (await sub.client.mcp.list({})).data.find((server) => server.name === name);
+      const until = async (name: string, wanted: string, ms: number): Promise<void> => {
+        const deadline = Date.now() + ms;
+        while ((await statusOf(name))?.status.status !== wanted && Date.now() < deadline) {
+          await sleep(300);
+        }
+        assert.strictEqual(
+          (await statusOf(name))?.status.status,
+          wanted,
+          `${name} never ${wanted}`,
+        );
+      };
+      try {
+        await until('fakemcp', 'connected', 30_000);
+        // (a) and (b): polled up to 30 s because the integration may register after the first read.
+        const deadline = Date.now() + 30_000;
+        let row:
+          Awaited<ReturnType<typeof sub.client.integration.list>>['data'][number] | undefined;
+        while (row === undefined && Date.now() < deadline) {
+          row = (await sub.client.integration.list({})).data.find((r) => r.id === integrationID);
+          if (row === undefined) await sleep(500);
+        }
+        const all = (await sub.client.integration.list({})).data.map((r) => r.id).join(',');
+        assert.ok(row !== undefined, `(a) no ${integrationID} in integration.list: ${all}`);
+        assert.strictEqual(row.metadata?.['source'], 'mcp');
+        assert.ok(
+          row.methods.some((m) => m.type === 'oauth'),
+          `(a) methods: ${JSON.stringify(row.methods)}`,
+        );
+        assert.strictEqual((await statusOf('remotemcp'))?.integrationID, integrationID, '(b)');
+
+        // (c)
+        await sub.client.mcp.disconnect({ server: 'fakemcp' });
+        await until('fakemcp', 'disabled', 10_000);
+        await sub.client.mcp.connect({ server: 'fakemcp' });
+        const atReturn = (await statusOf('fakemcp'))?.status.status === 'connected';
+        console.log(`mcp.connect: connected at return: ${String(atReturn)}`);
+        await until('fakemcp', 'connected', 30_000);
       } finally {
         await sub.stop();
         fs.rmSync(served, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

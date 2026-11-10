@@ -15,7 +15,12 @@ import {
   type SettingsConfigSource,
   type SettingsControllerDeps,
 } from './settingsController';
-import type { IntegrationRow, ServerConfigSnapshot } from './serverConfig';
+import type {
+  IntegrationRow,
+  McpActionResult,
+  McpServerRow,
+  ServerConfigSnapshot,
+} from './serverConfig';
 import type { AuthAttemptView, SettingsHostToWebview } from '../shared/settingsProtocol';
 
 const PLANTED_KEY = 'sk-planted-key-777';
@@ -68,12 +73,13 @@ const MODELS: ServerConfigSnapshot['models'] = {
 function snapshotOf(
   rows: IntegrationRow[],
   models: ServerConfigSnapshot['models'],
+  servers: McpServerRow[] = [],
 ): ServerConfigSnapshot {
   return {
     epoch: 1,
     integrations: { loaded: true, failed: false, rows },
     models,
-    mcp: { loaded: true, failed: false, pendingFirstRead: false, servers: [] },
+    mcp: { loaded: true, failed: false, pendingFirstRead: false, servers },
   };
 }
 
@@ -84,7 +90,9 @@ function setup(
     value: '',
     workspaceOverride: false,
   },
+  initialServers: McpServerRow[] = [],
 ) {
+  let servers = initialServers;
   let preference = initialPreference;
   const preferences = {
     read: vi.fn(() => preference),
@@ -99,12 +107,15 @@ function setup(
   const attemptListeners = new Set<(view: AuthAttemptView | undefined) => void>();
   let attempt: AuthAttemptView | undefined;
   const config = {
-    snapshot: vi.fn(() => snapshotOf(rows, models)),
+    snapshot: vi.fn(() => snapshotOf(rows, models, servers)),
     onDidChange: (listener: () => void) => {
       storeListeners.add(listener);
       return () => storeListeners.delete(listener);
     },
     reloadAll: vi.fn(() => Promise.resolve()),
+    mcpAction: vi.fn((_server: string, _op: 'connect' | 'disconnect'): Promise<McpActionResult> =>
+      Promise.resolve({ kind: 'done' }),
+    ),
   } satisfies SettingsConfigSource;
   const auth = {
     connect: vi.fn(
@@ -155,6 +166,10 @@ function setup(
     log,
     setRemote: (name: string | undefined) => {
       remote = name;
+    },
+    /** Replaces the MCP rows the next `snapshot()` returns (what a re-read would bring). */
+    setServers: (next: McpServerRow[]) => {
+      servers = next;
     },
     changeStore: () => storeListeners.forEach((listener) => listener()),
     setAttempt: (view: AuthAttemptView | undefined) => {
@@ -590,5 +605,261 @@ describe('SettingsController default model', () => {
     await t.controller.onMessage({ type: 'settings.openSetting', key: 'editor.fontSize' });
     expect(t.openSetting).toHaveBeenCalledOnce();
     expect(t.log.warn).toHaveBeenCalledWith('settings message dropped: invalid');
+  });
+});
+
+/**
+ * Protects issue #186 (PR2): the webview may connect, disconnect and sign in to an MCP server only
+ * when the host's own snapshot allows it (the server exists, its state permits the operation, nothing
+ * else of it is running), never reaches the add/remove routes, and the notice names what the server
+ * BECAME after the change, not what was asked. Provenance: FABRICATED snapshot, `mcpAction` and
+ * `auth` written from `serverConfig.ts` and `providerAuth.ts`; nothing here touches a server. The
+ * `mcp_0123456789abcdef` id has the shape of the one read in `core/src/mcp/index.ts` of the 2.0.32
+ * tag and is invented.
+ */
+describe('SettingsController MCP requests', () => {
+  const INTEGRATION = 'mcp_0123456789abcdef';
+  const LINEAR_METHOD: IntegrationRow['methods'][number] = {
+    index: 0,
+    type: 'oauth',
+    id: INTEGRATION,
+    label: 'linear',
+    fields: [],
+    supported: true,
+  };
+  const LINEAR_ROW: IntegrationRow = {
+    id: INTEGRATION,
+    name: 'linear',
+    connections: [],
+    methods: [LINEAR_METHOD],
+    source: 'mcp',
+  };
+  const server = (
+    name: string,
+    status: McpServerRow['status'],
+    extra: Partial<McpServerRow> = {},
+  ): McpServerRow => ({ name, status, resources: [], templates: [], ...extra });
+  const SERVERS: McpServerRow[] = [
+    server('docs', 'connected'),
+    server('slow', 'pending'),
+    server('off', 'disabled'),
+    server('broken', 'failed', { error: 'Connection closed', detail: 'Connection closed\nmore' }),
+    server('linear', 'needs_auth', { error: 'Sign in', integrationID: INTEGRATION }),
+  ];
+  const withServers = (
+    rows: IntegrationRow[] = [...ROWS, LINEAR_ROW],
+    list: McpServerRow[] = SERVERS,
+  ) => setup(rows, MODELS, { value: '', workspaceOverride: false }, list);
+  const stateOf = (t: ReturnType<typeof setup>) => {
+    const last = states(t.posted).at(-1);
+    return last?.type === 'settings.state' ? last.state : undefined;
+  };
+  const rowOf = (t: ReturnType<typeof setup>, name: string) =>
+    stateOf(t)?.mcp.servers.find((row) => row.name === name);
+
+  it('marks canSignIn and integrationID only with an mcp integration row and an oauth method', async () => {
+    const t = withServers();
+    await t.controller.onMessage({ type: 'settings.ready' });
+    expect(rowOf(t, 'linear')).toMatchObject({ canSignIn: true, integrationID: INTEGRATION });
+    expect(rowOf(t, 'broken')).toMatchObject({
+      canSignIn: false,
+      detail: 'Connection closed\nmore',
+    });
+    expect('integrationID' in (rowOf(t, 'docs') ?? {})).toBe(false);
+
+    // The id names a row that is not marked `source: 'mcp'`: no sign-in, and no id passed on.
+    const { source: _source, ...unmarked } = LINEAR_ROW;
+    const notMcp = withServers([...ROWS, unmarked]);
+    await notMcp.controller.onMessage({ type: 'settings.ready' });
+    expect(rowOf(notMcp, 'linear')?.canSignIn).toBe(false);
+    expect('integrationID' in (rowOf(notMcp, 'linear') ?? {})).toBe(false);
+
+    // An oauth method the tab cannot run, no integration row at all, a server not asking for auth.
+    const unsupported = withServers([
+      ...ROWS,
+      { ...LINEAR_ROW, methods: [{ ...LINEAR_METHOD, supported: false }] },
+    ]);
+    await unsupported.controller.onMessage({ type: 'settings.ready' });
+    expect(rowOf(unsupported, 'linear')?.canSignIn).toBe(false);
+    const nobody = withServers([...ROWS]);
+    await nobody.controller.onMessage({ type: 'settings.ready' });
+    expect(rowOf(nobody, 'linear')?.canSignIn).toBe(false);
+    const connected = withServers(undefined, [
+      server('linear', 'connected', { integrationID: INTEGRATION }),
+    ]);
+    await connected.controller.onMessage({ type: 'settings.ready' });
+    expect(rowOf(connected, 'linear')?.canSignIn).toBe(false);
+  });
+
+  it('allows connect from disabled and failed, disconnect from connected and pending, and nothing else', async () => {
+    const allowed: [string, 'connect' | 'disconnect'][] = [
+      ['off', 'connect'],
+      ['broken', 'connect'],
+      ['docs', 'disconnect'],
+      ['slow', 'disconnect'],
+    ];
+    for (const [name, op] of allowed) {
+      const t = withServers();
+      await t.controller.onMessage({ type: 'settings.mcp', server: name, op });
+      expect(t.config.mcpAction, `${op} ${name}`).toHaveBeenCalledExactlyOnceWith(name, op);
+    }
+    const refused: [string, 'connect' | 'disconnect'][] = [
+      ['docs', 'connect'],
+      ['slow', 'connect'],
+      ['linear', 'connect'],
+      ['linear', 'disconnect'],
+      ['off', 'disconnect'],
+      ['broken', 'disconnect'],
+      ['ghost', 'connect'],
+      ['ghost', 'disconnect'],
+    ];
+    for (const [name, op] of refused) {
+      const t = withServers();
+      await t.controller.onMessage({ type: 'settings.mcp', server: name, op });
+      expect(t.config.mcpAction, `${op} ${name}`).not.toHaveBeenCalled();
+      expect(t.log.warn, `${op} ${name}`).toHaveBeenCalledWith(
+        expect.stringMatching(/^settings request refused: settings\.mcp: /),
+      );
+      expect(notices(t.posted), `${op} ${name}`).toMatchObject([
+        { integrationID: '', kind: 'mcpFailed', server: name },
+      ]);
+    }
+  });
+
+  it('refuses a second request for a server whose first has not finished', async () => {
+    const t = withServers();
+    let finish: (result: McpActionResult) => void = () => undefined;
+    t.config.mcpAction.mockImplementationOnce(
+      () =>
+        new Promise<McpActionResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const first = t.controller.onMessage({ type: 'settings.mcp', server: 'off', op: 'connect' });
+    await t.controller.onMessage({ type: 'settings.mcp', server: 'off', op: 'connect' });
+    expect(t.config.mcpAction).toHaveBeenCalledOnce();
+    expect(t.log.warn).toHaveBeenCalledWith(
+      'settings request refused: settings.mcp: another request in progress',
+    );
+    t.setServers([server('off', 'connected'), ...SERVERS.slice(1)]);
+    finish({ kind: 'done' });
+    await first;
+    // The busy mark is gone: the same server may be asked again (now it can be disconnected).
+    await t.controller.onMessage({ type: 'settings.mcp', server: 'off', op: 'disconnect' });
+    expect(t.config.mcpAction).toHaveBeenCalledTimes(2);
+  });
+
+  it('words the notice by the state read after the change', async () => {
+    const cases: [McpServerRow, string, 'connect' | 'disconnect', Record<string, unknown>][] = [
+      [server('off', 'connected'), 'off', 'connect', { kind: 'mcpConnected', server: 'off' }],
+      [
+        server('docs', 'disabled'),
+        'docs',
+        'disconnect',
+        { kind: 'mcpDisconnected', server: 'docs' },
+      ],
+      [
+        server('broken', 'failed', { error: 'Boom' }),
+        'broken',
+        'connect',
+        { kind: 'mcpFailed', server: 'broken', message: 'Boom' },
+      ],
+      [
+        server('off', 'needs_auth', { error: 'Sign in' }),
+        'off',
+        'connect',
+        { kind: 'mcpFailed', server: 'off', message: 'Sign in' },
+      ],
+    ];
+    for (const [after, name, op, expected] of cases) {
+      const t = withServers();
+      t.config.mcpAction.mockImplementationOnce(() => {
+        t.setServers([after]);
+        return Promise.resolve({ kind: 'done' });
+      });
+      await t.controller.onMessage({ type: 'settings.mcp', server: name, op });
+      expect(notices(t.posted), `${op} ${name} -> ${after.status}`).toMatchObject([
+        { integrationID: '', ...expected },
+      ]);
+    }
+    // Still connecting: nothing yet, the stream will move the row. A server that left: a failure.
+    const pending = withServers();
+    pending.config.mcpAction.mockImplementationOnce(() => {
+      pending.setServers([server('off', 'pending')]);
+      return Promise.resolve({ kind: 'done' });
+    });
+    await pending.controller.onMessage({ type: 'settings.mcp', server: 'off', op: 'connect' });
+    expect(notices(pending.posted)).toEqual([]);
+    const gone = withServers();
+    gone.config.mcpAction.mockImplementationOnce(() => {
+      gone.setServers([]);
+      return Promise.resolve({ kind: 'done' });
+    });
+    await gone.controller.onMessage({ type: 'settings.mcp', server: 'off', op: 'connect' });
+    expect(notices(gone.posted)).toMatchObject([{ kind: 'mcpFailed', server: 'off' }]);
+  });
+
+  it('turns a failed call into an mcpFailed notice with the message it was given', async () => {
+    const t = withServers();
+    t.config.mcpAction.mockResolvedValueOnce({
+      kind: 'failed',
+      message: 'Server is gone',
+      notFound: true,
+    });
+    await t.controller.onMessage({ type: 'settings.mcp', server: 'off', op: 'connect' });
+    expect(notices(t.posted)).toEqual([
+      { integrationID: '', kind: 'mcpFailed', server: 'off', message: 'Server is gone' },
+    ]);
+  });
+
+  it('signs in through the mcp integration row and its oauth method, and names the ending', async () => {
+    const t = withServers();
+    await t.controller.onMessage({ type: 'settings.mcpSignIn', server: 'linear' });
+    expect(t.auth.connect).toHaveBeenCalledExactlyOnceWith(LINEAR_ROW, 0, {});
+    expect(notices(t.posted)).toMatchObject([{ integrationID: INTEGRATION, kind: 'connected' }]);
+    t.auth.connect.mockResolvedValueOnce({ kind: 'cancelled' });
+    await t.controller.onMessage({ type: 'settings.mcpSignIn', server: 'linear' });
+    expect(notices(t.posted).at(-1)).toMatchObject({
+      integrationID: INTEGRATION,
+      kind: 'cancelled',
+    });
+  });
+
+  it('refuses a sign-in without an integration, in another state, for a ghost, or while busy', async () => {
+    const attempts: [ReturnType<typeof setup>, string][] = [
+      [withServers([...ROWS]), 'linear'],
+      [withServers(), 'docs'],
+      [withServers(), 'broken'],
+      [withServers(), 'ghost'],
+    ];
+    for (const [t, name] of attempts) {
+      await t.controller.onMessage({ type: 'settings.mcpSignIn', server: name });
+      expect(t.auth.connect, name).not.toHaveBeenCalled();
+      expect(t.log.warn, name).toHaveBeenCalledWith(
+        expect.stringMatching(/^settings request refused: settings\.mcpSignIn: /),
+      );
+      expect(notices(t.posted), name).toMatchObject([
+        { integrationID: '', kind: 'mcpFailed', server: name },
+      ]);
+    }
+    const busy = withServers();
+    let finish: (result: AuthResult) => void = () => undefined;
+    busy.auth.connect.mockImplementationOnce(
+      () =>
+        new Promise<AuthResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const first = busy.controller.onMessage({ type: 'settings.mcpSignIn', server: 'linear' });
+    await busy.controller.onMessage({ type: 'settings.mcpSignIn', server: 'linear' });
+    expect(busy.auth.connect).toHaveBeenCalledOnce();
+    finish({ kind: 'connected' });
+    await first;
+  });
+
+  it('keeps the mcp integration out of the providers while it signs in', async () => {
+    const t = withServers();
+    await t.controller.onMessage({ type: 'settings.ready' });
+    expect(stateOf(t)?.providers.rows.some((row) => row.id.startsWith('mcp_'))).toBe(false);
   });
 });

@@ -15,7 +15,9 @@ function healthy(): AttentionInput {
       loaded: true,
       failed: false,
       pendingFirstRead: false,
-      servers: [{ name: 'docs', status: 'connected', resources: [], templates: [] }],
+      servers: [
+        { name: 'docs', status: 'connected', canSignIn: false, resources: [], templates: [] },
+      ],
     },
   });
   return {
@@ -105,8 +107,8 @@ describe('attentionItems', () => {
   it('adds nothing for a disabled or pending MCP server', () => {
     const input = healthy();
     input.mcp.servers = [
-      { name: 'off', status: 'disabled', resources: [], templates: [] },
-      { name: 'wait', status: 'pending', resources: [], templates: [] },
+      { name: 'off', status: 'disabled', canSignIn: false, resources: [], templates: [] },
+      { name: 'wait', status: 'pending', canSignIn: false, resources: [], templates: [] },
     ];
     expect(attentionItems(input)).toEqual([]);
   });

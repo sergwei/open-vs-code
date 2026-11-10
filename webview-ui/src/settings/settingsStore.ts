@@ -113,10 +113,16 @@ export function createSettingsStore(): SettingsStore {
 /**
  * The sentence the live region says for a notice. `name` is the provider's display name (the
  * caller looks it up; the id is the fallback). The `message` of the host is appended for the
- * kinds where it explains a problem (`failed`, `unsupported` and `modelRefused`), as plain text.
- * `modelRefused` is a default-model request that was refused or not saved: it names no provider and
- * never says "Sign-in" (VERIFIED by the check "words a refused model without mentioning sign-in" of
- * `settingsStore.test.ts`, fabricated notice, vitest, Windows 11, 08/11/2026).
+ * kinds where it explains a problem (`failed`, `unsupported`, `modelRefused` and `mcpFailed`), as
+ * plain text. `modelRefused` is a default-model request that was refused or not saved: it names no
+ * provider and never says "Sign-in" (VERIFIED by the check "words a refused model without
+ * mentioning sign-in" of `settingsStore.test.ts`, fabricated notice, vitest, Windows 11,
+ * 08/11/2026). The three `mcp*` kinds (issue #186, PR2) are the answer to a Connect, Disconnect or
+ * Retry of an MCP server and name it by `name` (the caller passes the server's name, never the
+ * `mcp_...` id): `mcpFailed` says the server "could not be changed" because it covers a refused
+ * request, a failed disconnect and a connect that ended failed alike, and the `message` tells which.
+ * VERIFIED by "words the three MCP notices with the server's name" of `settingsStore.test.ts`
+ * (fabricated notices, vitest, Windows 11, 10/11/2026).
  */
 export function noticeText(notice: SettingsNotice, name: string): string {
   const detail = notice.message === undefined || notice.message === '' ? '' : ` ${notice.message}`;
@@ -133,6 +139,12 @@ export function noticeText(notice: SettingsNotice, name: string): string {
       return l10n.t('Sign-in to {0} was cancelled.', name);
     case 'modelRefused':
       return `${l10n.t('The default model was not changed.')}${detail}`;
+    case 'mcpConnected':
+      return l10n.t('Connected to {0}.', name);
+    case 'mcpDisconnected':
+      return l10n.t('Disconnected from {0}.', name);
+    case 'mcpFailed':
+      return `${l10n.t('{0} could not be changed.', name)}${detail}`;
     case 'unsupported':
       return `${l10n.t('{0} cannot be set up here. Use opencode auth login in a terminal.', name)}${detail}`;
   }

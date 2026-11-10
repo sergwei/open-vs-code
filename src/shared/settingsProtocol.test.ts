@@ -43,8 +43,51 @@ describe('isSettingsWebviewToHost', () => {
       { type: 'settings.setDefaultModel', model: 'anthropic/claude-sonnet' },
       { type: 'settings.setDefaultModel', model: '' },
       ...SETTING_KEYS.map((key) => ({ type: 'settings.openSetting', key })),
+      { type: 'settings.mcp', server: 'docs', op: 'connect' },
+      { type: 'settings.mcp', server: 'docs', op: 'disconnect' },
+      { type: 'settings.mcpSignIn', server: 'linear' },
     ];
     for (const message of valid) expect(isSettingsWebviewToHost(message)).toBe(true);
+  });
+
+  /**
+   * Protects the MCP actions of issue #186 (PR2): the webview may connect or disconnect a server of
+   * the snapshot and start its sign-in, and NOTHING else of the MCP routes: no add, no remove, no
+   * config, no key. Fabricated messages (this proves our validator, not what a real webview posts).
+   */
+  it('takes a connect or disconnect of an MCP server and a sign-in, and nothing else', () => {
+    const bad: unknown[] = [
+      { type: 'settings.mcp' },
+      { type: 'settings.mcp', server: 'docs' },
+      { type: 'settings.mcp', op: 'connect' },
+      { type: 'settings.mcp', server: 'docs', op: 'add' },
+      { type: 'settings.mcp', server: 'docs', op: 'remove' },
+      { type: 'settings.mcp', server: 'docs', op: 'Connect' },
+      { type: 'settings.mcp', server: 'docs', op: 1 },
+      { type: 'settings.mcp', server: '', op: 'connect' },
+      { type: 'settings.mcp', server: 'x'.repeat(MAX_SETTINGS_ID + 1), op: 'connect' },
+      { type: 'settings.mcp', server: 7, op: 'connect' },
+      { type: 'settings.mcp', server: 'docs', op: 'connect', config: { command: 'x' } },
+      { type: 'settings.mcp', server: 'docs', op: 'connect', key: 'sk-planted' },
+      { type: 'settings.mcp', server: 'docs', op: 'connect', apiKey: 'sk-planted' },
+      { type: 'settings.mcp', server: 'docs', op: 'connect', secret: 'sk-planted' },
+      { type: 'settings.mcp', server: 'docs', op: 'connect', add: true },
+      { type: 'settings.mcpSignIn' },
+      { type: 'settings.mcpSignIn', server: '' },
+      { type: 'settings.mcpSignIn', server: 'x'.repeat(MAX_SETTINGS_ID + 1) },
+      { type: 'settings.mcpSignIn', server: ['linear'] },
+      { type: 'settings.mcpSignIn', server: 'linear', key: 'sk-planted' },
+      { type: 'settings.mcpSignIn', server: 'linear', secret: 'sk-planted' },
+      { type: 'settings.mcpSignIn', server: 'linear', integrationID: 'mcp_0123456789abcdef' },
+    ];
+    for (const message of bad) expect(isSettingsWebviewToHost(message)).toBe(false);
+    expect(
+      isSettingsWebviewToHost({
+        type: 'settings.mcp',
+        server: 'x'.repeat(MAX_SETTINGS_ID),
+        op: 'disconnect',
+      }),
+    ).toBe(true);
   });
 
   it('rejects a default-model request with extra fields or a model that is too long or not text', () => {

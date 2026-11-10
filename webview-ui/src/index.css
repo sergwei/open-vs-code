@@ -2254,8 +2254,61 @@ button.settings-toggle {
   border-radius: var(--ovc-radius-sm);
 }
 
+/*
+ * The error of a row is ONE line cut with an ellipsis (the whole first line is in its `title`, the
+ * whole error under "Show details"). Issue #186, PR2: it used to wrap into a block of up to 200
+ * characters, repeated by every failed server.
+ */
 .settings-error {
-  white-space: pre-line;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The name and state on the left, the button of the row on the right; below ~12em it wraps under. */
+.settings-mcp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
+}
+
+.settings-mcp-head .step-title {
+  flex: 1 1 10em;
+  min-width: 0;
+}
+
+.settings-mcp-action {
+  flex: 0 0 auto;
+}
+
+/* aria-disabled keeps the focus on the button, so the dimming is CSS (solid-webview section 7). */
+.settings-mcp-action[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.settings-details {
+  margin: 2px 0 0;
+}
+
+.settings-details > summary {
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+}
+
+.settings-details > summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* The whole error: wrapped, broken anywhere and never wider than the card. */
+.settings-detail-text {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--vscode-editor-font-family);
 }
 
 .settings-resources {

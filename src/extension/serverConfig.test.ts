@@ -16,9 +16,11 @@ import type {
   ProviderInfo,
 } from '@opencode/client';
 import {
+  MAX_DETAIL,
   MAX_TEXT,
   MCP_FIRST_READ_GRACE_MS,
   ServerConfig,
+  detailText,
   firstLine,
   toIntegrationRow,
   toMcpCatalogRows,
@@ -112,6 +114,23 @@ function fakeApi(
     /** When set, the next read of that source waits for `release()` and answers afterwards. */
     gate: undefined as { promise: Promise<void>; release: () => void } | undefined,
     fail: undefined as 'integrations' | 'mcp' | 'catalog' | 'models' | undefined,
+    /** What `mcp.connect` and `mcp.disconnect` throw, when set. */
+    writeError: undefined as unknown,
+    /** Runs when a write succeeds: the test changes `mcp` there, like the server would. */
+    onWrite: undefined as (() => void) | undefined,
+  };
+  /** The writes the store made, in order: `connect docs`, `disconnect docs`. */
+  const writes: string[] = [];
+  /** One write of `mcp.connect` or `mcp.disconnect`: records it, then fails or succeeds as told. */
+  const write = (label: string): Promise<void> => {
+    writes.push(label);
+    if (state.writeError !== undefined) {
+      // The client THROWS the body of a declared error (`{ _tag, message }`), not an `Error`.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject(state.writeError);
+    }
+    state.onWrite?.();
+    return Promise.resolve();
   };
   const hold = async (): Promise<void> => {
     const gate = state.gate;
@@ -158,6 +177,8 @@ function fakeApi(
           data: wire<Awaited<ReturnType<ServerConfigApi['mcp']['list']>>['data']>(state.mcp),
         };
       },
+      connect: (input) => write(`connect ${input.server}`),
+      disconnect: (input) => write(`disconnect ${input.server}`),
       resource: {
         catalog: async () => {
           calls.catalog++;
@@ -176,7 +197,7 @@ function fakeApi(
     state.gate = { promise, release };
     return release;
   };
-  return { api, calls, modelCalls, state, gate };
+  return { api, calls, modelCalls, state, gate, writes };
 }
 
 /** A store with a recording log and change counter. */
@@ -216,7 +237,10 @@ describe('the allow-list mapping', () => {
   it('keeps no planted secret anywhere in a serialized snapshot', async () => {
     const { api } = fakeApi({
       integrations: [INTEGRATION_WITH_SECRETS],
-      mcp: `[{"name":"docs","status":{"status":"failed","error":"x","headers":{"a":"hdr-planted-token"}},"integrationID":"at-planted-access"}]`,
+      // `integrationID` is an ALLOWED field since PR2 of issue #186 (the webview matches it with the
+      // sign-in in progress), so the secret is planted in `headers` of the server instead, next to
+      // the one in `status`; the assertion below checks that the id itself does arrive.
+      mcp: `[{"name":"docs","status":{"status":"failed","error":"x","headers":{"a":"hdr-planted-token"}},"headers":{"authorization":"at-planted-access"},"integrationID":"mcp_0123456789abcdef"}]`,
       catalog: wire<McpResourceCatalogOutput['data']>(
         `{"resources":[{"server":"docs","name":"r","uri":"file:///r","headers":{"a":"sk-planted-api-key"}}],"templates":[]}`,
       ),
@@ -229,6 +253,7 @@ describe('the allow-list mapping', () => {
     expect(json).toContain('cred_1');
     expect(json).toContain('ANTHROPIC_API_KEY');
     expect(json).toContain('sign in');
+    expect(store.snapshot().mcp.servers[0]?.integrationID).toBe('mcp_0123456789abcdef');
   });
 
   it('maps connections, key/oauth methods with their index, and drops env methods', () => {
@@ -642,5 +667,186 @@ describe('the model catalog', () => {
     await store.reloadAll();
     store.detach();
     expect(store.snapshot().models).toEqual({ loaded: false, failed: false, rows: [] });
+  });
+});
+
+/**
+ * Protects issue #186 (PR2): the whole MCP error reaches "Show details" scrubbed and bounded (it is
+ * the stderr of a process, with `\r\n`, and may carry the server URL), and `mcpAction` writes once,
+ * re-reads before it resolves and never lets the message of an error into the log. Provenance:
+ * FABRICATED client and errors written from the types of `@opencode/client@2.0.32` (the 404 body
+ * `{ _tag: 'McpServerNotFoundError', server, message }` is the one declared there); nothing here
+ * says what a real server answers.
+ */
+describe('the MCP details', () => {
+  /** An `mcp.list` answer with one failed server whose error is `error`. */
+  const failedWith = (error: string): string =>
+    JSON.stringify([{ name: 'broken', status: { status: 'failed', error } }]);
+
+  it('keeps the whole error as a scrubbed, bounded detail', async () => {
+    const error = `Connection closed at ${SECRETS.url} with ${SECRETS.password}\r\nline two\r\n\r\nline three  \r\n`;
+    const { api } = fakeApi({ mcp: failedWith(error) });
+    const { store } = setup(api);
+    await store.reloadAll();
+    const row = store.snapshot().mcp.servers[0];
+    expect(row?.error).toBe('Connection closed at <server> with <redacted>');
+    expect(row?.detail).toBe(
+      'Connection closed at <server> with <redacted>\nline two\n\nline three',
+    );
+    expect(JSON.stringify(row)).not.toContain(SECRETS.url);
+    expect(JSON.stringify(row)).not.toContain(SECRETS.password);
+    expect(row?.detail).not.toContain('\r');
+  });
+
+  it('cuts the detail to 20 lines and 2000 characters, with an ellipsis, and leaves a one-line error without one', async () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `line ${String(i + 1)}`);
+    expect(detailText(lines.join('\r\n'))).toBe(`${lines.slice(0, 20).join('\n')}…`);
+    const wide = detailText(`${'x'.repeat(5000)}\nsecond`);
+    expect(wide).toHaveLength(MAX_DETAIL);
+    expect(wide.endsWith('…')).toBe(true);
+    expect(detailText('a\nb', 5, 100)).toBe('a\nb');
+    expect(detailText('\n\n  \nonly\n\n')).toBe('only');
+    // A short one-line error is exactly its first line: nothing more to unfold.
+    const { api } = fakeApi({ mcp: failedWith('Connection closed') });
+    const { store } = setup(api);
+    return store.reloadAll().then(() => {
+      const row = store.snapshot().mcp.servers[0];
+      expect(row?.error).toBe('Connection closed');
+      expect('detail' in (row ?? {})).toBe(false);
+    });
+  });
+
+  it('keeps a long single line whole in the detail while the row line is cut', async () => {
+    const { api } = fakeApi({ mcp: failedWith('y'.repeat(500)) });
+    const { store } = setup(api);
+    await store.reloadAll();
+    const row = store.snapshot().mcp.servers[0];
+    expect(row?.error).toHaveLength(MAX_TEXT);
+    expect(row?.detail).toBe('y'.repeat(500));
+  });
+});
+
+describe('the MCP actions', () => {
+  const connectedDocs = '[{"name":"docs","status":{"status":"connected"}}]';
+  const disabledDocs = '[{"name":"docs","status":{"status":"disabled"}}]';
+
+  it('connects once and has read the list again before it resolves', async () => {
+    const { api, calls, state, writes } = fakeApi({ mcp: disabledDocs });
+    const { store, lines } = setup(api);
+    await store.reloadAll();
+    const reads = calls.mcp;
+    state.onWrite = () => {
+      state.mcp = connectedDocs;
+    };
+    const result = await store.mcpAction('docs', 'connect');
+    expect(result).toEqual({ kind: 'done' });
+    expect(writes).toEqual(['connect docs']);
+    expect(calls.mcp).toBe(reads + 1);
+    // The row already says what the server became: no optimistic state in between.
+    expect(store.snapshot().mcp.servers[0]?.status).toBe('connected');
+    expect(lines).toContain('info: mcp connect: docs');
+  });
+
+  it('disconnects with the other route', async () => {
+    const { api, state, writes } = fakeApi({ mcp: connectedDocs });
+    const { store } = setup(api);
+    await store.reloadAll();
+    state.onWrite = () => {
+      state.mcp = disabledDocs;
+    };
+    expect(await store.mcpAction('docs', 'disconnect')).toEqual({ kind: 'done' });
+    expect(writes).toEqual(['disconnect docs']);
+    expect(store.snapshot().mcp.servers[0]?.status).toBe('disabled');
+  });
+
+  it('resolves a failed call with the scrubbed message, a log line without it, and no re-read', async () => {
+    const { api, calls, state, writes } = fakeApi({ mcp: disabledDocs });
+    const { store, lines } = setup(api);
+    await store.reloadAll();
+    const reads = calls.mcp;
+    state.writeError = new Error(`cannot reach ${SECRETS.url} using ${SECRETS.password}`);
+    const result = await store.mcpAction('docs', 'connect');
+    expect(result).toMatchObject({ kind: 'failed', notFound: false });
+    const message = result.kind === 'failed' ? result.message : '';
+    expect(message).toContain('<server>');
+    expect(message).not.toContain(SECRETS.url);
+    expect(message).not.toContain(SECRETS.password);
+    expect(writes).toEqual(['connect docs']);
+    expect(calls.mcp).toBe(reads);
+    const line = lines.find((entry) => entry.startsWith('warn: mcp connect failed'));
+    expect(line).toBe('warn: mcp connect failed: docs: Error');
+  });
+
+  it('flags the 404 of a server that left the config as notFound', async () => {
+    const { api, state } = fakeApi({ mcp: disabledDocs });
+    const { store } = setup(api);
+    await store.reloadAll();
+    state.writeError = {
+      _tag: 'McpServerNotFoundError',
+      server: 'docs',
+      message: 'No MCP server docs',
+    };
+    expect(await store.mcpAction('docs', 'connect')).toEqual({
+      kind: 'failed',
+      message: 'No MCP server docs',
+      notFound: true,
+    });
+  });
+
+  it('fails without a server and writes nothing', async () => {
+    const { api, writes } = fakeApi({ mcp: disabledDocs });
+    const { store } = setup(api);
+    store.detach();
+    const result = await store.mcpAction('docs', 'connect');
+    expect(result).toMatchObject({ kind: 'failed', notFound: false });
+    expect(writes).toEqual([]);
+  });
+
+  it('fails when the server was replaced during the call', async () => {
+    const { api, state } = fakeApi({ mcp: disabledDocs });
+    const { store } = setup(api);
+    await store.reloadAll();
+    state.onWrite = () => {
+      store.attach(api, 2, SECRETS);
+    };
+    expect(await store.mcpAction('docs', 'connect')).toMatchObject({ kind: 'failed' });
+  });
+
+  /**
+   * Protects the mitigation for the HYPOTHESIS that the `mcp_...` integration is registered after
+   * the first integration read: a server naming an integration the rows do not have makes the store
+   * read the integrations again. The queues are drained with a macrotask before counting.
+   */
+  it('reads the integrations again when a server names one the rows do not have', async () => {
+    const { api, calls, state } = fakeApi({ mcp: '[]' });
+    const { store } = setup(api);
+    await store.reloadAll();
+    const before = calls.integrations;
+    state.mcp = `[{"name":"linear","status":{"status":"needs_auth","error":"Sign in"},"integrationID":"mcp_0123456789abcdef"}]`;
+    store.event('mcp.status.changed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.integrations).toBe(before + 1);
+    // Now the row exists: the same id no longer triggers a read.
+    state.integrations = [
+      wire<IntegrationInfo>(
+        `{"id":"mcp_0123456789abcdef","name":"linear","metadata":{"source":"mcp"},"methods":[],"connections":[]}`,
+      ),
+    ];
+    await store.reloadAll();
+    const settled = calls.integrations;
+    store.event('mcp.status.changed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.integrations).toBe(settled);
+  });
+
+  it('does not read the integrations before they were read once', async () => {
+    const { api, calls } = fakeApi({
+      mcp: `[{"name":"linear","status":{"status":"needs_auth","error":"x"},"integrationID":"mcp_0123456789abcdef"}]`,
+    });
+    const { store } = setup(api);
+    await store.mcpAction('linear', 'connect');
+    store.event('mcp.status.changed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.integrations).toBe(0);
   });
 });

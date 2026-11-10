@@ -11,6 +11,7 @@ import {
   Show,
   Switch,
 } from 'solid-js';
+import { createStore } from 'solid-js/store';
 import { WarningIcon } from '../chat/icons';
 import { attentionBySection, attentionItems, type AttentionItem } from './attention';
 import { GeneralSection } from './GeneralSection';
@@ -75,7 +76,14 @@ interface FocusRequest {
  * Accessibility: the navigation is a `role="tablist"` with a roving tabindex; a hidden
  * `role="status"` region announces the host's one-shot notices ("Connected to X", "Sign-in
  * expired") in the order they arrived, and alternates a trailing no-break space so the same text
- * twice is announced twice (solid-webview section 7). The component moves the focus only after a
+ * twice is announced twice (solid-webview section 7). The notices of an MCP server (Connect,
+ * Disconnect, Retry) carry `notice.server`, and those of an MCP sign-in (which carry the `mcp_...`
+ * id) are named by the server that owns the id, never by the id; each also tells the row of that
+ * server that its request ended (issue #186, PR2): VERIFIED in jsdom (fabricated notices, Windows
+ * 11, 10/11/2026) by "names an MCP server by its name, never by the mcp_ id of its integration",
+ * "clears the busy mark of an MCP row when a notice names its server, even with the same state" and
+ * "clears the busy mark of the Sign in button when the notice carries only the integration id" of
+ * `SettingsApp.test.tsx`. The component moves the focus only after a
  * jump the user asked for. Colours and sizes are in `index.css` (`--vscode-*` only, no inline
  * style).
  *
@@ -102,6 +110,8 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
   const [announcement, setAnnouncement] = createSignal('');
   const [horizontal, setHorizontal] = createSignal(false);
   const [focusRequest, setFocusRequest] = createSignal<FocusRequest | undefined>(undefined);
+  /** Notices received per MCP server name: the rows of the MCP section clear their busy mark on it. */
+  const [mcpSeq, setMcpSeq] = createStore<Record<string, number>>({});
   let flip = false;
   let root: HTMLDivElement | undefined;
 
@@ -115,7 +125,17 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
           const row = state.providers.rows.find(
             (candidate) => candidate.id === notice.integrationID,
           );
-          return noticeText(notice, row?.name ?? notice.integrationID);
+          // An MCP notice names its server (`notice.server`); a sign-in notice of an MCP server
+          // carries the `mcp_...` id, which is no name to read out, so the server that owns it
+          // speaks instead. Either way the row's busy mark is told (`mcpSeq`).
+          const mcp =
+            notice.server ??
+            state.mcp.servers.find(
+              (server) =>
+                server.integrationID !== undefined && server.integrationID === notice.integrationID,
+            )?.name;
+          if (mcp !== undefined) setMcpSeq(mcp, (count) => (count ?? 0) + 1);
+          return noticeText(notice, row?.name ?? mcp ?? notice.integrationID);
         });
         flip = !flip;
         const text = texts.join(' ');
@@ -357,7 +377,7 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
                           <ModelsSection state={state} send={props.send} />
                         </Match>
                         <Match when={section === 'mcp'}>
-                          <McpSection mcp={state.mcp} />
+                          <McpSection state={state} send={props.send} seq={mcpSeq} />
                         </Match>
                         <Match when={section === 'mods'}>
                           <ModsSection send={props.send} />

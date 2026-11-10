@@ -211,6 +211,12 @@
 // can see the "waiting" state); method id `code` gives a `code` attempt that `complete` accepts with
 // FAKE-CODE), `status`, `complete`, `cancel` (afterwards `status` is 404) and `DELETE
 // /api/credential/:id`, each publishing the events in the spike's order. The fake never logs a key.
+// E10-settings-mcp (PR2 of #186): `POST /api/experimental/mcp/:server/connect|disconnect` (404
+// `McpServerNotFoundError`; connect goes pending, settles after ~150 ms and only then answers 204;
+// `broken` fails again, `linear` stays needs_auth until its integration is connected; one stderr
+// line `{"fake":"mcp","op":…,"server":…}` per write), `linear` with the integrationID of a
+// synthetic `mcp_…` integration row (`metadata.source: 'mcp'`), and approving that integration's
+// OAuth attempt reconnects `linear`.
 // Everything above is synthetic.
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running;
@@ -252,12 +258,16 @@ let dropped = false;
 
 // ---- E10-config-views (issue #128), phase 1: the READ routes of the OpenCode Settings tab ----
 
+/** The `integrationID` of `linear` (SYNTHETIC value; the `mcp_` + 16 hex shape is upstream's). */
+const MCP_LINEAR_INTEGRATION_ID = 'mcp_0123456789abcdef';
+
 /**
  * The MCP servers `GET /api/mcp` lists once {@link populateMcp} ran, in this order: `docs`
  * connected, `broken` failed (an error whose first line is longer than 200 characters and that has
- * `\r\n` and more lines, like the stderr the spike saw), `off` disabled, `linear` needs_auth. The
- * names, statuses and texts are SYNTHETIC; the shapes follow the types of `@opencode/client`
- * 2.0.32 and the planner's spike (01/11/2026).
+ * `\r\n` and more lines, like the stderr the spike saw), `off` disabled, `linear` needs_auth and
+ * with the `integrationID` of its `mcp_…` integration row (E10-settings-mcp). The names, statuses
+ * and texts are SYNTHETIC; the shapes follow the types of `@opencode/client` 2.0.32 and the
+ * planner's spike (01/11/2026).
  */
 const MCP_FIXTURE = [
   { name: 'docs', status: { status: 'connected' } },
@@ -271,6 +281,7 @@ const MCP_FIXTURE = [
   { name: 'off', status: { status: 'disabled' } },
   {
     name: 'linear',
+    integrationID: MCP_LINEAR_INTEGRATION_ID,
     status: { status: 'needs_auth', error: 'Sign in with the opencode CLI to use this server' },
   },
 ];
@@ -329,11 +340,88 @@ function flipMcp() {
   broadcast('mcp.resources.changed', { server: 'broken' });
 }
 
+/** How long a fake MCP connect stays `pending` before it settles (INVENTED, a real handshake varies). */
+const MCP_CONNECT_MS = 150;
+
+/**
+ * Restarts one MCP server like upstream `connect` does (`stopServer` + `startServer`, any state):
+ * `pending` + `mcp.status.changed`, then after {@link MCP_CONNECT_MS} the outcome with its event
+ * (+ `mcp.resources.changed` when it connects), and only then `done()`. Outcome: `broken` always
+ * fails again with its CRLF error (INVENTED, keeps a deterministic failed row), `linear` is
+ * `needs_auth` until its `mcp_…` integration has a connection, anything else connects. The
+ * statuses are SYNTHETIC; the pending-then-settled order is read in upstream
+ * `packages/core/src/mcp/index.ts` L431-477 @843a6c5, not run against this fake.
+ */
+function reconnectMcp(name, done) {
+  const server = mcpServers.find((candidate) => candidate.name === name);
+  if (server === undefined) {
+    done?.();
+    return;
+  }
+  server.status = { status: 'pending' };
+  broadcast('mcp.status.changed', { server: name });
+  setTimeout(() => {
+    const linear = integrationRows.find((row) => row.id === server.integrationID);
+    if (name === 'broken') {
+      server.status = structuredClone(MCP_FIXTURE.find((s) => s.name === 'broken')?.status);
+    } else if (linear !== undefined && linear.connections.length === 0) {
+      server.status = structuredClone(MCP_FIXTURE.find((s) => s.name === 'linear')?.status);
+    } else {
+      server.status = { status: 'connected' };
+    }
+    broadcast('mcp.status.changed', { server: name });
+    if (server.status.status === 'connected') broadcast('mcp.resources.changed', { server: name });
+    done?.();
+  }, MCP_CONNECT_MS);
+}
+
+/**
+ * Handles `POST /api/experimental/mcp/:server/connect|disconnect`; false when the path is not one.
+ * Writes one stderr line `{"fake":"mcp","op":…,"server":…}` per accepted write (the host logs it, so
+ * a test can count writes and prove a refused action never reached the fake). Unknown server: 404
+ * `McpServerNotFoundError {server, message}` (the tag and fields are read in the 2.0.32 types, the
+ * status was not seen). `connect` answers 204 AFTER the outcome, like the real handler awaits
+ * `service.connect` (HYPOTHESIS for the real one until the `real-opencode` case); `disconnect`
+ * leaves the server `disabled` and publishes `mcp.status.changed` and `mcp.resources.changed`;
+ * `GET /api/mcp/resource` lists only the resources of `connected` servers (INVENTED, so a
+ * disconnected server shows none).
+ */
+function handleMcpWrites(request, response) {
+  const route = /^\/api\/experimental\/mcp\/([^/]+)\/(connect|disconnect)$/.exec(
+    new URL(request.url ?? '/', 'http://127.0.0.1').pathname,
+  );
+  if (request.method !== 'POST' || route === null) return false;
+  const name = decodeURIComponent(route[1] ?? '');
+  const op = route[2];
+  const server = mcpServers.find((candidate) => candidate.name === name);
+  if (server === undefined) {
+    json(response, 404, {
+      _tag: 'McpServerNotFoundError',
+      server: name,
+      message: `MCP server ${name} not found`,
+    });
+    return true;
+  }
+  process.stderr.write(`${JSON.stringify({ fake: 'mcp', op, server: name })}\n`);
+  if (op === 'connect') {
+    reconnectMcp(name, () => noContent(response));
+  } else {
+    server.status = { status: 'disabled' };
+    noContent(response);
+    broadcast('mcp.status.changed', { server: name });
+    broadcast('mcp.resources.changed', { server: name });
+  }
+  return true;
+}
+
 /**
  * The integrations `GET /api/integration` lists: a SMALL catalog (the real one has 238) with one
  * of each kind the tab handles. Shapes follow `IntegrationInfo` of `@opencode/client` 2.0.32 and the
  * spike's list of methods; ids, labels and forms are SYNTHETIC. No secret in it, like the real
- * `integration.list`. Module state, so connect and remove change the connections.
+ * `integration.list`. Module state, so connect and remove change the connections. The last row is
+ * the `mcp_…` integration of `linear` (`metadata.source: 'mcp'`, one oauth method without form;
+ * E10-settings-mcp): approving its attempt also reconnects the `linear` MCP server, see
+ * {@link connectIntegration}.
  */
 const integrationRows = [
   {
@@ -448,6 +536,17 @@ const integrationRows = [
         ],
       },
     ],
+    connections: [],
+  },
+  {
+    // The integration an OAuth-capable remote MCP server registers (E10-settings-mcp, PR2 of #186).
+    // The id shape (`mcp_` + 16 hex), `metadata.source: 'mcp'` and the single oauth method whose id
+    // is the integration id follow upstream `packages/core/src/mcp/index.ts` L173-213 @843a6c5 (read,
+    // not run against this fake); the id VALUE is SYNTHETIC.
+    id: MCP_LINEAR_INTEGRATION_ID,
+    name: 'linear',
+    metadata: { source: 'mcp' },
+    methods: [{ type: 'oauth', id: MCP_LINEAR_INTEGRATION_ID, label: 'linear' }],
     connections: [],
   },
 ];
@@ -2555,7 +2654,9 @@ const ENCODED_LINK = 'https://fake.example.test/code?scope=a%2Bb&state=s%3D1&red
  * order the planner's spike saw them for `connect/key` (opencode 2.0.32, Windows 11, 01/11/2026):
  * `credential.updated`, `provider.updated`, `model.updated`, `credential.switched` and
  * `integration.updated`. The `data` of each is SYNTHETIC except `credential.switched`
- * (`{integrationID, credentialID}`, seen in the spike). The fake NEVER logs or stores a key.
+ * (`{integrationID, credentialID}`, seen in the spike). The fake NEVER logs or stores a key. For an
+ * integration with `metadata.source === 'mcp'` it also restarts the MCP server that owns it
+ * ({@link reconnectMcp}, INVENTED timing), so approving the sign-in of `linear` ends `connected`.
  */
 function connectIntegration(row, method) {
   const credentialID = nextId('cred_fake');
@@ -2565,6 +2666,12 @@ function connectIntegration(row, method) {
   broadcast('model.updated', {});
   broadcast('credential.switched', { integrationID: row.id, credentialID });
   broadcast('integration.updated', { integrationID: row.id });
+  // Imitates `Credential.Event.Switched` reconnecting the MCP server of an `mcp_…` integration
+  // (upstream `core/src/mcp/index.ts` L577-597 @843a6c5, read, not run).
+  if (row.metadata?.source === 'mcp') {
+    const owner = mcpServers.find((server) => server.integrationID === row.id);
+    if (owner !== undefined) reconnectMcp(owner.name);
+  }
 }
 
 /**
@@ -2992,12 +3099,18 @@ function handleChat(request, response) {
     return true;
   }
   if (handleIntegrationWrites(request, response, location)) return true;
+  if (handleMcpWrites(request, response)) return true;
   if (method === 'GET' && path === '/api/mcp') {
     json(response, 200, { location, data: mcpServers });
     return true;
   }
   if (method === 'GET' && path === '/api/mcp/resource') {
-    json(response, 200, { location, data: { resources: mcpResources, templates: mcpTemplates } });
+    const live = (item) =>
+      mcpServers.find((server) => server.name === item.server)?.status.status === 'connected';
+    json(response, 200, {
+      location,
+      data: { resources: mcpResources.filter(live), templates: mcpTemplates.filter(live) },
+    });
     return true;
   }
   if (method === 'GET' && path === '/api/agent') {
