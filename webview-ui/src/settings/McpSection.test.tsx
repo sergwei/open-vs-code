@@ -214,6 +214,42 @@ describe('McpSection', () => {
     expect(connect.getAttribute('aria-disabled')).toBeNull();
   });
 
+  /**
+   * Protects issue #202: failed -> pending -> failed with no notice used to return to the status of
+   * the click and leave the row busy for good. SYNTHETIC states pushed by hand (vitest, no server).
+   */
+  it.each([
+    ['broken', 'failed'],
+    ['off', 'disabled'],
+  ] as const)(
+    'frees the row on the first state that is not pending after the click went through pending (%s, no notice)',
+    (name, initial) => {
+      const { button, sent, host } = show(loaded());
+      const withStatus = (status: SettingsMcpServerRow['status']): SettingsState['mcp'] =>
+        loaded(mcpServers.map((server) => (server.name === name ? { ...server, status } : server)));
+      const control = button(name);
+      control.click();
+      host(withStatus('pending'));
+      expect(control.getAttribute('aria-busy')).toBe('true');
+      host(withStatus(initial));
+      expect(control.getAttribute('aria-disabled')).toBeNull();
+      expect(control.getAttribute('aria-busy')).toBeNull();
+      control.click();
+      expect(sent).toHaveLength(2);
+    },
+  );
+
+  it('keeps a click made while pending (Disconnect) busy until a final state', () => {
+    const { button, host } = show(loaded([...mcpServers, row('slow', 'pending')]));
+    const disconnect = button('slow');
+    disconnect.click();
+    expect(disconnect.getAttribute('aria-busy')).toBe('true');
+    host(loaded([...mcpServers, row('slow', 'pending')]));
+    expect(disconnect.getAttribute('aria-busy')).toBe('true');
+    host(loaded([...mcpServers, row('slow', 'disabled')]));
+    expect(disconnect.getAttribute('aria-busy')).toBeNull();
+  });
+
   it('waits to sign in while any sign-in of the host is running, but not to connect', () => {
     const other: AuthAttemptView = { integrationID: 'azure', phase: 'waiting' };
     const { button, sent } = show(loaded(), other);
