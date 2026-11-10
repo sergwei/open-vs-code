@@ -11,7 +11,7 @@ The extension is a **client of `opencode serve`**, not a wrapper around the term
 the server for your workspace and talks to it over HTTP. This is an unofficial project: it is not
 affiliated with opencode or with Microsoft.
 
-> **Only opencode v2 is supported** (major version 2, tested with 2.0.32). The 1.x line
+> **Only opencode v2 is supported** (major version 2, tested with 2.2.7). The 1.x line
 > (`opencode-ai`) does not work with this extension.
 
 ## Features
