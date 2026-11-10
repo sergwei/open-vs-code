@@ -12,7 +12,15 @@ import type {
   SettingsWebviewToHost,
 } from '../../../src/shared/settingsProtocol';
 import { must, mount, type Mounted } from '../testing';
-import { anthropic, azure, copilot, makeState, mcpServers, vertex } from './settingsFixtures';
+import {
+  anthropic,
+  azure,
+  copilot,
+  makeState,
+  mcpServers,
+  modsListing,
+  vertex,
+} from './settingsFixtures';
 import { SettingsApp } from './SettingsApp';
 import { createSettingsStore } from './settingsStore';
 import { createSettingsUi, type PersistedSettingsUi } from './settingsUiState';
@@ -336,7 +344,7 @@ describe('header and navigation', () => {
     ).toBeNull();
   });
 
-  it('puts a number in the navigation: connected providers, and MCP servers needing attention', () => {
+  it('puts a number in the navigation: connected providers, MCP servers needing attention and active mods', () => {
     const { container } = setup(state, null);
     const badge = (section: string) =>
       container.querySelector(`#settings-tab-${section} .settings-badge`);
@@ -348,7 +356,36 @@ describe('header and navigation', () => {
       '2 need attention',
     );
     expect(badge('general')).toBeNull();
+    // No `mods` in the state: no number (the host sent no mods half).
     expect(badge('mods')).toBeNull();
+    unmount();
+    const withMods = setup({ ...structuredClone(state), mods: structuredClone(modsListing) }, null);
+    const modsBadge = withMods.container.querySelector('#settings-tab-mods .settings-badge');
+    expect(modsBadge?.textContent).toBe('1');
+    expect(modsBadge?.getAttribute('data-tone')).toBe('neutral');
+    expect(must(withMods.container, '#settings-tab-mods .visually-hidden').textContent).toBe(
+      '1 mod active',
+    );
+  });
+
+  it('lists a failed mod in Needs attention and its jump focuses the row of the mod', () => {
+    const { container, ui } = setup(
+      { ...structuredClone(state), mods: structuredClone(modsListing) },
+      null,
+    );
+    must(container, '.attention-item[data-kind="modFailed"]').click();
+    expect(ui.section()).toBe('mods');
+    expect(document.activeElement).toBe(must(container, '[data-mod-id="throws"]'));
+  });
+
+  it('finds a mod in the search and jumps to its row', () => {
+    const { container, ui } = setup(
+      { ...structuredClone(state), mods: structuredClone(modsListing) },
+      null,
+    );
+    press(typeInSearch(container, 'Throws'), 'Enter');
+    expect(ui.section()).toBe('mods');
+    expect(document.activeElement).toBe(must(container, '[data-mod-id="throws"]'));
   });
 
   it('moves and activates with the arrows of both axes, wrapping, Home and End, taking the focus', () => {
@@ -632,6 +669,30 @@ describe('announcements', () => {
       'Connected to off. Disconnected from docs. broken could not be changed. Boom Connected to linear. Sign-in to linear was cancelled.',
     );
     expect(region.textContent).not.toContain('mcp_');
+  });
+
+  // Protects PR3 of issue #186: a refused or failed General setting or mod switch is told in the
+  // live region (the control went back to the saved value, so silence would look like a bug).
+  it('announces a General setting and a mod that were not changed', () => {
+    const { container, apply } = setup(makeState());
+    const region = must(container, '[role="status"].visually-hidden');
+    batch(() => {
+      apply({
+        type: 'settings.notice',
+        notice: {
+          integrationID: '',
+          kind: 'settingFailed',
+          message: 'The setting could not be saved',
+        },
+      });
+      apply({
+        type: 'settings.notice',
+        notice: { integrationID: '', kind: 'modFailed', message: 'Mods are not available' },
+      });
+    });
+    expect(region.textContent).toBe(
+      'The setting was not changed. The setting could not be saved The mod was not changed. Mods are not available',
+    );
   });
 
   it('clears the busy mark of an MCP row when a notice names its server, even with the same state', () => {

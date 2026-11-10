@@ -23,6 +23,9 @@ export interface SettingsStoreState {
   providers: SettingsState['providers'];
   models: SettingsState['models'];
   preference: SettingsState['preference'];
+  general: SettingsState['general'];
+  /** The mods listing; `undefined` when the host has no mods half (not "no mods"). */
+  mods: SettingsState['mods'];
   mcp: SettingsState['mcp'];
   attempt: AuthAttemptView | undefined;
   /** One-shot messages, oldest first; the consumer drains them with `drainNotices`. */
@@ -49,7 +52,10 @@ export interface SettingsStore {
  * (solid-webview section 3). Since issue #186 the state also carries `models` and `preference`:
  * the model rows are REPLACED whole (not reconciled by `id`, because a catalog id repeats across
  * providers, so a key by `id` would merge two models into one), `serverDefault` disappears when the
- * host stops sending it, and `preference` is reconciled in place. VERIFIED by `settingsStore.test.ts`
+ * host stops sending it, and `preference` is reconciled in place. PR3 adds `general` (reconciled in
+ * place) and `mods` (the listing: its `mods` rows reconciled by `id` so a row keeps its DOM, its
+ * `skipped` folders replaced, and `undefined` again when the host stops sending it; VERIFIED by the
+ * "mods" cases of `settingsStore.test.ts`, fabricated). VERIFIED by `settingsStore.test.ts`
  * (fabricated messages: it proves identity, order and, in "keeps two models that share an id across
  * providers, and drops a default the host stops sending", that two providers' models with the same
  * id stay two rows; not what the real host sends).
@@ -64,6 +70,11 @@ export function createSettingsStore(): SettingsStore {
     providers: { loaded: false, failed: false, rows: [] },
     models: { loaded: false, failed: false, rows: [], serverDefault: undefined },
     preference: { value: '', status: 'none', workspaceOverride: false },
+    general: {
+      chatLocation: { value: 'editor', workspaceOverride: false },
+      autoStart: { value: true, workspaceOverride: false },
+    },
+    mods: undefined,
     mcp: { loaded: false, failed: false, pendingFirstRead: true, servers: [] },
     attempt: undefined,
     notices: [],
@@ -91,6 +102,19 @@ export function createSettingsStore(): SettingsStore {
         setState('models', 'rows', next.models.rows);
         setState('models', 'serverDefault', next.models.serverDefault);
         setState('preference', reconcile(next.preference));
+        setState('general', reconcile(next.general));
+        if (next.mods === undefined) {
+          setState('mods', undefined);
+        } else if (state.mods === undefined) {
+          setState('mods', structuredClone(next.mods));
+        } else {
+          setState('mods', 'enabled', next.mods.enabled);
+          setState('mods', 'persisted', next.mods.persisted);
+          // By `id`, merging: the row of a mod keeps its DOM (and the focus of its switch) while
+          // the listing refreshes. The skipped folders have no identity to keep: replaced.
+          setState('mods', 'mods', reconcile(next.mods.mods, { key: 'id', merge: true }));
+          setState('mods', 'skipped', next.mods.skipped);
+        }
         setState('mcp', 'loaded', next.mcp.loaded);
         setState('mcp', 'failed', next.mcp.failed);
         setState('mcp', 'pendingFirstRead', next.mcp.pendingFirstRead);
@@ -117,7 +141,10 @@ export function createSettingsStore(): SettingsStore {
  * plain text. `modelRefused` is a default-model request that was refused or not saved: it names no
  * provider and never says "Sign-in" (VERIFIED by the check "words a refused model without
  * mentioning sign-in" of `settingsStore.test.ts`, fabricated notice, vitest, Windows 11,
- * 08/11/2026). The three `mcp*` kinds (issue #186, PR2) are the answer to a Connect, Disconnect or
+ * 08/11/2026). `settingFailed` (a General setting could not be saved) and `modFailed` (a mod
+ * switch was refused) say the setting or the mod "was not changed" and append the host's fixed
+ * `message`; VERIFIED by "words the General setting and mod notices" of `settingsStore.test.ts`
+ * (fabricated notices, vitest). The three `mcp*` kinds (issue #186, PR2) are the answer to a Connect, Disconnect or
  * Retry of an MCP server and name it by `name` (the caller passes the server's name, never the
  * `mcp_...` id): `mcpFailed` says the server "could not be changed" because it covers a refused
  * request, a failed disconnect and a connect that ended failed alike, and the `message` tells which.
@@ -145,6 +172,10 @@ export function noticeText(notice: SettingsNotice, name: string): string {
       return l10n.t('Disconnected from {0}.', name);
     case 'mcpFailed':
       return `${l10n.t('{0} could not be changed.', name)}${detail}`;
+    case 'settingFailed':
+      return `${l10n.t('The setting was not changed.')}${detail}`;
+    case 'modFailed':
+      return `${l10n.t('The mod was not changed.')}${detail}`;
     case 'unsupported':
       return `${l10n.t('{0} cannot be set up here. Use opencode auth login in a terminal.', name)}${detail}`;
   }

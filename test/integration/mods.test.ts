@@ -28,7 +28,11 @@ import {
   RUN_MOD_COMMAND_ID,
   TEST_MOD_TOGGLE_COMMAND_ID,
   TEST_MODS_STATE_COMMAND_ID,
+  TEST_SETTINGS_MESSAGE_COMMAND_ID,
+  TEST_SETTINGS_STATE_COMMAND_ID,
 } from '../../src/extension/ids';
+import type { SettingsState } from '../../src/shared/settingsProtocol';
+import { openLogCursor } from './support/extensionLog';
 
 const EXTENSION_ID = 'sergwei.open-vs-code';
 
@@ -251,6 +255,54 @@ describe('mods', function () {
     );
     assert.deepStrictEqual((await state()).listing, before);
     assert.strictEqual(listed(await state(), 'quiet'), 'active');
+  });
+
+  /**
+   * The Settings tab's switch (PR3 of issue #186) goes through the same `ModsChat.toggle` as the
+   * popover: `settings.state` carries the listing and follows it, only that Worker stops (`quiet`
+   * keeps `active`), and the mod comes back on. The message goes through `test.settingsMessage`
+   * (the real guard and revalidation, not a DOM `postMessage`). A `finally` turns the mod back on
+   * whatever failed, so a failing assertion does not leave it disabled for the later cases.
+   * VERIFIED on Windows 11, VS Code 1.145.3 (10/11/2026): the `main` label ran it, "switches a mod
+   * off and on from the Settings tab: settings.state follows and only that Worker stops (373ms)".
+   */
+  it('switches a mod off and on from the Settings tab: settings.state follows and only that Worker stops', async () => {
+    const settingsMods = async () =>
+      (await vscode.commands.executeCommand<SettingsState>(TEST_SETTINGS_STATE_COMMAND_ID)).mods;
+    const stateOf = async (id: string): Promise<string | undefined> =>
+      (await settingsMods())?.mods.find((m) => m.id === id)?.state;
+    const sendToggle = (enabled: boolean): Thenable<unknown> =>
+      vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+        type: 'settings.modToggle',
+        modId: 'hello-station',
+        enabled,
+      });
+    try {
+      await sendToggle(false);
+      await waitForState((s) => listed(s, 'hello-station') === 'disabled', 'the mod to switch off');
+      assert.strictEqual(await stateOf('hello-station'), 'disabled');
+      assert.strictEqual(await stateOf('quiet'), 'active');
+      await sendToggle(true);
+      await waitForState((s) => listed(s, 'hello-station') === 'active', 'the mod to switch on');
+      assert.strictEqual(await stateOf('hello-station'), 'active');
+    } finally {
+      // Whatever failed above, the mod goes back on so later cases of the suite find it active.
+      await sendToggle(true);
+      await waitForState((s) => listed(s, 'hello-station') === 'active', 'the mod to be back on');
+    }
+  });
+
+  /** An id the last discovery never listed is refused from the Settings tab too: a log line, no change. */
+  it('refuses an unknown mod id from the Settings tab and writes nothing', async () => {
+    const before = (await state()).listing;
+    const log = await openLogCursor();
+    await vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+      type: 'settings.modToggle',
+      modId: 'no-such-mod',
+      enabled: false,
+    });
+    await log.waitFor('settings request failed: settings.modToggle', 8000);
+    assert.deepStrictEqual((await state()).listing, before);
   });
 
   /** Turning the switch off stops every mod, and a mod command then finds nothing to run. */

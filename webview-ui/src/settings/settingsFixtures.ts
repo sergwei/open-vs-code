@@ -2,6 +2,7 @@
 // the shapes follow `src/shared/settingsProtocol.ts`, the provider names and the copilot form are
 // those the planner spike saw in opencode 2.0.32 (01/11/2026), the values are invented. Only the
 // tests import this file.
+import type { ModsListing } from '../../../src/shared/model';
 import type {
   ProviderRow,
   SettingsMcpServerRow,
@@ -17,6 +18,10 @@ export function makeState(overrides: Partial<SettingsState> = {}): SettingsState
     providers: { loaded: true, failed: false, rows: [] },
     models: { loaded: true, failed: false, rows: [] },
     preference: { value: '', status: 'none', workspaceOverride: false },
+    general: {
+      chatLocation: { value: 'editor', workspaceOverride: false },
+      autoStart: { value: true, workspaceOverride: false },
+    },
     mcp: { loaded: true, failed: false, pendingFirstRead: false, servers: [] },
     ...overrides,
   };
@@ -136,6 +141,30 @@ export const openai: ProviderRow = {
       supported: true,
     },
   ],
+};
+
+/**
+ * A mods listing with one mod of each visible state (active, failed with its error, starting,
+ * stopped, switched off) and a skipped folder. Invented, shaped like `ModsListing`.
+ */
+export const modsListing: ModsListing = {
+  enabled: true,
+  persisted: true,
+  mods: [
+    { id: 'quiet', name: 'Quiet', version: '1.0.0', enabled: true, state: 'active' },
+    {
+      id: 'throws',
+      name: 'Throws',
+      version: '0.2.0',
+      description: 'Always fails to start.',
+      enabled: true,
+      state: 'failed',
+      error: 'boom at start-up',
+    },
+    { id: 'slow', name: 'Slow', version: '1.1.0', enabled: true, state: 'starting' },
+    { id: 'off-mod', name: 'Off mod', version: '2.0.0', enabled: false, state: 'disabled' },
+  ],
+  skipped: [{ folder: 'no-manifest', reason: 'mod.json is missing' }],
 };
 
 /**

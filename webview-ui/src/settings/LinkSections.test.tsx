@@ -1,13 +1,14 @@
-// Protects the sections that only link in phase 1.2 of issue #186 (Mods, Work mode, Advanced): each
-// button sends exactly the message of its row, nothing is sent without a click, and Work mode has
-// text and no button. (The Models section has its own file, `ModelsSection.test.tsx`.) Provenance:
-// fabricated state in jsdom; what the native Settings editor shows after `settings.openSetting` is
-// UNVERIFIED: the synthetic-server case in `fakeServer.test.ts` covers `settings.setDefaultModel`,
-// not this link.
+// Protects the sections of the Settings tab that hold buttons and no data of their own (Work mode
+// and Advanced; Mods has `ModsSection.test.tsx`, Models `ModelsSection.test.tsx`): each button sends
+// exactly the message of its row and in the order of the rows, nothing is sent without a click, and
+// Work mode (decision P2 of E10-settings-sections) explains Manual and Auto and offers ONLY "Open
+// chat": no switch, never `toggleWorkMode`. Provenance: fabricated state in jsdom; what each command
+// does once the host runs it is UNVERIFIED here (`settingsController.test.ts` maps the actions to
+// contributed commands, the integration case of `settings.test.ts` is for a real host).
 import { afterEach, describe, expect, it } from 'vitest';
 import type { SettingsWebviewToHost } from '../../../src/shared/settingsProtocol';
-import { must, mount, type Mounted } from '../testing';
-import { AdvancedSection, ModsSection, WorkModeSection } from './LinkSections';
+import { mount, type Mounted } from '../testing';
+import { AdvancedSection, WorkModeSection } from './LinkSections';
 
 let mounted: Mounted | undefined;
 afterEach(() => {
@@ -20,31 +21,26 @@ function buttons(container: Element): HTMLButtonElement[] {
 }
 
 describe('link sections', () => {
-  it('Mods opens openVsCode.mods.enabled and sends nothing before the click', () => {
+  it('Work mode explains Manual and Auto and offers only Open chat', () => {
     const sent: SettingsWebviewToHost[] = [];
     mounted = mount(() => (
-      <ModsSection
+      <WorkModeSection
         send={(message) => {
           sent.push(message);
         }}
       />
     ));
-    expect(sent).toEqual([]);
-    must<HTMLButtonElement>(mounted.container, 'button').click();
-    expect(sent).toEqual([{ type: 'settings.openSetting', key: 'mods.enabled' }]);
-    expect(buttons(mounted.container)[0]?.getAttribute('aria-label')).toBe(
-      'Open setting: Enable mods',
-    );
-  });
-
-  it('Work mode is text only: the sentences are there and there is no button', () => {
-    mounted = mount(() => <WorkModeSection />);
-    expect(mounted.container.querySelectorAll('button')).toHaveLength(0);
     expect(mounted.container.textContent).toContain('Manual asks before each action.');
     expect(mounted.container.textContent).toContain('Toggle Work Mode');
+    expect(mounted.container.querySelector('[role="switch"]')).toBeNull();
+    const all = buttons(mounted.container);
+    expect(all).toHaveLength(1);
+    expect(sent).toEqual([]);
+    all[0]?.click();
+    expect(sent).toEqual([{ type: 'settings.action', action: 'openChat' }]);
   });
 
-  it('Advanced opens the two machine settings and runs the two footer actions', () => {
+  it('sends each action of Advanced in order', () => {
     const sent: SettingsWebviewToHost[] = [];
     mounted = mount(() => (
       <AdvancedSection
@@ -53,12 +49,46 @@ describe('link sections', () => {
         }}
       />
     ));
-    for (const button of buttons(mounted.container)) button.click();
+    const all = buttons(mounted.container);
+    expect(all.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Open setting: opencode executable path',
+      'Open setting: External server URL',
+      'Set password: Server password',
+      'Forget password: Server password',
+      'Manage: Saved permissions',
+      'Forget decision: Plugins of this folder',
+      'Show logs: Log',
+      'Open settings: All extension settings',
+    ]);
+    expect(sent).toEqual([]);
+    for (const button of all) button.click();
     expect(sent).toEqual([
       { type: 'settings.openSetting', key: 'opencodePath' },
       { type: 'settings.openSetting', key: 'serverUrl' },
+      { type: 'settings.action', action: 'setServerPassword' },
+      { type: 'settings.action', action: 'clearServerPassword' },
+      { type: 'settings.action', action: 'managePermissions' },
+      { type: 'settings.action', action: 'forgetPluginDecision' },
       { type: 'settings.action', action: 'logs' },
       { type: 'settings.action', action: 'extensionSettings' },
+    ]);
+  });
+
+  it('opens the two machine settings from Advanced', () => {
+    const sent: SettingsWebviewToHost[] = [];
+    mounted = mount(() => (
+      <AdvancedSection
+        send={(message) => {
+          sent.push(message);
+        }}
+      />
+    ));
+    const [path, url] = buttons(mounted.container);
+    path?.click();
+    url?.click();
+    expect(sent).toEqual([
+      { type: 'settings.openSetting', key: 'opencodePath' },
+      { type: 'settings.openSetting', key: 'serverUrl' },
     ]);
   });
 });

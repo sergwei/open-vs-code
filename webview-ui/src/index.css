@@ -1887,6 +1887,41 @@ button.status-card-main:focus-visible::after {
   font-weight: 600;
 }
 
+/* Two buttons of one row (the server password has Set and Forget): they wrap together. */
+.link-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* The select of a General control: it takes its width from the row, never wider than it. */
+.settings-select {
+  width: auto;
+  max-width: 100%;
+}
+
+/* Mods section (issue #186, PR3): the buttons above the list and the list itself. The rows are the
+   same `.mods-row` of the chat popover, in a column with the same gap. */
+.settings-mods {
+  gap: 8px;
+}
+
+.settings-mods-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.settings-mods-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-mods-list .mods-row:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
 /* Providers: a compact connected row, the "+ Add provider" button and its picker (issue #186). */
 .provider-row {
   align-items: flex-start;
@@ -2036,7 +2071,13 @@ button.settings-tab:hover {
     display: none;
   }
 
+  /*
+   * `position: relative` makes the strip the containing block of the `.visually-hidden` spoken
+   * counts inside its tabs; otherwise those absolute spans are not clipped by the scroll and
+   * stretch the document sideways once a tab with a number sits beyond the visible part.
+   */
   .settings-nav {
+    position: relative;
     flex-direction: row;
     overflow-x: auto;
     scrollbar-width: thin;

@@ -10,7 +10,7 @@ import {
   searchEntries,
   type SearchEntry,
 } from './settingsSearch';
-import { anthropic, azure, makeState, mcpServers } from './settingsFixtures';
+import { anthropic, azure, makeState, mcpServers, modsListing } from './settingsFixtures';
 
 const entry = (label: string, keywords = ''): SearchEntry => ({
   id: label,
@@ -140,6 +140,27 @@ describe('buildSearchIndex', () => {
     expect(find('openVsCode.autoStart')[0]?.target).toEqual({ kind: 'setting', key: 'autoStart' });
     expect(find('restart')[0]?.target).toEqual({ kind: 'action', action: 'restart' });
     expect(find('logs')[0]?.target).toEqual({ kind: 'action', action: 'logs' });
+  });
+
+  it('finds a mod by name or id and jumps to its row, and the actions of PR3', () => {
+    const withMods = buildSearchIndex({ ...state, mods: structuredClone(modsListing) });
+    expect(searchEntries(withMods, 'throws')[0]?.target).toEqual({
+      kind: 'jump',
+      section: 'mods',
+      anchor: { attribute: 'data-mod-id', value: 'throws' },
+    });
+    expect(searchEntries(withMods, 'off-mod')[0]?.label).toBe('Off mod');
+    expect(find('throws')).toEqual([]);
+    expect(find('reload mods')[0]?.target).toEqual({ kind: 'action', action: 'reloadMods' });
+    expect(find('server password')[0]?.target).toEqual({
+      kind: 'action',
+      action: 'setServerPassword',
+    });
+    expect(find('saved permissions')[0]?.target).toEqual({
+      kind: 'action',
+      action: 'managePermissions',
+    });
+    expect(find('open chat')[0]?.target).toEqual({ kind: 'action', action: 'openChat' });
   });
 
   it('has unique ids', () => {

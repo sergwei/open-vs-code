@@ -1,17 +1,21 @@
 import * as l10n from '@vscode/l10n';
-import type { SettingsSettingKey } from '../../../src/shared/settingsProtocol';
+import type { SettingsAction, SettingsSettingKey } from '../../../src/shared/settingsProtocol';
 import type { SendSettings } from './ProviderCard';
 
 /**
- * One row of a section that has no data yet (issue #186, phase 1.2): a title, a sentence that says
- * what the thing does, and one button. The row is a `role="group"` named by its title, so a screen
- * reader says which row a button belongs to; the button's own name carries the title too.
+ * One row of a section that links to something instead of holding a control (issue #186): a title,
+ * a sentence that says what the thing does, and one button, or two when `secondary` is given (the
+ * server password has Set and Forget). The row is a `role="group"` named by its title, so a screen
+ * reader says which row a button belongs to; each button's own name carries the title too.
+ * VERIFIED by "sends each action of Advanced in order" of `LinkSections.test.tsx` (the two buttons
+ * of the password row included; fabricated state, jsdom).
  */
 export function LinkRow(props: {
   title: string;
   description: string;
   buttonLabel: string;
   onClick(): void;
+  secondary?: { buttonLabel: string; onClick(): void };
 }) {
   return (
     <div class="link-row" role="group" aria-label={props.title}>
@@ -19,16 +23,30 @@ export function LinkRow(props: {
         <p class="link-row-title">{props.title}</p>
         <p class="settings-hint">{props.description}</p>
       </div>
-      <button
-        type="button"
-        class="secondary"
-        aria-label={`${props.buttonLabel}: ${props.title}`}
-        onClick={() => {
-          props.onClick();
-        }}
-      >
-        {props.buttonLabel}
-      </button>
+      <div class="link-row-actions">
+        <button
+          type="button"
+          class="secondary"
+          aria-label={`${props.buttonLabel}: ${props.title}`}
+          onClick={() => {
+            props.onClick();
+          }}
+        >
+          {props.buttonLabel}
+        </button>
+        {props.secondary !== undefined && (
+          <button
+            type="button"
+            class="secondary"
+            aria-label={`${props.secondary.buttonLabel}: ${props.title}`}
+            onClick={() => {
+              props.secondary?.onClick();
+            }}
+          >
+            {props.secondary.buttonLabel}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -53,35 +71,20 @@ export function SettingLinkRow(props: {
 }
 
 /**
- * The Mods section (issue #186, phase 1.2): one row that opens `openVsCode.mods.enabled`. The list
- * of mods with a switch each comes with PR3; until then the section links instead of staying empty.
- * VERIFIED in jsdom by "Mods opens openVsCode.mods.enabled and sends nothing before the click" of
- * `LinkSections.test.tsx` (the button sends exactly `settings.openSetting` with `mods.enabled`).
+ * The Work mode section (issue #186, PR3, decision P2 of E10-settings-sections): the text that
+ * says how Manual and Auto work, and ONE button, "Open chat". There is NO switch here on purpose:
+ * the mode belongs to one session, and `Toggle Work Mode` from this tab would act on the active or
+ * most recent chat tab, which the user is not looking at (Auto answers `once` to permissions). The
+ * chat shows the mode and changes it. The button sends the `openChat` action.
+ * VERIFIED in jsdom by "Work mode explains Manual and Auto and offers only Open chat" of
+ * `LinkSections.test.tsx` (the sentences are there, the only button sends `openChat`, and there is
+ * no switch). VERIFIED in a real VS Code (Windows 11, 1.145.3, 10/11/2026, `test:visual` step 53)
+ * for the layout: "ok   L3 workMode at 1080 px (tab 1080), light: every row and control inside the
+ * document (true), counts {"buttons":1} (expected {"buttons":1}), switches none (each >= 3), no
+ * sideways overflow (0 px), no style attribute (0), min contrast 8.89 over 3 texts" (also the other
+ * themes and widths). NOT observed: pressing the button.
  */
-export function ModsSection(props: { send: SendSettings }) {
-  return (
-    <div class="settings-links">
-      <SettingLinkRow
-        title={l10n.t('Enable mods')}
-        description={l10n.t(
-          'A mod is JavaScript that runs with your user’s permissions, in its own worker thread. Turn this off to load none.',
-        )}
-        settingKey="mods.enabled"
-        send={props.send}
-      />
-    </div>
-  );
-}
-
-/**
- * The Work mode section (issue #186, phase 1.2): text only. The mode is per session and lives in
- * memory (decision `e3-work-mode/decisions/seis-preguntas`), so there is no setting to open and no
- * default to choose; the section says how it works and where to switch it. The command is named,
- * not linked: a link would need a new action in the protocol, which PR3 adds.
- * VERIFIED in jsdom by "Work mode is text only: the sentences are there and there is no button" of
- * `LinkSections.test.tsx` (the first paragraph and the command name are on screen, no button).
- */
-export function WorkModeSection() {
+export function WorkModeSection(props: { send: SendSettings }) {
   return (
     <div class="settings-links">
       <p class="settings-hint">
@@ -91,20 +94,37 @@ export function WorkModeSection() {
       </p>
       <p class="settings-hint">
         {l10n.t(
-          'The mode belongs to one session and is not kept when you close it. Switch it from the prompt row or with the command Toggle Work Mode.',
+          'The mode belongs to one session and is not kept when you close it. You see it and change it in the chat, in the prompt row or with the command Toggle Work Mode.',
         )}
       </p>
+      <LinkRow
+        title={l10n.t('Work mode of a chat')}
+        description={l10n.t('Open the chat to see the mode of its session and to change it.')}
+        buttonLabel={l10n.t('Open chat')}
+        onClick={() => {
+          props.send({ type: 'settings.action', action: 'openChat' });
+        }}
+      />
     </div>
   );
 }
 
+/** Sends one of the closed {@link SettingsAction}s. */
+function act(send: SendSettings, action: SettingsAction): void {
+  send({ type: 'settings.action', action });
+}
+
 /**
- * The Advanced section (issue #186, phase 1.2): the settings that decide which opencode is used
- * (`opencodePath` and `serverUrl`, both only openable here: they are machine-wide), and the two
- * footer actions as rows. The shell of opencode and the commands for the server password come with
- * PR3.
- * VERIFIED in jsdom by "Advanced opens the two machine settings and runs the two footer actions" of
- * `LinkSections.test.tsx` (each button sends its message, in order).
+ * The Advanced section (issue #186, PR3): the settings that decide which opencode is used
+ * (`opencodePath` and `serverUrl`, both only openable here: they are machine-wide), the server
+ * password (Set and Forget, the existing commands: the password is asked in a native InputBox and
+ * never passes through the webview), the saved permissions (Manage), the decision about the plugins
+ * of this folder (Forget) and the two footer actions as rows. The shell of opencode is NOT here
+ * (decision P3 of E10-settings-sections).
+ * VERIFIED in jsdom by "sends each action of Advanced in order" and "opens the two machine settings
+ * from Advanced" of `LinkSections.test.tsx` (each button sends its message; fabricated state).
+ * UNVERIFIED in a real host: what each command does when pressed from the tab (step 53 presses
+ * only Forget password).
  */
 export function AdvancedSection(props: { send: SendSettings }) {
   return (
@@ -126,11 +146,45 @@ export function AdvancedSection(props: { send: SendSettings }) {
         send={props.send}
       />
       <LinkRow
+        title={l10n.t('Server password')}
+        description={l10n.t(
+          'Only for an external server. Kept in the VS Code secret storage, never in the settings.',
+        )}
+        buttonLabel={l10n.t('Set password')}
+        onClick={() => {
+          act(props.send, 'setServerPassword');
+        }}
+        secondary={{
+          buttonLabel: l10n.t('Forget password'),
+          onClick: () => {
+            act(props.send, 'clearServerPassword');
+          },
+        }}
+      />
+      <LinkRow
+        title={l10n.t('Saved permissions')}
+        description={l10n.t('The permissions you chose to always allow. Pick the ones to revoke.')}
+        buttonLabel={l10n.t('Manage')}
+        onClick={() => {
+          act(props.send, 'managePermissions');
+        }}
+      />
+      <LinkRow
+        title={l10n.t('Plugins of this folder')}
+        description={l10n.t(
+          'Forget your decision about running the plugins this folder asks for, to be asked again.',
+        )}
+        buttonLabel={l10n.t('Forget decision')}
+        onClick={() => {
+          act(props.send, 'forgetPluginDecision');
+        }}
+      />
+      <LinkRow
         title={l10n.t('Log')}
         description={l10n.t('What the extension did, without anything you typed.')}
         buttonLabel={l10n.t('Show logs')}
         onClick={() => {
-          props.send({ type: 'settings.action', action: 'logs' });
+          act(props.send, 'logs');
         }}
       />
       <LinkRow
@@ -138,7 +192,7 @@ export function AdvancedSection(props: { send: SendSettings }) {
         description={l10n.t('Every setting of OpenCode in the Settings editor.')}
         buttonLabel={l10n.t('Open settings')}
         onClick={() => {
-          props.send({ type: 'settings.action', action: 'extensionSettings' });
+          act(props.send, 'extensionSettings');
         }}
       />
     </div>

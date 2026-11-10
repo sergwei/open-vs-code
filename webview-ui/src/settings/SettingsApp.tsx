@@ -15,8 +15,9 @@ import { createStore } from 'solid-js/store';
 import { WarningIcon } from '../chat/icons';
 import { attentionBySection, attentionItems, type AttentionItem } from './attention';
 import { GeneralSection } from './GeneralSection';
-import { AdvancedSection, ModsSection, WorkModeSection } from './LinkSections';
+import { AdvancedSection, WorkModeSection } from './LinkSections';
 import { McpSection } from './McpSection';
+import { ModsSection } from './ModsSection';
 import { ModelsSection } from './ModelsSection';
 import type { SendSettings } from './ProviderCard';
 import { ProvidersSection } from './ProvidersSection';
@@ -65,7 +66,8 @@ interface FocusRequest {
  * "Needs attention" (decision P5) comes from `attention.ts`: its items are listed in General, the
  * MCP card turns amber and the navigation shows the numbers. A jump (an attention item, a search
  * result, a card) opens the section, and for an item or result with a row it focuses that row (a
- * `[data-provider]` or `[data-server]` card); with no row it focuses the section heading. The
+ * `[data-provider]` or `[data-server]` card, or, since PR3, a `[data-mod-id]` mod row, which has
+ * `tabindex="-1"`); with no row it focuses the section heading. The
  * focus is requested through a signal and served by a second effect, so it runs after the DOM
  * shows the new section (`solid-webview` section 1). A card opens its section without moving the
  * focus. A search result for a provider that is NOT connected has no row, so the jump first expands
@@ -84,7 +86,8 @@ interface FocusRequest {
  * "clears the busy mark of an MCP row when a notice names its server, even with the same state" and
  * "clears the busy mark of the Sign in button when the notice carries only the integration id" of
  * `SettingsApp.test.tsx`. The component moves the focus only after a
- * jump the user asked for. Colours and sizes are in `index.css` (`--vscode-*` only, no inline
+ * jump the user asked for. The `settingFailed` and `modFailed` notices (PR3) are announced in the
+ * same region. Colours and sizes are in `index.css` (`--vscode-*` only, no inline
  * style).
  *
  * VERIFIED in jsdom by `SettingsApp.test.tsx` with fabricated state: "opens on General the first
@@ -186,6 +189,9 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
         ? state.providers.rows.filter((row) => row.connections.length > 0).length
         : undefined,
       mcpAttention: counts().mcp ?? 0,
+      ...(state.mods === undefined
+        ? {}
+        : { activeMods: state.mods.mods.filter((mod) => mod.state === 'active').length }),
     }),
   );
   const index = createMemo(() => buildSearchIndex(state));
@@ -380,10 +386,10 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
                           <McpSection state={state} send={props.send} seq={mcpSeq} />
                         </Match>
                         <Match when={section === 'mods'}>
-                          <ModsSection send={props.send} />
+                          <ModsSection state={state} send={props.send} />
                         </Match>
                         <Match when={section === 'workMode'}>
-                          <WorkModeSection />
+                          <WorkModeSection send={props.send} />
                         </Match>
                         <Match when={section === 'advanced'}>
                           <AdvancedSection send={props.send} />

@@ -8,8 +8,9 @@
 // validators of the webview side reject unknown properties, so a message with `key`, `apiKey` or
 // `secret` never gets through even if a future webview bug put one there.
 
+import type { ModsListing } from './model';
 import type { ConnectionState } from './protocol';
-import { field, isNonEmptyString, isPlainObject } from './protocol';
+import { field, isNonEmptyString, isPlainObject, MOD_ID_PATTERN } from './protocol';
 
 /** Longest id (integration, credential, field key) accepted from the webview. */
 export const MAX_SETTINGS_ID = 200;
@@ -140,6 +141,18 @@ export interface SettingsMcpServerRow {
   templates: { name: string; uriTemplate: string; description?: string }[];
 }
 
+/** The two settings of the General section the tab writes itself (issue #186, PR3). */
+export type SettingsWritableKey = 'chatLocation' | 'autoStart';
+
+/** Where the chat opens, as `openVsCode.chatLocation` holds it. */
+export type SettingsChatLocation = 'editor' | 'sidebar';
+
+/** The values of the General section as the host reads them, with the workspace-override hint. */
+export interface SettingsGeneral {
+  chatLocation: { value: SettingsChatLocation; workspaceOverride: boolean };
+  autoStart: { value: boolean; workspaceOverride: boolean };
+}
+
 /** The sign-in in progress, if any. `code` is the device code to copy, never a key. */
 export interface AuthAttemptView {
   integrationID: string;
@@ -168,6 +181,13 @@ export interface SettingsState {
     serverDefault?: { providerID: string; id: string; name: string };
   };
   preference: SettingsPreference;
+  /** `openVsCode.chatLocation` and `openVsCode.autoStart`, which the General section edits. */
+  general: SettingsGeneral;
+  /**
+   * The mods of this workspace (the same listing as the chat's mods popover). ABSENT when the host
+   * has no mods half (the section says so instead of claiming there are no mods).
+   */
+  mods?: ModsListing;
   mcp: {
     loaded: boolean;
     failed: boolean;
@@ -194,7 +214,11 @@ export interface SettingsNotice {
     /** An MCP server is connected / disconnected / could not be connected after a tab request. */
     | 'mcpConnected'
     | 'mcpDisconnected'
-    | 'mcpFailed';
+    | 'mcpFailed'
+    /** A General setting could not be saved; the message is a fixed text, never the value. */
+    | 'settingFailed'
+    /** A mod switch was refused or failed; the message is a fixed text. */
+    | 'modFailed';
   message?: string;
   /** The MCP server's name, for the three `mcp*` kinds (the `mcp_...` id is no name to read out). */
   server?: string;
@@ -205,8 +229,27 @@ export type SettingsHostToWebview =
   | { type: 'settings.state'; state: SettingsState }
   | { type: 'settings.notice'; notice: SettingsNotice };
 
-/** The footer actions the webview may ask the host for (existing commands). */
-export type SettingsAction = 'logs' | 'extensionSettings' | 'restart';
+/**
+ * The closed list of actions the webview may ask the host for (existing commands; the host maps
+ * each to its command id in `SETTINGS_ACTION_COMMANDS`). `toggleWorkMode` is NOT in it on purpose
+ * (decision P2 of E10-settings-sections): from the Settings tab it would flip a session the user
+ * does not see; the Work mode section only offers `openChat`.
+ */
+export const SETTINGS_ACTIONS = [
+  'logs',
+  'extensionSettings',
+  'restart',
+  'reloadMods',
+  'openModsFolder',
+  'setServerPassword',
+  'clearServerPassword',
+  'managePermissions',
+  'forgetPluginDecision',
+  'openChat',
+] as const;
+
+/** One of the {@link SETTINGS_ACTIONS}. */
+export type SettingsAction = (typeof SETTINGS_ACTIONS)[number];
 
 /** Settings webview to host. No variant has a field for a key, a token or a code. */
 export type SettingsWebviewToHost =
@@ -230,7 +273,12 @@ export type SettingsWebviewToHost =
   /** Connect or disconnect one MCP server of the snapshot; never add or remove (decision P6). */
   | { type: 'settings.mcp'; server: string; op: SettingsMcpOp }
   /** Start the OAuth sign-in of a `needs_auth` MCP server through its integration. */
-  | { type: 'settings.mcpSignIn'; server: string };
+  | { type: 'settings.mcpSignIn'; server: string }
+  /** Writes ONE of the two General settings (user scope); the host revalidates the value. */
+  | { type: 'settings.setSetting'; key: 'chatLocation'; value: SettingsChatLocation }
+  | { type: 'settings.setSetting'; key: 'autoStart'; value: boolean }
+  /** Switches one mod on or off for this workspace; the host checks the id against its listing. */
+  | { type: 'settings.modToggle'; modId: string; enabled: boolean };
 
 /** True for a non-empty string of at most {@link MAX_SETTINGS_ID} characters. */
 function isId(value: unknown): value is string {
@@ -268,9 +316,22 @@ function isMethodIndex(value: unknown): boolean {
   );
 }
 
-/** True for one of the three footer actions. */
+/** True for one of the {@link SETTINGS_ACTIONS}. */
 function isSettingsAction(value: unknown): value is SettingsAction {
-  return value === 'logs' || value === 'extensionSettings' || value === 'restart';
+  return SETTINGS_ACTIONS.some((action) => action === value);
+}
+
+/**
+ * True for a `settings.setSetting` payload: EXACTLY `chatLocation` with `editor` or `sidebar`, or
+ * `autoStart` with a boolean. Any other key (`opencodePath`, `serverUrl`, `defaultModel`...) or a
+ * value of the other key's type is refused.
+ */
+function isSettingPair(message: Record<string, unknown>): boolean {
+  const key = field(message, 'key');
+  const value = field(message, 'value');
+  if (key === 'chatLocation') return value === 'editor' || value === 'sidebar';
+  if (key === 'autoStart') return typeof value === 'boolean';
+  return false;
 }
 
 /** True for a key of the closed {@link SETTINGS_SETTING_KEYS} list. */
@@ -319,17 +380,37 @@ const WEBVIEW_SHAPES: Record<
     valid: (m) => isId(field(m, 'server')) && isMcpOp(field(m, 'op')),
   },
   'settings.mcpSignIn': { keys: ['server'], valid: (m) => isId(field(m, 'server')) },
+  'settings.setSetting': { keys: ['key', 'value'], valid: isSettingPair },
+  'settings.modToggle': {
+    keys: ['modId', 'enabled'],
+    valid: (m) => {
+      const modId = field(m, 'modId');
+      return (
+        typeof modId === 'string' &&
+        MOD_ID_PATTERN.test(modId) &&
+        typeof field(m, 'enabled') === 'boolean'
+      );
+    },
+  },
 };
 
 /**
  * Guard for messages arriving at the host from the settings webview, which is untrusted input.
  *
- * Accepts only a plain object whose `type` is one of the eleven known ones, whose own properties
+ * Accepts only a plain object whose `type` is one of the thirteen known ones, whose own properties
  * are EXACTLY `type` plus the ones that type declares (so a `apiKey` or `secret` makes it fail, as
  * does any other extra field; `settings.openSetting` DOES declare a `key`, which must be one of
  * {@link SETTINGS_SETTING_KEYS}, never free text; `settings.mcp` declares `server` and an `op` that
  * is `connect` or `disconnect`, so an `add` or `remove` never gets through), and whose values pass
- * the bounds above: ids (an MCP `server` name included) up
+ * the bounds above. Since PR3 of issue #186: `settings.action` takes only the ten names of
+ * {@link SETTINGS_ACTIONS} (never a free command id, never `toggleWorkMode`); `settings.setSetting`
+ * takes exactly `chatLocation` with `editor` or `sidebar`, or `autoStart` with a boolean, and
+ * nothing else; `settings.modToggle` takes a `modId` that matches `MOD_ID_PATTERN` and a boolean
+ * `enabled`. VERIFIED in a real host (Windows 11, VS Code 1.145.3, 10/11/2026) for the accepted
+ * messages by the `main` integration cases "the Settings tab writes chatLocation and autoStart to
+ * the USER settings, refuses other values and restores" and "refuses an unknown mod id from the
+ * Settings tab and writes nothing" (both passing, through the real guard). Ids (an MCP
+ * `server` name included) up
  * to 200 characters, a method index up to 100, at most 20 answers of at most 2000 characters, a
  * default-model text of at most 401 characters (empty allowed: it clears the setting). Never
  * throws: a throwing getter or a hostile object yields `false`. Whether the integration or method

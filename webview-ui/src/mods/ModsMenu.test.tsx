@@ -148,6 +148,20 @@ describe('ModsMenu', () => {
     expect(root.querySelectorAll('.mods-skipped button')).toHaveLength(0);
   });
 
+  /**
+   * Protects the popover from the focus behaviour of the Settings tab: its rows must NOT carry
+   * `tabindex` (a click on a row's text would move the focus and draw an outline). Fabricated
+   * listing, vitest, jsdom: that a click on a row's text draws no outline in a real VS Code is UNVERIFIED (step 45
+   * presses the switches, not the text).
+   */
+  it('renders the popover rows without tabindex', () => {
+    const { trigger, root } = setup();
+    trigger()?.click();
+    const rows = root.querySelectorAll('.mods-row');
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect(row.hasAttribute('tabindex')).toBe(false);
+  });
+
   it('a click calls onToggle with the opposite and leaves the row busy until the next listing', () => {
     const { trigger, switches, onToggle, setListing, root } = setup();
     trigger()?.click();

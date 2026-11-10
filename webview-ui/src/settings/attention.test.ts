@@ -1,11 +1,13 @@
 // Protects "Needs attention" (issue #186, decision P5): each source of trouble yields exactly one
 // item that jumps to the right place, a healthy state yields none, and the default-model item does
-// not appear before the models were read (it would be an artefact then). Provenance: fabricated
+// not appear before the models were read (it would be an artefact then). PR3: a failed mod is an
+// item (and no other mod state is), and there is no item for the server being down (decision P1 of
+// E10-settings-sections removed it: the tab shows no sections while disconnected). Provenance: fabricated
 // states built from `settingsFixtures.ts`; how a real server fills `needsAuth` or `needs_auth` is
 // not exercised here (the fake server's `broken` and `linear` are the real-VS-Code cells of 1.4).
 import { describe, expect, it } from 'vitest';
 import { attentionBySection, attentionItems, type AttentionInput } from './attention';
-import { anthropic, makeState, mcpServers } from './settingsFixtures';
+import { anthropic, makeState, mcpServers, modsListing } from './settingsFixtures';
 
 /** A healthy input: connected, one provider, one MCP server that is connected. */
 function healthy(): AttentionInput {
@@ -21,7 +23,6 @@ function healthy(): AttentionInput {
     },
   });
   return {
-    connection: state.connection,
     providers: state.providers,
     models: state.models,
     preference: state.preference,
@@ -36,7 +37,7 @@ describe('attentionItems', () => {
 
   it('yields one item per source, each with the section and row to jump to', () => {
     const input = healthy();
-    input.connection = { state: 'reconnecting', attempt: 1 };
+    input.mods = structuredClone(modsListing);
     const row = input.providers.rows[0];
     if (row?.connections[0]?.kind === 'credential') row.connections[0].needsAuth = 'sign in';
     input.mcp = {
@@ -48,15 +49,27 @@ describe('attentionItems', () => {
     input.preference = { value: 'anthropic/gone', status: 'unavailable', workspaceOverride: false };
     const items = attentionItems(input);
     expect(items.map((item) => [item.kind, item.section, item.anchor?.value])).toEqual([
-      ['serverDown', 'general', undefined],
       ['providerNeedsAuth', 'providers', 'anthropic'],
       ['mcpFailed', 'mcp', 'broken'],
       ['mcpNeedsAuth', 'mcp', 'linear'],
+      ['modFailed', 'mods', 'throws'],
       ['modelIgnored', 'models', undefined],
     ]);
     expect(new Set(items.map((item) => item.id)).size).toBe(items.length);
-    expect(items[2]?.anchor?.attribute).toBe('data-server');
-    expect(items[1]?.anchor?.attribute).toBe('data-provider');
+    expect(items[1]?.anchor?.attribute).toBe('data-server');
+    expect(items[0]?.anchor?.attribute).toBe('data-provider');
+    expect(items[3]?.anchor?.attribute).toBe('data-mod-id');
+    expect(items[3]?.text).toBe('The mod Throws could not start');
+  });
+
+  it('flags only a mod that failed, and nothing when the host sent no mods', () => {
+    const input = healthy();
+    const listing = structuredClone(modsListing);
+    listing.mods = listing.mods.filter((mod) => mod.state !== 'failed');
+    input.mods = listing;
+    expect(attentionItems(input)).toEqual([]);
+    input.mods = undefined;
+    expect(attentionItems(input)).toEqual([]);
   });
 
   it('counts a provider once even when two connections need sign-in', () => {
@@ -71,21 +84,6 @@ describe('attentionItems', () => {
       },
     ];
     expect(attentionItems(input)).toHaveLength(1);
-  });
-
-  it('flags the server down for unavailable, stopped and reconnecting only', () => {
-    const cases: [AttentionInput['connection'], number][] = [
-      [{ state: 'unavailable', reason: 'start-failed', error: { code: 'x', message: 'y' } }, 1],
-      [{ state: 'stopped' }, 1],
-      [{ state: 'reconnecting', attempt: 2 }, 1],
-      [{ state: 'not-started', reason: 'auto-start-off' }, 0],
-      [{ state: 'starting' }, 0],
-    ];
-    for (const [connection, expected] of cases) {
-      const input = healthy();
-      input.connection = connection;
-      expect(attentionItems(input), connection.state).toHaveLength(expected);
-    }
   });
 
   it('ignores the default-model setting until the models were read, and when that read failed', () => {
