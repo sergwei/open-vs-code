@@ -9,6 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Built and tested against opencode 2.2.7** (was 2.0.32): the `@opencode/client` pin and the
+  recommended CLI move together. Calls to the experimental routes (usage stats, MCP connect and
+  disconnect) now use the `client.experimental.*` methods.
 - **Several pending requests share one box.** Instead of stacking one card on top of another, the
   permissions and questions the agent is waiting on sit in a single box with a tab per request
   (icon and name, the active one underlined, "1 of 3" on the right) and only the active request
