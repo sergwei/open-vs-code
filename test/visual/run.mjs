@@ -13859,12 +13859,25 @@ try {
     );
   }
 
-  /** What the settings document shows of its layout: column, overflow and `style` attributes. */
+  /**
+   * What the settings document shows of its layout: column, overflow and `style` attributes, plus
+   * `widest` (the three elements reaching furthest past the right edge), which is printed in the
+   * failure text of step 53 only and never asserted.
+   */
   function settingsLayout(doc) {
     const root = doc.documentElement;
     return {
       docWidth: root.clientWidth,
       overflow: root.scrollWidth - root.clientWidth,
+      // Diagnostic only (not asserted): the widest element that reaches past the right edge.
+      widest: [...doc.querySelectorAll('#root *')]
+        .map((el) => ({
+          tag: `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}.${String(el.className).split(' ')[0]}`,
+          right: Math.round(el.getBoundingClientRect().right),
+        }))
+        .filter((item) => item.right > root.clientWidth)
+        .sort((a, b) => b.right - a.right)
+        .slice(0, 3),
       // Same rule as the other steps: an EMPTY `style=""` (left behind when a script clears it) is
       // not a style; any value is.
       styled: [...doc.querySelectorAll('#root, #root *, body')].filter(
@@ -19037,6 +19050,7 @@ try {
     restart: '#settings-panel-general .card-actions button.secondary',
     rowTitle: '#settings-panel-general .link-row-title',
     rowHint: '#settings-panel-general .settings-hint',
+    chatLocation: '#settings-chat-location',
   };
 
   await step('47 OpenCode Settings: Models and General (E10-settings-redesign)', async () => {
@@ -19202,7 +19216,7 @@ try {
             );
             const insideAll = [
               ...doc.querySelectorAll(
-                '#settings-panel-general .attention-item, #settings-panel-general .fact, #settings-panel-general .link-row',
+                '#settings-panel-general .attention-item, #settings-panel-general .fact, #settings-panel-general .link-row, #settings-panel-general .settings-control select, #settings-panel-general .settings-control button[role="switch"]',
               ),
             ].every((element) => {
               const rect = element.getBoundingClientRect();
@@ -19211,6 +19225,12 @@ try {
             return {
               kinds,
               insideAll,
+              // The two controls of PR3 (issue #186): the select of the chat location and the
+              // switch of the automatic start are there, as ONE select and ONE switch.
+              controls:
+                doc.querySelectorAll('#settings-panel-general select#settings-chat-location')
+                  .length === 1 &&
+                doc.querySelectorAll('#settings-panel-general button[role="switch"]').length === 1,
               facts: doc.querySelectorAll('.fact').length,
               // `broken` is `failed` unless an MCPFLIP turn of an earlier step flipped it and the
               // fake was not restarted since: the list must say what the servers say.
@@ -19227,11 +19247,12 @@ try {
             general.kinds.includes('mcpFailed') === general.brokenFailed &&
               general.kinds.includes('mcpNeedsAuth') &&
               general.insideAll &&
+              general.controls &&
               general.facts >= 3 &&
               layout.overflow <= 0 &&
               layout.styled === 0 &&
               contrast.ok,
-            `G1 ${label} px (${String(measured)}), ${themeName}: General lists "Needs attention" with ${JSON.stringify(general.kinds)}, the server facts and the two chat rows, all inside the document (${String(general.insideAll)}), no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+            `G1 ${label} px (${String(measured)}), ${themeName}: General lists "Needs attention" with ${JSON.stringify(general.kinds)}, the server facts, the chat location select and the automatic start switch (controls ${String(general.controls)}), all inside the document (${String(general.insideAll)}), no sideways overflow (${String(layout.overflow)} px), no style attribute (${String(layout.styled)}), ${contrast.text}`,
           );
           if (theme === DARK) await shot(`47c-general-${label}`);
         }
@@ -19281,10 +19302,14 @@ try {
     async () => {
       const DARK = 'Default Dark Modern';
       const originalWidth = await sideBarPx();
+      // The cell WITHOUT mods (it installs no fixture; step 45 removed its own): the buttons of
+      // each section since PR3 of issue #186. Mods: Reload mods, Open folder, Open setting. Work
+      // mode: Open chat. Advanced: path, URL, Set and Forget password, Manage, Forget decision,
+      // Show logs, Open settings.
       const SECTIONS = [
-        ['mods', 1, 'Enable mods'],
-        ['workMode', 0, null],
-        ['advanced', 4, 'opencode executable path'],
+        ['mods', 3, 'Enable mods'],
+        ['workMode', 1, 'Work mode of a chat'],
+        ['advanced', 8, 'opencode executable path'],
       ];
       try {
         await startSettingsStep();
@@ -21074,10 +21099,519 @@ try {
       assertNoSettingsErrors('step 52');
       assertNoWebviewErrors('step 52');
     } finally {
-      // The fake keeps `linear` connected: this is the last step. Dark theme and width back.
+      // The fake keeps `linear` connected. Dark theme and width back.
       await endSettingsStep(originalWidth);
     }
   });
+
+  // ---------------------------------------------------------------------------------------------
+  // Step 53 (E10-settings-sections, PR3 of issue #186): General with its two controls, Mods with
+  // data, Work mode and Advanced. It installs the fixtures `quiet` and `throws` plus a folder with
+  // no mod.json (a skipped one) in the mods root, runs "OpenCode: Reload Mods" and waits for the
+  // host to log "mod quiet loaded". The workspace gets its own `openVsCode.chatLocation` EQUAL to
+  // the effective one, so the override hint shows without moving the chat.
+  //   Matrix (3 widths x 4 themes unless said): L1 General, L2 Mods, L3 Work mode, L4 Advanced (each
+  //   cell: inside the document, the expected number of controls, no sideways overflow, no `style`
+  //   attribute, text contrast >= 4.5 and switch edge and thumb contrast >= 3), L5 the badge "Mods
+  //   (n)" of the navigation (1080 vertical and 300 strip).
+  //   Behaviour (660 px, dark, real mouse): B1 the switch of `quiet` off and on (host log line, the
+  //   badge goes down and up), B2 the switch of the automatic start writes the USER setting and
+  //   follows the state, B3 "Forget password" raises the toast "there was no stored server
+  //   password", B4 "Needs attention" lists `throws` and its jump focuses its row, B5 with
+  //   `openVsCode.mods.enabled` off the switches are aria-disabled and the note shows.
+  // NOT pressed: "Open folder" (a file manager), "Saved permissions" (opens a chat tab), "Forget
+  // decision" and "Open chat". The budget of this step is an ESTIMATE (see `steps.mjs`).
+  // ---------------------------------------------------------------------------------------------
+  await step(
+    '53 OpenCode Settings: General, Mods, Work mode and Advanced with data (E10-settings-sections)',
+    async () => {
+      const DARK = 'Default Dark Modern';
+      const QUIET = 'quiet';
+      const THROWS = 'throws';
+      const SKIPPED_FOLDER = 'no-manifest-53';
+      const AUTO_KEY = 'openVsCode.autoStart';
+      const LOC_KEY = 'openVsCode.chatLocation';
+      const MODS_KEY = 'openVsCode.mods.enabled';
+      const WIDTHS = [
+        ['1080', 1080],
+        ['660', 660],
+        ['300', 300],
+      ];
+      const originalWidth = await sideBarPx();
+      const vscodeDir = path.join(workspace, '.vscode');
+      const hadVscodeDir = fs.existsSync(vscodeDir);
+      const workspaceFile = path.join(vscodeDir, 'settings.json');
+      const hadWorkspaceFile = fs.existsSync(workspaceFile);
+      const previousWorkspaceFile = hadWorkspaceFile ? fs.readFileSync(workspaceFile) : null;
+      const userFile = path.join(vscode.userDataDir, 'User', 'settings.json');
+      const userSetting = (key) =>
+        fs.existsSync(userFile) ? JSON.parse(fs.readFileSync(userFile, 'utf8'))[key] : undefined;
+      const hostLogText = () => {
+        const files = [];
+        const walk = (dir) => {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) walk(full);
+            else if (entry.name === 'OpenCode.log') files.push(full);
+          }
+        };
+        try {
+          walk(path.join(vscode.userDataDir, 'logs'));
+        } catch {
+          return '';
+        }
+        return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+      };
+      const loaded = (id) => hostLogText().split(`mod ${id} loaded`).length - 1;
+      const switchedLines = (id, direction) =>
+        hostLogText().split(`mod ${id} switched ${direction} in this workspace`).length - 1;
+
+      /** Presses the navigation tab of `section` with the real mouse and waits for its panel (no check line). */
+      const showSection = async (section) => {
+        await settingsClick(`#settings-tab-${section}`);
+        return settingsWait(
+          (doc, id) => doc.querySelector(`#settings-panel-${id}`)?.hidden === false,
+          section,
+          5_000,
+        );
+      };
+      const modsSwitch = (id) => `#settings-panel-mods [data-mod-id="${id}"] button[role="switch"]`;
+      const checkedOf = (selector) =>
+        settingsWeb.inDoc(
+          (doc, sel) => doc.querySelector(sel)?.getAttribute('aria-checked') ?? null,
+          selector,
+        );
+      const waitChecked = (selector, wanted, ms = 20_000) =>
+        settingsWait(
+          (doc, spec) => doc.querySelector(spec.sel)?.getAttribute('aria-checked') === spec.wanted,
+          { sel: selector, wanted },
+          ms,
+        );
+      const badgeText = () =>
+        settingsWeb.inDoc(
+          (doc) => doc.querySelector('#settings-tab-mods .settings-badge')?.textContent ?? null,
+        );
+
+      // The expected shape of each section, and what to measure in it. Counts are exact numbers:
+      // a missing or an extra control is a FAIL, not a pass with "at least".
+      const SECTION_SPECS = {
+        general: {
+          counts: {
+            selects: 'select',
+            switches: 'button[role="switch"]',
+            hints: '[data-hint="workspace"]',
+            rows: '.link-row',
+          },
+          expect: { selects: 1, switches: 1, hints: 1, rows: 2 },
+          text: {
+            ...SETTINGS_BASE,
+            title: '#settings-panel-general .settings-section-title',
+            rowTitle: '#settings-panel-general .link-row-title',
+            hint: '#settings-panel-general .settings-hint',
+            select: '#settings-chat-location',
+            override: '#settings-panel-general [data-hint="workspace"] button',
+          },
+        },
+        mods: {
+          counts: {
+            rows: '.mods-row[data-mod-id]',
+            skipped: '.mods-skipped',
+            switches: 'button[role="switch"]',
+            buttons: '.settings-mods-actions button',
+            failed: '.mods-state[data-state="failed"]',
+          },
+          expect: { rows: 2, skipped: 1, switches: 2, buttons: 2, failed: 1 },
+          text: {
+            ...SETTINGS_BASE,
+            title: '#settings-panel-mods .settings-section-title',
+            hint: '#settings-panel-mods .settings-hint',
+            name: '#settings-panel-mods .mods-name',
+            failed: '#settings-panel-mods .mods-state[data-state="failed"]',
+            skipped: '#settings-panel-mods .mods-skipped .mods-state',
+            footer: '#settings-panel-mods .mods-footer',
+            button: '#settings-panel-mods .settings-mods-actions button',
+          },
+        },
+        workMode: {
+          counts: { buttons: 'button' },
+          expect: { buttons: 1 },
+          text: {
+            ...SETTINGS_BASE,
+            title: '#settings-panel-workMode .settings-section-title',
+            hint: '#settings-panel-workMode .settings-hint',
+            button: '#settings-panel-workMode button',
+          },
+        },
+        advanced: {
+          counts: { buttons: 'button', rows: '.link-row' },
+          expect: { buttons: 8, rows: 7 },
+          text: {
+            ...SETTINGS_BASE,
+            title: '#settings-panel-advanced .settings-section-title',
+            rowTitle: '#settings-panel-advanced .link-row-title',
+            hint: '#settings-panel-advanced .settings-hint',
+            button: '#settings-panel-advanced button.secondary',
+          },
+        },
+      };
+
+      /** Self-contained (serialised into the page): where the controls of a panel are and the contrast of its switches. */
+      const measureCell = (doc, spec) => {
+        const parse = (value) => {
+          const text = String(value).trim();
+          let m =
+            /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+%?))?\s*\)$/i.exec(
+              text,
+            );
+          if (m) {
+            let alpha = m[4] === undefined ? 1 : Number.parseFloat(m[4]);
+            if (m[4]?.endsWith('%')) alpha /= 100;
+            return [Number(m[1]), Number(m[2]), Number(m[3]), alpha];
+          }
+          m = /^#([0-9a-f]{3,8})$/i.exec(text);
+          if (!m) return null;
+          let hex = m[1];
+          if (hex.length === 3 || hex.length === 4) hex = [...hex].map((c) => c + c).join('');
+          const alpha = hex.length === 8 ? Number.parseInt(hex.slice(6, 8), 16) / 255 : 1;
+          return [0, 2, 4].map((i) => Number.parseInt(hex.slice(i, i + 2), 16)).concat([alpha]);
+        };
+        const over = (front, back) =>
+          [0, 1, 2].map((i) => front[i] * front[3] + back[i] * (1 - front[3])).concat([1]);
+        const lum = (color) => {
+          const [r, g, b] = color.slice(0, 3).map((channel) => {
+            const v = channel / 255;
+            return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+          });
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const ratioOf = (a, b) => {
+          const [high, low] = [lum(a), lum(b)].sort((x, y) => y - x);
+          return (high + 0.05) / (low + 0.05);
+        };
+        const win = doc.defaultView;
+        const base = parse(
+          win.getComputedStyle(doc.documentElement).getPropertyValue('--vscode-editor-background'),
+        ) ?? [30, 30, 30, 1];
+        const behind = (element) => {
+          const chain = [];
+          for (let node = element.parentElement; node; node = node.parentElement)
+            chain.unshift(node);
+          let background = [base[0], base[1], base[2], 1];
+          for (const node of chain) {
+            const own = parse(win.getComputedStyle(node).backgroundColor);
+            if (own && own[3] > 0) background = over(own, background);
+          }
+          return background;
+        };
+        const panel = doc.querySelector(`#settings-panel-${spec.section}`);
+        const width = doc.documentElement.clientWidth;
+        const inside = [...(panel?.querySelectorAll(spec.insideSel) ?? [])];
+        const counts = Object.fromEntries(
+          Object.entries(spec.counts).map(([name, sel]) => [
+            name,
+            panel?.querySelectorAll(sel).length ?? 0,
+          ]),
+        );
+        const switches = [...(panel?.querySelectorAll('button[role="switch"]') ?? [])].map(
+          (element) => {
+            const style = win.getComputedStyle(element);
+            const around = behind(element);
+            const fill = parse(style.backgroundColor);
+            const track = fill && fill[3] > 0 ? over(fill, around) : around;
+            const border = parse(style.borderTopColor);
+            const edges = [];
+            if (element.getAttribute('aria-checked') === 'true') edges.push(ratioOf(track, around));
+            if (Number.parseFloat(style.borderTopWidth) > 0 && border)
+              edges.push(ratioOf(over(border, around), around));
+            const thumb = parse(win.getComputedStyle(element, '::after').backgroundColor);
+            return {
+              edge: Math.max(...edges, 0),
+              thumb: thumb ? ratioOf(over(thumb, track), track) : null,
+            };
+          },
+        );
+        return {
+          found: panel !== null,
+          inside:
+            inside.length > 0 &&
+            inside.every((element) => {
+              const rect = element.getBoundingClientRect();
+              return rect.width > 0 && rect.left >= -1 && rect.right <= width + 1;
+            }),
+          counts,
+          switches,
+        };
+      };
+
+      try {
+        await startSettingsStep();
+        assertNoSettingsErrors('step 53 start');
+
+        // --- Set-up: two mods and a skipped folder; the workspace overrides the chat location ------
+        const quietLoadedBefore = loaded(QUIET);
+        for (const id of [QUIET, THROWS]) installModFixture(repoRoot, vscode.modsHome, id);
+        fs.mkdirSync(path.join(vscode.modsHome, SKIPPED_FOLDER), { recursive: true });
+        await command('OpenCode: Reload Mods');
+        check(
+          (await waitFor(() => loaded(QUIET) > quietLoadedBefore, 20_000, 200)) === true,
+          'the host logs "mod quiet loaded" after Reload Mods',
+        );
+        const listed = await settingsWait(
+          (doc) =>
+            doc.querySelectorAll('#settings-panel-mods .mods-row[data-mod-id]').length === 2 &&
+            doc.querySelector('#settings-panel-mods .mods-state[data-state="failed"]') !== null &&
+            doc.querySelector('#settings-panel-mods .mods-skipped') !== null,
+          null,
+          20_000,
+        );
+        check(
+          listed === true,
+          'the Mods section lists quiet and throws (failed) and the skipped folder',
+        );
+        const effectiveLocation = await settingsWeb.inDoc(
+          (doc) => doc.querySelector('#settings-chat-location')?.value ?? 'editor',
+        );
+        fs.mkdirSync(vscodeDir, { recursive: true });
+        fs.writeFileSync(workspaceFile, JSON.stringify({ [LOC_KEY]: effectiveLocation }, null, 2));
+        const hinted = await settingsWait(
+          (doc) => doc.querySelector('#settings-panel-general [data-hint="workspace"]') !== null,
+          null,
+          20_000,
+        );
+        check(hinted === true, 'a workspace value of chatLocation shows the workspace hint');
+
+        // --- L1-L5: three widths x four themes --------------------------------------------------
+        for (const [label, target] of WIDTHS) {
+          const measured = await fitSettingsTab(target);
+          const widthOk = Math.abs(measured - target) <= 60;
+          check(
+            widthOk,
+            `the Settings tab is ${String(measured)} px wide for the ${label} px cells (within 60 px of ${String(target)})`,
+          );
+          if (!widthOk) settingsUnverified.push(`step 53 width ${label}`);
+          for (const [themeName, theme] of PROBLEM_THEMES) {
+            await setSettingsTheme(theme);
+            for (const [section, spec] of Object.entries(SECTION_SPECS)) {
+              const shown = await showSection(section);
+              const layout = await settingsWeb.inDoc(settingsLayout);
+              const cell = await settingsWeb.inDoc(measureCell, {
+                section,
+                counts: spec.counts,
+                insideSel:
+                  '.link-row, .settings-hint, button, .mods-row, select, .mods-footer, .mods-off',
+              });
+              const scoped = spec.text;
+              const contrast = contrastVerdict(
+                await settingsWeb.inDoc(measureText, scoped),
+                Object.keys(scoped).filter((name) => name !== '__base'),
+              );
+              const countsOk = Object.entries(spec.expect).every(
+                ([name, want]) => cell.counts[name] === want,
+              );
+              const switchesOk = cell.switches.every(
+                (item) => item.edge >= 3 && item.thumb !== null && item.thumb >= 3,
+              );
+              const cellName = { general: 'L1', mods: 'L2', workMode: 'L3', advanced: 'L4' }[
+                section
+              ];
+              check(
+                shown === true &&
+                  cell.found &&
+                  cell.inside &&
+                  countsOk &&
+                  switchesOk &&
+                  layout.overflow <= 0 &&
+                  layout.styled === 0 &&
+                  contrast.ok,
+                `${cellName} ${section} at ${label} px (tab ${String(measured)}), ${themeName}: every row and control inside the document (${String(cell.inside)}), counts ${JSON.stringify(cell.counts)} (expected ${JSON.stringify(spec.expect)}), switches ${cell.switches.map((item) => `edge ${item.edge.toFixed(2)} thumb ${item.thumb === null ? 'none' : item.thumb.toFixed(2)}`).join(' / ') || 'none'} (each >= 3), no sideways overflow (${String(layout.overflow)} px${layout.overflow > 0 ? ` ${JSON.stringify(layout.widest)}` : ''}), no style attribute (${String(layout.styled)}), ${contrast.text}`,
+              );
+              if (theme === DARK && (section === 'general' || section === 'mods')) {
+                await shot(`53-${section}-${label}`);
+              }
+            }
+            if (label !== '660') {
+              const badge = await settingsWeb.inDoc((doc) => ({
+                text: doc.querySelector('#settings-tab-mods .settings-badge')?.textContent ?? null,
+                tone: doc.querySelector('#settings-tab-mods .settings-badge')?.dataset.tone ?? null,
+                orientation: doc.querySelector('.settings-nav')?.getAttribute('aria-orientation'),
+              }));
+              const badgeContrast = contrastVerdict(
+                await settingsWeb.inDoc(measureText, {
+                  ...SETTINGS_BASE,
+                  badge: '#settings-tab-mods .settings-badge',
+                }),
+                ['badge'],
+              );
+              check(
+                badge.text === '1' &&
+                  badge.tone === 'neutral' &&
+                  badge.orientation === (label === '1080' ? 'vertical' : 'horizontal') &&
+                  badgeContrast.ok,
+                `L5 the navigation at ${label} px, ${themeName}: the Mods tab carries the number ${JSON.stringify(badge.text)} (one active mod, tone ${String(badge.tone)}, ${String(badge.orientation)} navigation), ${badgeContrast.text}`,
+              );
+            }
+          }
+          await setSettingsTheme(DARK);
+        }
+        assertNoSettingsErrors('step 53 matrix');
+
+        // --- Behaviour, 660 px, dark, real mouse -----------------------------------------------
+        await fitSettingsTab(660);
+        await setSettingsTheme(DARK);
+        await showSection('mods');
+        const offBefore = switchedLines(QUIET, 'off');
+        const onBefore = switchedLines(QUIET, 'on');
+        check(await settingsClick(modsSwitch(QUIET)), 'B1: the switch of quiet is pressed');
+        const quietOff = await waitChecked(modsSwitch(QUIET), 'false');
+        const offLogged = await waitFor(() => switchedLines(QUIET, 'off') > offBefore, 15_000, 200);
+        const badgeOff = await settingsWait(
+          (doc) => doc.querySelector('#settings-tab-mods .settings-badge') === null,
+          null,
+          10_000,
+        );
+        check(
+          quietOff === true && offLogged === true && badgeOff === true,
+          `B1 the switch of quiet turns it off: aria-checked false, the host logged "mod quiet switched off in this workspace" and the badge of Mods is gone (${JSON.stringify(await badgeText())})`,
+        );
+        check(await settingsClick(modsSwitch(QUIET)), 'B1: the switch of quiet is pressed again');
+        const quietOn = await waitChecked(modsSwitch(QUIET), 'true');
+        const onLogged = await waitFor(() => switchedLines(QUIET, 'on') > onBefore, 15_000, 200);
+        const badgeOn = await settingsWait(
+          (doc) => doc.querySelector('#settings-tab-mods .settings-badge')?.textContent === '1',
+          null,
+          15_000,
+        );
+        check(
+          quietOn === true && onLogged === true && badgeOn === true,
+          `B1 pressed again, quiet is on again: aria-checked true, "mod quiet switched on in this workspace" logged and the badge says ${JSON.stringify(await badgeText())}`,
+        );
+        await shot('53-quiet-switched');
+
+        await showSection('general');
+        check(
+          await settingsClick('#settings-panel-general button[role="switch"]'),
+          'B2: the switch of the automatic start is pressed',
+        );
+        const autoOff = await waitFor(async () => userSetting(AUTO_KEY) === false, 10_000, 200);
+        const autoFollows = await waitChecked(
+          '#settings-panel-general button[role="switch"]',
+          'false',
+          10_000,
+        );
+        check(
+          autoOff === true && autoFollows === true,
+          `B2 the switch of the automatic start writes ${AUTO_KEY} false in the user settings (${JSON.stringify(userSetting(AUTO_KEY))}) and the switch follows the state (aria-checked false: ${String(autoFollows)})`,
+        );
+        check(
+          await settingsClick('#settings-panel-general button[role="switch"]'),
+          'B2: the switch is pressed again',
+        );
+        const autoBack = await waitFor(async () => userSetting(AUTO_KEY) !== false, 10_000, 200);
+        const autoBackFollows = await waitChecked(
+          '#settings-panel-general button[role="switch"]',
+          'true',
+          10_000,
+        );
+        check(
+          autoBack === true && autoBackFollows === true,
+          `B2 pressed again, the setting is ${JSON.stringify(userSetting(AUTO_KEY))} and the switch reads on`,
+        );
+
+        // B4 first (still in General): the failed mod is listed and its jump focuses its row.
+        check(
+          await settingsClick('.attention-item[data-kind="modFailed"]'),
+          'B4: the failed mod of "Needs attention" is pressed with the mouse',
+        );
+        const jumped = await settingsWait(
+          (doc) =>
+            doc.querySelector('#settings-panel-mods')?.hidden === false &&
+            doc.activeElement?.getAttribute('data-mod-id') === 'throws',
+          null,
+          5_000,
+        );
+        check(
+          jumped === true,
+          'B4 "Needs attention" lists the mod throws and its jump focuses its row',
+        );
+
+        await showSection('advanced');
+        await command('Notifications: Clear All Notifications');
+        check(
+          await settingsClick('#settings-panel-advanced button', 'Forget password'),
+          'B3: "Forget password" is pressed',
+        );
+        const toast = await waitFor(
+          async () =>
+            (await page.locator('.notifications-toasts .notification-toast').allInnerTexts()).some(
+              (text) => /there was no stored server password/i.test(text),
+            ),
+          10_000,
+          200,
+        );
+        check(
+          toast === true,
+          'B3 "Forget password" raises the toast "there was no stored server password"',
+        );
+        await command('Notifications: Clear All Notifications');
+
+        // B5: the global switch off: the note shows and the switches are aria-disabled.
+        await showSection('mods');
+        writeSettings(vscode.userDataDir, { [MODS_KEY]: false });
+        const off = await settingsWait(
+          (doc) =>
+            doc.querySelector('#settings-panel-mods .mods-off') !== null &&
+            [...doc.querySelectorAll('#settings-panel-mods button[role="switch"]')].every(
+              (button) => button.getAttribute('aria-disabled') === 'true',
+            ),
+          null,
+          20_000,
+        );
+        const offLoggedBefore = switchedLines(QUIET, 'off');
+        await settingsClick(modsSwitch(QUIET));
+        // negative window: the press on an aria-disabled switch must not make the host switch the
+        // mod; the positive barrier is the `off` wait above (note shown, switches aria-disabled).
+        await sleep(1_000);
+        check(
+          off === true && switchedLines(QUIET, 'off') === offLoggedBefore,
+          'B5 with openVsCode.mods.enabled off Mods shows the note, its switches are aria-disabled and pressing one switches nothing',
+        );
+        await shot('53-mods-off');
+        writeSettings(vscode.userDataDir, { [MODS_KEY]: undefined });
+        const backOn = await settingsWait(
+          (doc) =>
+            doc.querySelector('#settings-panel-mods .mods-off') === null &&
+            doc
+              .querySelector('#settings-panel-mods [data-mod-id="quiet"] button[role="switch"]')
+              ?.getAttribute('aria-checked') === 'true',
+          null,
+          20_000,
+        );
+        check(backOn === true, 'B5 with the setting back, the note is gone and quiet reads on');
+        assertNoSettingsErrors('step 53');
+        assertNoWebviewErrors('step 53');
+      } finally {
+        // Leave the run as found: the user settings without our two keys, the workspace file only if
+        // the step made it, quiet back on (best effort), the fixtures and the skipped folder gone.
+        writeSettings(vscode.userDataDir, { [AUTO_KEY]: undefined, [MODS_KEY]: undefined });
+        if (previousWorkspaceFile !== null) fs.writeFileSync(workspaceFile, previousWorkspaceFile);
+        else fs.rmSync(workspaceFile, { force: true });
+        if (!hadVscodeDir) {
+          try {
+            fs.rmdirSync(vscodeDir);
+          } catch {
+            // not empty: something else put a file there, which is not ours to remove
+          }
+        }
+        if ((await checkedOf(modsSwitch(QUIET)).catch(() => null)) === 'false') {
+          await settingsClick(modsSwitch(QUIET)).catch(() => undefined);
+        }
+        for (const id of [QUIET, THROWS]) removeModFixture(vscode.modsHome, id);
+        fs.rmSync(path.join(vscode.modsHome, SKIPPED_FOLDER), { recursive: true, force: true });
+        await command('OpenCode: Reload Mods').catch(() => undefined);
+        await endSettingsStep(originalWidth);
+      }
+    },
+  );
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
