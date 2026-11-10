@@ -40,6 +40,20 @@ describe('isSettingsWebviewToHost', () => {
       { type: 'settings.action', action: 'logs' },
       { type: 'settings.action', action: 'extensionSettings' },
       { type: 'settings.action', action: 'restart' },
+      ...[
+        'reloadMods',
+        'openModsFolder',
+        'setServerPassword',
+        'clearServerPassword',
+        'managePermissions',
+        'forgetPluginDecision',
+        'openChat',
+      ].map((action) => ({ type: 'settings.action', action })),
+      { type: 'settings.setSetting', key: 'chatLocation', value: 'editor' },
+      { type: 'settings.setSetting', key: 'chatLocation', value: 'sidebar' },
+      { type: 'settings.setSetting', key: 'autoStart', value: true },
+      { type: 'settings.setSetting', key: 'autoStart', value: false },
+      { type: 'settings.modToggle', modId: 'hello-station', enabled: false },
       { type: 'settings.setDefaultModel', model: 'anthropic/claude-sonnet' },
       { type: 'settings.setDefaultModel', model: '' },
       ...SETTING_KEYS.map((key) => ({ type: 'settings.openSetting', key })),
@@ -48,6 +62,45 @@ describe('isSettingsWebviewToHost', () => {
       { type: 'settings.mcpSignIn', server: 'linear' },
     ];
     for (const message of valid) expect(isSettingsWebviewToHost(message)).toBe(true);
+  });
+
+  /**
+   * Protects PR3 of issue #186: `settings.setSetting` takes exactly the two pairs the General
+   * section writes, `settings.modToggle` a mod id of the manifest's shape and a boolean, and
+   * `settings.action` only the closed list (never `toggleWorkMode`, never a free command id).
+   * Fabricated messages (this proves our validator, not what a real webview posts).
+   */
+  it('takes only the General pairs, a well-formed mod toggle and the closed list of actions', () => {
+    const bad: unknown[] = [
+      { type: 'settings.setSetting' },
+      { type: 'settings.setSetting', key: 'chatLocation', value: true },
+      { type: 'settings.setSetting', key: 'chatLocation', value: 'panel' },
+      { type: 'settings.setSetting', key: 'autoStart', value: 'yes' },
+      { type: 'settings.setSetting', key: 'autoStart', value: 1 },
+      ...['opencodePath', 'serverUrl', 'mods.enabled', 'defaultModel'].map((key) => ({
+        type: 'settings.setSetting',
+        key,
+        value: 'x',
+      })),
+      { type: 'settings.setSetting', key: 'autoStart', value: true, apiKey: 'k' },
+      { type: 'settings.setSetting', key: 'autoStart', value: true, secret: 's' },
+      { type: 'settings.modToggle', modId: 'quiet' },
+      { type: 'settings.modToggle', enabled: true },
+      { type: 'settings.modToggle', modId: '..', enabled: true },
+      { type: 'settings.modToggle', modId: '../x', enabled: true },
+      { type: 'settings.modToggle', modId: 'Quiet', enabled: true },
+      { type: 'settings.modToggle', modId: 'a'.repeat(65), enabled: true },
+      { type: 'settings.modToggle', modId: 'quiet', enabled: 'true' },
+      { type: 'settings.modToggle', modId: 'quiet', enabled: true, key: 'x' },
+      { type: 'settings.action', action: 'toggleWorkMode' },
+      { type: 'settings.action', action: 'workbench.action.openSettings' },
+      { type: 'settings.action', action: 'openVsCode.toggleWorkMode' },
+    ];
+    for (const message of bad)
+      expect(isSettingsWebviewToHost(message), JSON.stringify(message)).toBe(false);
+    expect(
+      isSettingsWebviewToHost({ type: 'settings.modToggle', modId: 'a'.repeat(64), enabled: true }),
+    ).toBe(true);
   });
 
   /**

@@ -1,10 +1,11 @@
 import * as l10n from '@vscode/l10n';
-import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
+import { createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { plural } from '../../../src/shared/l10n';
-import type { ModEntry, ModsListing } from '../../../src/shared/model';
+import type { ModsListing } from '../../../src/shared/model';
 import type { ModsAction } from '../../../src/shared/protocol';
 import { PuzzleIcon } from '../chat/icons';
 import { dismissOutside } from '../selectors/dismissOutside';
+import { createModsBusy, ModsRows } from './ModsRows';
 
 /** `id` of the dialog, referenced by the `aria-controls` of the button. One prompt per document. */
 const DIALOG_ID = 'mods-menu';
@@ -16,47 +17,17 @@ const HEADING_ID = 'mods-menu-heading';
 const TRIGGER_SELECTOR = '[data-mods-trigger]';
 
 /**
- * How long a row stays `aria-busy` waiting for the `mods.state` that answers its switch. Our
- * choice, not measured: a failure of the host (`notice`, e.g. the list could not be saved) sends no
- * `mods.state`, so without a limit the row would stay blocked for good. The host publishes the new
- * listing right after it saved the list, BEFORE it stops or starts the Worker, so the normal wait
- * is short; what can stretch it is a load or another toggle queued ahead in the host. 5 s covers a
- * normal queue and is short enough that a retry is not a long wait. There is one timer for the
- * whole popover: pressing a second switch restarts the limit of the first (harmless).
- */
-const BUSY_LIMIT_MS = 5000;
-
-/** True when the switch of `mod` reads "on": everything but the ones the user turned off. */
-function isOn(mod: ModEntry): boolean {
-  return mod.state !== 'disabled';
-}
-
-/**
- * The ids a switch is described by: the mod's description and its state line (starting, the error
- * of a failed mod), each only when it is drawn, so a screen reader reads them with the switch.
- */
-function describedBy(mod: ModEntry): string | undefined {
-  const ids = [
-    mod.description ? `mods-desc-${mod.id}` : undefined,
-    stateLine(mod) !== undefined ? `mods-state-${mod.id}` : undefined,
-  ].filter((id) => id !== undefined);
-  return ids.length > 0 ? ids.join(' ') : undefined;
-}
-
-/** The state line under a mod's description, or `undefined` when there is nothing to add. */
-function stateLine(mod: ModEntry): string | undefined {
-  if (mod.state === 'starting') return l10n.t('Starting…');
-  if (mod.state === 'failed') return mod.error ?? l10n.t('Could not start');
-  return undefined;
-}
-
-/**
  * The mods button of the prompt bar (a puzzle piece and a count of the active mods) and its
  * popover with one switch per mod (E10-mod-toggles, issue #181, design A of Sergio). The host owns
  * the list: this component only shows `listing` and calls `onToggle` / `onAction` (the parent posts
  * `mod.toggle` / `mods.action`), so a click never assumes its own outcome: the switch changes when
  * the next `mods.state` arrives, and meanwhile its row is `aria-busy` and the switch `aria-disabled`
- * (at most {@link BUSY_LIMIT_MS}, in case the host answers with a `notice` only).
+ * (at most `BUSY_LIMIT_MS` of `ModsRows.tsx`, in case the host answers with a `notice` only).
+ *
+ * Since PR3 of issue #186 the rows, the "mods are off" note, the skipped folders, the footer and the
+ * busy marks live in `ModsRows.tsx` (`ModsRows`, `createModsBusy`), which the Settings tab also
+ * uses, so both places have ONE semantics for the switch; this component keeps the button, the
+ * dialog, its header with "Open folder", the focus and the closing rules.
  *
  * It renders nothing when the listing has no mod and no skipped folder (decision C1). The button
  * is `aria-haspopup="dialog"`, not a menu: the popover holds switches with a description and two
@@ -77,6 +48,12 @@ function stateLine(mod: ModEntry): string | undefined {
  * openVsCode.mods.enabled off the popover lists the mods with aria-disabled switches" and the
  * matrix cells (6 components x wide, 300 px and under 200 px x the four themes), e.g. "row with the
  * switch off at 300 (bar 300 px), hc-light: inside the view, no sideways overflow, text whole".
+ * That run was BEFORE the extraction of `ModsRows`. VERIFIED again through it on the final tree
+ * (Windows 11, VS Code 1.145.3, 10/11/2026, `test:visual` step 45): "ok   a click opens the popover
+ * with the focus on the first switch (hello-station), three mod rows and the skipped folder (focus
+ * on "hello-station", rows [["hello-station","true"],["quiet","true"],["throws","true"]])" and "ok
+ * Escape with the popover open closes it and does NOT stop the running turn (open false, busy
+ * true)" (the full run's only FAIL was in step 25, unrelated).
  * The off switch first drew its outline in `--vscode-checkbox-border` and measured 1.57:1 in
  * Default Light Modern (see `index.css`). The keyboard path (Tab to a switch, then Space) is NOT
  * cited as verified: step 45 failed on it three times, never reproduced on demand. (1) The popover
@@ -105,10 +82,9 @@ export function ModsMenu(props: {
   onCloseReady?(close: () => void): void;
 }) {
   const [open, setOpen] = createSignal(false);
-  const [busy, setBusy] = createSignal<ReadonlySet<string>>(new Set());
+  const busy = createModsBusy(() => props.listing);
   let trigger: HTMLButtonElement | undefined;
   let dialog: HTMLDivElement | undefined;
-  let busyTimer: ReturnType<typeof setTimeout> | undefined;
   props.onCloseReady?.(() => {
     setOpen(false);
   });
@@ -138,22 +114,6 @@ export function ModsMenu(props: {
     dialog?.querySelector<HTMLElement>('button[role="switch"]') ??
     dialog?.querySelector<HTMLElement>('button');
 
-  const clearBusy = (): void => {
-    if (busyTimer !== undefined) clearTimeout(busyTimer);
-    busyTimer = undefined;
-    setBusy(new Set<string>());
-  };
-  // Any change of the listing is the host's answer: unblock the rows (a state we did not ask for
-  // also ends the wait, which is harmless: the next click is simply allowed).
-  createEffect(
-    on(() => props.listing.mods.map((mod) => `${mod.id}:${mod.state}`).join('|'), clearBusy, {
-      defer: true,
-    }),
-  );
-  onCleanup(() => {
-    if (busyTimer !== undefined) clearTimeout(busyTimer);
-  });
-
   /** Closes the popover; `restoreFocus` puts the focus back on the button. */
   const close = (restoreFocus: boolean): void => {
     setOpen(false);
@@ -163,14 +123,6 @@ export function ModsMenu(props: {
   const openDialog = (): void => {
     setOpen(true);
     firstFocusable()?.focus();
-  };
-
-  const toggle = (mod: ModEntry): void => {
-    if (!props.listing.enabled || busy().has(mod.id)) return;
-    setBusy(new Set([...busy(), mod.id]));
-    if (busyTimer !== undefined) clearTimeout(busyTimer);
-    busyTimer = setTimeout(clearBusy, BUSY_LIMIT_MS);
-    props.onToggle(mod.id, !isOn(mod));
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
@@ -260,80 +212,16 @@ export function ModsMenu(props: {
                 {l10n.t('Open folder')}
               </button>
             </div>
-            <Show when={!props.listing.enabled}>
-              <div class="mods-off" role="note">
-                <span>
-                  {l10n.t('Mods are turned off. Turn them on in the settings to use the switches.')}
-                </span>
-                <button
-                  type="button"
-                  class="mods-link"
-                  onClick={() => {
-                    props.onAction('openSettings');
-                  }}
-                >
-                  {l10n.t('Open Settings')}
-                </button>
-              </div>
-            </Show>
-            <For each={props.listing.mods}>
-              {(mod) => (
-                <div
-                  class="mods-row"
-                  data-mod-id={mod.id}
-                  aria-busy={busy().has(mod.id) ? 'true' : undefined}
-                >
-                  <div class="mods-text">
-                    <span class="mods-name">
-                      {mod.name} <span class="mods-version">{mod.version}</span>
-                    </span>
-                    <Show when={mod.description}>
-                      <span class="mods-description" id={`mods-desc-${mod.id}`}>
-                        {mod.description}
-                      </span>
-                    </Show>
-                    <Show when={stateLine(mod)}>
-                      {(line) => (
-                        <span class="mods-state" id={`mods-state-${mod.id}`} data-state={mod.state}>
-                          {line()}
-                        </span>
-                      )}
-                    </Show>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    class="mods-switch"
-                    aria-label={mod.name}
-                    aria-describedby={describedBy(mod)}
-                    aria-checked={isOn(mod)}
-                    aria-disabled={
-                      !props.listing.enabled || busy().has(mod.id) ? 'true' : undefined
-                    }
-                    onClick={() => {
-                      toggle(mod);
-                    }}
-                  />
-                </div>
-              )}
-            </For>
-            <For each={props.listing.skipped}>
-              {(skipped) => (
-                <div class="mods-row mods-skipped" data-skipped={skipped.folder}>
-                  <div class="mods-text">
-                    <span class="mods-name">{skipped.folder}</span>
-                    <span class="mods-state" data-state="skipped">
-                      {l10n.t('Skipped: {0}', skipped.reason)}
-                    </span>
-                  </div>
-                </div>
-              )}
-            </For>
-            <p class="mods-footer">
-              {props.listing.persisted
-                ? l10n.t('Each switch starts or stops only that mod. Saved for this workspace.')
-                : l10n.t('No folder open: these choices last until you close this window')}
-            </p>
+            <ModsRows
+              listing={props.listing}
+              busy={busy}
+              onToggle={(modId, enabled) => {
+                props.onToggle(modId, enabled);
+              }}
+              onOpenSettings={() => {
+                props.onAction('openSettings');
+              }}
+            />
           </div>
         </Show>
       </div>

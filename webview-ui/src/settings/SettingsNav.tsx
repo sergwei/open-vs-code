@@ -14,13 +14,29 @@ export interface NavBadge {
 /**
  * The badges of the navigation (issue #186): Providers shows how many are connected (neutral) and
  * MCP servers how many need attention (warning); both only when above zero. `connected` is
- * `undefined` until the providers were read, so no "0" is invented while loading.
+ * `undefined` until the providers were read, so no "0" is invented while loading. PR3 adds Mods
+ * with `activeMods`, the number of mods in the state `active` (the same "N active" as the button
+ * of the chat), neutral and only above zero; it is `undefined`/absent when the host sent no mods.
+ * VERIFIED by "puts a number in the navigation: connected providers, MCP servers needing
+ * attention and active mods" of `SettingsApp.test.tsx` (fabricated state, spoken text included).
  */
 export function navBadges(input: {
   connected: number | undefined;
   mcpAttention: number;
+  activeMods?: number;
 }): Partial<Record<SettingsSection, NavBadge>> {
   const badges: Partial<Record<SettingsSection, NavBadge>> = {};
+  if (input.activeMods !== undefined && input.activeMods > 0) {
+    badges.mods = {
+      count: input.activeMods,
+      tone: 'neutral',
+      spoken: plural(
+        input.activeMods,
+        l10n.t('{0} mod active', input.activeMods),
+        l10n.t('{0} mods active', input.activeMods),
+      ),
+    };
+  }
   if (input.connected !== undefined && input.connected > 0) {
     badges.providers = {
       count: input.connected,

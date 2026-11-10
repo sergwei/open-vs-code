@@ -7,13 +7,17 @@
 // `providerAuth.ts`. They prove the controller's validation and coalescing, not a real panel
 // (the `fake-server` suite drives the same controller through `test.settingsMessage`; `test:visual`
 // step 36 drives it with real DOM `postMessage` clicks, see the header of `SettingsController`).
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { ProviderAuth, type AuthResult, type AuthUi, type ProviderAuthApi } from './providerAuth';
 import {
+  SETTINGS_ACTION_COMMANDS,
   SettingsController,
   type SettingsAuth,
   type SettingsConfigSource,
   type SettingsControllerDeps,
+  type SettingsGeneralSource,
+  type SettingsMods,
 } from './settingsController';
 import type {
   IntegrationRow,
@@ -21,7 +25,14 @@ import type {
   McpServerRow,
   ServerConfigSnapshot,
 } from './serverConfig';
-import type { AuthAttemptView, SettingsHostToWebview } from '../shared/settingsProtocol';
+import type { ModsListing } from '../shared/model';
+import {
+  SETTINGS_ACTIONS,
+  type AuthAttemptView,
+  type SettingsGeneral,
+  type SettingsHostToWebview,
+  type SettingsWritableKey,
+} from '../shared/settingsProtocol';
 
 const PLANTED_KEY = 'sk-planted-key-777';
 
@@ -91,9 +102,30 @@ function setup(
     workspaceOverride: false,
   },
   initialServers: McpServerRow[] = [],
+  mods?: SettingsMods,
 ) {
   let servers = initialServers;
   let preference = initialPreference;
+  let general: SettingsGeneral = {
+    chatLocation: { value: 'editor', workspaceOverride: false },
+    autoStart: { value: true, workspaceOverride: false },
+  };
+  const generalSource = {
+    read: vi.fn(() => general),
+    write: vi.fn((key: SettingsWritableKey, value: string | boolean) => {
+      general =
+        key === 'chatLocation'
+          ? {
+              ...general,
+              chatLocation: {
+                ...general.chatLocation,
+                value: value === 'sidebar' ? 'sidebar' : 'editor',
+              },
+            }
+          : { ...general, autoStart: { ...general.autoStart, value: value === true } };
+      return Promise.resolve();
+    }),
+  } satisfies SettingsGeneralSource;
   const preferences = {
     read: vi.fn(() => preference),
     write: vi.fn((value: string | undefined) => {
@@ -143,6 +175,8 @@ function setup(
     config,
     auth,
     preferences,
+    general: generalSource,
+    ...(mods === undefined ? {} : { mods }),
     openSetting,
     post: (message) => posted.push(message),
     header: () => ({
@@ -161,6 +195,10 @@ function setup(
     config,
     auth,
     preferences,
+    generalSource,
+    setGeneral: (next: SettingsGeneral) => {
+      general = next;
+    },
     openSetting,
     runAction,
     log,
@@ -404,6 +442,7 @@ describe('SettingsController with the real ProviderAuth', () => {
       config: t.config,
       auth,
       preferences: t.preferences,
+      general: t.generalSource,
       openSetting: t.openSetting,
       post: () => undefined,
       header: () => ({ connection: { state: 'starting' }, folder: 'work' }),
@@ -861,5 +900,198 @@ describe('SettingsController MCP requests', () => {
     const t = withServers();
     await t.controller.onMessage({ type: 'settings.ready' });
     expect(stateOf(t)?.providers.rows.some((row) => row.id.startsWith('mcp_'))).toBe(false);
+  });
+});
+
+/** A fabricated mods half: a listing that tests replace, and the change listeners it fires. */
+function makeMods(listing: ModsListing) {
+  const listeners = new Set<() => void>();
+  const toggle = vi.fn((_modId: string, _enabled: boolean): Promise<void> => Promise.resolve());
+  const mods: SettingsMods = {
+    state: () => ({ bands: [], commands: [], listing }),
+    toggle,
+    onDidChange: (listener) => {
+      listeners.add(listener);
+      return { dispose: () => listeners.delete(listener) };
+    },
+  };
+  return {
+    mods,
+    toggle,
+    listeners,
+    fire: () => listeners.forEach((listener) => listener()),
+  };
+}
+
+const LISTING: ModsListing = {
+  enabled: true,
+  persisted: true,
+  mods: [{ id: 'quiet', name: 'Quiet', version: '1.0.0', enabled: true, state: 'active' }],
+  skipped: [],
+};
+
+// Protects PR3 of issue #186: the General settings and the mods listing travel in the state, a
+// write of `chatLocation` or `autoStart` happens ONCE and never keeps a value the setting does not
+// hold, a mod switch goes through the same `toggle` as the chat's `mod.toggle`, and a refusal tells
+// the webview without ever logging text of the mod or the value. FABRICATED `general` and mods half.
+describe('SettingsController general settings and mods', () => {
+  const noPreference = { value: '', workspaceOverride: false };
+
+  it('carries general in the state, and mods only when a mods half was given', () => {
+    const without = setup();
+    expect(without.controller.buildState().general).toEqual({
+      chatLocation: { value: 'editor', workspaceOverride: false },
+      autoStart: { value: true, workspaceOverride: false },
+    });
+    expect('mods' in without.controller.buildState()).toBe(false);
+    const m = makeMods(LISTING);
+    const withMods = setup(ROWS, MODELS, noPreference, [], m.mods);
+    withMods.setGeneral({
+      chatLocation: { value: 'sidebar', workspaceOverride: true },
+      autoStart: { value: false, workspaceOverride: false },
+    });
+    const state = withMods.controller.buildState();
+    expect(state.general.chatLocation).toEqual({ value: 'sidebar', workspaceOverride: true });
+    expect(state.mods).toEqual(LISTING);
+  });
+
+  it('writes the user setting once and asks for a fresh state', async () => {
+    const t = setup();
+    t.controller.onReady();
+    t.posted.length = 0;
+    await t.controller.onMessage({
+      type: 'settings.setSetting',
+      key: 'chatLocation',
+      value: 'sidebar',
+    });
+    await t.controller.onMessage({ type: 'settings.setSetting', key: 'autoStart', value: false });
+    expect(t.generalSource.write.mock.calls).toEqual([
+      ['chatLocation', 'sidebar'],
+      ['autoStart', false],
+    ]);
+    await Promise.resolve();
+    // One state per write (the two requests were awaited one after the other, so their
+    // microtasks did not coalesce).
+    expect(states(t.posted)).toHaveLength(2);
+    expect(t.controller.buildState().general).toEqual({
+      chatLocation: { value: 'sidebar', workspaceOverride: false },
+      autoStart: { value: false, workspaceOverride: false },
+    });
+    expect(notices(t.posted)).toEqual([]);
+  });
+
+  it('refuses a key or a value outside the pair and writes nothing', async () => {
+    const t = setup();
+    for (const bad of [
+      { type: 'settings.setSetting', key: 'opencodePath', value: 'x' },
+      { type: 'settings.setSetting', key: 'chatLocation', value: true },
+      { type: 'settings.setSetting', key: 'autoStart', value: 'yes' },
+    ]) {
+      await t.controller.onMessage(bad);
+    }
+    expect(t.generalSource.write).not.toHaveBeenCalled();
+    expect(t.log.warn).toHaveBeenCalledTimes(3);
+  });
+
+  it('tells the webview when the write throws, without the value', async () => {
+    const t = setup();
+    t.controller.onReady();
+    t.posted.length = 0;
+    t.generalSource.write.mockRejectedValueOnce(new TypeError('cannot write sidebar'));
+    await t.controller.onMessage({
+      type: 'settings.setSetting',
+      key: 'chatLocation',
+      value: 'sidebar',
+    });
+    await Promise.resolve();
+    expect(t.log.warn).toHaveBeenCalledWith(
+      'settings request failed: settings.setSetting: TypeError',
+    );
+    expect(JSON.stringify(t.log.warn.mock.calls)).not.toContain('sidebar');
+    expect(notices(t.posted)).toMatchObject([{ kind: 'settingFailed' }]);
+    expect(states(t.posted)).toHaveLength(1);
+  });
+
+  it('switches a mod through the mods half and says nothing on success', async () => {
+    const m = makeMods(LISTING);
+    const t = setup(ROWS, MODELS, noPreference, [], m.mods);
+    t.controller.onReady();
+    t.posted.length = 0;
+    await t.controller.onMessage({ type: 'settings.modToggle', modId: 'quiet', enabled: false });
+    expect(m.toggle).toHaveBeenCalledExactlyOnceWith('quiet', false);
+    expect(notices(t.posted)).toEqual([]);
+    // The state comes from the mods half's own change event, coalesced.
+    m.fire();
+    m.fire();
+    await Promise.resolve();
+    expect(states(t.posted)).toHaveLength(1);
+  });
+
+  it('refuses a mod the discovery does not know with a notice and a log without text of the mod', async () => {
+    const m = makeMods(LISTING);
+    m.toggle.mockRejectedValueOnce(new RangeError('no such mod: secret-mod-text'));
+    const t = setup(ROWS, MODELS, noPreference, [], m.mods);
+    t.controller.onReady();
+    t.posted.length = 0;
+    await t.controller.onMessage({ type: 'settings.modToggle', modId: 'ghost', enabled: true });
+    await Promise.resolve();
+    expect(t.log.warn).toHaveBeenCalledWith(
+      'settings request failed: settings.modToggle: RangeError',
+    );
+    expect(JSON.stringify(t.log.warn.mock.calls)).not.toContain('secret-mod-text');
+    expect(notices(t.posted)).toEqual([
+      { integrationID: '', kind: 'modFailed', message: 'The mod could not be switched' },
+    ]);
+    expect(states(t.posted)).toHaveLength(1);
+  });
+
+  it('answers a notice when there is no mods half', async () => {
+    const t = setup();
+    await t.controller.onMessage({ type: 'settings.modToggle', modId: 'quiet', enabled: false });
+    expect(notices(t.posted)).toEqual([
+      { integrationID: '', kind: 'modFailed', message: 'Mods are not available' },
+    ]);
+  });
+
+  it('drops a bad mod id or extra field before the mods half hears of it', async () => {
+    const m = makeMods(LISTING);
+    const t = setup(ROWS, MODELS, noPreference, [], m.mods);
+    for (const bad of [
+      { type: 'settings.modToggle', modId: '../x', enabled: true },
+      { type: 'settings.modToggle', modId: 'Quiet', enabled: true },
+      { type: 'settings.modToggle', modId: 'quiet', enabled: 'yes' },
+      { type: 'settings.modToggle', modId: 'quiet', enabled: true, key: 'k' },
+    ]) {
+      await t.controller.onMessage(bad);
+    }
+    expect(m.toggle).not.toHaveBeenCalled();
+  });
+
+  it('stops listening to the mods half when disposed', () => {
+    const m = makeMods(LISTING);
+    const t = setup(ROWS, MODELS, noPreference, [], m.mods);
+    expect(m.listeners.size).toBe(1);
+    t.controller.dispose();
+    expect(m.listeners.size).toBe(0);
+  });
+});
+
+describe('SETTINGS_ACTION_COMMANDS', () => {
+  const manifest = JSON.parse(
+    readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+  ) as { contributes: { commands: { command: string }[] } };
+  const contributed = new Set(manifest.contributes.commands.map((command) => command.command));
+
+  // Protects: an action of the closed list that points at a command package.json does not
+  // contribute would do nothing when pressed. Reads the REAL package.json.
+  it('maps every action to a contributed command, and has no entry beyond the list', () => {
+    expect(Object.keys(SETTINGS_ACTION_COMMANDS).sort()).toEqual([...SETTINGS_ACTIONS].sort());
+    for (const action of SETTINGS_ACTIONS) {
+      expect(contributed.has(SETTINGS_ACTION_COMMANDS[action]), action).toBe(true);
+    }
+  });
+
+  it('never maps an action to Toggle Work Mode (decision P2)', () => {
+    expect(Object.values(SETTINGS_ACTION_COMMANDS)).not.toContain('openVsCode.toggleWorkMode');
   });
 });

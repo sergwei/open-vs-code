@@ -32,7 +32,9 @@ export interface SearchEntry {
 }
 
 /** The slice of the store {@link buildSearchIndex} reads. */
-export type SearchInput = Pick<SettingsStoreState, 'providers' | 'models' | 'mcp'>;
+export type SearchInput = Pick<SettingsStoreState, 'providers' | 'models' | 'mcp'> & {
+  mods?: SettingsStoreState['mods'];
+};
 
 /** The label of each section, in the interface language. */
 export function sectionLabels(): Record<SettingsSection, string> {
@@ -70,8 +72,10 @@ export function normalize(text: string): string {
 /**
  * Builds the entries from the state of the tab: the sections, the providers (connected or not), the
  * models, the MCP servers, the native settings (found by label or by their `openVsCode.<key>`) and
- * the two actions the footer has (Restart, Show logs). Mods arrive with the data of PR3. The order
- * is the order of the ties of {@link searchEntries}.
+ * the mods (one jump each, to its row by `data-mod-id`; none when the host sent no mods) and the
+ * actions: Restart server and Show logs, and, since PR3, Reload mods, Open mods folder, Set server
+ * password, Manage saved permissions and Open chat. The order is the order of the ties of
+ * {@link searchEntries}.
  * VERIFIED by `settingsSearch.test.ts` with fabricated states; a real catalog of 238 providers
  * and thousands of models is not measured here (the list is capped at {@link MAX_SEARCH_RESULTS}
  * after ranking, and the index is rebuilt only when the state changes).
@@ -124,6 +128,19 @@ export function buildSearchIndex(input: SearchInput): SearchEntry[] {
       },
     });
   }
+  for (const mod of input.mods?.mods ?? []) {
+    entries.push({
+      id: `mod:${mod.id}`,
+      label: mod.name,
+      detail: l10n.t('Mod'),
+      keywords: mod.id,
+      target: {
+        kind: 'jump',
+        section: 'mods',
+        anchor: { attribute: 'data-mod-id', value: mod.id },
+      },
+    });
+  }
   const settings = settingLabels();
   for (const key of SETTINGS_SETTING_KEYS) {
     entries.push({
@@ -148,6 +165,41 @@ export function buildSearchIndex(input: SearchInput): SearchEntry[] {
       detail: l10n.t('Action'),
       keywords: '',
       target: { kind: 'action', action: 'logs' },
+    },
+    {
+      id: 'action:reloadMods',
+      label: l10n.t('Reload mods'),
+      detail: l10n.t('Action'),
+      keywords: '',
+      target: { kind: 'action', action: 'reloadMods' },
+    },
+    {
+      id: 'action:openModsFolder',
+      label: l10n.t('Open mods folder'),
+      detail: l10n.t('Action'),
+      keywords: '',
+      target: { kind: 'action', action: 'openModsFolder' },
+    },
+    {
+      id: 'action:setServerPassword',
+      label: l10n.t('Set server password'),
+      detail: l10n.t('Action'),
+      keywords: '',
+      target: { kind: 'action', action: 'setServerPassword' },
+    },
+    {
+      id: 'action:managePermissions',
+      label: l10n.t('Manage saved permissions'),
+      detail: l10n.t('Action'),
+      keywords: '',
+      target: { kind: 'action', action: 'managePermissions' },
+    },
+    {
+      id: 'action:openChat',
+      label: l10n.t('Open chat'),
+      detail: l10n.t('Action'),
+      keywords: '',
+      target: { kind: 'action', action: 'openChat' },
     },
   );
   return entries;

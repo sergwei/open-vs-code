@@ -27,6 +27,8 @@ import type { Catalog, ModelRef } from '../shared/model';
 import {
   ADD_SELECTION_TO_CHAT_COMMAND_ID,
   ADD_TO_CHAT_COMMAND_ID,
+  AUTO_START_KEY,
+  AUTO_START_SETTING,
   CHAT_FOCUSED_CONTEXT_KEY,
   CHAT_LOCATION_KEY,
   CHAT_LOCATION_SETTING,
@@ -74,7 +76,7 @@ import { ProviderAuth } from './providerAuth';
 import { createProviderAuthUi, type ProviderTestAnswers } from './providerAuthUi';
 import type { ModsSink } from './modEvents';
 import { ServerConfig, type ServerConfigSink } from './serverConfig';
-import { SettingsController } from './settingsController';
+import { SETTINGS_ACTION_COMMANDS, SettingsController } from './settingsController';
 import { SettingsPanel } from './settingsPanel';
 import { fakeOpenExternal, launchModesOf, testLaunchFrom } from './testLaunch';
 import { createOpencodeClient } from './opencodeClient';
@@ -505,6 +507,16 @@ function warnSessionFailure(action: 'rename' | 'delete' | 'loadMore', error: unk
  * refused a model outside the catalog without writing, and cleared it on `''`. UNVERIFIED: `openSetting`
  * (no test presses a button that sends `settings.openSetting`) and the `workspaceOverride` flag
  * outside `test:visual` step 47 (M1: "a workspace value of the setting shows the workspace hint").
+ * PR3 of issue #186 gives the controller two more dependencies: `general` (reads
+ * `openVsCode.chatLocation` and `openVsCode.autoStart` with their workspace-override flag and
+ * writes the USER value) and `mods` (the `chat` half of the mods sink, so the Settings tab lists
+ * and switches mods through the same `ModsChat.toggle` as the chat), and maps every
+ * `settings.action` through `SETTINGS_ACTION_COMMANDS`. A change of `chatLocation` or `autoStart`
+ * now also calls `settings.changed()`. VERIFIED in a real host (Windows 11, VS Code 1.145.3,
+ * 10/11/2026, `main` integration label, 55 passing, 1 pending): "the Settings tab writes chatLocation
+ * and autoStart to the USER settings, refuses other values and restores" and "switches a mod off and
+ * on from the Settings tab: settings.state follows and only that Worker stops". NOT observed: macOS,
+ * Linux.
  *
  * E10-mods (phase 2): the optional `mods` sink (from `registerMods`) is handed to the controller as
  * its `mods` dependency, which forwards every stream event to it. When absent the controller
@@ -719,13 +731,37 @@ export function registerChat(
       };
     },
     runAction: (action) => {
-      const command = {
-        logs: SHOW_LOGS_COMMAND_ID,
-        extensionSettings: OPEN_SETTINGS_COMMAND_ID,
-        restart: RESTART_SERVER_COMMAND_ID,
-      }[action];
-      void vscode.commands.executeCommand(command);
+      void vscode.commands.executeCommand(SETTINGS_ACTION_COMMANDS[action]);
     },
+    // PR3 of issue #186: chatLocation and autoStart are written in the USER settings, like
+    // defaultModel; `inspect` says whether the workspace or the folder hides the user's value.
+    general: {
+      read: () => {
+        const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+        const overridden = (key: string): boolean => {
+          const inspected = config.inspect<unknown>(key);
+          return (
+            inspected?.workspaceValue !== undefined || inspected?.workspaceFolderValue !== undefined
+          );
+        };
+        return {
+          chatLocation: {
+            value: readChatLocation(config.get<unknown>(CHAT_LOCATION_KEY)),
+            workspaceOverride: overridden(CHAT_LOCATION_KEY),
+          },
+          autoStart: {
+            value: config.get<boolean>(AUTO_START_KEY, true),
+            workspaceOverride: overridden(AUTO_START_KEY),
+          },
+        };
+      },
+      write: async (key, value) => {
+        await vscode.workspace
+          .getConfiguration(CONFIG_SECTION)
+          .update(key, value, vscode.ConfigurationTarget.Global);
+      },
+    },
+    ...(mods?.chat === undefined ? {} : { mods: mods.chat }),
     // Issue #186: the default model of new chats lives in the USER settings (decision P3 of
     // E10-settings-redesign); a value of the workspace or the folder hides it, and `read` says so.
     preferences: {
@@ -1473,6 +1509,13 @@ export function registerChat(
         settings.changed(); // the Models section shows the setting
       }
       if (event.affectsConfiguration(CHAT_LOCATION_SETTING)) applyLocation(readLocation());
+      // The General section shows both settings (PR3 of issue #186).
+      if (
+        event.affectsConfiguration(CHAT_LOCATION_SETTING) ||
+        event.affectsConfiguration(AUTO_START_SETTING)
+      ) {
+        settings.changed();
+      }
     }),
     vscode.commands.registerCommand(OPEN_SETTINGS_COMMAND_ID, async () => {
       await vscode.commands.executeCommand(

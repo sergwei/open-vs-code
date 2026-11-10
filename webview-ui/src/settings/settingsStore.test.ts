@@ -3,7 +3,7 @@
 // same batch are both delivered, in order. Provenance: fabricated messages (see settingsFixtures.ts).
 import { batch, createRoot } from 'solid-js';
 import { describe, expect, it } from 'vitest';
-import { anthropic, azure, makeState, mcpServers } from './settingsFixtures';
+import { anthropic, azure, makeState, mcpServers, modsListing } from './settingsFixtures';
 import { createSettingsStore, noticeText } from './settingsStore';
 
 describe('createSettingsStore', () => {
@@ -186,4 +186,58 @@ describe('noticeText', () => {
     expect(failed).not.toContain('Sign-in');
     expect(noticeText({ ...base, kind: 'mcpFailed' }, 'docs')).toBe('docs could not be changed.');
   });
+
+  /** Protects PR3 of issue #186: the two new kinds never mention sign-in. FABRICATED notices. */
+  it('words the General setting and mod notices', () => {
+    expect(noticeText({ integrationID: '', kind: 'settingFailed', message: 'No write' }, '')).toBe(
+      'The setting was not changed. No write',
+    );
+    expect(noticeText({ integrationID: '', kind: 'modFailed' }, '')).toBe(
+      'The mod was not changed.',
+    );
+  });
+});
+
+describe('the General and mods halves of the state', () => {
+  it('holds general, and keeps the mods listing absent until the host sends it', () =>
+    createRoot((dispose) => {
+      const store = createSettingsStore();
+      expect(store.state.mods).toBeUndefined();
+      store.apply({
+        type: 'settings.state',
+        state: makeState({
+          general: {
+            chatLocation: { value: 'sidebar', workspaceOverride: true },
+            autoStart: { value: false, workspaceOverride: false },
+          },
+        }),
+      });
+      expect(store.state.general.chatLocation).toEqual({
+        value: 'sidebar',
+        workspaceOverride: true,
+      });
+      expect(store.state.general.autoStart.value).toBe(false);
+      expect(store.state.mods).toBeUndefined();
+      dispose();
+    }));
+
+  it('mods: keeps the identity of a mod row across states, replaces the skipped folders and drops the listing the host stops sending', () =>
+    createRoot((dispose) => {
+      const store = createSettingsStore();
+      store.apply({
+        type: 'settings.state',
+        state: makeState({ mods: structuredClone(modsListing) }),
+      });
+      const quiet = store.state.mods?.mods.find((mod) => mod.id === 'quiet');
+      const next = structuredClone(modsListing);
+      next.mods = next.mods.map((mod) => (mod.id === 'quiet' ? { ...mod, state: 'stopped' } : mod));
+      next.skipped = [];
+      store.apply({ type: 'settings.state', state: makeState({ mods: next }) });
+      expect(store.state.mods?.mods.find((mod) => mod.id === 'quiet')).toBe(quiet);
+      expect(quiet?.state).toBe('stopped');
+      expect(store.state.mods?.skipped).toEqual([]);
+      store.apply({ type: 'settings.state', state: makeState() });
+      expect(store.state.mods).toBeUndefined();
+      dispose();
+    }));
 });

@@ -19,6 +19,19 @@ import type {
   ServerConfigSnapshot,
 } from './serverConfig';
 import type { ServerLog } from './opencodeServer';
+import type { ModsChat } from './modEvents';
+import {
+  CLEAR_SERVER_PASSWORD_COMMAND_ID,
+  FORGET_PLUGIN_DECISION_COMMAND_ID,
+  MANAGE_PERMISSIONS_COMMAND_ID,
+  OPEN_CHAT_COMMAND_ID,
+  OPEN_MODS_FOLDER_COMMAND_ID,
+  OPEN_SETTINGS_COMMAND_ID,
+  RELOAD_MODS_COMMAND_ID,
+  RESTART_SERVER_COMMAND_ID,
+  SET_SERVER_PASSWORD_COMMAND_ID,
+  SHOW_LOGS_COMMAND_ID,
+} from './ids';
 import type { ConnectionState } from '../shared/protocol';
 import {
   MAX_SETTINGS_ANSWERS,
@@ -26,6 +39,7 @@ import {
   isSettingsWebviewToHost,
   type ProviderRow,
   type SettingsAction,
+  type SettingsGeneral,
   type SettingsHostToWebview,
   type SettingsMcpOp,
   type SettingsMcpServerRow,
@@ -34,8 +48,42 @@ import {
   type SettingsSettingKey,
   type SettingsState,
   type SettingsWebviewToHost,
+  type SettingsWritableKey,
 } from '../shared/settingsProtocol';
 import { isAvailable, parseModelSetting } from './modelPreference';
+
+/**
+ * The command each {@link SettingsAction} runs. A PURE constant (`ids.ts` has no `vscode`) so that
+ * `settingsController.test.ts` can check that every action points at a command contributed in
+ * `package.json`; `chatLifecycle.ts` only does `executeCommand(SETTINGS_ACTION_COMMANDS[action])`.
+ * There is no `toggleWorkMode` entry on purpose (decision P2 of E10-settings-sections).
+ */
+export const SETTINGS_ACTION_COMMANDS: Record<SettingsAction, string> = {
+  logs: SHOW_LOGS_COMMAND_ID,
+  extensionSettings: OPEN_SETTINGS_COMMAND_ID,
+  restart: RESTART_SERVER_COMMAND_ID,
+  reloadMods: RELOAD_MODS_COMMAND_ID,
+  openModsFolder: OPEN_MODS_FOLDER_COMMAND_ID,
+  setServerPassword: SET_SERVER_PASSWORD_COMMAND_ID,
+  clearServerPassword: CLEAR_SERVER_PASSWORD_COMMAND_ID,
+  managePermissions: MANAGE_PERMISSIONS_COMMAND_ID,
+  forgetPluginDecision: FORGET_PLUGIN_DECISION_COMMAND_ID,
+  openChat: OPEN_CHAT_COMMAND_ID,
+};
+
+/** The slice of {@link ModsChat} the controller uses: the listing, the per-mod switch and its changes. */
+export type SettingsMods = Pick<ModsChat, 'state' | 'toggle' | 'onDidChange'>;
+
+/**
+ * The two General settings as `chatLifecycle.ts` reads and writes them. Like
+ * {@link SettingsPreferences}: the controller never touches `vscode`.
+ */
+export interface SettingsGeneralSource {
+  /** The effective values and whether the workspace or the folder overrides each one. */
+  read(): SettingsGeneral;
+  /** Writes the USER (global) value of one of the two settings. */
+  write(key: SettingsWritableKey, value: string | boolean): Promise<void>;
+}
 
 /** The slice of {@link ServerConfig} the controller reads. */
 export type SettingsConfigSource = Pick<
@@ -77,10 +125,14 @@ export interface SettingsControllerDeps {
   config: SettingsConfigSource;
   auth: SettingsAuth;
   preferences: SettingsPreferences;
+  /** `openVsCode.chatLocation` and `openVsCode.autoStart` (PR3 of issue #186). */
+  general: SettingsGeneralSource;
+  /** The mods half; absent when the host has none (the state then carries no `mods`). */
+  mods?: SettingsMods;
   /** Sends one message to the webview (the panel drops it if the webview is not ready). */
   post(message: SettingsHostToWebview): void;
   header(): SettingsHeader;
-  /** Runs a footer action with the existing command (logs, extension settings, restart). */
+  /** Runs one of the closed {@link SettingsAction}s with its existing command. */
   runAction(action: SettingsAction): void;
   /** Opens one setting of this extension in the native Settings editor. */
   openSetting(key: SettingsSettingKey): void;
@@ -115,7 +167,18 @@ export interface SettingsControllerDeps {
  * the fixture in 1 group(s) …" for the state, "ok   M1 choosing a model writes openVsCode.defaultModel
  * in the user settings and the select follows the state …" for the write). `settings.openSetting` is
  * UNVERIFIED in a real host: no test presses a button that sends it; `settingsController.test.ts`
- * covers the three with fabricated stores and a fake `preferences`. UNVERIFIED, with no date: the
+ * covers the three with fabricated stores and a fake `preferences`. PR3 of issue #186 adds
+ * `settings.setSetting` (the two General settings, USER scope), `settings.modToggle` (through the
+ * mods half) and the ten closed `settings.action`s ({@link SETTINGS_ACTION_COMMANDS}); it also asks
+ * for a state when the mods listing changes. VERIFIED in a real host (Windows 11, VS Code 1.145.3,
+ * 10/11/2026) by the `main` integration cases "the Settings tab writes chatLocation and autoStart to
+ * the USER settings, refuses other values and restores" and "switches a mod off and on from the
+ * Settings tab: settings.state follows and only that Worker stops" (55 passing, 1 pending), and by
+ * `test:visual` step 53 ("ok   B1 the switch of quiet turns it off: aria-checked false, the host
+ * logged "mod quiet switched off in this workspace" and the badge of Mods is gone (null)" and "ok
+ * B2 the switch of the automatic start writes openVsCode.autoStart false in the user settings
+ * (false) and the switch follows the state (aria-checked false: true)"; the full run had one FAIL,
+ * in step 25, unrelated). UNVERIFIED, with no date: the
  * controller after the tab is hidden and shown (no `test:visual` cell does it). The `--steps 36`
  * texts above come from a run of 7/11/2026 on an EARLIER tree (the search box, the CSS and the
  * review fixes came after it, among them the `modelRefused` notice and the fresh state after a
@@ -134,6 +197,12 @@ export class SettingsController {
       deps.config.onDidChange(() => this.changed()),
       deps.auth.onDidChangeAttempt(() => this.changed()),
     ];
+    if (deps.mods !== undefined) {
+      const subscription = deps.mods.onDidChange(() => this.changed());
+      this.unsubscribe.push(() => {
+        subscription.dispose();
+      });
+    }
   }
 
   /** Stops listening to the store and the flows. */
@@ -172,7 +241,10 @@ export class SettingsController {
    * the ids match then, unchecked against a real server with a second provider). The preference
    * `status` is judged against the model rows held now, so it is only meaningful once
    * `models.loaded`. Each MCP server gets its `canSignIn` and `integrationID` from {@link mcpRow}
-   * (the second only when it names an `mcp` integration row), and keeps its `detail`.
+   * (the second only when it names an `mcp` integration row), and keeps its `detail`. Since PR3 it
+   * also carries `general` (the two settings, read now, with their workspace-override flag) and,
+   * only when a mods half was given, `mods` (its `state().listing` as it is: plain texts of
+   * `mod.json` or the Worker).
    */
   buildState(): SettingsState {
     const snapshot = this.deps.config.snapshot();
@@ -216,6 +288,8 @@ export class SettingsController {
         ...(models.serverDefault === undefined ? {} : { serverDefault: models.serverDefault }),
       },
       preference: this.preference(),
+      general: this.deps.general.read(),
+      ...(this.deps.mods === undefined ? {} : { mods: this.deps.mods.state().listing }),
       mcp: {
         loaded: snapshot.mcp.loaded,
         failed: snapshot.mcp.failed,
@@ -341,6 +415,68 @@ export class SettingsController {
       case 'settings.mcpSignIn':
         await this.mcpSignIn(message.server);
         return;
+      case 'settings.setSetting':
+        await this.setSetting(message.key, message.value);
+        return;
+      case 'settings.modToggle':
+        await this.modToggle(message.modId, message.enabled);
+        return;
+    }
+  }
+
+  /**
+   * Writes the USER value of `chatLocation` or `autoStart` once and asks for a fresh state on EVERY
+   * exit, so the control never keeps a value the setting does not hold (no optimistic state). The
+   * value was already checked by the protocol guard (the pair is exact). A write that throws logs one
+   * line with the error name only (never the value) and posts a `settingFailed` notice.
+   * VERIFIED by "writes the user setting once and asks for a fresh state" and "tells the webview
+   * when the write throws, without the value" of `settingsController.test.ts` (fabricated
+   * `general`, vitest). VERIFIED in a real host (Windows 11, VS Code 1.145.3, 10/11/2026) by the
+   * `main` integration case "the Settings tab writes chatLocation and autoStart to the USER
+   * settings, refuses other values and restores" (passing). NOT observed: a real write failure.
+   */
+  private async setSetting(key: SettingsWritableKey, value: string | boolean): Promise<void> {
+    try {
+      await this.deps.general.write(key, value);
+    } catch (error) {
+      const name = error instanceof Error ? error.name : 'unknown';
+      this.deps.log.warn(`settings request failed: settings.setSetting: ${name}`);
+      this.notice({
+        integrationID: '',
+        kind: 'settingFailed',
+        message: l10n.t('The setting could not be saved'),
+      });
+    }
+    this.changed();
+  }
+
+  /**
+   * Switches one mod through {@link ModsChat.toggle}, the same path as the chat's `mod.toggle`
+   * (which rejects, writing nothing, an id outside the last discovery). Without a mods half, or when
+   * the toggle rejects, it logs `settings request failed: settings.modToggle: <error name>` (never a
+   * text of the mod), posts a `modFailed` notice with a fixed message and a fresh state. On success
+   * it posts nothing: the next `settings.state` comes from `mods.onDidChange`.
+   * VERIFIED by "switches a mod through the mods half and says nothing on success", "refuses a
+   * mod the discovery does not know with a notice and a log without text of the mod" and "answers a
+   * notice when there is no mods half" of `settingsController.test.ts` (fabricated mods half).
+   */
+  private async modToggle(modId: string, enabled: boolean): Promise<void> {
+    const mods = this.deps.mods;
+    try {
+      if (mods === undefined) throw new Error('Mods are not available');
+      await mods.toggle(modId, enabled);
+    } catch (error) {
+      const name = error instanceof Error ? error.name : 'unknown';
+      this.deps.log.warn(`settings request failed: settings.modToggle: ${name}`);
+      this.notice({
+        integrationID: '',
+        kind: 'modFailed',
+        message:
+          mods === undefined
+            ? l10n.t('Mods are not available')
+            : l10n.t('The mod could not be switched'),
+      });
+      this.changed();
     }
   }
 
