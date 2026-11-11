@@ -20,6 +20,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The shell of opencode in Settings › Advanced.** A drop-down with Automatic and the shells the
+  server offers (the ones opencode only accepts for the terminal are marked). It is saved in your
+  global opencode config, so it also applies to the terminal UI and every folder; a hint says when
+  another config (the folder's or your organization's) sets its own shell and hides the choice.
 - **A switch per mod.** A puzzle-piece button after **+** and **/** in the prompt bar (with the
   number of active mods) opens a popover listing the mods with one switch each. A switch starts or
   stops only that mod: the others keep their state, bands and open panels. The choice is saved for
