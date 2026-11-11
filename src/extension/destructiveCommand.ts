@@ -32,7 +32,7 @@
 //   inline code (flags alone, `-c`, a heredoc, `--import`), `git -c`, `git config` writes and the
 //   git options that run a command (`rebase --exec`, `submodule foreach`, `--upload-pack`…), `sed
 //   -i`, `awk`; `npx`, `pnpm|yarn|npm|bun exec|dlx|x`, `uv run`, `uv tool run`, `hatch env run`, `corepack <pm>`,
-//   `poetry run`… are classified by the
+//   `dotnet tool exec`, `dnx`, `asdf env`, `poetry run`… are classified by the
 //   tool they launch;
 // - reading secrets without naming them: recursive `grep` of the current directory, `rg --hidden`,
 //   a recursive `Get-ChildItem`/`dir /s`/`ls -R` that is not a list of names (in Windows a leading
@@ -49,12 +49,14 @@
 //   `export`, `env`, `sudo`, launchers, `bash -c`, escapes, separators). A new door goes in that
 //   list too: the doors are private sets here (`TRANSPARENT`, `ELEVATORS`, `RUNNERS`, and the
 //   launchers `npx`, `pnpm exec`, `corepack <pm>`, `uv tool run`, `hatch env run`, `dotnet tool
-//   run`, each also with an option before `run` (#193)…), so the test keeps its own copy.
+//   run`, each also with an option before `run` (#193), `dnx`, `dotnet tool exec`, `asdf env`…), so
+//   the test keeps its own copy.
 //   A runner or launcher that classifies the command after it is a door for EVERY family.
 // - An exception is for the EXACT command (`GIT_EDITOR=true`, `git rm --cached`), never for a
 //   whole tool or a whole option family.
-// - Options that take a value are a table per tool (`NPM_VALUE_OPTIONS`, `UVX_VALUE_OPTIONS`,
-//   `TERRAFORM_VALUE_OPTIONS`): a value read as the command is how `-w a rimraf` slipped through.
+// - Options that take a value are a table per tool (`NPM_VALUE_OPTIONS`, `TERRAFORM_VALUE_OPTIONS`):
+//   a value read as the command is how `-w a rimraf` slipped through. `uvx` and `dnx` have NO table
+//   (#204): an option that may take a value makes the next word a candidate tool as well.
 // - Probe daily use before believing a rule: add the commands people type all day (`date
 //   +%Y%m%d`, `git log --format=%H%n%B`, `node -v`, `terraform plan -var x=1`) to `DAILY_CORES`,
 //   so a rule that asks for them shows up as a red case, not as a user turning Auto off.
@@ -825,27 +827,25 @@ function interpreterAsks(command: string, args: readonly string[]): boolean {
  * - `npm` and `npx` skip the values of `-w`, `--workspace` and `--prefix`. VERIFIED on Windows 11
  *   with Node 24 (07/11/2026, the bundled module run against a probe of 52 command lines): `npx -w a
  *   rimraf dist` asks, `npx -w a tsc` does not.
- * - `uvx` skips the value of `--python`: `uvx --python 3.12 ruff check` does not ask. Same probe.
+ * - `uvx` and `uv tool run` are read by {@link uvxAsks} (no table of options, issue #204):
+ *   `uvx --python 3.12 ruff check` does not ask, `uvx --directory src rm -rf dist` does.
  * - `pnpm`, `yarn` and `bunx` skip no value, so there `-w` is a flag and the tool is the next word:
  *   `pnpm exec -w rimraf dist` asks, the example of what this function is for. HYPOTHESIS: that
  *   `-w` is a boolean flag in pnpm and yarn comes from their documentation; not run against the
  *   real binaries. The probe above only checked what this module answers for the text.
  * - `-c`/`--call` run a shell string, and `-p`/`--package`, `--from` and `--with` change which
  *   package supplies the tool: they always ask. `npx ovsx@latest publish` asks (the tool is `ovsx`,
- *   its version dropped), `npx prettier --check .` does not. Options with a value that are not listed (`--registry u`) are read as the
- *   tool: a known limit.
+ *   its version dropped), `npx prettier --check .` does not. For npx, options with a value that are
+ *   not listed (`--registry u`) are read as the tool: a known limit (not for uvx, see above).
  */
 function launcherAsks(args: readonly string[], launcher: string): boolean {
+  // `uvx` has its own reading (issue #204): no table of options, see {@link uvxAsks}.
+  if (launcher === 'uvx') return uvxAsks(args);
   // The tool is the first word that is not an option nor the value of one that takes a value in THIS
   // launcher: `-w`, `--workspace` and `--prefix` in npm and npx (`npx -w a rimraf dist` asks, the
-  // tool is `rimraf`), `--python` in uvx. In pnpm and yarn `-w` is a flag (HYPOTHESIS, see the
-  // header), so `pnpm exec -w rimraf dist` runs `rimraf`.
-  const valued =
-    launcher === 'uvx'
-      ? UVX_VALUE_OPTIONS
-      : launcher === 'npm' || launcher === 'npx'
-        ? NPM_VALUE_OPTIONS
-        : undefined;
+  // tool is `rimraf`). In pnpm and yarn `-w` is a flag (HYPOTHESIS, see the header), so `pnpm exec
+  // -w rimraf dist` runs `rimraf`.
+  const valued = launcher === 'npm' || launcher === 'npx' ? NPM_VALUE_OPTIONS : undefined;
   let first = 0;
   while (first < args.length) {
     const arg = args[first] ?? '';
@@ -856,26 +856,96 @@ function launcherAsks(args: readonly string[], launcher: string): boolean {
   if (first >= args.length) first = -1;
   // Only the launcher's own options count: `npx tsc -p tsconfig.json` has the tool's `-p`.
   const own = first < 0 ? args : args.slice(0, first);
-  if (
-    own.some(
-      (arg) =>
-        arg === '-c' ||
-        arg === '--call' ||
-        arg.startsWith('--call=') ||
-        arg === '-p' ||
-        arg.startsWith('--package') ||
-        arg.startsWith('--from') ||
-        arg.startsWith('--with'),
-    )
-  ) {
-    return true;
-  }
+  if (own.some(changesTheTool)) return true;
   const tool = first;
   const word = args[tool];
   if (tool < 0 || word === undefined) return false;
   const name = toolName(word);
   if (!LITERAL_NAME.test(name)) return true;
   return launchedAsks(name, args.slice(tool + 1));
+}
+
+/**
+ * True for a launcher option that runs a shell string (`-c`, `--call`) or changes which package
+ * supplies the tool (`-p`, `--package`, `--from`, `--with`): the line then always asks. Shared by
+ * {@link launcherAsks} (npm family) and {@link uvxAsks}.
+ */
+function changesTheTool(arg: string): boolean {
+  return (
+    arg === '-c' ||
+    arg === '--call' ||
+    arg.startsWith('--call=') ||
+    arg === '-p' ||
+    arg.startsWith('--package') ||
+    arg.startsWith('--from') ||
+    arg.startsWith('--with')
+  );
+}
+
+/**
+ * True when a `uvx` / `uv tool run` line asks (issue #204, decision of Sergio 11/11/2026: a rule with
+ * no table of options). Only `--python` is known to take a separate value; every other option
+ * without `=` MAY take one (uv has ~45 such options and gains more with each release, so a table
+ * would rot and fail open without notice). So the zone of options is walked: each word that is not
+ * an option is a candidate tool, and while the word before it is an option without `=` it may be
+ * that option's value, so the next word is a candidate too (`uvx --directory src rm -rf dist`:
+ * `src`, then `rm`). The line asks when any candidate, classified with the words after it, asks. The
+ * FIRST candidate keeps the rule of before (a name that is not literal asks); a later one is
+ * speculative, so a non-literal name does not ask by itself (`uvx -q black .` is approved). Options
+ * that run a string or change the package ({@link changesTheTool}), `-w` (uv's `--with`) and a short
+ * group with `w` (`-qw numpy`) ask anywhere in the walked zone, not only before the first
+ * candidate. Monotonic: it reads a superset of what the old reading read, so no verdict is relaxed
+ * (`uvx --directory rimraf dist` still asks through `rimraf`). VERIFIED by the row `uvx --directory
+ * rimraf dist` of the check below and by the reviewer's in-memory probe of main 44b80bf against
+ * the final tree (11/11/2026, Windows 11: 0 relaxed over 40290 + 2380 command lines of heads x
+ * DANGEROUS_CORES + DAILY_CORES; fabricated text). Deliberate false positive: a dangerous
+ * word right after an UNKNOWN option and a harmless first word (`uvx --future-flag echo rm -rf x`)
+ * asks. After a known boolean option ({@link UVX_BOOLEAN_OPTIONS}, or a short group made only of
+ * `q`, `v`, `n`, `U`; decision of Sergio, Engram #2241) the next word is NOT read as a possible
+ * value, so `uvx --offline ruff format` is approved (read as a value, its tool would be the disk
+ * command `format`). That list is not exhaustive and may go stale: an option missing from it only
+ * makes the line ask more, never less.
+ * VERIFIED by the check "asks for what dnx, asdf env and uvx behind an option launch, and approves
+ * the rest" of `destructiveCommand.test.ts` (rows `uvx --directory src rm -rf dist`, `uvx
+ * --some-future-option v rm -rf dist`, `uvx -qw numpy ruff check .`, `uvx -q black .`, `uvx -q
+ * --future-flag rm -rf dist`, `uvx --future-flag foo format c:`, `uvx --offline ruff format`; 11/11/2026,
+ * Windows 11, Node 24; fabricated text). HYPOTHESIS, read from
+ * https://docs.astral.sh/uv/reference/cli/#uv-tool-run (uv 0.13.7, not run): that clap groups
+ * `-qp 3.12` and `-qw numpy` with the valued short option last; to check it, run `uvx -qw numpy
+ * python -c "print(1)"` with a real uv.
+ */
+function uvxAsks(args: readonly string[]): boolean {
+  const candidates: number[] = [];
+  let end = args.length;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] ?? '';
+    if (UVX_VALUE_OPTIONS.has(arg)) {
+      i += 1; // its value is not a tool
+    } else if (!arg.startsWith('-')) {
+      candidates.push(i);
+      const before = args[i - 1] ?? '';
+      const mayBeValue =
+        before.startsWith('-') &&
+        before !== '--' &&
+        !before.includes('=') &&
+        !UVX_VALUE_OPTIONS.has(before) &&
+        !UVX_BOOLEAN_OPTIONS.has(before) &&
+        !/^-[qvnU]+$/.test(before);
+      if (!mayBeValue) {
+        end = i;
+        break;
+      }
+    }
+  }
+  // Only the launcher's own options count: `uvx tsc -p tsconfig.json` has the tool's `-p`.
+  const asksOption = (arg: string): boolean =>
+    changesTheTool(arg) || arg === '-w' || (/^-[a-zA-Z]{2,}$/.test(arg) && arg.includes('w'));
+  if (args.slice(0, end).some(asksOption)) return true;
+  return candidates.some((at, k) => {
+    const name = toolName(args[at] ?? '');
+    if (!LITERAL_NAME.test(name)) return k === 0;
+    return launchedAsks(name, args.slice(at + 1));
+  });
 }
 
 /**
@@ -939,6 +1009,16 @@ const LAUNCH_WORDS = new Set(['run', 'exec', 'x']);
  * https://raw.githubusercontent.com/pypa/hatch/master/src/hatch/cli/env/run.py (click command
  * without `ignore_unknown_options`): that `hatch env run -- pytest -x` is the form click really
  * needs. To check it, run `hatch env run rm -rf x` with a real hatch and look for "No such option".
+ * Issue #204 adds `asdf env <cmd> [util]`: `util` (default `env`, which prints the environment) is
+ * classified with the rest of the line; no `cmd` or no `util`, or an option or `--` in either
+ * place, asks, and an `env` anywhere after a global option of `asdf` makes the line ask (only for
+ * `asdf`: `mise env` and `hatch env` are untouched). Deliberate false positives: `asdf env node` and
+ * `asdf env node -- git status`. VERIFIED by the check "asks for what dnx, asdf env and uvx behind
+ * an option launch, and approves the rest" of `destructiveCommand.test.ts` (rows `asdf env node rm
+ * -rf dist`, `asdf env node`, `asdf env -x node rm -rf dist`, `asdf --x env node git push`,
+ * `asdf env node node -v`; 11/11/2026, Windows 11, Node 24; fabricated text). HYPOTHESIS, read from
+ * https://asdf-vm.com/manage/commands.html and `internal/cli/cli.go` of asdf (not run): what
+ * `envCommand` does with the util and its arguments.
  */
 function runnerAsks(command: string, args: readonly string[]): boolean {
   if (command === 'bun' && (cluster(args, 'ep') || longOpt(args, '--eval', '--print'))) return true;
@@ -954,7 +1034,12 @@ function runnerAsks(command: string, args: readonly string[]): boolean {
   // when such a line names a launching subcommand or package manager anywhere, it asks.
   if (
     args[0]?.startsWith('-') === true &&
-    args.some((arg) => LAUNCH_WORDS.has(arg) || PACKAGE_MANAGERS.has(toolName(arg)))
+    args.some(
+      (arg) =>
+        LAUNCH_WORDS.has(arg) ||
+        PACKAGE_MANAGERS.has(toolName(arg)) ||
+        (command === 'asdf' && arg === 'env'),
+    )
   ) {
     return true;
   }
@@ -968,6 +1053,17 @@ function runnerAsks(command: string, args: readonly string[]): boolean {
     args.slice(2).some((arg) => LAUNCH_WORDS.has(arg))
   ) {
     return true;
+  }
+  // `asdf env <cmd> [util]` runs `util` (default `env`, which prints the environment) inside the
+  // environment of `cmd` (issue #204): without `cmd` or `util`, or with an option (`--` included) in
+  // either place, it asks; otherwise `util` is classified with the rest of the line.
+  if (command === 'asdf' && args[0] === 'env') {
+    const cmd = args[1];
+    const util = args[2];
+    if (cmd === undefined || util === undefined) return true;
+    if (cmd.startsWith('-') || util.startsWith('-')) return true;
+    const name = toolName(util);
+    return !LITERAL_NAME.test(name) || launchedAsks(name, args.slice(3));
   }
   // `hatch env run X` is `hatch run X` (its documentation calls `hatch run` a wrapper around `env
   // run`): read as that, so the tool must follow right away and is classified with its arguments.
@@ -1045,7 +1141,49 @@ const VERCEL_SAFE = new Set([
 /** Options of `npm` and `npx` that take the next word as their value (`npm exec -w a -- tool`). */
 const NPM_VALUE_OPTIONS = new Set(['-w', '--workspace', '--prefix']);
 
-/** Options of `uvx` that take the next word as their value (`uvx --python 3.12 tool`). */
+/**
+ * Boolean options of `uv tool run` (they take no value), read from
+ * the `uv tool run` section of https://docs.astral.sh/uv/reference/cli/ (uv 0.13.7, not run). A
+ * word after one is not read as its possible value. Not exhaustive; a stale list only makes {@link
+ * uvxAsks} ask more.
+ */
+const UVX_BOOLEAN_OPTIONS = new Set([
+  '-h',
+  '--help',
+  '--compile',
+  '--compile-bytecode',
+  '--lfs',
+  '--no-build-isolation',
+  '--no-env-file',
+  '--no-index',
+  '--no-require-build-hashes',
+  '--no-sources',
+  '--require-build-hashes',
+  '--system-certs',
+  '--force-reinstall',
+  '--no-cache-dir',
+  '--quiet',
+  '--verbose',
+  '--no-cache',
+  '--upgrade',
+  '--offline',
+  '--isolated',
+  '--refresh',
+  '--reinstall',
+  '--no-config',
+  '--managed-python',
+  '--no-managed-python',
+  '--no-progress',
+  '--no-python-downloads',
+  '--no-build',
+  '--no-binary',
+]);
+
+/**
+ * The only option of `uvx` known to take the next word as its value (`uvx --python 3.12 tool`); every
+ * other option without `=` MAY take one and {@link uvxAsks} reads both ways (decision of Sergio
+ * 11/11/2026: no table of the ~45 valued options of uv, it would rot with each release).
+ */
 const UVX_VALUE_OPTIONS = new Set(['--python']);
 
 /** Options of `terraform apply` that take the next word as their value (with one or two dashes). */
@@ -1171,6 +1309,31 @@ function recursiveSecretSearch(command: string, args: readonly string[]): boolea
 }
 
 /**
+ * True when what `dotnet tool exec`, `dotnet dnx` or `dnx` launches asks, given the words from the
+ * package on (issue #204). Classified like `npx X`, with NO table of dotnet options: a first word
+ * that starts with `-` (`dnx -y rimraf dist`, `dnx -- rimraf dist`) may take a value, so it asks; a
+ * package name that is not literal asks; a `--` right after the package is skipped; otherwise the
+ * package (its `@version` removed) is classified with the rest. No package decides nothing (false),
+ * so the caller goes on to the other rules of `dotnet`. The package id is taken for the binary
+ * (`dotnet-ef` is both); a package with another command name is not covered.
+ * VERIFIED by the check "asks for what dnx, asdf env and uvx behind an option launch, and approves
+ * the rest" of `destructiveCommand.test.ts` (rows `dnx rimraf -- dist`, `dnx dotnetsay@2.1.0 --
+ * Hello World`, `dnx -y rimraf dist`; 11/11/2026, Windows 11, Node 24; fabricated text).
+ * HYPOTHESIS, read from https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-tool-exec (not
+ * run, no dotnet 10): the syntax, and that dotnet may swallow its own option written after the
+ * package; classifying more words than the tool receives fails closed.
+ */
+function dotnetExecAsks(args: readonly string[]): boolean {
+  const word = args[0];
+  if (word === undefined) return false;
+  if (word.startsWith('-')) return true;
+  const name = toolName(word);
+  if (!LITERAL_NAME.test(name)) return true;
+  const rest = args.slice(1);
+  return launchedAsks(name, rest[0] === '--' ? rest.slice(1) : rest);
+}
+
+/**
  * True when the command `command` (already a lower-case literal name) with `args` is destructive or
  * runs text that cannot be classified. The cases are grouped by family, see the header of the file.
  * `dotnet tool run X` is classified by the local tool `X` (`dotnet-ef database drop` asks like
@@ -1180,7 +1343,16 @@ function recursiveSecretSearch(command: string, args: readonly string[]): boolea
  * the door `dotnet tool --x run` (10/11/2026, Windows 11, Node 24; fabricated text; `--x` is
  * invented; syntax of `dotnet tool run` read in
  * https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-tool-run; HYPOTHESIS that dotnet accepts options there, learn.microsoft.com 404 on `dotnet
- * tool`); `nix` asks whatever it runs ({@link
+ * tool`); `dnx` and `dotnet tool exec|dnx X` (issue #204) are classified by {@link dotnetExecAsks},
+ * and the `dotnet` case never returns false early, so `push` and `ef database drop` are still read
+ * (VERIFIED by the rows `dotnet dnx dotnetsay push`, `dotnet tool exec dotnetsay push` and `dotnet
+ * tool exec dotnetsay ef database drop` of "asks for what dnx, asdf env and uvx behind an option
+ * launch, and approves the rest": with a `return false` placed after the dnx branch they turned red
+ * and with it removed they pass; 11/11/2026, Windows 11, Node 24; fabricated text). `dnx` counts as
+ * the `dotnet` alias only as its subcommand (the first word that is not an option), so `dotnet build
+ * dnx -c Release` and `dotnet run --project dnx -- dist` are approved (VERIFIED by those two rows of
+ * the same check). HYPOTHESIS: the dotnet CLI itself reads `dnx` as its alias only in that position;
+ * not run against a real dotnet. `nix` asks whatever it runs ({@link
  * OPAQUE}). For `npm|pnpm|yarn`, an `exec`/`dlx` that is the subcommand is classified by the tool it launches,
  * and an `exec` anywhere else on the line (`yarn kubectl exec pod`) does not end the reading: for
  * pnpm and yarn the first word is read as a binary too, so the binary's own `exec` asks. VERIFIED by the check "asks
@@ -1517,11 +1689,25 @@ function commandAsks(command: string, args: readonly string[]): boolean {
         const name = toolName(word);
         if (!LITERAL_NAME.test(name) || launchedAsks(name, args.slice(toolRun + 3))) return true;
       }
+      // `dotnet tool exec X` and its hidden alias `dotnet dnx X` (issue #204). No early `return
+      // false` here: a line that is fine so far still goes on to `push` and `ef database drop`.
+      if (command === 'dotnet') {
+        const exec = args.findIndex((arg, k) => arg === 'tool' && args[k + 1] === 'exec');
+        // `dnx` counts only as the subcommand, the first word that is not an option
+        // (`dotnet -d dnx x`); `dotnet build dnx` or `--project dnx` are not the alias.
+        const sub = args.findIndex((arg) => !arg.startsWith('-'));
+        const dnx = args[sub] === 'dnx' ? sub : -1;
+        if (exec >= 0 && dotnetExecAsks(args.slice(exec + 2))) return true;
+        if (dnx >= 0 && dotnetExecAsks(args.slice(dnx + 1))) return true;
+      }
       return (
         hasAny(args, ['push']) ||
         (hasAny(args, ['ef']) && hasAny(args, ['database']) && hasAny(args, ['drop']))
       );
     }
+    case 'dnx':
+      // The script of the .NET 10 installer: `dotnet tool exec` without the `dotnet` (issue #204).
+      return dotnetExecAsks(args);
     case 'dotnet-ef':
       // The standalone name of `dotnet ef` (reached by `dotnet tool run dotnet-ef …`).
       return hasAny(args, ['database']) && hasAny(args, ['drop']);

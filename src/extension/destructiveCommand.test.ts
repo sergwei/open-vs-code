@@ -1426,7 +1426,10 @@ interface Door {
  * `RUNNERS`, the launcher functions) and exporting them only for a test would widen the module's
  * surface; so adding a door to the classifier means adding it here too. The nested launchers of
  * #193 (`uv tool --quiet run`, `hatch env run`, `hatch env run -e test`, `dotnet tool --x run`)
- * are doors too; only `hatch env run` is harmless on its own. Doors that never ask on
+ * are doors too; only `hatch env run` is harmless on its own. So are those of #204 (`dnx`,
+ * `dotnet tool exec`, `dotnet dnx`, `dotnet -d dnx`, `dnx <pkg> --`, `asdf env node`, `uvx
+ * --directory src`, `uv tool run --directory src`, `uvx -q`, `uvx -qp 3.12`): harmless on their
+ * own, except `dnx -y` and `uvx -w numpy`. Doors that never ask on
  * their own (the prefixes that run the next command unchanged) are in {@link HARMLESS_DOORS} as well.
  */
 const ASKING_DOORS: readonly Door[] = [
@@ -1527,6 +1530,34 @@ const ASKING_DOORS: readonly Door[] = [
     wrap: (c) => `dotnet tool --x run ${c}`,
     asksAlone: 'an option between tool and run may take a value',
   },
+  // The launchers of #204: `dotnet tool exec` / `dnx`, `asdf env node` and the options of uvx.
+  // `dnx -y` and `uvx -w numpy` ask alone; the rest approve what they carry.
+  { name: 'dnx', wrap: (c) => `dnx ${c}` },
+  { name: 'dotnet tool exec', wrap: (c) => `dotnet tool exec ${c}` },
+  { name: 'dotnet dnx', wrap: (c) => `dotnet dnx ${c}` },
+  { name: 'dotnet -d dnx', wrap: (c) => `dotnet -d dnx ${c}` },
+  {
+    name: 'dnx <pkg> --',
+    wrap: (c) => {
+      const space = c.indexOf(' ');
+      return space < 0 ? `dnx ${c} --` : `dnx ${c.slice(0, space)} -- ${c.slice(space + 1)}`;
+    },
+  },
+  {
+    name: 'dnx -y',
+    wrap: (c) => `dnx -y ${c}`,
+    asksAlone: 'an option before the package may take a value (#204)',
+  },
+  { name: 'asdf env node', wrap: (c) => `asdf env node ${c}` },
+  { name: 'uvx --directory src', wrap: (c) => `uvx --directory src ${c}` },
+  { name: 'uv tool run --directory src', wrap: (c) => `uv tool run --directory src ${c}` },
+  { name: 'uvx -q', wrap: (c) => `uvx -q ${c}` },
+  { name: 'uvx -qp 3.12', wrap: (c) => `uvx -qp 3.12 ${c}` },
+  {
+    name: 'uvx -w numpy',
+    wrap: (c) => `uvx -w numpy ${c}`,
+    asksAlone: '-w is --with: it changes the package that supplies the tool',
+  },
   {
     name: 'nix run',
     wrap: (c) => `nix run ${c}`,
@@ -1573,6 +1604,7 @@ const ASKING_DOORS: readonly Door[] = [
  * set `asksAlone` (each carries its reason; `mise exec --` is the deliberate one, decision of
  * Sergio 07/11/2026, pinned by the check "asks for mise exec -- git status, on purpose" below).
  * `yarn`, `bun x`, `corepack`, `uv tool run` and `hatch env run` ARE here: they approve every {@link DAILY_CORES}.
+ * So are the doors of #204 except `dnx -y` and `uvx -w numpy`.
  */
 const HARMLESS_DOORS: readonly Door[] = ASKING_DOORS.filter((door) => door.asksAlone === undefined);
 
@@ -1628,6 +1660,81 @@ describe('commandNeedsAsk: nested launchers with an option in between (#193)', (
       'dotnet tool list',
       'dotnet tool --x list',
       'dotnet tool run dotnet-ef migrations list',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(false);
+    }
+  });
+});
+
+describe('commandNeedsAsk: more nested launchers (#204)', () => {
+  /**
+   * Regression of issue #204 (follow-up of #193): `dotnet tool exec` / `dotnet dnx` / `dnx`, `asdf env
+   * <cmd> [util]` and `uvx` / `uv tool run` behind an option with a value were approved whatever they
+   * launched. No operand is `x` (it matches the launching words and would make a row ask for the
+   * wrong reason). Fabricated commands; nothing run against a real dotnet, asdf or uv; the
+   * criterion only.
+   */
+  it('asks for what dnx, asdf env and uvx behind an option launch, and approves the rest', () => {
+    for (const command of [
+      'dotnet tool exec rimraf dist',
+      'dotnet dnx rimraf dist',
+      'dnx rimraf dist',
+      'dnx.cmd rimraf dist',
+      'dnx dotnet-ef database drop',
+      'dotnet tool exec dotnet-ef@9.0.0 database drop',
+      'dnx rimraf@5.0.0 dist',
+      'dnx rimraf -- dist',
+      'dotnet -d dnx rimraf dist',
+      'dnx -y rimraf dist',
+      'dotnet tool exec --source s rimraf dist',
+      'dnx -- rimraf dist',
+      'asdf env node rm -rf dist',
+      'asdf env node',
+      'asdf env',
+      'asdf env node env',
+      'asdf env node bash',
+      'asdf env node -- git status',
+      'asdf env -x node rm -rf dist',
+      'asdf --x env node git push',
+      'uvx --directory src rm -rf dist',
+      'uv tool run --directory src rm -rf dist',
+      'uvx --cache-dir c git push',
+      'uvx -qp 3.12 rm -rf dist',
+      'uvx -w numpy ruff check .',
+      'uvx -qw numpy ruff check .',
+      'uv tool run -w numpy rm -rf dist',
+      'uvx --directory src --from evil ruff',
+      'uvx --directory rimraf dist',
+      'uvx --some-future-option v rm -rf dist',
+      'dotnet dnx dotnetsay push',
+      'dotnet tool exec dotnetsay push',
+      'dotnet tool exec dotnetsay ef database drop',
+      'uvx --future-flag foo format c:',
+      'uvx -q --future-flag rm -rf dist',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(true);
+    }
+    for (const command of [
+      'dnx dotnetsay',
+      'dnx dotnetsay@2.1.0 -- Hello World',
+      'dotnet tool exec dotnetsay -- Hello World',
+      'dotnet dnx dotnetsay',
+      'dnx dotnet-ef migrations list',
+      'dotnet tool install -g dotnet-ef',
+      'asdf env node node -v',
+      'asdf env node npm test',
+      'asdf current',
+      'uvx --python 3.12 ruff check',
+      'uvx -q ruff check .',
+      'uvx --offline ruff format',
+      'uvx --no-index ruff format',
+      'dotnet build dnx -c Release',
+      'dotnet run --project dnx -- dist',
+      'uvx -q black .',
+      'uvx -q pre-commit run --all-files',
+      'uvx --directory src ruff check .',
+      'uvx -qp 3.12 ruff check .',
+      'uv tool run --directory src ruff check .',
     ]) {
       expect(commandNeedsAsk(command), command).toBe(false);
     }
