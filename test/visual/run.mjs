@@ -2090,6 +2090,30 @@ function powershellSta(script, input = '') {
 }
 
 /**
+ * Runs one synchronous clipboard call (a PowerShell spawn) and prints `  clipboard <op> took N ms`
+ * in the section of the running step, also when the call throws. The line is neither ok, FAIL nor
+ * warn, so it changes no verdict and `compare-runs` does not see it (issue #210).
+ *
+ * Why: step 20 sometimes spends 10-20 s next to ONE clipboard call of the machine running it
+ * (traces of 31/10-10/11/2026 put the lost time beside a PowerShell clipboard call every time,
+ * and the same calls usually take under 1 s the rest of the runs), and nothing said which call. The
+ * cause is HYPOTHESIS (clipboard owner locks, Win+V history, PowerShell/Add-Type scan): this
+ * measures it, it does not work around it. `op` is `save`, `set-image`, `set-text` or `restore`.
+ * VERIFIED (11/11/2026, Windows 11, two `--steps 20` runs, both "all visual checks passed"): each
+ * printed five lines, e.g. "clipboard save took 242 ms" and "clipboard set-text took 217 ms"; in
+ * one of them "clipboard restore took 10231 ms" located a 10 s stall (step 20 took 22.1 s) in the
+ * restore. Not observed: macOS or Linux (the step is Windows only).
+ */
+function timedClipboard(op, call) {
+  const started = Date.now();
+  try {
+    return call();
+  } finally {
+    console.log(`  clipboard ${op} took ${String(Date.now() - started)} ms`);
+  }
+}
+
+/**
  * Reads what the user has on the Windows clipboard so step 20 can give it back: text (Unicode) or
  * an image (as PNG), base64 through stdout and kept IN MEMORY only (it may be a password; nothing
  * goes to disk or to the log). Text is checked first, so a copy from Word, Excel or a browser
@@ -2101,8 +2125,10 @@ function powershellSta(script, input = '') {
  * original formats may differ.
  * VERIFIED for an image (Windows 11, 23/10/2026): a full `npm run test:visual` printed "clipboard
  * saved (image)" and "clipboard restored (image)", and a read-only sha256 of the clipboard was the
- * same before and after the run. UNVERIFIED for text (the clipboard held an image that day), for
- * `empty` and for `other`; the README says what is not kept.
+ * same before and after the run. VERIFIED for `empty` (Windows 11, 11/11/2026, two `--steps 20`
+ * runs): both printed "clipboard saved (empty)". UNVERIFIED for text (the clipboard held an image
+ * that day) and for `other`; the README says what is not kept. The PowerShell read is timed by
+ * {@link timedClipboard} (`clipboard save took N ms`).
  */
 function saveClipboard() {
   // One line for PowerShell: statements joined by `; `, but the if/elseif/else chain by spaces
@@ -2114,8 +2140,10 @@ function saveClipboard() {
     'elseif ($n -gt 0) { "other:" }',
     'else { "empty:" }',
   ].join(' ');
-  const out = powershellSta(
-    `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $c = [System.Windows.Forms.Clipboard]; $d = $c::GetDataObject(); $n = if ($d) { $d.GetFormats().Length } else { 0 }; "$n"; ${chain}`,
+  const out = timedClipboard('save', () =>
+    powershellSta(
+      `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $c = [System.Windows.Forms.Clipboard]; $d = $c::GetDataObject(); $n = if ($d) { $d.GetFormats().Length } else { 0 }; "$n"; ${chain}`,
+    ),
   );
   const [count = '', answer = ''] = out.split(/\r?\n/);
   const colon = answer.indexOf(':');
@@ -2133,24 +2161,32 @@ function saveClipboard() {
  * Gives back what {@link saveClipboard} read: the same text or image, or an empty clipboard if it
  * was empty. Never throws: a failure is a warning, the run goes on. Logs only the kind.
  * VERIFIED for an image only, by the run quoted in the header of {@link saveClipboard} ("clipboard
- * restored (image)", same sha256 before and after). UNVERIFIED for text and `empty`.
+ * restored (image)", same sha256 before and after). VERIFIED for `empty` (Windows 11, 11/11/2026,
+ * two `--steps 20` runs): both printed "clipboard restored (empty)". UNVERIFIED for text. The
+ * PowerShell call is timed by {@link timedClipboard} (`clipboard restore took N ms`).
  */
 function restoreClipboard(saved) {
   try {
     const read = '$b = [Convert]::FromBase64String([Console]::In.ReadToEnd())';
     const forms = 'Add-Type -AssemblyName System.Windows.Forms,System.Drawing';
     if (saved.kind === 'text') {
-      powershellSta(
-        `${forms}; ${read}; [System.Windows.Forms.Clipboard]::SetText([Text.Encoding]::UTF8.GetString($b))`,
-        saved.data,
+      timedClipboard('restore', () =>
+        powershellSta(
+          `${forms}; ${read}; [System.Windows.Forms.Clipboard]::SetText([Text.Encoding]::UTF8.GetString($b))`,
+          saved.data,
+        ),
       );
     } else if (saved.kind === 'image') {
-      powershellSta(
-        `${forms}; ${read}; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromStream((New-Object IO.MemoryStream(,$b))))`,
-        saved.data,
+      timedClipboard('restore', () =>
+        powershellSta(
+          `${forms}; ${read}; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromStream((New-Object IO.MemoryStream(,$b))))`,
+          saved.data,
+        ),
       );
     } else if (saved.kind === 'empty') {
-      powershellSta(`${forms}; [System.Windows.Forms.Clipboard]::Clear()`);
+      timedClipboard('restore', () =>
+        powershellSta(`${forms}; [System.Windows.Forms.Clipboard]::Clear()`),
+      );
     } else {
       warn('the clipboard held something that is neither text nor an image: it was NOT restored');
       return;
@@ -7366,7 +7402,10 @@ try {
         };
       });
     const count = (text, phrase) => text.split(phrase).length - 1;
-    /** Puts the PNG on the system clipboard: the page's own API first, PowerShell on Windows next. */
+    /**
+     * Puts the PNG on the system clipboard: the page's own API first, PowerShell on Windows next
+     * (that call prints `clipboard set-image took N ms` through {@link timedClipboard}).
+     */
     const clipboardImage = async () => {
       const viaPage = await page.evaluate(async (b64) => {
         try {
@@ -7383,28 +7422,33 @@ try {
       if (process.platform !== 'win32') throw new Error(`no way to set the clipboard: ${viaPage}`);
       const file = path.join(workDir, 'clipboard.png');
       fs.writeFileSync(file, Buffer.from(PNG_B64, 'base64'));
-      execFileSync(
-        'powershell',
-        [
-          '-NoProfile',
-          '-STA',
-          '-Command',
-          `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile('${file}'))`,
-        ],
-        { windowsHide: true },
+      timedClipboard('set-image', () =>
+        execFileSync(
+          'powershell',
+          [
+            '-NoProfile',
+            '-STA',
+            '-Command',
+            `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; [System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile('${file}'))`,
+          ],
+          { windowsHide: true },
+        ),
       );
       return `powershell (page API said: ${viaPage})`;
     };
     // The page's `navigator.clipboard.write*` is denied in the workbench ("Write permission
-    // denied", seen in this step), so the text goes through the OS too.
+    // denied", seen in this step), so the text goes through the OS too (timed as `set-text` by
+    // {@link timedClipboard}).
     const clipboardText = (text) => {
       if (process.platform !== 'win32') throw new Error('no way to set the text clipboard here');
-      execFileSync(
-        'powershell',
-        ['-NoProfile', '-STA', '-Command', `Set-Clipboard -Value '${text}'`],
-        {
-          windowsHide: true,
-        },
+      timedClipboard('set-text', () =>
+        execFileSync(
+          'powershell',
+          ['-NoProfile', '-STA', '-Command', `Set-Clipboard -Value '${text}'`],
+          {
+            windowsHide: true,
+          },
+        ),
       );
     };
     const pasteIntoBox = async () => {
@@ -8801,6 +8845,51 @@ try {
           .locator(`.activitybar [aria-label^="${label}"]`)
           .count()
           .catch(() => 0);
+      /**
+       * Opens the command palette of window `p` with F1, types `>text` and returns the flattened
+       * text of its rows.
+       *
+       * F1 is pressed up to three times, each waiting up to 4 s for the input (2-3 times the
+       * ~1.75 s measured in #209): an F1 sent to a window that has just started is lost, and typing
+       * into the void left the control window with `[]` rows (the FAIL of #209). The first two
+       * waits do not trace their expiry (`traceExpiry` false: a lost F1 is the normal path being
+       * retried, not a test bug); the third does. With `waitRow` the list is awaited positively
+       * (up to 5 s for a row containing it) and no fixed sleep follows; without it the 1 s sleep
+       * stays because the caller reads a NEGATIVE (a query that must match nothing).
+       * VERIFIED (11/11/2026, Windows 11): two `--steps 25` runs in a row ended "all visual checks
+       * passed" with 0 expired waits, and the check "the installed copy resolves
+       * %command.showLogs.title% from package.nls.json" was ok in both. UNVERIFIED: the retry
+       * itself (no run lost the F1, so the "F1 did not open it" line was never printed).
+       */
+      const paletteRows = async (p, text, waitRow) => {
+        const input = p.locator('.quick-input-widget input').first();
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          await p.keyboard.press('F1');
+          const open = await waitFor(() => input.isVisible(), 4_000, 100, attempt === 3);
+          if (open) break;
+          console.log(`  palette: F1 did not open it (try ${String(attempt)} of 3)`);
+        }
+        await input.click({ timeout: 2_000 }).catch(() => undefined);
+        await p.keyboard.press('ControlOrMeta+A');
+        await p.keyboard.type(`>${text}`);
+        await waitFor(async () => (await input.inputValue()) === `>${text}`, 2_000, 50);
+        const rows = () =>
+          p.evaluate(() =>
+            [...globalThis.document.querySelectorAll('.quick-input-list .monaco-list-row')].map(
+              (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim(),
+            ),
+          );
+        if (waitRow === undefined) {
+          await sleep(1_000); // kept: the list filters asynchronously and the caller reads a negative too
+        } else {
+          await waitFor(
+            async () => (await rows()).some((row) => row.includes(waitRow)),
+            5_000,
+            100,
+          );
+        }
+        return rows();
+      };
       // The text of every OpenCode.log under `<userDataDir>/logs` (the extension host writes there).
       const readHostLog = (userDataDir) => {
         const files = [];
@@ -8915,25 +9004,7 @@ try {
         );
         // E11-i18n: the installed copy carries the catalogs. Without `package.nls.json` next to
         // `package.json` the palette would list the raw `%command.showLogs.title%`.
-        await other.keyboard.press('F1');
-        await waitFor(
-          () => other.locator('.quick-input-widget input').first().isVisible(),
-          2_000,
-          100,
-        );
-        await other
-          .locator('.quick-input-widget input')
-          .first()
-          .click({ timeout: 2_000 })
-          .catch(() => undefined);
-        await other.keyboard.press('ControlOrMeta+A');
-        await other.keyboard.type('>OpenCode: Show Logs');
-        await sleep(1_000); // kept: the list filters asynchronously, no signal for it
-        const titleRows = await other.evaluate(() =>
-          [...globalThis.document.querySelectorAll('.quick-input-list .monaco-list-row')].map(
-            (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim(),
-          ),
-        );
+        const titleRows = await paletteRows(other, 'OpenCode: Show Logs', 'OpenCode: Show Logs');
         await other.keyboard.press('Escape');
         check(
           titleRows.some((row) => row.includes('OpenCode: Show Logs')) &&
@@ -8969,34 +9040,12 @@ try {
           `in Restricted Mode the OpenCode item is NOT in the activity bar (${String(restrictedItems)})`,
         );
         // The palette: a query that must match (the palette works), then the one that must not.
-        const paletteRows = async (text) => {
-          for (let attempt = 0; attempt < 3; attempt += 1) {
-            await other.keyboard.press('F1');
-            const open = await waitFor(
-              () => other.locator('.quick-input-widget input').first().isVisible(),
-              2_000,
-              100,
-            );
-            if (open) break;
-          }
-          const input = other.locator('.quick-input-widget input').first();
-          await input.click({ timeout: 2_000 }).catch(() => undefined);
-          await other.keyboard.press('ControlOrMeta+A');
-          await other.keyboard.type(`>${text}`);
-          await waitFor(async () => (await input.inputValue()) === `>${text}`, 2_000, 50);
-          await sleep(1_000); // kept: the list filters asynchronously and the caller reads a negative too
-          return other.evaluate(() =>
-            [...globalThis.document.querySelectorAll('.quick-input-list .monaco-list-row')].map(
-              (row) => (row.textContent ?? '').replace(/\s+/g, ' ').trim(),
-            ),
-          );
-        };
-        const trustRows = await paletteRows('Manage Workspace Trust');
+        const trustRows = await paletteRows(other, 'Manage Workspace Trust');
         check(
           trustRows.some((row) => /Workspace Trust/i.test(row)),
           `the palette of the Restricted Mode window lists "Manage Workspace Trust" (${JSON.stringify(trustRows.slice(0, 2))})`,
         );
-        const openCodeRows = await paletteRows('OpenCode: Open Chat');
+        const openCodeRows = await paletteRows(other, 'OpenCode: Open Chat');
         check(
           !openCodeRows.some((row) => /opencode/i.test(row)),
           `the palette of the Restricted Mode window has no OpenCode command (${JSON.stringify(openCodeRows)})`,
@@ -18208,6 +18257,18 @@ try {
   // header with link and footer; row on; row off; failed row; skipped row) x 3 widths (wide 900, 300,
   // under 200) x 4 themes = 72 cells, each: inside the view, no sideways overflow, text whole (no
   // clipping), text contrast >= 4.5 and switch edge and thumb or icon contrast >= 3.
+  // Issue #210: the popover closes with the window blur, so before the Tab and the Escape blocks
+  // `ensurePopoverOpen` prints the focus of the chat and of the workbench and reopens it only when
+  // that focus was lost (decision of Sergio, 11/11/2026); with the focus intact it does not reopen
+  // and the check judges. `openByMouse` waits up to 3 s for the system focus; neither is a check.
+  // VERIFIED on Windows 11, VS Code stable, 11/11/2026: two `--steps 44,45` runs ended "all visual
+  // checks passed" with no "popover was closed" line. With a temporary Escape before the Tab block
+  // the run printed "mods popover was closed before the Tab key: chat hasFocus true, workbench
+  // hasFocus true (system focus)" ending "focus intact, not reopening", and the check "Tab moves
+  // the focus to the switch of quiet" FAILED (expected: the popover is judged, not hidden). With
+  // that Escape plus the chat document losing the focus (a focus() on the status bar) the line said
+  // "chat hasFocus false" and "reopening once", and the run passed. NOT observed: the real system
+  // blur (the system focus never left; `workbenchHasFocus` was true in both mutations).
   await step('45 mods popover: one switch per mod (E10-mod-toggles)', async () => {
     const DARK = 'Default Dark Modern';
     const HELLO = 'hello-station';
@@ -18340,6 +18401,12 @@ try {
       await page.keyboard.press(key);
       await sleep(200); // negative window: the key reaches the webview asynchronously; negative checks follow
     };
+    // Opens the popover with the real mouse (no-op when it is already open) and waits for the
+    // dialog. Before the click it makes the chat document own the focus if it has none, and waits up
+    // to 3 s for the system focus of the workbench, printing a line when it never comes back; both
+    // are preparation, not checks, and the click is checked. Why: the popover closes on the window
+    // blur (issue #210). HYPOTHESIS that the 3 s wait ever fires: no run printed "did not hold the
+    // system focus"; it would need a run with the window really blurred.
     const openByMouse = async () => {
       const before = await view();
       if (before.open) return;
@@ -18347,11 +18414,34 @@ try {
       // closes on the window blur: when the document has no focus, make the chat own it (steady for
       // three reads) first. Skipped otherwise: it costs about a second per call.
       if (!before.hasFocus) await focusPromptBox();
+      // The window blur that closes the popover is the SYSTEM focus leaving the workbench: wait up
+      // to 3 s (the margin of `diagnoseAfterFailure`) for it to be back before the click, and say
+      // so when it is not (nothing more can be done from here: the verdict is the checks').
+      if (
+        (await waitFor(() => workbenchHasFocus().catch(() => false), 3_000, 100, false)) !== true
+      ) {
+        console.log('  mods popover: the workbench did not hold the system focus before the click');
+      }
       check(
         await clickIn('button[data-mods-trigger]'),
         'the mods button is pressed with the real mouse',
       );
       await waitPresent('[role="dialog"].mods-popover');
+    };
+    // When the popover is closed before a keyboard block, prints the focus of the chat and of the
+    // workbench, and reopens it ONLY if the focus was lost (`!now.hasFocus || system !== true`: the
+    // window blur of the header of `ModsMenu`). With the focus intact (a close the product did
+    // itself) it prints the line without reopening, so the checks that follow judge it. Called
+    // before each keyboard block that needs the popover open; never a check itself.
+    const ensurePopoverOpen = async (context) => {
+      const now = await view();
+      if (now.open) return;
+      const system = await workbenchHasFocus().catch(() => 'unknown');
+      const lostFocus = !now.hasFocus || system !== true;
+      console.log(
+        `  mods popover was closed before ${context}: chat hasFocus ${String(now.hasFocus)}, workbench hasFocus ${String(system)} (system focus), active "${String(now.activeText).replace(/\s+/g, ' ')}"; ${lostFocus ? 'reopening once' : 'focus intact, not reopening'}`,
+      );
+      if (lostFocus) await openByMouse();
     };
     const closeByEscape = async () => {
       if ((await view()).open) await press('Escape');
@@ -18686,6 +18776,7 @@ try {
 
       // --- quiet off and on with the keyboard; hello-station untouched ------------------------------
       const helloLoadedBefore = loaded(HELLO);
+      await ensurePopoverOpen('the Tab key');
       await press('Tab');
       state = await view();
       check(
@@ -18856,6 +18947,7 @@ try {
       // --- Escape returns the focus and does not stop a turn -------------------------------------------
       await waitFor(async () => (await view()).found, 20_000, 200);
       await openByMouse();
+      await ensurePopoverOpen('the Escape key');
       await press('Escape');
       state = await view();
       check(
@@ -18868,6 +18960,7 @@ try {
       await page.keyboard.press('Enter');
       check((await waitFor(isBusy, 5_000, 100)) === true, 'a SLOW turn is running');
       await openByMouse();
+      await ensurePopoverOpen('the Escape key with a turn running');
       await press('Escape');
       state = await view();
       check(
@@ -19951,6 +20044,19 @@ try {
   // px) x 4 themes for the box, the status strip and the empty state (idle) and for a running row and
   // a waiting row; the functional cells type in the real box and click the real pills and buttons.
   // NOT covered: the contrast of the PLACEHOLDER text (its colour is not read), a screen reader.
+  // F7 (issue #210, decision P2): a check that the host logged the interrupt, one repeat of the click
+  // when no host line about the Stop shows up in 5 s, the OpenCode.log lines when F7 fails, and a
+  // Stop of the leftover turn so step 51 does not wait 60 s. VERIFIED on Windows 11, 11/11/2026: two
+  // `--steps 49,50,51` runs passed with "F7 the host asked the server to interrupt the waiting turn
+  // ("abort requested for … (interrupted: true) from the side bar")"; with the Stop click temporarily
+  // omitted that check, "F7 the turn that waited for the permission ends after Stop" and "F7 the
+  // "Waiting for you" row is gone once the request is no longer pending" failed, the log lines were
+  // printed, the line "step 50 cleanup: the chat was still busy; Stop Response, idle true" came out
+  // and step 51 passed "no turn is running when the step starts". The failure dump keeps only the
+  // log lines after the F7 click: VERIFIED on Windows 11, 11/11/2026, with both Stop clicks
+  // mutated away it printed "F7 host log lines about the Stop, only those after the F7 click (0):"
+  // and no line of the F4 Stop of another session. NOT observed: the retry click landing (the host
+  // always answered at the first click), and the CI failure it targets.
   await step('50 quick start home view (E9-sidebar-home)', async () => {
     const DARK = 'Default Dark Modern';
     const NORMAL = 300;
@@ -19975,6 +20081,21 @@ try {
       return files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
     };
     const logCount = (needle) => hostLogText().split(needle).length - 1;
+    /**
+     * Stops a turn this step left running, from the chat, so step 51 does not inherit its 60 s wait
+     * for "no turn is running". Prints one `step 50 cleanup:` line when it had to act; it never
+     * judges (the F7 checks are the verdict). Needs the chat webview open: HYPOTHESIS (read in the
+     * code, not run) that with it closed, or after F8 moved the chat to the editor group, `isBusy`
+     * rejects and nothing is done; to check it, make `isBusy` log its rejection in that state.
+     */
+    const stopLeftoverTurn = async () => {
+      if ((await isBusy().catch(() => false)) !== true) return;
+      await command('OpenCode: Stop Response').catch(() => undefined);
+      const stopped = await waitFor(async () => !(await isBusy()), 10_000, 150, false);
+      console.log(
+        `  step 50 cleanup: the chat was still busy; Stop Response, idle ${String(stopped)}`,
+      );
+    };
 
     /** (Re)connects `homeWeb` to the CDP target whose document says surface `home`. */
     async function connectHome(timeoutMs = 30_000) {
@@ -20402,19 +20523,60 @@ try {
       );
       await shot('50e-home-reply');
       // End the turn from the home view: the same Stop, now while it waits for the permission.
+      // The host lines that say what became of a Stop (P2 of tooling/visual-stability, issue #210):
+      // the interrupt it asked the server for, a refusal of the home view, a failed abort.
+      const stopAsked = () =>
+        (
+          hostLogText().match(
+            /abort requested for [^\n]*\(interrupted: true\) from the side bar/g,
+          ) ?? []
+        ).length;
+      const stopSignals = () =>
+        stopAsked() + logCount('home refused to stop') + logCount('abort failed for ');
+      const signalsBefore = stopSignals();
+      const askedBefore = stopAsked();
+      // Lines of the host log before the click: the failure dump below shows only what came after.
+      const logLinesBefore = hostLogText().split('\n').length;
       check(
         await homeClick('.home-action[aria-label^="Stop "]'),
         'F7 Stop of the waiting run is clicked',
       );
-      check(await waitIdle(30_000), 'F7 the turn that waited for the permission ends after Stop');
+      // Positive wait for ANY host line about the Stop (5 s, 2-3x the 168 ms seen locally). If none
+      // shows up the click never reached the host: click once more (the normal path is not traced).
+      if ((await waitFor(() => stopSignals() > signalsBefore, 5_000, 100, false)) !== true) {
+        console.log('  F7 no host line 5 s after the Stop click: clicking it once more');
+        await homeClick('.home-action[aria-label^="Stop "]');
+        await waitFor(() => stopSignals() > signalsBefore, 5_000, 100, false);
+      }
       check(
+        stopAsked() > askedBefore,
+        'F7 the host asked the server to interrupt the waiting turn ("abort requested for … (interrupted: true) from the side bar")',
+      );
+      const f7Idle = await waitIdle(30_000);
+      check(f7Idle, 'F7 the turn that waited for the permission ends after Stop');
+      const f7RowGone =
         (await homeWait(
           (doc) => doc.querySelectorAll('.home-row[data-kind="waiting"]').length === 0,
           undefined,
           20_000,
-        )) !== undefined,
+        )) !== undefined;
+      check(
+        f7RowGone,
         'F7 the "Waiting for you" row is gone once the request is no longer pending',
       );
+      if (stopAsked() <= askedBefore || !f7Idle || !f7RowGone) {
+        // The CI artifact carries no OpenCode.log: print what explains the failure here.
+        const lines = hostLogText()
+          .split('\n')
+          .slice(logLinesBefore)
+          .filter((line) => /abort|home refused|turn finished|ses_/i.test(line))
+          .slice(-15);
+        console.log(
+          `  F7 host log lines about the Stop, only those after the F7 click (${String(lines.length)}):`,
+        );
+        for (const line of lines) console.log(`    ${line}`);
+        await stopLeftoverTurn();
+      }
 
       // --- F8: the model and MCP pills open the OpenCode Settings tab (one tab, not two) -------------------
       await closeAllEditors();
@@ -20441,6 +20603,13 @@ try {
       );
       assertNoHomeErrors('step 50');
     } finally {
+      // Only acts when an exception was thrown between the F7 Stop and the `closeAllEditors()` of
+      // F8: a failed F7 is handled in its own branch, and HYPOTHESIS (read in the code, not run)
+      // that after F8 the chat is in the `editor` group, so `isBusy` rejects and
+      // `stopLeftoverTurn` returns without acting. A turn left
+      // running would make step 51 wait 60 s for "no turn is running". The verdict stays with the
+      // checks.
+      await stopLeftoverTurn();
       await closeAllEditors().catch(() => undefined);
       homeWeb?.close();
       setLocation('sidebar');

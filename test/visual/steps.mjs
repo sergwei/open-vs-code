@@ -24,7 +24,9 @@
  *   least). So a step passes on a normal day and is flagged when it grows by about a quarter.
  *   `== timings` marks the ones that go over; it is not a FAIL or a `warn` (decision P4). The
  *   budgets also size the shards of `--shard i/N` ({@link shardPlan}), so a stale budget skews
- *   the balance between runners, never a check. The planner declares the budget of a new step. The final full run of 31/10/2026 (Windows 11, VS Code
+ *   the balance between runners, never a check. The `budgetS` literals do not count in the code
+ *   fingerprint (`fingerprint.mjs` hashes them as 0), so recalibrating one does not make a saved
+ *   full run stale (issue #210). The planner declares the budget of a new step. The final full run of 31/10/2026 (Windows 11, VS Code
  *   1.144.0, 0 FAIL) is a third run: no step printed `over budget`. UNVERIFIED beyond those three
  *   runs; the steps 22, 24, 28 and 29 are unstable in the background (issue #117), so their durations
  *   vary more.
@@ -46,6 +48,14 @@
  * "Allowed once" that the step 5 leaves) survive Restart Server, and `--steps 7` alone failed with
  * "the answered-request lines are the same after Restart Server ([] -> [])" (28/10/2026, Windows
  * 11, VS Code 1.143.1; the other 24 ids passed alone). With `needs: ['5']` the 7 passed 2 runs of 2.
+ * The step 20 (drop and paste, issue #30) has a `budgetS` of 20, calibrated with the CI, not with
+ * a local run (issue #210, decision of Sergio 11/11/2026): in the 8 `visual.yml` runs read on
+ * 11/11/2026 (windows-latest, empty clipboard) it took 11.9 to 15.8 s, and 15.8 times 1.25 is
+ * 19.75, rounded up to 20. Locally it is bimodal: of the 45 saved full runs with this step
+ * (up to 10/11/2026), 38 took 10.7 to 13.9 s, 6 took 18.0 to 27.3 s and one took 90.5 s. The lost time sat beside ONE PowerShell clipboard call
+ * per run in the traces, and `run.mjs` now prints `clipboard <op> took N ms` for each call
+ * (`timedClipboard`) so the next slow run says which one. The cause (the clipboard of that PC) is
+ * HYPOTHESIS; a local `over budget` on this step is that tail, not a regression.
  * Steps 24 (slash commands, issue #33) and 25 (Workspace Trust, same issue) came after that
  * measurement: the 24 needs the 1 (it drives the chat) and sends prompts; the 25 needs nothing
  * (it starts two more VS Code windows of its own, a control and one in Restricted Mode, and never
@@ -197,7 +207,7 @@ export const STEPS = [
   { id: '17', needs: ['1'], sendsPrompt: true, groups: ['render'], budgetS: 10 },
   { id: '18', needs: ['1'], sendsPrompt: true, groups: ['render'], budgetS: 15 },
   { id: '19', needs: ['1'], sendsPrompt: true, groups: ['render'], budgetS: 20 },
-  { id: '20', needs: ['1'], sendsPrompt: true, groups: ['composer'], budgetS: 15 },
+  { id: '20', needs: ['1'], sendsPrompt: true, groups: ['composer'], budgetS: 20 },
   { id: '21', needs: ['1'], sendsPrompt: false, groups: ['setup'], budgetS: 5 },
   { id: '22', needs: ['2'], sendsPrompt: true, groups: ['keyboard'], budgetS: 20 },
   { id: '23', needs: ['1'], sendsPrompt: false, groups: ['selectors'], budgetS: 25 },
