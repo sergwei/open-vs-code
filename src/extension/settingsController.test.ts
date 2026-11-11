@@ -24,6 +24,7 @@ import type {
   McpActionResult,
   McpServerRow,
   ServerConfigSnapshot,
+  ShellActionResult,
 } from './serverConfig';
 import type { ModsListing } from '../shared/model';
 import {
@@ -81,16 +82,31 @@ const MODELS: ServerConfigSnapshot['models'] = {
   serverDefault: { providerID: 'anthropic', id: 'claude-sonnet', name: 'Claude Sonnet' },
 };
 
+/** The shell of opencode as the store holds it: read, Automatic, two shells offered, one of them terminal-only. */
+const SHELL: ServerConfigSnapshot['shell'] = {
+  loaded: true,
+  failed: false,
+  writing: false,
+  current: '',
+  overridden: false,
+  options: [
+    { value: 'powershell', name: 'powershell', terminalOnly: false },
+    { value: 'fish', name: 'fish', terminalOnly: true },
+  ],
+};
+
 function snapshotOf(
   rows: IntegrationRow[],
   models: ServerConfigSnapshot['models'],
   servers: McpServerRow[] = [],
+  shell: ServerConfigSnapshot['shell'] = SHELL,
 ): ServerConfigSnapshot {
   return {
     epoch: 1,
     integrations: { loaded: true, failed: false, rows },
     models,
     mcp: { loaded: true, failed: false, pendingFirstRead: false, servers },
+    shell,
   };
 }
 
@@ -105,6 +121,7 @@ function setup(
   mods?: SettingsMods,
 ) {
   let servers = initialServers;
+  let shell = SHELL;
   let preference = initialPreference;
   let general: SettingsGeneral = {
     chatLocation: { value: 'editor', workspaceOverride: false },
@@ -139,13 +156,16 @@ function setup(
   const attemptListeners = new Set<(view: AuthAttemptView | undefined) => void>();
   let attempt: AuthAttemptView | undefined;
   const config = {
-    snapshot: vi.fn(() => snapshotOf(rows, models, servers)),
+    snapshot: vi.fn(() => snapshotOf(rows, models, servers, shell)),
     onDidChange: (listener: () => void) => {
       storeListeners.add(listener);
       return () => storeListeners.delete(listener);
     },
     reloadAll: vi.fn(() => Promise.resolve()),
     mcpAction: vi.fn((_server: string, _op: 'connect' | 'disconnect'): Promise<McpActionResult> =>
+      Promise.resolve({ kind: 'done' }),
+    ),
+    shellAction: vi.fn((_value: string): Promise<ShellActionResult> =>
       Promise.resolve({ kind: 'done' }),
     ),
   } satisfies SettingsConfigSource;
@@ -208,6 +228,10 @@ function setup(
     /** Replaces the MCP rows the next `snapshot()` returns (what a re-read would bring). */
     setServers: (next: McpServerRow[]) => {
       servers = next;
+    },
+    /** Replaces the shell state the next `snapshot()` returns. */
+    setShell: (next: ServerConfigSnapshot['shell']) => {
+      shell = next;
     },
     changeStore: () => storeListeners.forEach((listener) => listener()),
     setAttempt: (view: AuthAttemptView | undefined) => {
@@ -1073,6 +1097,105 @@ describe('SettingsController general settings and mods', () => {
     expect(m.listeners.size).toBe(1);
     t.controller.dispose();
     expect(m.listeners.size).toBe(0);
+  });
+});
+
+/**
+ * Protects issue #205: the webview (untrusted) may set the shell of opencode only to Automatic or
+ * to a shell the store offers, never before the first read or while a write runs, and the select
+ * must always get a fresh state back (no optimistic value). The server itself accepts ANY shell
+ * name (planner of #205, real 2.2.7), so this allow-list is the only one. Provenance: FABRICATED
+ * snapshot and `shellAction`; the write against the server is in `serverConfig.test.ts`.
+ */
+describe('SettingsController shell requests', () => {
+  it('builds the shell of opencode field by field', () => {
+    const t = setup();
+    // Not a fresh literal, so TypeScript lets the extra field through like a wider server object.
+    const wide = {
+      value: 'powershell',
+      name: 'powershell',
+      terminalOnly: false,
+      env: 'sk-planted',
+    };
+    t.setShell({ ...SHELL, overridden: true, options: [wide] });
+    expect(t.controller.buildState().shell).toEqual({
+      loaded: true,
+      failed: false,
+      writing: false,
+      current: '',
+      overridden: true,
+      options: [{ value: 'powershell', name: 'powershell', terminalOnly: false }],
+    });
+    expect(JSON.stringify(t.controller.buildState())).not.toContain('sk-planted');
+  });
+
+  it('accepts Automatic and an offered shell, writes it once and asks for a state', async () => {
+    const t = setup();
+    t.setShell({ ...SHELL, current: 'powershell' });
+    t.controller.onReady();
+    await t.controller.onMessage({ type: 'settings.setShell', shell: '' });
+    await t.controller.onMessage({ type: 'settings.setShell', shell: 'fish' });
+    expect(t.config.shellAction.mock.calls).toEqual([[''], ['fish']]);
+    await Promise.resolve();
+    expect(states(t.posted).length).toBeGreaterThan(1);
+    expect(notices(t.posted)).toEqual([]);
+  });
+
+  it('refuses a shell the snapshot does not offer, with a fixed log line and a notice', async () => {
+    const t = setup();
+    t.controller.onReady();
+    await t.controller.onMessage({ type: 'settings.setShell', shell: 'zsh-planted' });
+    expect(t.config.shellAction).not.toHaveBeenCalled();
+    expect(t.log.warn).toHaveBeenCalledWith(
+      'settings request refused: settings.setShell: not offered',
+    );
+    expect(JSON.stringify(t.log.warn.mock.calls)).not.toContain('zsh-planted');
+    expect(notices(t.posted)).toEqual([
+      { integrationID: '', kind: 'shellFailed', message: 'Unknown shell' },
+    ]);
+    await Promise.resolve();
+    expect(states(t.posted).length).toBeGreaterThan(1);
+  });
+
+  it('refuses a request before the first read and while a write is running', async () => {
+    const t = setup();
+    t.controller.onReady();
+    t.setShell({ ...SHELL, loaded: false });
+    await t.controller.onMessage({ type: 'settings.setShell', shell: 'fish' });
+    t.setShell({ ...SHELL, writing: true });
+    await t.controller.onMessage({ type: 'settings.setShell', shell: 'fish' });
+    expect(t.config.shellAction).not.toHaveBeenCalled();
+    expect(t.log.warn).toHaveBeenCalledWith(
+      'settings request refused: settings.setShell: not read',
+    );
+    expect(t.log.warn).toHaveBeenCalledWith(
+      'settings request refused: settings.setShell: another write in progress',
+    );
+    expect(notices(t.posted)).toHaveLength(2);
+  });
+
+  it('sends nothing for the shell already held, and only asks for a state', async () => {
+    const t = setup();
+    t.setShell({ ...SHELL, current: 'powershell' });
+    t.controller.onReady();
+    const before = states(t.posted).length;
+    await t.controller.onMessage({ type: 'settings.setShell', shell: 'powershell' });
+    expect(t.config.shellAction).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(states(t.posted).length).toBe(before + 1);
+    expect(notices(t.posted)).toEqual([]);
+  });
+
+  it('words a failed write with the message of the store and asks for a state', async () => {
+    const t = setup();
+    t.controller.onReady();
+    t.config.shellAction.mockResolvedValueOnce({ kind: 'failed', message: 'Missing key' });
+    await t.controller.onMessage({ type: 'settings.setShell', shell: 'fish' });
+    expect(notices(t.posted)).toEqual([
+      { integrationID: '', kind: 'shellFailed', message: 'Missing key' },
+    ]);
+    await Promise.resolve();
+    expect(states(t.posted).length).toBeGreaterThan(1);
   });
 });
 

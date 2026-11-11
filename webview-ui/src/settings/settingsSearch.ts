@@ -74,9 +74,12 @@ export function normalize(text: string): string {
  * models, the MCP servers, the native settings (found by label or by their `openVsCode.<key>`) and
  * the mods (one jump each, to its row by `data-mod-id`; none when the host sent no mods) and the
  * actions: Restart server and Show logs, and, since PR3, Reload mods, Open mods folder, Set server
- * password, Manage saved permissions and Open chat. The order is the order of the ties of
+ * password, Manage saved permissions and Open chat. The shell of opencode (issue #205) is one more
+ * entry after the native settings, found by "opencode shell", "shell" or "terminal", that jumps to
+ * its select in Advanced by `data-setting="shell"`. The order is the order of the ties of
  * {@link searchEntries}.
- * VERIFIED by `settingsSearch.test.ts` with fabricated states; a real catalog of 238 providers
+ * VERIFIED by `settingsSearch.test.ts` with fabricated states (the shell entry by "finds the shell of
+ * opencode by label or keyword and jumps to its select in Advanced"); a real catalog of 238 providers
  * and thousands of models is not measured here (the list is capped at {@link MAX_SEARCH_RESULTS}
  * after ranking, and the index is rebuilt only when the state changes).
  */
@@ -151,6 +154,18 @@ export function buildSearchIndex(input: SearchInput): SearchEntry[] {
       target: { kind: 'setting', key },
     });
   }
+  // The shell of opencode is not a VS Code setting: it jumps to its select in Advanced (issue #205).
+  entries.push({
+    id: 'setting:shell',
+    label: l10n.t('opencode shell'),
+    detail: l10n.t('Setting'),
+    keywords: 'shell terminal',
+    target: {
+      kind: 'jump',
+      section: 'advanced',
+      anchor: { attribute: 'data-setting', value: 'shell' },
+    },
+  });
   entries.push(
     {
       id: 'action:restart',

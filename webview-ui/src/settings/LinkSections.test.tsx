@@ -5,10 +5,12 @@
 // chat": no switch, never `toggleWorkMode`. Provenance: fabricated state in jsdom; what each command
 // does once the host runs it is UNVERIFIED here (`settingsController.test.ts` maps the actions to
 // contributed commands, the integration case of `settings.test.ts` is for a real host).
+import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { SettingsWebviewToHost } from '../../../src/shared/settingsProtocol';
+import type { SettingsState, SettingsWebviewToHost } from '../../../src/shared/settingsProtocol';
 import { mount, type Mounted } from '../testing';
 import { AdvancedSection, WorkModeSection } from './LinkSections';
+import { makeState } from './settingsFixtures';
 
 let mounted: Mounted | undefined;
 afterEach(() => {
@@ -44,6 +46,7 @@ describe('link sections', () => {
     const sent: SettingsWebviewToHost[] = [];
     mounted = mount(() => (
       <AdvancedSection
+        state={makeState()}
         send={(message) => {
           sent.push(message);
         }}
@@ -78,6 +81,7 @@ describe('link sections', () => {
     const sent: SettingsWebviewToHost[] = [];
     mounted = mount(() => (
       <AdvancedSection
+        state={makeState()}
         send={(message) => {
           sent.push(message);
         }}
@@ -90,5 +94,128 @@ describe('link sections', () => {
       { type: 'settings.openSetting', key: 'opencodePath' },
       { type: 'settings.openSetting', key: 'serverUrl' },
     ]);
+  });
+});
+
+/**
+ * Protects issue #205 (decisions P1-P3): the shell row of Advanced. State is fabricated and the
+ * select is driven by `change` events in jsdom; what VS Code shows is `test:visual` step 53 (F3).
+ */
+describe('the shell row of Advanced', () => {
+  const options = [
+    { value: 'bash', name: 'bash', terminalOnly: false },
+    { value: '/usr/bin/fish', name: 'fish', terminalOnly: true },
+  ];
+
+  function shellState(shell: Partial<SettingsState['shell']>): SettingsState {
+    return makeState({
+      shell: {
+        loaded: true,
+        failed: false,
+        writing: false,
+        current: '',
+        overridden: false,
+        options,
+        ...shell,
+      },
+    });
+  }
+
+  function mountShell(initial: SettingsState): {
+    sent: SettingsWebviewToHost[];
+    set: (state: SettingsState) => void;
+  } {
+    const sent: SettingsWebviewToHost[] = [];
+    const [state, set] = createSignal(initial);
+    mounted = mount(() => (
+      <AdvancedSection
+        state={state()}
+        send={(message) => {
+          sent.push(message);
+        }}
+      />
+    ));
+    return { sent, set };
+  }
+
+  function shellSelect(): HTMLSelectElement {
+    const element = mounted?.container.querySelector<HTMLSelectElement>('#settings-shell');
+    if (element === null || element === undefined) throw new Error('no shell select');
+    return element;
+  }
+
+  function pick(value: string): void {
+    const select = shellSelect();
+    select.value = value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  it('lists Automatic and the options, marks the terminal-only one, and shows the saved shell', () => {
+    mountShell(shellState({ current: 'bash' }));
+    const select = shellSelect();
+    expect(Array.from(select.options).map((option) => option.textContent)).toEqual([
+      'Automatic',
+      'bash',
+      'fish (terminal only)',
+    ]);
+    expect(select.value).toBe('bash');
+    expect(select.getAttribute('data-setting')).toBe('shell');
+    expect(mounted?.container.querySelector('label[for="settings-shell"]')?.textContent).toBe(
+      'opencode shell',
+    );
+    expect(mounted?.container.textContent).toContain('global opencode config');
+  });
+
+  it('sends exactly one setShell per pick, and the select goes back to the saved shell', () => {
+    const { sent } = mountShell(shellState({ current: 'bash' }));
+    pick('/usr/bin/fish');
+    expect(sent).toEqual([{ type: 'settings.setShell', shell: '/usr/bin/fish' }]);
+    expect(shellSelect().value).toBe('bash');
+    pick('');
+    expect(sent[1]).toEqual({ type: 'settings.setShell', shell: '' });
+  });
+
+  it('shows the pick while writing, ignores a second pick, and never disables the select', () => {
+    const { sent, set } = mountShell(shellState({ current: '' }));
+    pick('bash');
+    set(shellState({ current: '', writing: true }));
+    const select = shellSelect();
+    expect(select.value).toBe('bash');
+    expect(select.getAttribute('aria-busy')).toBe('true');
+    expect(select.getAttribute('aria-disabled')).toBe('true');
+    expect(select.disabled).toBe(false);
+    pick('/usr/bin/fish');
+    expect(sent).toHaveLength(1);
+    expect(select.value).toBe('bash');
+    set(shellState({ current: 'bash', writing: false }));
+    expect(select.value).toBe('bash');
+    expect(select.hasAttribute('aria-busy')).toBe(false);
+  });
+
+  it('returns to the saved shell when the write ends refused, even with the same value', () => {
+    const { set } = mountShell(shellState({ current: '' }));
+    pick('bash');
+    set(shellState({ current: '', writing: true }));
+    expect(shellSelect().value).toBe('bash');
+    set(shellState({ current: '', writing: false }));
+    expect(shellSelect().value).toBe('');
+  });
+
+  it('says the shells are being read, or could not be read, and has no select then', () => {
+    const loading = mountShell(shellState({ loaded: false }));
+    expect(mounted?.container.querySelector('#settings-shell')).toBeNull();
+    expect(mounted?.container.textContent).toContain('Reading the shells…');
+    loading.set(shellState({ loaded: true, failed: true, current: 'zsh' }));
+    expect(mounted?.container.querySelector('#settings-shell')).toBeNull();
+    expect(mounted?.container.textContent).toContain('The shells could not be read. zsh');
+  });
+
+  it('tells when another config hides the shell, and not otherwise', () => {
+    const { set } = mountShell(shellState({ overridden: true }));
+    expect(mounted?.container.querySelector('[data-hint="shell-override"]')?.textContent).toContain(
+      'sets its own shell',
+    );
+    set(shellState({ overridden: false }));
+    expect(mounted?.container.querySelector('[data-hint="shell-override"]')).toBeNull();
   });
 });

@@ -26,6 +26,8 @@ export interface SettingsStoreState {
   general: SettingsState['general'];
   /** The mods listing; `undefined` when the host has no mods half (not "no mods"). */
   mods: SettingsState['mods'];
+  /** The shell of opencode (issue #205); not read yet until the host says `loaded`. */
+  shell: SettingsState['shell'];
   mcp: SettingsState['mcp'];
   attempt: AuthAttemptView | undefined;
   /** One-shot messages, oldest first; the consumer drains them with `drainNotices`. */
@@ -55,7 +57,10 @@ export interface SettingsStore {
  * host stops sending it, and `preference` is reconciled in place. PR3 adds `general` (reconciled in
  * place) and `mods` (the listing: its `mods` rows reconciled by `id` so a row keeps its DOM, its
  * `skipped` folders replaced, and `undefined` again when the host stops sending it; VERIFIED by the
- * "mods" cases of `settingsStore.test.ts`, fabricated). VERIFIED by `settingsStore.test.ts`
+ * "mods" cases of `settingsStore.test.ts`, fabricated). Issue #205 adds `shell`: its fields are
+ * copied one by one and its `options` reconciled in place by `value`, so the select keeps its DOM;
+ * VERIFIED by "keeps the shell options and their DOM across states" of `settingsStore.test.ts`
+ * (fabricated). VERIFIED by `settingsStore.test.ts`
  * (fabricated messages: it proves identity, order and, in "keeps two models that share an id across
  * providers, and drops a default the host stops sending", that two providers' models with the same
  * id stay two rows; not what the real host sends).
@@ -75,6 +80,14 @@ export function createSettingsStore(): SettingsStore {
       autoStart: { value: true, workspaceOverride: false },
     },
     mods: undefined,
+    shell: {
+      loaded: false,
+      failed: false,
+      writing: false,
+      current: '',
+      overridden: false,
+      options: [],
+    },
     mcp: { loaded: false, failed: false, pendingFirstRead: true, servers: [] },
     attempt: undefined,
     notices: [],
@@ -115,6 +128,13 @@ export function createSettingsStore(): SettingsStore {
           setState('mods', 'mods', reconcile(next.mods.mods, { key: 'id', merge: true }));
           setState('mods', 'skipped', next.mods.skipped);
         }
+        // In place, the options by `value`: the select keeps its DOM (and its focus) across states.
+        setState('shell', 'loaded', next.shell.loaded);
+        setState('shell', 'failed', next.shell.failed);
+        setState('shell', 'writing', next.shell.writing);
+        setState('shell', 'current', next.shell.current);
+        setState('shell', 'overridden', next.shell.overridden);
+        setState('shell', 'options', reconcile(next.shell.options, { key: 'value', merge: true }));
         setState('mcp', 'loaded', next.mcp.loaded);
         setState('mcp', 'failed', next.mcp.failed);
         setState('mcp', 'pendingFirstRead', next.mcp.pendingFirstRead);
@@ -144,7 +164,9 @@ export function createSettingsStore(): SettingsStore {
  * 08/11/2026). `settingFailed` (a General setting could not be saved) and `modFailed` (a mod
  * switch was refused) say the setting or the mod "was not changed" and append the host's fixed
  * `message`; VERIFIED by "words the General setting and mod notices" of `settingsStore.test.ts`
- * (fabricated notices, vitest). The three `mcp*` kinds (issue #186, PR2) are the answer to a Connect, Disconnect or
+ * (fabricated notices, vitest). `shellFailed` (the shell of opencode was refused or not written,
+ * issue #205) says "The shell was not changed." plus the host's `message`; VERIFIED by
+ * "words the shell notice" of `settingsStore.test.ts` (fabricated notice, vitest). The three `mcp*` kinds (issue #186, PR2) are the answer to a Connect, Disconnect or
  * Retry of an MCP server and name it by `name` (the caller passes the server's name, never the
  * `mcp_...` id): `mcpFailed` says the server "could not be changed" because it covers a refused
  * request, a failed disconnect and a connect that ended failed alike, and the `message` tells which.
@@ -176,6 +198,8 @@ export function noticeText(notice: SettingsNotice, name: string): string {
       return `${l10n.t('The setting was not changed.')}${detail}`;
     case 'modFailed':
       return `${l10n.t('The mod was not changed.')}${detail}`;
+    case 'shellFailed':
+      return `${l10n.t('The shell was not changed.')}${detail}`;
     case 'unsupported':
       return `${l10n.t('{0} cannot be set up here. Use opencode auth login in a terminal.', name)}${detail}`;
   }

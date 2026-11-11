@@ -562,8 +562,17 @@ function fakeApi(options: FakeOptions = {}) {
         },
       },
     },
-    // The controller never reads usage nor writes MCP state; these stubs only keep `ChatApi` whole.
+    // The controller never reads usage nor writes MCP or config state; these stubs only keep
+    // `ChatApi` whole.
+    config: {
+      get: () => Promise.reject(new Error('config.get is not used by the controller')),
+      shells: () => Promise.reject(new Error('config.shells is not used by the controller')),
+    },
     experimental: {
+      config: {
+        update: () =>
+          Promise.reject(new Error('experimental.config.update is not used by the controller')),
+      },
       session: {
         stats: () =>
           Promise.resolve({

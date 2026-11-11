@@ -10,6 +10,9 @@
 // They confirm OUR mapping and coalescing, not the contract with the server.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
+  ConfigGetOutput,
+  ConfigShellsOutput,
+  ExperimentalConfigUpdateInput,
   IntegrationInfo,
   McpResourceCatalogOutput,
   ModelInfo,
@@ -19,11 +22,13 @@ import {
   MAX_DETAIL,
   MAX_TEXT,
   MCP_FIRST_READ_GRACE_MS,
+  SHELL_SETTLE_MS,
   ServerConfig,
   detailText,
   firstLine,
   toIntegrationRow,
   toMcpCatalogRows,
+  toShellState,
   type ServerConfigApi,
 } from './serverConfig';
 
@@ -90,7 +95,11 @@ const PROVIDER_WITH_SECRETS = wire<ProviderInfo>(`{
   "body": {"refresh": "rt-planted-refresh"}
 }`);
 
-/** A client whose three reads answer with the (mutable) data and count their calls. */
+/**
+ * A client whose reads answer with the (mutable) data and count their calls; since issue #205 it
+ * also answers `config.get`/`config.shells` and records the `experimental.config.update` PATCHes
+ * (`shell`), without a gate on those reads.
+ */
 function fakeApi(
   initial: {
     integrations?: IntegrationInfo[];
@@ -135,6 +144,19 @@ function fakeApi(
     state.onWrite?.();
     return Promise.resolve();
   };
+  /** The shell row (issue #205): what `config.get`/`config.shells` answer and the PATCHes seen. */
+  const shell = {
+    entries: [] as ConfigGetOutput,
+    shells: [] as ConfigShellsOutput,
+    gets: 0,
+    patches: [] as ExperimentalConfigUpdateInput[],
+    patchError: undefined as unknown,
+    fail: false,
+    /** Runs when a PATCH succeeds: the test changes `entries` there, like the reload would. */
+    onPatch: undefined as (() => void) | undefined,
+    /** When set, the NEXT PATCH waits for it before succeeding (taken once, like `state.gate`). */
+    patchGate: undefined as { promise: Promise<void> } | undefined,
+  };
   const hold = async (): Promise<void> => {
     const gate = state.gate;
     state.gate = undefined;
@@ -175,6 +197,34 @@ function fakeApi(
         connect: (input) => write(`connect ${input.server}`),
         disconnect: (input) => write(`disconnect ${input.server}`),
       },
+      config: {
+        update: async (input) => {
+          shell.patches.push(input);
+          const gate = shell.patchGate;
+          shell.patchGate = undefined;
+          if (gate !== undefined) await gate.promise;
+          if (shell.patchError !== undefined) {
+            // The client THROWS the body of a declared error, not an `Error`.
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+            return Promise.reject(shell.patchError);
+          }
+          shell.onPatch?.();
+          return Promise.resolve();
+        },
+      },
+    },
+    config: {
+      get: async () => {
+        // No `hold()` here: a gate set for another source must not be taken by this read.
+        shell.gets++;
+        await Promise.resolve();
+        if (shell.fail) throw new Error(`boom ${SECRETS.url}`);
+        return shell.entries;
+      },
+      shells: async () => {
+        await Promise.resolve();
+        return shell.shells;
+      },
     },
     mcp: {
       list: async () => {
@@ -204,7 +254,7 @@ function fakeApi(
     state.gate = { promise, release };
     return release;
   };
-  return { api, calls, modelCalls, state, gate, writes };
+  return { api, calls, modelCalls, state, gate, writes, shell };
 }
 
 /** A store with a recording log and change counter. */
@@ -730,6 +780,280 @@ describe('the MCP details', () => {
     const row = store.snapshot().mcp.servers[0];
     expect(row?.error).toHaveLength(MAX_TEXT);
     expect(row?.detail).toBe('y'.repeat(500));
+  });
+});
+
+/**
+ * Protects issue #205: the shell row shows what the GLOBAL opencode config holds and what wins
+ * over it, never a secret of the document it lives in, and the write waits for the server to
+ * reload before reading it back (the 204 comes BEFORE the reload: a read right after it returns
+ * the old value). Provenance: FABRICATED entries, shells and client, shaped by the real 2.2.7
+ * server the planner of #205 saw (Windows 11, 11/11/2026: bare arrays, `config.updated` about
+ * 200 ms after the PATCH, none for a PATCH that changes nothing). Planted secrets prove the
+ * allow-list; nothing here proves what a real server answers.
+ */
+describe('the shell of opencode', () => {
+  const doc = (info: string, path = 'C:\\cfg\\opencode.jsonc') =>
+    wire<ConfigGetOutput[number]>(
+      `{"type":"document","path":${JSON.stringify(path)},"info":${info}}`,
+    );
+  const dir = wire<ConfigGetOutput[number]>(`{"type":"directory","path":"C:\\\\cfg"}`);
+  const shellOf = (name: string, path: string, acceptable = true) => ({ name, path, acceptable });
+
+  it('takes the last shell of the global group, and none when no document holds one', () => {
+    expect(toShellState([doc('{"shell":"cmd"}'), doc('{"shell":"bash"}'), dir], [])).toMatchObject({
+      current: 'bash',
+      overridden: false,
+    });
+    expect(toShellState([doc('{}'), dir], [])).toMatchObject({ current: '', overridden: false });
+    expect(toShellState([], [])).toEqual({ current: '', overridden: false, options: [] });
+  });
+
+  it('flags overridden only for a later document with a different shell', () => {
+    const global = doc('{"shell":"bash"}');
+    expect(toShellState([global, dir, doc('{"shell":"cmd"}')], [])).toMatchObject({
+      current: 'bash',
+      overridden: true,
+    });
+    expect(toShellState([global, dir, doc('{"shell":"bash"}')], []).overridden).toBe(false);
+    expect(toShellState([global, dir, doc('{"model":"a/b"}')], []).overridden).toBe(false);
+    expect(toShellState([dir, doc('{"shell":"cmd"}')], [])).toMatchObject({
+      current: '',
+      overridden: true,
+    });
+  });
+
+  it('offers the shells by name, by path when two share one, and marks the unacceptable', () => {
+    const { options } = toShellState(
+      [],
+      [
+        shellOf('bash', '/usr/bin/bash'),
+        shellOf('bash', '/opt/bin/bash'),
+        shellOf('fish', '/usr/bin/fish', false),
+        shellOf('zsh', '/bin/zsh'),
+      ],
+    );
+    expect(options).toEqual([
+      { value: '/usr/bin/bash', name: '/usr/bin/bash', terminalOnly: false },
+      { value: '/opt/bin/bash', name: '/opt/bin/bash', terminalOnly: false },
+      { value: 'fish', name: 'fish', terminalOnly: true },
+      { value: 'zsh', name: 'zsh', terminalOnly: false },
+    ]);
+  });
+
+  it('adds a current shell no option offers, and drops options it cannot send back exact', () => {
+    const long = 'x'.repeat(2001);
+    const { options } = toShellState(
+      [doc('{"shell":"nu-custom"}'), dir],
+      [
+        shellOf('fish', '/usr/bin/fish'),
+        shellOf('', '/x'),
+        shellOf('cmd', ''),
+        shellOf(long, '/y'),
+        shellOf('toolong', long),
+        wire<ConfigShellsOutput[number]>(`{"name":7,"path":"/z","acceptable":true}`),
+      ],
+    );
+    expect(options.map((option) => option.value)).toEqual(['fish', 'nu-custom']);
+  });
+
+  it('keeps no planted secret from the document or the shells in a serialized snapshot', async () => {
+    const { api, shell } = fakeApi();
+    shell.entries = [
+      doc(
+        `{"shell":"bash","username":"hdr-planted-token","providers":{"x":{"options":{"apiKey":"sk-planted-api-key"}}},"mcp":{"y":{"headers":{"Authorization":"at-planted-access"}}}}`,
+      ),
+      dir,
+    ];
+    shell.shells = [
+      wire<ConfigShellsOutput[number]>(
+        `{"name":"bash","path":"/usr/bin/bash","acceptable":true,"env":{"K":"rt-planted-refresh"}}`,
+      ),
+    ];
+    const { store } = setup(api);
+    await store.reloadAll();
+    const json = JSON.stringify(store.snapshot());
+    for (const secret of PLANTED) expect(json).not.toContain(secret);
+    // ...while the allowed fields did arrive, so the check is not vacuous.
+    expect(store.snapshot().shell).toEqual({
+      loaded: true,
+      failed: false,
+      writing: false,
+      current: 'bash',
+      overridden: false,
+      options: [{ value: 'bash', name: 'bash', terminalOnly: false }],
+    });
+  });
+
+  it('reads on server.connected and on a config.updated nobody is waiting for', async () => {
+    const { api, shell } = fakeApi();
+    const { store } = setup(api);
+    store.event('server.connected');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(shell.gets).toBe(1);
+    shell.entries = [doc('{"shell":"cmd"}'), dir];
+    store.event('config.updated');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(shell.gets).toBe(2);
+    expect(store.snapshot().shell.current).toBe('cmd');
+  });
+
+  it('keeps the previous shell, sets failed and logs the code when the read fails', async () => {
+    const { api, shell } = fakeApi();
+    shell.entries = [doc('{"shell":"cmd"}'), dir];
+    const { store, lines } = setup(api);
+    await store.reloadAll();
+    shell.fail = true;
+    await store.reloadAll();
+    expect(store.snapshot().shell).toMatchObject({ loaded: true, failed: true, current: 'cmd' });
+    expect(lines.some((line) => line.startsWith('warn: shell read failed'))).toBe(true);
+    expect(lines.join('\n')).not.toContain(SECRETS.url);
+  });
+
+  describe('shell actions', () => {
+    /** A store whose server reloads `delay` ms (fake time) after the PATCH, like the real one. */
+    function reloading(value: string | null) {
+      const made = fakeApi();
+      made.shell.entries = [doc('{}'), dir];
+      made.shell.onPatch = () => {
+        made.shell.entries = [doc(value === null ? '{}' : `{"shell":"${value}"}`), dir];
+      };
+      return { ...made, ...setup(made.api) };
+    }
+
+    it('sends one PATCH with null for Automatic and the value otherwise', async () => {
+      vi.useFakeTimers();
+      const a = reloading('bash');
+      const first = a.store.shellAction('bash');
+      a.store.event('config.updated');
+      expect(await first).toEqual({ kind: 'done' });
+      expect(a.shell.patches).toEqual([{ shell: 'bash' }]);
+      const second = a.store.shellAction('');
+      a.store.event('config.updated');
+      expect(await second).toEqual({ kind: 'done' });
+      expect(a.shell.patches).toEqual([{ shell: 'bash' }, { shell: null }]);
+    });
+
+    it('does not re-read before config.updated, and reads the new value on it', async () => {
+      vi.useFakeTimers();
+      const a = reloading('bash');
+      await a.store.reloadAll();
+      const reads = a.shell.gets;
+      let settled = false;
+      const pending = a.store.shellAction('bash').then((result) => {
+        settled = true;
+        return result;
+      });
+      await vi.advanceTimersByTimeAsync(SHELL_SETTLE_MS - 100);
+      expect(settled).toBe(false);
+      expect(a.shell.gets).toBe(reads);
+      a.store.event('config.updated');
+      expect(await pending).toEqual({ kind: 'done' });
+      expect(a.shell.gets).toBe(reads + 1);
+      expect(a.store.snapshot().shell.current).toBe('bash');
+      expect(a.lines).toContain('info: shell set');
+    });
+
+    it('re-reads after SHELL_SETTLE_MS when no config.updated comes', async () => {
+      vi.useFakeTimers();
+      const a = reloading('bash');
+      await a.store.reloadAll();
+      const reads = a.shell.gets;
+      const pending = a.store.shellAction('bash');
+      await vi.advanceTimersByTimeAsync(SHELL_SETTLE_MS - 1);
+      expect(a.shell.gets).toBe(reads);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(await pending).toEqual({ kind: 'done' });
+      expect(a.shell.gets).toBe(reads + 1);
+      expect(a.store.snapshot().shell.current).toBe('bash');
+    });
+
+    it('goes on at once when config.updated arrived before the 204', async () => {
+      vi.useFakeTimers();
+      const a = reloading('bash');
+      a.shell.onPatch = () => {
+        a.shell.entries = [doc('{"shell":"bash"}'), dir];
+        a.store.event('config.updated');
+      };
+      expect(await a.store.shellAction('bash')).toEqual({ kind: 'done' });
+      expect(a.store.snapshot().shell.current).toBe('bash');
+    });
+
+    it('says writing from the call until the re-read ends, and tells the listeners', async () => {
+      vi.useFakeTimers();
+      const a = reloading('bash');
+      await a.store.reloadAll();
+      const seen: boolean[] = [];
+      a.store.onDidChange(() => seen.push(a.store.snapshot().shell.writing));
+      const pending = a.store.shellAction('bash');
+      expect(a.store.snapshot().shell.writing).toBe(true);
+      a.store.event('config.updated');
+      await pending;
+      expect(a.store.snapshot().shell.writing).toBe(false);
+      expect(seen[0]).toBe(true);
+      expect(seen[seen.length - 1]).toBe(false);
+    });
+
+    it('fails with the code in the log and without the value when the PATCH is rejected', async () => {
+      vi.useFakeTimers();
+      const a = reloading('bash');
+      await a.store.reloadAll();
+      const reads = a.shell.gets;
+      a.shell.patchError = {
+        _tag: 'InvalidRequestError',
+        message: `Missing key at ${SECRETS.url} for C:\\Users\\planted-user`,
+      };
+      const result = await a.store.shellAction('C:\\Users\\planted-user\\bash.exe');
+      expect(result).toMatchObject({ kind: 'failed' });
+      expect(result.kind === 'failed' ? result.message : '').not.toContain(SECRETS.url);
+      expect(a.lines).toContain('warn: shell set failed: InvalidRequestError');
+      expect(a.lines.join('\n')).not.toContain('planted-user');
+      expect(a.shell.gets).toBe(reads);
+      expect(a.store.snapshot().shell.writing).toBe(false);
+    });
+
+    it('fails without a server, and gives up silently when the server was replaced', async () => {
+      vi.useFakeTimers();
+      const a = reloading('bash');
+      a.store.detach();
+      expect(await a.store.shellAction('bash')).toMatchObject({ kind: 'failed' });
+      expect(a.shell.patches).toEqual([]);
+      a.store.attach(a.api, 2, SECRETS);
+      const pending = a.store.shellAction('bash');
+      a.store.attach(a.api, 3, SECRETS);
+      expect(await pending).toMatchObject({ kind: 'failed' });
+      expect(a.lines.filter((line) => line.includes('shell set'))).toEqual([]);
+      expect(a.store.snapshot().shell.writing).toBe(false);
+    });
+
+    /**
+     * Protects the waiter of a newer write (W1 of the review of #205): an old PATCH that settles
+     * after the server was replaced must not clear the waiter the new write installed, or the new
+     * `config.updated` goes to the plain read and the write sleeps the whole SHELL_SETTLE_MS.
+     * Fabricated timeline (fake client, fake timers). Mutation run: with the unconditional
+     * `this.shellWaiter = undefined` back in `shellAction`, this check failed (the second write
+     * had not settled 100 ms after the event).
+     */
+    it('does not clear the waiter of a newer write when an old PATCH settles late', async () => {
+      vi.useFakeTimers();
+      const a = reloading('bash');
+      let release: () => void = () => undefined;
+      a.shell.patchGate = { promise: new Promise<void>((resolve) => (release = resolve)) };
+      const old = a.store.shellAction('bash');
+      a.store.attach(a.api, 2, SECRETS);
+      let settled = false;
+      const fresh = a.store.shellAction('bash').then((result) => {
+        settled = true;
+        return result;
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      release();
+      expect(await old).toMatchObject({ kind: 'failed' });
+      a.store.event('config.updated');
+      await vi.advanceTimersByTimeAsync(100);
+      expect(settled).toBe(true);
+      expect(await fresh).toEqual({ kind: 'done' });
+    });
   });
 });
 
