@@ -243,10 +243,14 @@ panel.onDidClose(() => station.log.info('closed'));
 - **Files.** `html`, `scripts` and `styles` are paths **relative to your mod folder** (`.html` or `.htm`,
   `.js` or `.mjs`, `.css`; each file at most 1 MB). A path with `..`, an absolute path, a drive letter or
   a link that leaves the folder is refused. That check covers the files you declare. It does **not** cover
-  what the page asks for by itself (an `<img>` or a `url()`): VS Code serves it when its path is under your
-  folder and does not resolve links, so a symlink or junction inside your folder that points outside is
-  readable by the page. The page has no network, so all it can do with that is send it to your mod, which
-  already has Node (see Security). Do not leave links to private places inside a mod folder.
+  what the page asks for by itself (an `<img>` or a `url()`), and what happens depends on the VS Code
+  version. From VS Code 1.146 the real path is resolved and a file whose real location is outside your
+  folder is not served to the page (a link that stays inside your folder keeps working;
+  [microsoft/vscode#346026](https://github.com/microsoft/vscode/pull/346026)). Before 1.146 the path was
+  compared as text, so a symlink or junction inside your folder that points outside is readable by the
+  page. The page has no network, so all it can do with that is send it to your mod, which already has
+  Node (see Security). The extension supports VS Code 1.105 and later, so do not rely on the newer
+  behaviour and do not leave links to private places inside a mod folder.
 - **The page has no network.** Its content security policy is `default-src 'none'`, scripts only by a
   nonce the extension adds to the files you declare, styles and images only from your folder, and **no
   `connect-src`**: `fetch`, `XMLHttpRequest` and WebSocket are blocked. Inline `<script>` and `style=`
