@@ -13,7 +13,11 @@ import type {
   AgentListOutput,
   CommandListInput,
   CommandListOutput,
+  ConfigGetInput,
+  ConfigGetOutput,
+  ConfigShellsOutput,
   CredentialRemoveInput,
+  ExperimentalConfigUpdateInput,
   FileDiffInfo,
   FileFindInput,
   FileFindOutput,
@@ -314,6 +318,21 @@ export interface ChatApi {
    * integration of a remote MCP server and connects and disconnects a local one").
    */
   experimental: {
+    /**
+     * `PATCH /api/experimental/config` (issue #205): writes the supported fields of the GLOBAL
+     * opencode.jsonc ("the highest-precedence global configuration document"); the Settings tab
+     * sends only `{ shell }` (`null` removes the key). 204 with no body, and it answers BEFORE the
+     * server reloads: a `config.get` right after it still returns the old value, and the reload
+     * publishes `config.updated`. A patch that changes nothing is a 204 with NO `config.updated`.
+     * The server does not validate the shell name; `{}` is a 400 `InvalidRequestError`. The old
+     * `config.update` is a `@deprecated` alias and is not declared. VERIFIED against a real
+     * opencode 2.2.7 (Windows 11, 11/11/2026, planner of #205, `OPENCODE_CONFIG_DIR` isolated,
+     * `OPENCODE_FILEWATCHER_DISABLE=1`): 204 in 371 ms the first time, `config.updated` about 200 ms
+     * after the PATCH, `config.get` converged in 173-575 ms, null on null emitted nothing, an
+     * unknown name was written as is. No test of this repository runs this write against a real
+     * server on purpose (it would write the developer's own opencode.jsonc).
+     */
+    config: { update(input: ExperimentalConfigUpdateInput): Promise<void> };
     session: {
       /**
        * `GET /api/experimental/session/stats` (issue #187, E9): cost, tokens and per-model usage of
@@ -353,6 +372,20 @@ export interface ChatApi {
       connect(input: ExperimentalMcpConnectInput): Promise<void>;
       disconnect(input: ExperimentalMcpDisconnectInput): Promise<void>;
     };
+  };
+  /**
+   * The reads of the shell row (issue #205): `GET /api/config` (the config documents and
+   * directories, highest precedence LAST in the global group) and `GET /api/config/shell` (the
+   * shells of this machine). Unlike the catalog reads, BOTH answers are bare arrays, not
+   * `{ location, data }`. VERIFIED against a real opencode 2.2.7 (Windows 11, 11/11/2026, planner
+   * of #205): `config.get()` gave `[document <global>/opencode.jsonc, directory <global dir>, ...]`
+   * and `config.shells()` gave `{path, name, acceptable}` entries for powershell and cmd. The
+   * `info` of a document can hold provider keys and MCP headers: the host reads ONLY `info.shell`.
+   * `client.config.update` is not declared (deprecated alias of `experimental.config.update`).
+   */
+  config: {
+    get(input?: ConfigGetInput): Promise<ConfigGetOutput>;
+    shells(): Promise<ConfigShellsOutput>;
   };
   agent: { list(input?: AgentListInput): Promise<AgentListOutput> };
   /**

@@ -142,6 +142,16 @@ describe('buildSearchIndex', () => {
     expect(find('logs')[0]?.target).toEqual({ kind: 'action', action: 'logs' });
   });
 
+  it('finds the shell of opencode by label or keyword and jumps to its select in Advanced', () => {
+    const target = {
+      kind: 'jump',
+      section: 'advanced',
+      anchor: { attribute: 'data-setting', value: 'shell' },
+    };
+    expect(find('opencode shell')[0]?.target).toEqual(target);
+    expect(find('terminal')[0]?.target).toEqual(target);
+  });
+
   it('finds a mod by name or id and jumps to its row, and the actions of PR3', () => {
     const withMods = buildSearchIndex({ ...state, mods: structuredClone(modsListing) });
     expect(searchEntries(withMods, 'throws')[0]?.target).toEqual({

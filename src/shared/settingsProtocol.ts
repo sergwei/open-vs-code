@@ -153,6 +153,33 @@ export interface SettingsGeneral {
   autoStart: { value: boolean; workspaceOverride: boolean };
 }
 
+/** One choice of the shell select (issue #205); `value` is exactly what `settings.setShell` carries. */
+export interface SettingsShellOption {
+  /** The shell name, or its path when two shells share a name. */
+  value: string;
+  /** What the select shows. */
+  name: string;
+  /** True when opencode does not accept the shell for the agent's commands (the terminal only). */
+  terminalOnly: boolean;
+}
+
+/**
+ * The shell of opencode as the Advanced section needs it (issue #205). It is the GLOBAL opencode
+ * config, not a VS Code setting: the host reads it from the server and writes it back.
+ */
+export interface SettingsShell {
+  loaded: boolean;
+  /** True when the last read failed (the rest is then the previous read). */
+  failed: boolean;
+  /** True while a change is being written and read back; the select must ignore new choices. */
+  writing: boolean;
+  /** The shell the global config holds; `''` means Automatic. */
+  current: string;
+  /** True when another config document (project, organization) sets a shell that wins over it. */
+  overridden: boolean;
+  options: SettingsShellOption[];
+}
+
 /** The sign-in in progress, if any. `code` is the device code to copy, never a key. */
 export interface AuthAttemptView {
   integrationID: string;
@@ -188,6 +215,8 @@ export interface SettingsState {
    * has no mods half (the section says so instead of claiming there are no mods).
    */
   mods?: ModsListing;
+  /** The shell of opencode (issue #205). */
+  shell: SettingsShell;
   mcp: {
     loaded: boolean;
     failed: boolean;
@@ -218,7 +247,9 @@ export interface SettingsNotice {
     /** A General setting could not be saved; the message is a fixed text, never the value. */
     | 'settingFailed'
     /** A mod switch was refused or failed; the message is a fixed text. */
-    | 'modFailed';
+    | 'modFailed'
+    /** The shell of opencode was refused or could not be written; the message is fixed or scrubbed. */
+    | 'shellFailed';
   message?: string;
   /** The MCP server's name, for the three `mcp*` kinds (the `mcp_...` id is no name to read out). */
   server?: string;
@@ -278,7 +309,9 @@ export type SettingsWebviewToHost =
   | { type: 'settings.setSetting'; key: 'chatLocation'; value: SettingsChatLocation }
   | { type: 'settings.setSetting'; key: 'autoStart'; value: boolean }
   /** Switches one mod on or off for this workspace; the host checks the id against its listing. */
-  | { type: 'settings.modToggle'; modId: string; enabled: boolean };
+  | { type: 'settings.modToggle'; modId: string; enabled: boolean }
+  /** Sets the shell of opencode (`''` = Automatic); the host accepts only one of its options. */
+  | { type: 'settings.setShell'; shell: string };
 
 /** True for a non-empty string of at most {@link MAX_SETTINGS_ID} characters. */
 function isId(value: unknown): value is string {
@@ -347,6 +380,15 @@ function isModelText(value: unknown): boolean {
   return typeof value === 'string' && value.length <= 2 * MAX_SETTINGS_ID + 1;
 }
 
+/**
+ * True for the text of a `settings.setShell` request: a string of at most {@link MAX_SETTINGS_VALUE}
+ * characters, `''` allowed (Automatic). It travels as opaque text (a Windows path keeps its
+ * backslashes); the host revalidates it against the options it holds.
+ */
+function isShellText(value: unknown): boolean {
+  return typeof value === 'string' && value.length <= MAX_SETTINGS_VALUE;
+}
+
 /** True for one of the two MCP operations the tab may ask for. */
 function isMcpOp(value: unknown): value is SettingsMcpOp {
   return value === 'connect' || value === 'disconnect';
@@ -381,6 +423,7 @@ const WEBVIEW_SHAPES: Record<
   },
   'settings.mcpSignIn': { keys: ['server'], valid: (m) => isId(field(m, 'server')) },
   'settings.setSetting': { keys: ['key', 'value'], valid: isSettingPair },
+  'settings.setShell': { keys: ['shell'], valid: (m) => isShellText(field(m, 'shell')) },
   'settings.modToggle': {
     keys: ['modId', 'enabled'],
     valid: (m) => {
@@ -397,7 +440,10 @@ const WEBVIEW_SHAPES: Record<
 /**
  * Guard for messages arriving at the host from the settings webview, which is untrusted input.
  *
- * Accepts only a plain object whose `type` is one of the thirteen known ones, whose own properties
+ * Accepts only a plain object whose `type` is one of the fourteen known ones (the fourteenth,
+ * `settings.setShell`, takes a `shell` string of at most 2000 characters, `''` allowed, issue
+ * #205; VERIFIED by the check "takes a shell of at most 2000 characters, empty or a Windows path, and nothing else" of `settingsProtocol.test.ts`, fabricated
+ * messages, vitest, Windows 11, 11/11/2026), whose own properties
  * are EXACTLY `type` plus the ones that type declares (so a `apiKey` or `secret` makes it fail, as
  * does any other extra field; `settings.openSetting` DOES declare a `key`, which must be one of
  * {@link SETTINGS_SETTING_KEYS}, never free text; `settings.mcp` declares `server` and an `op` that

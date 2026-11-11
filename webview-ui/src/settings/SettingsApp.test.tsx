@@ -695,6 +695,18 @@ describe('announcements', () => {
     );
   });
 
+  // Protects issue #205: a refused or failed shell change is told in the live region (the select
+  // went back to the saved shell, so silence would look like a bug). Fabricated notice.
+  it('announces a shell that was not changed', () => {
+    const { container, apply } = setup(makeState());
+    const region = must(container, '[role="status"].visually-hidden');
+    apply({
+      type: 'settings.notice',
+      notice: { integrationID: '', kind: 'shellFailed', message: 'Unknown shell' },
+    });
+    expect(region.textContent.trim()).toBe('The shell was not changed. Unknown shell');
+  });
+
   it('clears the busy mark of an MCP row when a notice names its server, even with the same state', () => {
     const { container, apply, sent } = setup(
       makeState({ mcp: { ...makeState().mcp, servers: mcpServers } }),

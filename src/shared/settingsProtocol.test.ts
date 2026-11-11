@@ -163,6 +163,34 @@ describe('isSettingsWebviewToHost', () => {
     ).toBe(true);
   });
 
+  /**
+   * Protects issue #205: `settings.setShell` carries exactly one `shell` string (`''` is Automatic)
+   * of at most MAX_SETTINGS_VALUE characters, as opaque text (a Windows path keeps its
+   * backslashes), and nothing else rides along. Fabricated messages: this proves our validator,
+   * not what a real webview posts.
+   */
+  it('takes a shell of at most 2000 characters, empty or a Windows path, and nothing else', () => {
+    const good: unknown[] = [
+      { type: 'settings.setShell', shell: '' },
+      { type: 'settings.setShell', shell: 'powershell' },
+      { type: 'settings.setShell', shell: 'C:\\WINDOWS\\system32\\cmd.exe' },
+      { type: 'settings.setShell', shell: 'x'.repeat(MAX_SETTINGS_VALUE) },
+    ];
+    for (const message of good) expect(isSettingsWebviewToHost(message)).toBe(true);
+    const bad: unknown[] = [
+      { type: 'settings.setShell', shell: 'x'.repeat(MAX_SETTINGS_VALUE + 1) },
+      { type: 'settings.setShell', shell: null },
+      { type: 'settings.setShell', shell: 7 },
+      { type: 'settings.setShell', shell: ['cmd'] },
+      { type: 'settings.setShell' },
+      { type: 'settings.setShell', shell: 'cmd', apiKey: 'sk-planted' },
+      { type: 'settings.setShell', shell: 'cmd', path: 'C:\\x.exe' },
+      { type: 'settings.setShell', shell: 'cmd', value: 'x' },
+    ];
+    for (const message of bad)
+      expect(isSettingsWebviewToHost(message), JSON.stringify(message)).toBe(false);
+  });
+
   it('opens only the settings of the closed list, and takes nothing besides the key', () => {
     const bad: unknown[] = [
       { type: 'settings.openSetting' },

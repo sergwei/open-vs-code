@@ -88,7 +88,7 @@ export interface SettingsGeneralSource {
 /** The slice of {@link ServerConfig} the controller reads. */
 export type SettingsConfigSource = Pick<
   ServerConfig,
-  'snapshot' | 'onDidChange' | 'reloadAll' | 'mcpAction'
+  'snapshot' | 'onDidChange' | 'reloadAll' | 'mcpAction' | 'shellAction'
 >;
 /** The slice of {@link ProviderAuth} the controller drives. */
 export type SettingsAuth = Pick<
@@ -244,7 +244,11 @@ export class SettingsController {
    * (the second only when it names an `mcp` integration row), and keeps its `detail`. Since PR3 it
    * also carries `general` (the two settings, read now, with their workspace-override flag) and,
    * only when a mods half was given, `mods` (its `state().listing` as it is: plain texts of
-   * `mod.json` or the Worker).
+   * `mod.json` or the Worker). Since issue #205 it carries `shell`, copied field by field from the
+   * snapshot (`loaded`, `failed`, `writing`, `current`, `overridden` and the options as
+   * `{value, name, terminalOnly}`), so nothing else of the store can ride along.
+   * VERIFIED by "builds the shell of opencode field by field" of `settingsController.test.ts`
+   * (fabricated snapshot with an extra field, vitest, Windows 11, 11/11/2026).
    */
   buildState(): SettingsState {
     const snapshot = this.deps.config.snapshot();
@@ -290,6 +294,18 @@ export class SettingsController {
       preference: this.preference(),
       general: this.deps.general.read(),
       ...(this.deps.mods === undefined ? {} : { mods: this.deps.mods.state().listing }),
+      shell: {
+        loaded: snapshot.shell.loaded,
+        failed: snapshot.shell.failed,
+        writing: snapshot.shell.writing,
+        current: snapshot.shell.current,
+        overridden: snapshot.shell.overridden,
+        options: snapshot.shell.options.map((option) => ({
+          value: option.value,
+          name: option.name,
+          terminalOnly: option.terminalOnly,
+        })),
+      },
       mcp: {
         loaded: snapshot.mcp.loaded,
         failed: snapshot.mcp.failed,
@@ -421,7 +437,56 @@ export class SettingsController {
       case 'settings.modToggle':
         await this.modToggle(message.modId, message.enabled);
         return;
+      case 'settings.setShell':
+        await this.setShell(message.shell);
+        return;
     }
+  }
+
+  /**
+   * Revalidates a shell request of the Advanced row and writes it to the GLOBAL opencode config
+   * through {@link ServerConfig.shellAction}. The shell must be `''` (Automatic) or the `value` of
+   * one of the options the snapshot holds (the server itself accepts any name, so this allow-list
+   * is the only one); a request before the first read (`!loaded`) or while a write runs
+   * (`writing`) is refused. A refusal writes one `settings request refused` line with a fixed
+   * reason (never the text asked for) and posts a `shellFailed` notice with a fixed message, and a
+   * fresh state, so the select goes back to the saved value. A shell equal to `current` sends
+   * nothing (a patch that changes nothing publishes no `config.updated`, so the write would wait
+   * for the settle timer for nothing) and only asks for a state. A failed write posts the
+   * scrubbed message of the error. EVERY exit asks for a state: no optimistic value is posted.
+   * VERIFIED by the checks of "SettingsController shell requests" in `settingsController.test.ts`
+   * (fabricated snapshot and fake `shellAction`, vitest, Windows 11, 11/11/2026): accepts `''` and
+   * an offered value, refuses an unoffered one, one before the read and one while writing, sends
+   * nothing for the current value, and words a failed write.
+   */
+  private async setShell(shell: string): Promise<void> {
+    const state = this.deps.config.snapshot().shell;
+    if (!state.loaded || state.writing) {
+      this.refused('settings.setShell', state.writing ? 'another write in progress' : 'not read');
+      this.refuseShell(l10n.t('The shell cannot be changed right now.'));
+      return;
+    }
+    if (shell !== '' && !state.options.some((option) => option.value === shell)) {
+      this.refused('settings.setShell', 'not offered');
+      this.refuseShell(l10n.t('Unknown shell'));
+      return;
+    }
+    if (shell === state.current) {
+      this.changed();
+      return;
+    }
+    const result = await this.deps.config.shellAction(shell);
+    if (result.kind === 'failed') {
+      this.refuseShell(result.message);
+      return;
+    }
+    this.changed();
+  }
+
+  /** Posts a `shellFailed` notice and then the current state, so the select returns to the saved shell. */
+  private refuseShell(message: string): void {
+    this.notice({ integrationID: '', kind: 'shellFailed', message });
+    this.changed();
   }
 
   /**

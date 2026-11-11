@@ -9,7 +9,10 @@ import type {
   SettingsState,
 } from '../../../src/shared/settingsProtocol';
 
-/** A connected state with empty lists; tests override the parts they care about. */
+/**
+ * A connected state with empty lists and the shell of opencode loaded as Automatic with no
+ * options (issue #205); tests override the parts they care about.
+ */
 export function makeState(overrides: Partial<SettingsState> = {}): SettingsState {
   return {
     connection: { state: 'connected', serverVersion: '2.0.32' },
@@ -23,6 +26,14 @@ export function makeState(overrides: Partial<SettingsState> = {}): SettingsState
       autoStart: { value: true, workspaceOverride: false },
     },
     mcp: { loaded: true, failed: false, pendingFirstRead: false, servers: [] },
+    shell: {
+      loaded: true,
+      failed: false,
+      writing: false,
+      current: '',
+      overridden: false,
+      options: [],
+    },
     ...overrides,
   };
 }

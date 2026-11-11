@@ -392,7 +392,7 @@ export function SettingsApp(props: { store: SettingsStore; send: SendSettings; u
                           <WorkModeSection send={props.send} />
                         </Match>
                         <Match when={section === 'advanced'}>
-                          <AdvancedSection send={props.send} />
+                          <AdvancedSection state={state} send={props.send} />
                         </Match>
                       </Switch>
                     </div>

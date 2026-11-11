@@ -198,6 +198,47 @@ describe('noticeText', () => {
   });
 });
 
+describe('the shell half of the state', () => {
+  /** Protects issue #205: the shell reaches the store, and a row object keeps its identity. FABRICATED states. */
+  it('keeps the shell options and their DOM across states', () =>
+    createRoot((dispose) => {
+      const store = createSettingsStore();
+      expect(store.state.shell.loaded).toBe(false);
+      const options = [{ value: 'bash', name: 'bash', terminalOnly: false }];
+      const shell = {
+        loaded: true,
+        failed: false,
+        writing: false,
+        current: 'bash',
+        overridden: true,
+        options,
+      };
+      store.apply({ type: 'settings.state', state: makeState({ shell }) });
+      expect(store.state.shell.current).toBe('bash');
+      expect(store.state.shell.overridden).toBe(true);
+      const row = store.state.shell.options[0];
+      store.apply({
+        type: 'settings.state',
+        state: makeState({ shell: { ...shell, writing: true, options: structuredClone(options) } }),
+      });
+      expect(store.state.shell.writing).toBe(true);
+      expect(store.state.shell.options[0]).toBe(row);
+      dispose();
+    }));
+});
+
+describe('the shell notice', () => {
+  /** Protects issue #205: the shell notice says what was not changed and appends the host's text. FABRICATED notices. */
+  it('words the shell notice', () => {
+    expect(
+      noticeText({ integrationID: '', kind: 'shellFailed', message: 'Unknown shell' }, ''),
+    ).toBe('The shell was not changed. Unknown shell');
+    expect(noticeText({ integrationID: '', kind: 'shellFailed' }, '')).toBe(
+      'The shell was not changed.',
+    );
+  });
+});
+
 describe('the General and mods halves of the state', () => {
   it('holds general, and keeps the mods listing absent until the host sends it', () =>
     createRoot((dispose) => {

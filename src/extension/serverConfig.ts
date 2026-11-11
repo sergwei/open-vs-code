@@ -21,13 +21,19 @@ import { logTextOf, sanitizeText, toErrorInfo } from './wireMapping';
 import type { ChatApi } from './opencodeClient';
 import type { ServerLog } from './opencodeServer';
 import type { ProviderAuthApi } from './providerAuth';
+import { MAX_SETTINGS_VALUE } from '../shared/settingsProtocol';
 
 /** The client methods the store reads: a slice of {@link ChatApi}, so a test supplies a small fake. */
 export type ServerConfigApi = {
   integration: Pick<ChatApi['integration'], 'list' | 'get'>;
   mcp: ChatApi['mcp'];
-  /** The MCP writes, which live under `client.experimental.mcp` since 2.2 (issue #191). */
-  experimental: Pick<ChatApi['experimental'], 'mcp'>;
+  /** `config.get` and `config.shells`, the reads of the shell row (issue #205). */
+  config: ChatApi['config'];
+  /**
+   * The MCP writes, which live under `client.experimental.mcp` since 2.2 (issue #191), and the
+   * shell write `client.experimental.config.update` (issue #205).
+   */
+  experimental: Pick<ChatApi['experimental'], 'mcp' | 'config'>;
   /** The catalog reads of the model picker (issue #186): `model.list`, `model.default`. */
   model: ChatApi['model'];
   /** `provider.list`, for the provider names and the link provider to integration. */
@@ -44,6 +50,13 @@ export const MAX_DETAIL_LINES = 20;
 export const MAX_DETAIL = 2000;
 /** How long an empty first MCP list is shown as "still loading" before it is believed (ms). */
 export const MCP_FIRST_READ_GRACE_MS = 2000;
+/**
+ * How long {@link ServerConfig.shellAction} waits for the `config.updated` that follows its write
+ * before it re-reads anyway (ms). Chosen by the planner of issue #205 as 2-3 times the 173-575 ms
+ * the real 2.2.7 server took to converge (Windows 11, 11/11/2026): the 204 comes BEFORE the reload,
+ * and a patch that changes nothing publishes no event at all.
+ */
+export const SHELL_SETTLE_MS = 1500;
 
 /** A field of the form of a connection method; only `string` fields are supported by the tab. */
 export interface FieldRow {
@@ -128,6 +141,19 @@ export interface McpServerRow {
 export type McpActionResult =
   { kind: 'done' } | { kind: 'failed'; message: string; notFound: boolean };
 
+/** What {@link ServerConfig.shellAction} resolves: it worked, or why it did not. */
+export type ShellActionResult = { kind: 'done' } | { kind: 'failed'; message: string };
+
+/** One choice of the shell select: `value` is what is written (and what `current` holds). */
+export interface ShellOptionRow {
+  /** The shell name, or its path when two shells share a name; exactly what the PATCH carries. */
+  value: string;
+  /** What the select shows: the same as `value`, so two shells of one name show their paths. */
+  name: string;
+  /** True when opencode says the shell is not acceptable for the agent's commands (fish, nu). */
+  terminalOnly: boolean;
+}
+
 /** Everything the tab shows about the server's configuration. */
 export interface ServerConfigSnapshot {
   /** The epoch given to `attach`; `undefined` when there is no server. */
@@ -158,6 +184,19 @@ export interface ServerConfigSnapshot {
      */
     pendingFirstRead: boolean;
     servers: McpServerRow[];
+  };
+  /** The shell of opencode (issue #205), read with `config.get` and `config.shells`. */
+  shell: {
+    loaded: boolean;
+    /** True when the last read failed (the other fields are then the previous ones). */
+    failed: boolean;
+    /** True from the PATCH until the re-read that follows it ends. */
+    writing: boolean;
+    /** The shell the global config document holds; `''` for Automatic. */
+    current: string;
+    /** True when a later config document (project, organization) holds another shell that wins. */
+    overridden: boolean;
+    options: ShellOptionRow[];
   };
 }
 
@@ -432,6 +471,63 @@ export function toMcpCatalogRows(
   return { resources, templates };
 }
 
+/** A shell name or path that can travel back to the host unchanged: a string of 1..2000 characters. */
+function isShellText(value: unknown): value is string {
+  return typeof value === 'string' && value !== '' && value.length <= MAX_SETTINGS_VALUE;
+}
+
+/**
+ * Reduces `config.get` and `config.shells` to what the shell row needs, by allow-list: ONLY
+ * `info.shell` of a document is read (the rest of `info` holds provider keys, MCP headers and the
+ * user name) and each option keeps `path`, `name` and `acceptable` (an `env` or any other extra
+ * field of a shell is never read).
+ *
+ * `current` is the LAST `info.shell` among the documents BEFORE the first `directory` entry (the
+ * global group; upstream's rule, `packages/app/src/settings/general/controllers.ts` @ v2.2.7), `''`
+ * when none holds one. `overridden` is true when a document AFTER that directory (a project one, or
+ * a managed or inline one) holds a different shell, because it wins in the effective config while
+ * `current` only says what was written to the global file. Options: the `value` is the shell's name,
+ * or its path when two shells share a name, and `terminalOnly` is `!acceptable`; a shell whose
+ * name or path is not a string of 1..2000 characters is DROPPED, not cut, because the value has to
+ * come back exact (the protocol refuses longer ones). A `current` that no option offers is added as
+ * an option of its own, so the select can always show what the config holds.
+ * VERIFIED by the checks of "the shell of opencode" in `serverConfig.test.ts` (fabricated entries
+ * and shells, vitest, Windows 11, 11/11/2026). The order of the entries (global document, then its
+ * directory, an inline document after it) was seen on a real 2.2.7 server by the planner of #205
+ * (11/11/2026); this function was not run against one.
+ */
+export function toShellState(
+  entries: Awaited<ReturnType<ServerConfigApi['config']['get']>>,
+  shells: Awaited<ReturnType<ServerConfigApi['config']['shells']>>,
+): { current: string; overridden: boolean; options: ShellOptionRow[] } {
+  let current = '';
+  let seenDirectory = false;
+  const later: string[] = [];
+  for (const entry of entries) {
+    if (entry.type === 'directory') {
+      seenDirectory = true;
+      continue;
+    }
+    const shell: unknown = entry.info.shell;
+    if (!isShellText(shell)) continue;
+    if (seenDirectory) later.push(shell);
+    else current = shell;
+  }
+  const usable = shells.filter((shell) => isShellText(shell.path) && isShellText(shell.name));
+  const perName = new Map<string, number>();
+  for (const shell of usable) perName.set(shell.name, (perName.get(shell.name) ?? 0) + 1);
+  const options: ShellOptionRow[] = [];
+  for (const shell of usable) {
+    const value = (perName.get(shell.name) ?? 0) > 1 ? shell.path : shell.name;
+    if (options.some((option) => option.value === value)) continue;
+    options.push({ value, name: value, terminalOnly: shell.acceptable !== true });
+  }
+  if (current !== '' && !options.some((option) => option.value === current)) {
+    options.push({ value: current, name: current, terminalOnly: false });
+  }
+  return { current, overridden: later.some((shell) => shell !== current), options };
+}
+
 /**
  * One read that never runs twice at once: a request while it is in flight marks it dirty, so the
  * running one repeats ONCE when it ends and every caller shares the promise (the pattern of
@@ -488,12 +584,15 @@ class CoalescedRead {
 }
 
 /**
- * The store: four coalesced reads (integrations, models, MCP list, MCP resource catalog) of the
+ * The store: five coalesced reads (integrations, models, MCP list, MCP resource catalog, and the
+ * shell of opencode) of the
  * server attached, each REPLACING its rows whole (an integration or server that left must disappear),
  * and a snapshot to read them. A failed read keeps the previous rows, sets `failed` and logs one
  * `warn` line; a read for a server that went away meanwhile is dropped (generation check). Since
- * issue #186 (PR2) it also WRITES, in one place: {@link ServerConfig.mcpAction} connects or
- * disconnects an MCP server at runtime and then re-reads the list.
+ * issue #186 (PR2) it also WRITES: {@link ServerConfig.mcpAction} connects or
+ * disconnects an MCP server at runtime and then re-reads the list; since issue #205
+ * {@link ServerConfig.shellAction} writes the shell into the GLOBAL opencode config and re-reads
+ * it once the server has reloaded.
  *
  * VERIFIED by unit tests with fake clients (coalescing, replacement, stale generation, the
  * pending-first-read rule, the allow-list with a planted secret, the catalog re-read on a status
@@ -541,6 +640,21 @@ export class ServerConfig implements ServerConfigSink {
   private mcpEventSeen = false;
   private graceTimer: ReturnType<typeof setTimeout> | undefined;
 
+  private shell: { current: string; overridden: boolean; options: ShellOptionRow[] } = {
+    current: '',
+    overridden: false,
+    options: [],
+  };
+  private shellLoaded = false;
+  private shellFailed = false;
+  private shellWriting = false;
+  /** Set by {@link ServerConfig.shellAction} while it waits for `config.updated`; see `event`. */
+  private shellWaiter: (() => void) | undefined;
+
+  private readonly shellRead = new CoalescedRead(
+    () => this.generation,
+    (generation) => this.readShell(generation),
+  );
   private readonly integrationRead = new CoalescedRead(
     () => this.generation,
     (generation) => this.readIntegrations(generation),
@@ -593,6 +707,14 @@ export class ServerConfig implements ServerConfigSink {
         pendingFirstRead: this.mcpLoaded && !this.mcpSettled && servers.length === 0,
         servers,
       },
+      shell: {
+        loaded: this.shellLoaded,
+        failed: this.shellFailed,
+        writing: this.shellWriting,
+        current: this.shell.current,
+        overridden: this.shell.overridden,
+        options: this.shell.options,
+      },
     };
   }
 
@@ -627,8 +749,12 @@ export class ServerConfig implements ServerConfigSink {
    * stream has no replay: `opencode-api` section 4); `integration.updated`, `credential.updated` and
    * `credential.switched` re-read the integrations AND the models (a new credential makes a
    * provider available, so its models appear: HYPOTHESIS, the opt-in suite never changed a
-   * credential); `model.updated`, `provider.updated` and `config.updated` re-read only the models
-   * (names read in the client types of 2.0.32, never seen on a real stream); `mcp.status.changed` re-reads the list AND the resource catalog, and
+   * credential); `model.updated` and `provider.updated` re-read only the models
+   * (names read in the client types of 2.0.32, never seen on a real stream); `config.updated`
+   * re-reads the models AND the shell, except that a shell write waiting for this very event
+   * ({@link ServerConfig.shellAction}) is released instead and does its own read (the event is
+   * seen on a real 2.2.7 server, about 200 ms after the PATCH: planner of #205, 11/11/2026);
+   * `mcp.status.changed` re-reads the list AND the resource catalog, and
    * `mcp.resources.changed` only the catalog. The catalog is re-read on a status change too as a
    * defence: upstream 843a6c5 (`packages/core/src/mcp/index.ts` L463-465) publishes
    * `ResourcesChanged` when a server connects, but no test follows that event end to end against
@@ -654,9 +780,17 @@ export class ServerConfig implements ServerConfigSink {
         return;
       case 'model.updated':
       case 'provider.updated':
-      case 'config.updated':
         void this.modelRead.request();
         return;
+      case 'config.updated': {
+        void this.modelRead.request();
+        // A shell write in flight is waiting for this event to read the new value: it does the
+        // read itself. Otherwise the event came from elsewhere (the TUI, a file) and is read here.
+        const waiter = this.shellWaiter;
+        if (waiter === undefined) void this.shellRead.request();
+        else waiter();
+        return;
+      }
       case 'mcp.status.changed':
         this.mcpEventSeen = true;
         void this.mcpRead.request();
@@ -670,17 +804,21 @@ export class ServerConfig implements ServerConfigSink {
     }
   }
 
-  /** Re-reads the four sources (the Refresh button); resolves when all are done, never rejects. */
+  /** Re-reads the five sources (the Refresh button); resolves when all are done, never rejects. */
   async reloadAll(): Promise<void> {
     await Promise.all([
       this.integrationRead.request(),
       this.modelRead.request(),
       this.mcpRead.request(),
       this.catalogRead.request(),
+      this.shellRead.request(),
     ]);
   }
 
-  /** Drops the server and everything read from it, and cancels the grace timer. */
+  /**
+   * Drops the server and everything read from it, cancels the grace timer and releases a shell
+   * write that is waiting for `config.updated` (it then sees the new generation and gives up).
+   */
   private forget(): void {
     this.generation++;
     this.api = undefined;
@@ -690,6 +828,13 @@ export class ServerConfig implements ServerConfigSink {
     this.modelRead.reset();
     this.mcpRead.reset();
     this.catalogRead.reset();
+    this.shellRead.reset();
+    // Releases a shell write that is still waiting; it sees the new generation and gives up.
+    this.shellWaiter?.();
+    this.shell = { current: '', overridden: false, options: [] };
+    this.shellLoaded = false;
+    this.shellFailed = false;
+    this.shellWriting = false;
     this.integrations = [];
     this.integrationsLoaded = false;
     this.integrationsFailed = false;
@@ -853,6 +998,125 @@ export class ServerConfig implements ServerConfigSink {
     this.log.info(`mcp ${op}: ${server}`);
     await this.mcpRead.request();
     return { kind: 'done' };
+  }
+
+  /**
+   * One read of `config.get` and `config.shells` for `generation`, all or nothing: if one fails the
+   * previous state stays and `failed` is set. {@link toShellState} reduces both by allow-list, so
+   * nothing of a document but its `shell` reaches the snapshot.
+   * VERIFIED by the "the shell of opencode" checks of `serverConfig.test.ts` (fabricated payloads
+   * with planted secrets, vitest, Windows 11, 11/11/2026); a real server's payload was seen only by
+   * the planner of #205.
+   */
+  private async readShell(generation: number): Promise<void> {
+    const api = this.api;
+    if (api === undefined) return;
+    try {
+      const [entries, shells] = await Promise.all([api.config.get(), api.config.shells()]);
+      if (generation !== this.generation) return;
+      this.shell = toShellState(entries, shells);
+      this.shellLoaded = true;
+      this.shellFailed = false;
+    } catch (error) {
+      if (generation !== this.generation) return;
+      this.shellFailed = true;
+      this.warnFailed('shell read', error);
+    }
+    this.notify();
+  }
+
+  /**
+   * Sets the shell of opencode (`''` removes it, so opencode picks one) by patching the GLOBAL
+   * opencode config with `client.experimental.config.update`, then waits for the server to reload
+   * and reads the shell again, so the caller judges the state AFTER the change (no optimistic
+   * value). The caller has already checked `value` against the options of the snapshot; this
+   * method does not.
+   *
+   * The 204 answers BEFORE the reload: a `config.get` right after it returns the old value, so the
+   * re-read waits for the next `config.updated` (see {@link ServerConfig.event}) or, at most,
+   * {@link SHELL_SETTLE_MS} after the 204, and then goes on either way: a patch that changes
+   * nothing publishes no event, and on a very slow machine the re-read can still see the old
+   * value (the `config.updated` that arrives later corrects it). `snapshot().shell.writing` is
+   * true from the call until the re-read ends. The waiter is installed BEFORE the write, because
+   * the event may arrive before the 204. Any `config.updated` (the TUI, a file watcher) between
+   * installing the waiter and the reload also releases the wait early, so the re-read may still see
+   * the old value; the later real `config.updated` goes to the plain read and corrects it.
+   *
+   * Resolves `{ kind: 'done' }` once the re-read ended (a read that fails still resolves: it sets
+   * `shell.failed`), or `{ kind: 'failed', message }` with the scrubbed message of the error when
+   * the write threw, there is no server, or the server was replaced meanwhile. Never throws.
+   * Writes one `info` line `shell set` or one `warn` line `shell set failed: <code>`, never the
+   * value (a path may carry the user name); the no-server and replaced-server returns write none.
+   * VERIFIED by the "shell actions" checks of `serverConfig.test.ts` (fake client, vitest, Windows
+   * 11, 11/11/2026): one PATCH with `{ shell: null }` for `''` and `{ shell: value }` otherwise,
+   * "does not re-read before config.updated", the re-read on the event, the re-read after
+   * SHELL_SETTLE_MS without one, `writing` true during and false after, a failure with its code
+   * and no value in the log, and a replaced server giving up silently. The write against a real
+   * server was observed only by the planner of #205 (2.2.7, Windows 11, 11/11/2026, isolated
+   * config dir); no test of this repository writes a real opencode config.
+   */
+  async shellAction(value: string): Promise<ShellActionResult> {
+    const api = this.api;
+    if (api === undefined) {
+      return { kind: 'failed', message: l10n.t('The opencode server is not running') };
+    }
+    const generation = this.generation;
+    let arrived = false;
+    let wake: () => void = () => undefined;
+    const event = new Promise<void>((resolve) => {
+      wake = resolve;
+    });
+    const waiter = (): void => {
+      arrived = true;
+      this.clearShellWaiter(waiter);
+      wake();
+    };
+    this.shellWaiter = waiter;
+    this.shellWriting = true;
+    this.notify();
+    const done = (): void => {
+      if (generation !== this.generation) return;
+      this.shellWriting = false;
+      this.notify();
+    };
+    try {
+      await api.experimental.config.update({ shell: value === '' ? null : value });
+    } catch (error) {
+      this.clearShellWaiter(waiter);
+      done();
+      if (generation !== this.generation) {
+        return { kind: 'failed', message: l10n.t('The opencode server is not running') };
+      }
+      const info = toErrorInfo(error, this.secrets);
+      this.log.warn(`shell set failed: ${info.code}`);
+      return { kind: 'failed', message: info.message };
+    }
+    if (!arrived) {
+      const timer = setTimeout(wake, SHELL_SETTLE_MS);
+      timer.unref();
+      await event;
+      clearTimeout(timer);
+    }
+    this.clearShellWaiter(waiter);
+    if (generation !== this.generation) {
+      return { kind: 'failed', message: l10n.t('The opencode server is not running') };
+    }
+    this.log.info('shell set');
+    await this.shellRead.request();
+    done();
+    return { kind: 'done' };
+  }
+
+  /**
+   * Clears the pending shell waiter only if it is still `waiter`.
+   *
+   * A write on a replaced server may settle after a newer `shellAction` installed its own waiter;
+   * clearing unconditionally would send the newer write's `config.updated` to the plain read and
+   * make it sleep the whole SHELL_SETTLE_MS. VERIFIED by the "does not clear the waiter of a newer
+   * write" check of `serverConfig.test.ts` (fake client, vitest, Windows 11, 11/11/2026).
+   */
+  private clearShellWaiter(waiter: () => void): void {
+    if (this.shellWaiter === waiter) this.shellWaiter = undefined;
   }
 
   /**

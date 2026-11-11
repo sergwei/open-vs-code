@@ -1,5 +1,10 @@
 import * as l10n from '@vscode/l10n';
-import type { SettingsAction, SettingsSettingKey } from '../../../src/shared/settingsProtocol';
+import { createEffect, createSignal, For, Show } from 'solid-js';
+import type {
+  SettingsAction,
+  SettingsSettingKey,
+  SettingsState,
+} from '../../../src/shared/settingsProtocol';
 import type { SendSettings } from './ProviderCard';
 
 /**
@@ -115,18 +120,122 @@ function act(send: SendSettings, action: SettingsAction): void {
 }
 
 /**
- * The Advanced section (issue #186, PR3): the settings that decide which opencode is used
- * (`opencodePath` and `serverUrl`, both only openable here: they are machine-wide), the server
- * password (Set and Forget, the existing commands: the password is asked in a native InputBox and
- * never passes through the webview), the saved permissions (Manage), the decision about the plugins
- * of this folder (Forget) and the two footer actions as rows. The shell of opencode is NOT here
- * (decision P3 of E10-settings-sections).
+ * The "opencode shell" row of Advanced (issue #205, decisions P1-P3 of E10-settings-shell): a
+ * labelled select with Automatic and the shells the server offers, in the same row layout as the
+ * General selects. The choice is NOT optimistic and NOT written here: the select reports the pick
+ * with `settings.setShell`, and shows the saved shell again at once; while the host writes and reads
+ * back (`shell.writing`) it shows the pick with `aria-busy` and `aria-disabled` (never `disabled`,
+ * which would drop the focus) and ignores new picks, then returns to `shell.current`, so a refused
+ * or failed write ends on the real shell even when its value did not change. Before the first read
+ * it says so, and when the read failed it says so and names the saved shell, with no select. The
+ * hint tells that the shell is saved in the GLOBAL opencode config, and, when `shell.overridden`, that
+ * another config document hides it. The select carries `data-setting="shell"`, the anchor of the
+ * search entry.
+ * VERIFIED in jsdom by the "shell row" checks of `LinkSections.test.tsx` (options, one message per
+ * pick, the busy state, the return to the saved shell, loading, failed and the override hint;
+ * fabricated state). VERIFIED in a real VS Code against the fake server by `test:visual --steps 53`
+ * (Windows 11, 11/11/2026, "all visual checks passed", twice): "ok   L4 advanced at <w> px ...
+ * counts {"buttons":8,"rows":8,"selects":1,"hints":1}" in the 12 cells (3 widths x light, dark,
+ * hc-dark, hc-light), "ok   B6 choosing a shell sends one write to the server (1 line(s)
+ * {"fake":"config"}) and the select settles on "/usr/bin/bash", not busy" and "ok   B6 choosing
+ * Automatic again writes once more (2 line(s) in total) and the select reads Automatic". NOT
+ * covered there: `aria-busy` DURING the write (the check sees only "not busy" after it), the
+ * loading and failed states, a refused pick, and a real server (the fake answers).
+ */
+function ShellRow(props: { state: SettingsState; send: SendSettings }) {
+  const title = l10n.t('opencode shell');
+  let select: HTMLSelectElement | undefined;
+  // The last pick, shown only while the host writes it.
+  const [picked, setPicked] = createSignal<string | undefined>(undefined);
+  const shown = (): string =>
+    props.state.shell.writing ? (picked() ?? props.state.shell.current) : props.state.shell.current;
+  // Moves the select to `shown()` once the options exist (the effect also reads their count).
+  createEffect(() => {
+    const value = shown();
+    void props.state.shell.options.length;
+    if (select !== undefined) select.value = value;
+  });
+  const optionLabel = (name: string, terminalOnly: boolean): string =>
+    terminalOnly ? l10n.t('{0} (terminal only)', name) : name;
+  return (
+    <div class="link-row settings-control" role="group" aria-label={title}>
+      <div class="link-row-text">
+        <label class="link-row-title" for="settings-shell">
+          {title}
+        </label>
+        <p class="settings-hint">
+          {l10n.t(
+            "The shell opencode uses for its terminal and for the agent's commands. Saved in your global opencode config (opencode.jsonc in your user folder), so it also applies to the terminal UI and every folder.",
+          )}
+        </p>
+        <Show when={props.state.shell.overridden}>
+          <p class="settings-hint" data-hint="shell-override">
+            {l10n.t(
+              'Another opencode config (the one of this folder, or one from your organization) sets its own shell, which hides the one chosen here.',
+            )}
+          </p>
+        </Show>
+        <Show when={!props.state.shell.loaded && !props.state.shell.failed}>
+          <p class="settings-hint">{l10n.t('Reading the shells…')}</p>
+        </Show>
+        <Show when={props.state.shell.failed}>
+          <p class="settings-hint">
+            {l10n.t('The shells could not be read.')}
+            {props.state.shell.current === '' ? '' : ` ${props.state.shell.current}`}
+          </p>
+        </Show>
+      </div>
+      <Show when={props.state.shell.loaded && !props.state.shell.failed}>
+        <select
+          id="settings-shell"
+          class="settings-input settings-select"
+          data-setting="shell"
+          aria-busy={props.state.shell.writing ? 'true' : undefined}
+          aria-disabled={props.state.shell.writing ? 'true' : undefined}
+          ref={(element) => {
+            select = element;
+          }}
+          onChange={(event) => {
+            const target = event.currentTarget;
+            const value = target.value;
+            if (!props.state.shell.writing) {
+              setPicked(value);
+              props.send({ type: 'settings.setShell', shell: value });
+            }
+            // Not optimistic: back to what the host holds NOW (the pick while it writes). A refusal
+            // that changes nothing sends no new state, so only this line can undo the pick.
+            target.value = shown();
+          }}
+        >
+          <option value="" selected={shown() === ''}>
+            {l10n.t('Automatic')}
+          </option>
+          <For each={props.state.shell.options}>
+            {(option) => (
+              <option value={option.value} selected={shown() === option.value}>
+                {optionLabel(option.name, option.terminalOnly)}
+              </option>
+            )}
+          </For>
+        </select>
+      </Show>
+    </div>
+  );
+}
+
+/**
+ * The Advanced section (issue #186, PR3; the shell row, issue #205): the settings that decide which
+ * opencode is used (`opencodePath` and `serverUrl`, both only openable here: they are machine-wide),
+ * the server password (Set and Forget, the existing commands: the password is asked in a native
+ * InputBox and never passes through the webview), the saved permissions (Manage), the decision about
+ * the plugins of this folder (Forget), the shell of opencode (a select, {@link ShellRow}, after the
+ * plugins row and before the log) and the two footer actions as rows.
  * VERIFIED in jsdom by "sends each action of Advanced in order" and "opens the two machine settings
  * from Advanced" of `LinkSections.test.tsx` (each button sends its message; fabricated state).
  * UNVERIFIED in a real host: what each command does when pressed from the tab (step 53 presses
  * only Forget password).
  */
-export function AdvancedSection(props: { send: SendSettings }) {
+export function AdvancedSection(props: { state: SettingsState; send: SendSettings }) {
   return (
     <div class="settings-links">
       <SettingLinkRow
@@ -179,6 +288,7 @@ export function AdvancedSection(props: { send: SendSettings }) {
           act(props.send, 'forgetPluginDecision');
         }}
       />
+      <ShellRow state={props.state} send={props.send} />
       <LinkRow
         title={l10n.t('Log')}
         description={l10n.t('What the extension did, without anything you typed.')}
