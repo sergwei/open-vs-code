@@ -20,10 +20,11 @@ export const PANEL_DROP_WARN_WINDOW_MS = 1000;
  * `dir` is already a real path (`DiscoveredMod.dir`). The lexical check catches `..`; `realpath`
  * then follows symlinks, and the second check refuses a link that leaves the folder, so a FILE
  * the mod declares (`html`, `scripts`, `styles`) cannot be outside the mod. The file must also be
- * at most 1 MB. This does NOT cover what the page asks for by itself: VS Code serves a resource
- * when its path is under `localResourceRoots` as text, without `realpath`, so a link inside the
- * folder that points outside is readable from the page (see `docs/mods.md`, Panels, and the
- * check "P7" of `test:visual` step 39).
+ * at most 1 MB. This does NOT cover what the page asks for by itself, which VS Code decides: before
+ * 1.146 it served a resource when its path was under `localResourceRoots` as text, without
+ * `realpath`, so a link inside the folder that points outside was readable from the page; from
+ * 1.146 it resolves the real path and refuses it (microsoft/vscode#346026; see `docs/mods.md`,
+ * Panels, and the check "P7" of `test:visual` step 39, which expects each behaviour by version).
  * VERIFIED (Windows 11, Vitest, 03/11/2026) by `modPanelPolicy.test.ts`: "R1: refuses a declared
  * file under a junction that leaves the folder" (`realpath` follows a junction) and "R3: accepts
  * a link that stays inside the folder and returns the real path". Mutation: without the second

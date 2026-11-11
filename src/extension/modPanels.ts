@@ -3,8 +3,9 @@
 //
 // What a panel is allowed to be (architecture rules 1, 2 and 6):
 //   - It is not the chat webview and shares nothing with it. Its page is served files by path under
-//     its mod folder (`localResourceRoots` = that folder; VS Code compares paths as text and does not
-//     resolve links, so a link inside the folder that points outside is readable by the page: see
+//     its mod folder (`localResourceRoots` = that folder; before VS Code 1.146 the roots are
+//     compared as text, so a link inside the folder that points outside is readable by the page;
+//     from 1.146 the real path is resolved and such a file is refused, microsoft/vscode#346026: see
 //     `resolveModFile` and `docs/mods.md`), and its HTML comes from
 //     `buildModPanelHtml`, whose CSP has no `connect-src`: the page cannot make a request, so it can
 //     reach neither the opencode server nor the network. The server URL and the password never enter
@@ -60,12 +61,16 @@ export function modPanelViewType(modId: string): string {
  * mod and its answer comes back: "pong 1 from mod"" (both directions of the relay), "ok   P5 the mod
  * heard onDidClose (its sentinel panel.closed exists)" (a tab closed by the user) and "ok   P6
  * Reload Mods closed the open panel (its tab is gone)" (a panel closed by the host). Also VERIFIED
- * there (03/11/2026, `test:visual --steps 39`): "ok   P7 a link inside the mod folder that points
- * outside is served to the page" (a junction out of the folder: the page loaded the file) and "ok
- * P8 ten page messages over 1 MB were dropped with 1 warning(s) in the mods log, not ten" (mutation
- * with the gate bypassed: the same check read 10 warnings and failed). UNVERIFIED on macOS or
- * Linux (P7 needs a link: only run locally), for a missing file and a hidden tab receiving a
- * message: no test makes them happen.
+ * there (03/11/2026, `test:visual --steps 39`): "ok   P8 ten page messages over 1 MB were dropped
+ * with 1 warning(s) in the mods log, not ten" (mutation with the gate bypassed: the same check
+ * read 10 warnings and failed). The links that leave the folder depend on the VS Code version and
+ * are VERIFIED only on 1.146.0 (11/11/2026, Windows 11, two runs of `test:visual --steps 39`): "ok
+ * P7 on VS Code 1.146.0 a link inside the mod folder that points outside is refused by the page,
+ * like VS Code since 1.146 (microsoft/vscode#346026; documented in docs/mods.md): inside.png
+ * loaded, outside/probe.png error" (a junction out of the folder: the page did not get the file).
+ * The pre-1.146 behaviour (served to the page) was seen on 1.144.0 on 03/11/2026 and is UNVERIFIED
+ * since the check changed. UNVERIFIED on macOS or Linux (test:visual runs only on Windows, CI included), for a
+ * missing file and a hidden tab receiving a message: no test makes them happen.
  */
 export function createModPanels(deps: ModPanelsDeps): ModPanelUi {
   const open = new Map<string, { panel: vscode.WebviewPanel; byHost: boolean }>();
