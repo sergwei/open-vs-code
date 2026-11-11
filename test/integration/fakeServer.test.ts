@@ -3268,6 +3268,49 @@ describe('fake server', function () {
     });
 
     /**
+     * Picks `/opt/bin/bash` in the Settings tab, then Automatic, then offers `zsh`: the state
+     * follows the server (`current` equal, `writing` false), each accepted pick reaches the fake
+     * once (one `{"fake":"config"` stderr line per PATCH, which the host logs verbatim) and `zsh`
+     * is refused without a new line.
+     *
+     * Protects #205 (H2, H3): the host writes through `experimental.config.update`, rereads the
+     * truth after `config.updated` and revalidates against the options it holds. Provenance:
+     * SYNTHETIC server (the fake keeps the shell in memory and never writes a file; its shells
+     * are fixed); the real route is only READ by `realOpencode.test.ts`. The refusal half waits
+     * for the refusal line (positive) and then one `SETTLE_MS` window. The last step restores
+     * Automatic in a `finally`, in case an assertion failed half-way.
+     */
+    it('sets the shell of opencode from the Settings tab and refuses one that is not offered', async function () {
+      const send = (shell: string): Thenable<unknown> =>
+        vscode.commands.executeCommand(TEST_SETTINGS_MESSAGE_COMMAND_ID, {
+          type: 'settings.setShell',
+          shell,
+        });
+      await waitForState(
+        (s) => s.shell.loaded && s.shell.options.some((o) => o.value === '/opt/bin/bash'),
+        'the shells',
+      );
+      try {
+        const log = await openLogCursor();
+        await send('/opt/bin/bash');
+        await waitForState(
+          (s) => s.shell.current === '/opt/bin/bash' && !s.shell.writing,
+          'the shell applied',
+        );
+        assert.strictEqual(countOf(log, '{"fake":"config","op":"shell"}'), 1);
+
+        await send('zsh');
+        await log.waitFor('settings request refused: settings.setShell', 10_000);
+        await sleep(SETTLE_MS); // negative window: a refused pick must not reach the fake
+        assert.strictEqual(countOf(log, '{"fake":"config","op":"shell"}'), 1);
+        assert.strictEqual((await readState()).shell.current, '/opt/bin/bash');
+      } finally {
+        await send('');
+        await waitForState((s) => s.shell.current === '' && !s.shell.writing, 'Automatic back');
+      }
+    });
+
+    /**
      * Signs in to `linear` through its integration: the state offers `canSignIn` and the `mcp_…`
      * integrationID, `settings.mcpSignIn` runs the OAuth flow, the test browser approves the link
      * and the fake reconnects the server (`needs_auth` -> `connected`). Providers never lists the

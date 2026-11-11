@@ -1391,6 +1391,49 @@ describe('real opencode', function () {
         fs.rmSync(served, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
       }
     });
+
+    /**
+     * `config.shells()` and `config.get()` answer the bare arrays the host reads, and nothing is
+     * written: the case prints only COUNTS.
+     *
+     * Protects #205 (H4): the shapes `toShellState` consumes (`{path, name, acceptable}` options;
+     * entries of `type` `document` or `directory`, the first `directory` marking the end of the
+     * global documents). It NEVER calls `experimental.config.update`: that would write the
+     * developer's real global opencode.jsonc, and the write path is covered by the fake only.
+     * VERIFIED against the real opencode CLI 2.2.7 (Windows 11, 11/11/2026, `--label real-opencode`,
+     * 22 passing, 1 pending): "✔ reads the shells and the config documents without writing them"
+     * and the printed line "config: 1 entries, 2 shells". NOT observed: with 1 entry, the real
+     * answer held only the `directory` entry (no global opencode.jsonc existed), so the shape of a
+     * `document` entry and its `info.shell` was NOT exercised by this run (only by the planner's
+     * probe of 11/11/2026 with an isolated OPENCODE_CONFIG_DIR).
+     */
+    it('reads the shells and the config documents without writing them', async function () {
+      this.timeout(60_000);
+      const served = fs.mkdtempSync(path.join(os.tmpdir(), 'ovsc-contract-shell-'));
+      const sub = await startOwnServer(binary, served, 'shell-pw');
+      try {
+        const shells = await sub.client.config.shells();
+        assert.ok(Array.isArray(shells) && shells.length > 0, 'no shells listed');
+        for (const shell of shells) {
+          assert.strictEqual(typeof shell.path, 'string');
+          assert.strictEqual(typeof shell.name, 'string');
+          assert.strictEqual(typeof shell.acceptable, 'boolean');
+        }
+        const entries = await sub.client.config.get();
+        assert.ok(Array.isArray(entries), 'config.get is not an array');
+        for (const entry of entries) {
+          assert.ok(['document', 'directory'].includes(entry.type), `entry type ${entry.type}`);
+        }
+        assert.ok(
+          entries.some((entry) => entry.type === 'directory'),
+          'no directory entry in the config',
+        );
+        console.log(`config: ${String(entries.length)} entries, ${String(shells.length)} shells`);
+      } finally {
+        await sub.stop();
+        fs.rmSync(served, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      }
+    });
   });
 
   /**

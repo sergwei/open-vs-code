@@ -21503,14 +21503,21 @@ try {
           },
         },
         advanced: {
-          counts: { buttons: 'button', rows: '.link-row' },
-          expect: { buttons: 8, rows: 7 },
+          counts: {
+            buttons: 'button',
+            rows: '.link-row',
+            selects: 'select',
+            hints: '[data-hint="shell-override"]',
+          },
+          expect: { buttons: 8, rows: 8, selects: 1, hints: 1 },
           text: {
             ...SETTINGS_BASE,
             title: '#settings-panel-advanced .settings-section-title',
             rowTitle: '#settings-panel-advanced .link-row-title',
             hint: '#settings-panel-advanced .settings-hint',
             button: '#settings-panel-advanced button.secondary',
+            select: '#settings-panel-advanced select',
+            override: '#settings-panel-advanced [data-hint="shell-override"]',
           },
         },
       };
@@ -21813,6 +21820,67 @@ try {
           'B3 "Forget password" raises the toast "there was no stored server password"',
         );
         await command('Notifications: Clear All Notifications');
+
+        // B6 (E10-settings-shell, #205): the shell select of Advanced, with the real keyboard.
+        // One ArrowDown picks the first option after Automatic (a `bash`), which the fake stores in
+        // memory (it never writes a file) and answers with `config.updated`; the select shows the
+        // pick while the host writes (`aria-busy`) and then the server's value.
+        const shellWrites = () => hostLogText().split('{"fake":"config"').length - 1;
+        const shellValue = () =>
+          settingsWeb.inDoc((doc) => doc.querySelector('#settings-shell')?.value ?? null);
+        const shellSettled = (wanted) =>
+          settingsWait(
+            (doc, want) => {
+              const select = doc.querySelector('#settings-shell');
+              return (
+                select !== null &&
+                select.getAttribute('aria-busy') !== 'true' &&
+                (want === '' ? select.value === '' : select.value.endsWith(want))
+              );
+            },
+            wanted,
+            15_000,
+          );
+        const writesBefore = shellWrites();
+        check(
+          await settingsClick('#settings-panel-advanced label.link-row-title'),
+          'B6: the label of the shell select is clicked (it focuses the select)',
+        );
+        await page.keyboard.press('ArrowDown');
+        let shellPicked = await settingsWait(
+          (doc) => doc.querySelector('#settings-shell')?.value !== '',
+          null,
+          3_000,
+        );
+        if (shellPicked === undefined) {
+          await settingsWeb.inDoc((doc) => {
+            const select = doc.querySelector('#settings-shell');
+            select.value = '/usr/bin/bash';
+            select.dispatchEvent(new doc.defaultView.Event('change', { bubbles: true }));
+          });
+          settingsUnverified.push('B6 the shell select was changed by script, not by the keyboard');
+          shellPicked = await settingsWait(
+            (doc) => doc.querySelector('#settings-shell')?.value !== '',
+            null,
+            3_000,
+          );
+        }
+        const wroteOnce = await waitFor(() => shellWrites() === writesBefore + 1, 15_000, 200);
+        const pickedSettled = await shellSettled('bash');
+        const pickedValue = await shellValue();
+        check(
+          shellPicked === true &&
+            wroteOnce === true &&
+            pickedSettled === true &&
+            /\/bin\/bash$/.test(String(pickedValue)),
+          `B6 choosing a shell sends one write to the server (${String(shellWrites() - writesBefore)} line(s) {"fake":"config"}) and the select settles on ${JSON.stringify(pickedValue)}, not busy`,
+        );
+        await page.keyboard.press('ArrowUp');
+        const backAuto = await shellSettled('');
+        check(
+          backAuto === true && shellWrites() === writesBefore + 2,
+          `B6 choosing Automatic again writes once more (${String(shellWrites() - writesBefore)} line(s) in total) and the select reads Automatic`,
+        );
 
         // B5: the global switch off: the note shows and the switches are aria-disabled.
         await showSection('mods');

@@ -217,6 +217,9 @@
 // line `{"fake":"mcp","op":…,"server":…}` per write), `linear` with the integrationID of a
 // synthetic `mcp_…` integration row (`metadata.source: 'mcp'`), and approving that integration's
 // OAuth attempt reconnects `linear`.
+// E10-settings-shell (#205): `GET /api/config`, `GET /api/config/shell` and `PATCH
+// /api/experimental/config` ({shell}) over an in-memory shell, see `handleConfig` (no file is ever
+// written).
 // Everything above is synthetic.
 // On start it writes one stderr line `{"fake":"argv",...}` so tests can check args, cwd and env.
 // Every mode has a hard 60 s lifetime so a test that fails half-way cannot leave it running;
@@ -413,6 +416,71 @@ function handleMcpWrites(request, response) {
     broadcast('mcp.resources.changed', { server: name });
   }
   return true;
+}
+
+// ---- E10-settings-shell (issue #205): the shell of opencode, in memory ----
+
+/** The shell the fake "global opencode.jsonc" holds; `''` = no `shell` key (automatic). */
+let fakeShell = '';
+
+/** The options `GET /api/config/shell` lists: an ambiguous name and one that is not acceptable. */
+const FAKE_SHELLS = [
+  { path: '/usr/bin/bash', name: 'bash', acceptable: true },
+  { path: '/opt/bin/bash', name: 'bash', acceptable: true },
+  { path: '/usr/bin/fish', name: 'fish', acceptable: false },
+];
+
+/**
+ * Answers `GET /api/config`, `GET /api/config/shell` and `PATCH /api/experimental/config`;
+ * false when the request is none of them.
+ *
+ * The shapes (bare arrays, no `{location, data}`; PATCH answers 204) were seen against a real
+ * opencode 2.2.7 on Windows 11 on 11/11/2026 (plan #205); the paths and shells here are
+ * SYNTHETIC and the same on every OS. `GET /api/config` is `[document, directory]`; with
+ * `FAKE_OPENCODE_MODE` `visual` a later `document` with another `shell` follows, so the override
+ * hint shows. PATCH without a `shell` key is 400 `InvalidRequestError`; otherwise it stores the
+ * value (a string, or null = automatic), writes one stderr line `{"fake":"config","op":"shell"}`
+ * (never the value), answers 204 at once and, ONLY IF the value changed, publishes `config.updated`
+ * ~100 ms later (the real one reloads behind a 100 ms debounce, answers 204 BEFORE reloading, and
+ * emits nothing for a PATCH that changes nothing: GOTCHA 1 and 2 of the plan, seen real).
+ */
+function handleConfig(request, response) {
+  const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
+  if (request.method === 'GET' && path === '/api/config') {
+    const dir = nodePath.join(tmpdir(), 'fake-opencode-config');
+    json(response, 200, [
+      {
+        type: 'document',
+        path: nodePath.join(dir, 'opencode.jsonc'),
+        info: fakeShell === '' ? {} : { shell: fakeShell },
+      },
+      { type: 'directory', path: dir },
+      ...(has('visual')
+        ? [{ type: 'document', path: nodePath.join(dir, 'project.jsonc'), info: { shell: 'dash' } }]
+        : []),
+    ]);
+    return true;
+  }
+  if (request.method === 'GET' && path === '/api/config/shell') {
+    json(response, 200, FAKE_SHELLS);
+    return true;
+  }
+  if (request.method === 'PATCH' && path === '/api/experimental/config') {
+    readBody(request).then((body) => {
+      if (!('shell' in body)) {
+        json(response, 400, { _tag: 'InvalidRequestError', message: 'Missing key at ["shell"]' });
+        return;
+      }
+      const next = typeof body.shell === 'string' ? body.shell : '';
+      const changed = next !== fakeShell;
+      fakeShell = next;
+      process.stderr.write(`${JSON.stringify({ fake: 'config', op: 'shell' })}\n`);
+      noContent(response);
+      if (changed) setTimeout(() => broadcast('config.updated', {}), 100);
+    });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -3104,6 +3172,7 @@ function handleChat(request, response) {
   }
   if (handleIntegrationWrites(request, response, location)) return true;
   if (handleMcpWrites(request, response)) return true;
+  if (handleConfig(request, response)) return true;
   if (method === 'GET' && path === '/api/mcp') {
     json(response, 200, { location, data: mcpServers });
     return true;

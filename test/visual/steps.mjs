@@ -160,6 +160,9 @@
  * 3 side bar drags, a Reload Mods with two Worker starts and 5 mouse flows; the step 46, with 17 s
  * measured in the full run of 08/11/2026, has 16 cells of the header and navigation. It is the last
  * step of the run. The next branch that runs a full run recalibrates it.
+ * E10-settings-shell (issue #205) adds the shell row of Advanced to that step (one select, one
+ * override hint, B6: two writes to the fake, each waiting about 0.2-0.6 s for the reload), so its
+ * `budgetS` goes from 60 to 65: timed only in `--steps 53` (18.1 / 17.9 s, 11/11/2026), not in a full run.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -232,7 +235,7 @@ export const STEPS = [
   // E10-settings-mcp (issue #186, PR2): ESTIMATE, see the paragraph of the step 52 above.
   { id: '52', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 40 },
   // E10-settings-sections (issue #186, PR3): ESTIMATE, see the paragraph of the step 53 above.
-  { id: '53', needs: ['1'], sendsPrompt: false, groups: ['config', 'mods'], budgetS: 60 },
+  { id: '53', needs: ['1'], sendsPrompt: false, groups: ['config', 'mods'], budgetS: 65 },
 ];
 
 /** Every valid id, in canonical order. */
