@@ -41,25 +41,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   push` and the git options that run a command, publishing (`npm publish`, `docker push`, `gh pr
   merge`…), infrastructure and cloud destructives (`kubectl delete`, `terraform destroy`,
   `docker run|exec`…), shells and interpreters fed by stdin or inline code, launchers (`npx`,
-  `pnpm exec`, `uv run`, `wsl`, `ssh`…) classified by what they run, SQL clients, copies to
-  another machine (`scp`, `rsync host:`, `sftp`) and publishing through `gh` (`repo create
-  --push`, `workflow run`…), an unquoted glob or `$` in a word, a backslash in a command name or
-  one that is a POSIX escape (`git pu\sh`; Windows paths such as `src\app.ts` are fine), and
-  environment variables that configure what runs (`GIT_*`, `PAGER`, `LD_*`, also through
-  `export`; `GIT_EDITOR=true` and a few like it pass), uploads to the cloud (`aws s3 sync . s3://b`,
-  `gcloud storage cp … gs://`, `az storage blob upload`, `azcopy`; downloads pass), framework
-  database resets (`rails db:drop`, `php artisan migrate:fresh`, `manage.py flush`, `dotnet ef
-  database drop`…) and, because in Windows a leading dot hides nothing, a recursive listing
-  (`Get-ChildItem -Recurse`, `dir /s`, `ls -R`) unless it lists only names (`-Name`, `-Directory`,
-  `dir /b`), and deployments (`vercel --prod`, `firebase deploy`, `fly deploy`, `wrangler deploy`,
-  `cdk deploy`, `sam deploy`, `kubectl apply`…). Known limits: it classifies one simple command by
-  its text, so it does not know the value-taking options of every launcher (`npx --registry u
-  tool`, `uvx` options other than `--python`), reads `%VAR%` only in capitals, does not look at
-  `--import` after `node --test`, and `ls -R` also asks in bash. What it does **not** see is
-  approved: tools it does not name (`fd -X rm`, `trash`, `rclone`, `gsutil rm` through an alias…), an alias you configured (`git p` for
-  `git push`), what a script does (`bash build.sh`, `npm run clean`) and any tool that is not
-  named in its list; reviews keep finding more of those. The agent's own questions still reach
-  you. The mode lives in the extension host's memory: a new
+  `pnpm exec`, `uv run`, `dnx`, `asdf env`, `wsl`, `ssh`…) classified by what they run, SQL
+  clients, copies to another machine (`scp`, `rsync host:`, `sftp`) and publishing through `gh`
+  (`repo create --push`, `workflow run`…), an unquoted glob or `$` in a word, a backslash in a
+  command name or one that is a POSIX escape (`git pu\sh`; Windows paths such as `src\app.ts`
+  are fine), and environment variables that configure what runs (`GIT_*`, `PAGER`, `LD_*`, also
+  through `export`; `GIT_EDITOR=true` and a few like it pass), uploads to the cloud
+  (`aws s3 sync . s3://b`, `gcloud storage cp … gs://`, `az storage blob upload`, `azcopy`;
+  downloads pass), framework database resets (`rails db:drop`, `php artisan migrate:fresh`,
+  `manage.py flush`, `dotnet ef database drop`…) and, because in Windows a leading dot hides
+  nothing, a recursive listing (`Get-ChildItem -Recurse`, `dir /s`, `ls -R`) unless it lists only
+  names (`-Name`, `-Directory`, `dir /b`), and deployments (`vercel --prod`, `firebase deploy`,
+  `fly deploy`, `wrangler deploy`, `cdk deploy`, `sam deploy`, `kubectl apply`…). Known limits: it
+  classifies one simple command by its text, so it does not know the value-taking options of every
+  launcher (`npx --registry u tool`), reads `%VAR%` only in capitals, does not look at `--import`
+  after `node --test`, and `ls -R` also asks in bash. What it does **not** see is approved: tools
+  it does not name (`fd -X rm`, `trash`, `rclone`, `gsutil rm` through an alias…), an alias you
+  configured (`git p` for `git push`), what a script does (`bash build.sh`, `npm run clean`) and
+  any tool that is not named in its list; reviews keep finding more of those. The agent's own
+  questions still reach you. The mode lives in the extension host's memory: a new
   session and a reload start in Manual. New command **OpenCode: Toggle Work Mode** (no default
   shortcut). Auto only answers what opencode asks: what its configuration allows without asking
   runs the same in both modes.
