@@ -91,6 +91,26 @@ describe('fingerprint', () => {
     expect(fingerprint(root).hash).not.toBe(pkg);
   });
 
+  /**
+   * Protects issue #210: recalibrating a `budgetS` must not stale a full run, while `groups`,
+   * `needs` and `id` must. Fabricated `steps.mjs` in a temporary tree. VERIFIED (11/11/2026,
+   * Windows 11): fails if `normalizeBudgets` is not applied in `digestFile` (mutation).
+   */
+  it('ignores budgetS in steps.mjs but not groups, needs or ids', () => {
+    const steps = (budget, group = 'a', needs = '[]', id = 20) =>
+      `export const STEPS = [{ id: ${id}, groups: ['${group}'], needs: ${needs}, budgetS: ${budget} }];\n`;
+    put('test/visual/steps.mjs', steps(15));
+    const before = fingerprint(root).hash;
+    put('test/visual/steps.mjs', steps(20.5));
+    expect(fingerprint(root).hash).toBe(before);
+    put('test/visual/steps.mjs', steps(15, 'b'));
+    expect(fingerprint(root).hash).not.toBe(before);
+    put('test/visual/steps.mjs', steps(15, 'a', '[1]'));
+    expect(fingerprint(root).hash).not.toBe(before);
+    put('test/visual/steps.mjs', steps(15, 'a', '[]', 21));
+    expect(fingerprint(root).hash).not.toBe(before);
+  });
+
   it('hashes the synthetic server and leaves out the post-processors and the --affected selector', () => {
     put('src/extension/test-fixtures/fake-opencode.mjs', 'export const f = 1;\n');
     put('test/visual/compare-runs.mjs', 'export const c = 1;\n');
