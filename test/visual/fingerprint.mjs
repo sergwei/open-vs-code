@@ -33,6 +33,9 @@
 //    selector, none feeds the run). `run.mjs`, `steps.mjs`, `vscodeProcess.mjs` and
 //    `webviewCdp.mjs` ARE the harness. Excluding the last three of the list changed the
 //    fingerprint once (tooling/visual-ci-parallel): every output saved before is stale.
+//    `steps.mjs` is hashed with its `budgetS` numbers neutralised (`normalizeBudgets`, issue #210):
+//    recalibrating a budget does not stale a run; `needs`, `groups` and ids still do. That change
+//    staled every output saved before it, once.
 //  - Raw (line endings normalised): `package.json`, `package-lock.json`, `esbuild.mjs`,
 //    `webview-ui/build.mjs`, `webview-ui/vite.config.mts` and `webview-ui/index.html` when it exists
 //    (today it does not: Vite's HTML is generated).
@@ -166,8 +169,27 @@ function normalizeEol(text) {
 }
 
 /**
- * The sha256 (hex) of one file as the fingerprint sees it: esbuild's output for source files, the
- * text with normalised line endings for the text files without a loader, and the raw bytes for
+ * Sets every `budgetS: <number>` literal of minified `steps.mjs` code to `budgetS:0`, so
+ * recalibrating a step budget does not change the fingerprint (issue #210).
+ *
+ * Why: `budgetS` only decides whether the report prints "over budget" and how `shardPlan` splits
+ * the steps; it never changes what a step does or checks. Hashing it made every recalibration
+ * stale a whole full run. Works on the OUTPUT of esbuild with `minifyWhitespace` (where the
+ * literal is always `budgetS:N`), the same idea as the budget normalisation `harnessDiff.mjs`
+ * applies for `--affected`. Everything else in `steps.mjs` (`needs`, `groups`, ids, banners) still
+ * counts. HYPOTHESIS about `shardPlan`: a CI merge may cover a tree whose shard boundaries differ.
+ * VERIFIED (11/11/2026, Windows 11): the case "ignores budgetS in steps.mjs but not groups, needs
+ * or ids" of `fingerprint.test.mjs` passes, and fails when the call in `digestFile` is replaced
+ * by the identity (mutation).
+ */
+export function normalizeBudgets(code) {
+  return code.replace(/\bbudgetS:\d+(?:\.\d+)?/g, 'budgetS:0');
+}
+
+/**
+ * The sha256 (hex) of one file as the fingerprint sees it: esbuild's output for source files
+ * (`test/visual/steps.mjs` with its `budgetS` literals neutralised by {@link normalizeBudgets}),
+ * the text with normalised line endings for the text files without a loader, and the raw bytes for
  * any other extension (a binary read as utf8 would collapse its non-utf8 bytes to U+FFFD). A file
  * esbuild cannot parse is hashed raw (marked, so it differs from a parsed twin): a syntax error
  * must not make the fingerprint throw, and the run itself would fail on it anyway.
@@ -183,7 +205,13 @@ export function digestFile(root, rel) {
   let body = `raw\n${text}`;
   if (loader !== undefined) {
     try {
-      body = `code\n${transformSync(text, { loader, legalComments: 'none', minifyWhitespace: true }).code}`;
+      let code = transformSync(text, {
+        loader,
+        legalComments: 'none',
+        minifyWhitespace: true,
+      }).code;
+      if (rel === 'test/visual/steps.mjs') code = normalizeBudgets(code);
+      body = `code\n${code}`;
     } catch {
       // keep the raw body: see the header of this function
     }
