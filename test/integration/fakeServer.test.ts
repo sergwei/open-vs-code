@@ -3207,11 +3207,25 @@ describe('fake server', function () {
      * right server and the store follows `mcp.status.changed` / `mcp.resources.changed` after it.
      * Provenance: SYNTHETIC server; the 204-after-handshake order is the fake's, the real one is
      * `realOpencode.test.ts`. Runs after the MCPFLIP case, so `broken` is not used here.
+     *
+     * The first wait asks for the FINAL state (`disabled` AND no resources), not the first state
+     * that is `disabled`: in `serverConfig.ts` the server status (`mcpRead`) and the resource
+     * catalog (`catalogRead`) are two independent coalesced reads, so a snapshot with `disabled`
+     * and the two old resources exists in between. Seen on `verify (windows-latest)` of CI runs
+     * 43022954614 and 43022684513 (VS Code 1.146.0, 11/11/2026): "AssertionError: docs kept its
+     * resources 2 !== 0", and the next case failing in cascade. HYPOTHESIS that 1.146 only changed
+     * the pace, not the order of the two reads; on Windows 11 locally the case passed before and
+     * after this change (so the local runs prove no regression, not the fix: that is the CI).
      */
     it('disconnects and reconnects an MCP server from the Settings tab', async function () {
       const log = await openLogCursor();
       await sendMcp('docs', 'disconnect');
-      const off = await waitForState((s) => mcpRow(s, 'docs')?.status === 'disabled', 'docs off');
+      const off = await waitForState(
+        (s) =>
+          mcpRow(s, 'docs')?.status === 'disabled' &&
+          (mcpRow(s, 'docs')?.resources.length ?? 0) === 0,
+        'docs off with no resources',
+      );
       assert.strictEqual(mcpRow(off, 'docs')?.resources.length, 0, 'docs kept its resources');
       await log.waitFor('mcp disconnect: docs', 10_000);
       assert.strictEqual(countOf(log, '{"fake":"mcp","op":"disconnect","server":"docs"}'), 1);
