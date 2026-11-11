@@ -254,6 +254,8 @@ import path from 'node:path';
 import {
   createWorkspace,
   installModFixture,
+  isOwnVsCodeWindow,
+  linksLeaveRootServed,
   removeModFixture,
   startVSCode,
   writeSettings,
@@ -2290,6 +2292,219 @@ function withProbeTimeout(promise) {
 }
 
 /**
+ * The `user32`/`kernel32` entry points the focus helpers need, as the one-line C# member list that
+ * `Add-Type -MemberDefinition` takes (single line on purpose: the script goes through stdin and a
+ * multi-line here-string is not needed). Namespace `W`, class `U`.
+ */
+const WIN32_FOCUS_MEMBERS = [
+  '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+  '[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);',
+  '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);',
+  '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);',
+  '[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);',
+  '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);',
+  '[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);',
+  '[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);',
+  '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);',
+  '[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();',
+].join(' ');
+
+/**
+ * Runs a PowerShell script (`-EncodedCommand`, no `-STA`, no clipboard) and returns its stdout;
+ * throws on a non-zero exit or after 20 s. Only the focus helpers use it: the clipboard has
+ * {@link powershellSta}. `windowsHide: true` so the process shows no console of its own. Encoded
+ * because with the script on stdin (`-Command -`) a multi-line `if { }` printed NOTHING on Windows
+ * 11 (11/11/2026, an empty stdout with exit 0; HYPOTHESIS that this was why the first mutation
+ * run printed "foreground unknown": the cause was not isolated, check by running the old
+ * `-Command -` form again); stderr is piped so the CLIXML progress noise stays out of the log.
+ */
+function powershellScript(script) {
+  const encoded = Buffer.from(`$ProgressPreference = 'SilentlyContinue'\n${script}`, 'utf16le');
+  return execFileSync(
+    'powershell',
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded.toString('base64')],
+    {
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: 20_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  ).trim();
+}
+
+/**
+ * The window that holds the system foreground right now: `{ pid, process, title (at most 80
+ * characters), className }`, or `undefined` off Windows, with no foreground window, or when
+ * PowerShell fails (it never throws: it runs while the run is already diagnosing a problem).
+ * tooling/vscode-1146: until now the harness could not say WHICH window took the focus when a shard
+ * of CI printed "STOPPED … system focus" (steps 36, 37 and 51 of four runs), so the cause stayed
+ * unknown. Uses `GetForegroundWindow`, `GetWindowThreadProcessId`, `GetWindowText` and
+ * `GetClassName` through `Add-Type` P/Invoke (0.5-2 s per call, HYPOTHESIS: only paid with the
+ * focus lost or at the start of a step that has none).
+ * VERIFIED only as far as the parsing goes: in the mutation run of 11/11/2026 (Windows 11, VS Code
+ * 1.146.0, `--steps 1,2`, the focus probe forced to false once) the marker line
+ * printed "foreground Code pid <pid> ..." (the VS Code window itself, so the JSON parse and the
+ * process lookup worked). NOT observed: a different process in front; a window of its own (TopMost)
+ * did not take the foreground, `document.hasFocus()` stayed true. UNVERIFIED until a CI run loses
+ * the focus to another window.
+ */
+function foregroundWindow() {
+  if (process.platform !== 'win32') return undefined;
+  try {
+    const out = powershellScript(
+      [
+        `Add-Type -Namespace W -Name U -MemberDefinition '${WIN32_FOCUS_MEMBERS}'`,
+        '$h = [W.U]::GetForegroundWindow()',
+        "if ($h -eq [IntPtr]::Zero) { '' } else {",
+        '  $p = [uint32]0; [void][W.U]::GetWindowThreadProcessId($h, [ref]$p)',
+        '  $t = New-Object System.Text.StringBuilder 256; [void][W.U]::GetWindowText($h, $t, 256)',
+        '  $c = New-Object System.Text.StringBuilder 256; [void][W.U]::GetClassName($h, $c, 256)',
+        '  $n = (Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName',
+        '  ConvertTo-Json -Compress @{ pid = [int]$p; process = [string]$n; title = $t.ToString(); className = $c.ToString() }',
+        '}',
+      ].join('\n'),
+    );
+    if (out === '') return undefined;
+    const parsed = JSON.parse(out);
+    return {
+      pid: Number(parsed.pid),
+      process: String(parsed.process),
+      title: String(parsed.title).replace(/\s+/g, ' ').slice(0, 80),
+      className: String(parsed.className),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Tries to give the system focus back to the VS Code window; returns the way that worked
+ * (`'bringToFront'` or `'SetForegroundWindow'`) or `undefined` when the workbench still has no focus
+ * 2 s after the last attempt. Never throws.
+ *
+ * Two ways, in this order, each followed by a wait of up to 2 s for `document.hasFocus()`:
+ * (1) CDP `Page.bringToFront` through `page.bringToFront()`; (2) on Windows, `AttachThreadInput` to
+ * the thread of the window in front plus `BringWindowToTop`/`SetForegroundWindow` on the
+ * `MainWindowHandle` of the VS Code process (`vscode.pid`). Windows only lets the foreground
+ * process call `SetForegroundWindow`, hence the attach. Never presses ALT, the usual trick: a loose
+ * ALT sends the focus to the menu bar of VS Code and changes what the next step sees.
+ * HYPOTHESIS: that Electron activates the window on `Page.bringToFront`, and that the workbench window
+ * is the `MainWindowHandle` of `vscode.pid`; the focus loss of CI has never been reproduced here, so
+ * neither way is proven to recover a real one. UNVERIFIED until a CI run prints
+ * `regained via …` after a real loss.
+ */
+async function regainSystemFocus() {
+  const hasFocus = () => workbenchHasFocus().catch(() => false);
+  try {
+    await withProbeTimeout(page.bringToFront());
+    if ((await waitFor(hasFocus, 2_000, 100, false)) === true) return 'bringToFront';
+  } catch {
+    // Falls through to the next way.
+  }
+  if (process.platform !== 'win32' || vscode === undefined) return undefined;
+  try {
+    powershellScript(
+      [
+        `Add-Type -Namespace W -Name U -MemberDefinition '${WIN32_FOCUS_MEMBERS}'`,
+        `$h = (Get-Process -Id ${String(Number(vscode.pid))}).MainWindowHandle`,
+        'if ($h -ne [IntPtr]::Zero) {',
+        '  $f = [W.U]::GetForegroundWindow(); $x = [uint32]0',
+        '  $ft = [W.U]::GetWindowThreadProcessId($f, [ref]$x); $me = [W.U]::GetCurrentThreadId()',
+        '  if ([W.U]::IsIconic($h)) { [void][W.U]::ShowWindow($h, 9) }',
+        '  [void][W.U]::AttachThreadInput($me, $ft, $true)',
+        '  [void][W.U]::BringWindowToTop($h); [void][W.U]::SetForegroundWindow($h)',
+        '  [void][W.U]::AttachThreadInput($me, $ft, $false)',
+        '}',
+      ].join('\n'),
+    );
+    if ((await waitFor(hasFocus, 2_000, 100, false)) === true) return 'SetForegroundWindow';
+  } catch {
+    // Not regained.
+  }
+  return undefined;
+}
+
+/**
+ * Saves a screenshot of the whole desktop to `FAIL-desktop-<id>.png` in the work directory (the
+ * `FAIL-*.png` glob of `visual.yml` uploads it in `visual-evidence-*`; the `<id>` is the `when` text,
+ * e.g. `FAIL-desktop-after-step-36.png`). Only when
+ * `GITHUB_ACTIONS === 'true'`: on a developer machine the desktop is the user's, and nothing of it
+ * is captured. Windows only; never throws. UNVERIFIED until a CI run loses the focus.
+ */
+function captureDesktop(label) {
+  if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'win32') return;
+  try {
+    const file = path.join(workDir, `FAIL-desktop-${label.replace(/\W+/g, '-')}.png`);
+    powershellScript(
+      [
+        'Add-Type -AssemblyName System.Windows.Forms, System.Drawing',
+        '$b = [System.Windows.Forms.SystemInformation]::VirtualScreen',
+        '$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height',
+        '$g = [System.Drawing.Graphics]::FromImage($bmp)',
+        '$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)',
+        `$bmp.Save('${file.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png)`,
+        '$g.Dispose(); $bmp.Dispose()',
+      ].join('\n'),
+    );
+  } catch {
+    // The capture is evidence only.
+  }
+}
+
+/**
+ * Handles a lost system focus: prints the marker line, tries {@link regainSystemFocus} and, in
+ * CI only, saves the desktop. Returns `{ regained, window }`, `window` being the one-line
+ * description of what was in front (or `''`).
+ *
+ * When the window in front is the VS Code under test ({@link isOwnVsCodeWindow}) it prints one
+ * short line (`system focus false <when>: VS Code itself in front`, column 0, no ok/FAIL/warn),
+ * saves nothing, tries no recovery and returns `{ regained: false, window, own: true }`. The
+ * probe `foregroundWindow()` is still paid (HYPOTHESIS 0.5-2 s, see its header); the recovery
+ * (5-7 s in CI) is what is skipped. So the start of a step goes on at once, and
+ * {@link diagnoseAfterFailure} cuts with `focus` as before tooling/vscode-1146, with an empty
+ * `detail` (no other window to name). Evidence: CI run 43077896965 printed 11 lines of the form
+ * "system focus lost before step 28: foreground Code pid 3780 "[Extension Development Host]
+ * open-vs-code-visual-JCfsun - Visual Studio Code [Ad" (Chrome_WidgetWin_1); not regained in 6.8 s",
+ * across 3 shards: shard 2 pid 3780 (steps 28, 29, 31, 32), shard 3 pid 8840 (36, 38), shard 4
+ * pid 4948 (47, 48, 49, 52, 53); all steps passed, ~65 s wasted.
+ * HYPOTHESIS on the cause: the window in front was ours but not active in the runner's session.
+ * "The focus is inside a webview/iframe" and "the pid is a child of ours" are NOT shown (the pids
+ * were not compared with each shard's "VS Code pid" line). Would be checked by that comparison
+ * and by probing `document.activeElement` in that state.
+ *
+ * The marker line starts in column 0 and with neither `ok`, `FAIL` nor `warn`, so `extractChecks`
+ * and `merge-shards` ignore it: `system focus lost <when>: foreground <process> pid <pid> "<title>"
+ * (<class>); regained via <way>|not regained in <N.N> s`. `when` is `after step <id>` or
+ * `before step <id>`. The seconds are the whole cost of the handling (PowerShell probes, capture,
+ * waits): it runs outside the step timer, so `== timings` and `== waits` do not show it.
+ * VERIFIED once on Windows 11 (11/11/2026, `--steps 1,2`, probe forced to false at the start of
+ * step 2): "system focus lost before step 2: foreground Code pid <pid> ...; regained via
+ * bringToFront" (before the seconds were added) and step 2 ran. NOT observed: a real loss with
+ * another process in front, the `after step` path, `SetForegroundWindow`, `captureDesktop`:
+ * UNVERIFIED until a CI run loses the focus.
+ */
+async function handleFocusLoss(when) {
+  const started = performance.now();
+  const front = foregroundWindow();
+  const window =
+    front === undefined
+      ? ''
+      : `foreground ${front.process} pid ${String(front.pid)} "${front.title}" (${front.className})`;
+  if (isOwnVsCodeWindow(front, vscode?.pid, path.basename(workspace))) {
+    console.log(`system focus false ${when}: VS Code itself in front`);
+    return { regained: false, window, own: true };
+  }
+  captureDesktop(when);
+  const way = await regainSystemFocus();
+  console.log(
+    `system focus lost ${when}: ${window === '' ? 'foreground unknown' : window}; ${
+      way === undefined ? 'not regained' : `regained via ${way}`
+    } in ${((performance.now() - started) / 1000).toFixed(1)} s`,
+  );
+  return { regained: way !== undefined, window, own: false };
+}
+
+/**
  * Looks for why the run cannot go on after a failed step; returns `{ kind, detail }` for
  * {@link stopLine}, or `undefined` when nothing stops it (the step failed by itself and the next
  * ones may still prove something). Issue #127: without it, a webview that stops answering, a window
@@ -2344,6 +2559,14 @@ function withProbeTimeout(promise) {
  * Neither ran in the final full run of 02/11/2026 (Windows 11, VS Code 1.144.0, "all visual
  * checks passed": no step got stuck); there is no test without VS Code, and mutation (c) above
  * plus a second failing step would exercise them.
+ * Focus cause (tooling/vscode-1146): when the 3 s wait ends with no focus it prints the marker line
+ * of {@link handleFocusLoss} (who is in front) and tries {@link regainSystemFocus}; if the focus
+ * comes back the cause is NOT returned (the failed step stays FAIL, the run goes on, and the dialog
+ * probe below still runs), otherwise `focus` is returned with the window in front as `detail`.
+ * If VS Code itself is in front no regain is tried and `focus` is returned at once, as before,
+ * with an empty `detail` (the line of {@link handleFocusLoss} already said who is in front).
+ * NOT observed: this path (after a failed step) with the focus lost, with or without regain.
+ * UNVERIFIED until a CI run loses the focus after a failed step.
  */
 async function diagnoseAfterFailure(id, stuck) {
   if (page === undefined) return undefined;
@@ -2388,7 +2611,12 @@ async function diagnoseAfterFailure(id, stuck) {
       await new Promise((resolve) => setTimeout(resolve, 250));
       focused = await workbenchHasFocus();
     }
-    if (!focused) return { kind: 'focus', detail: '' };
+    if (!focused) {
+      // tooling/vscode-1146: say who is in front and try to take the focus back. If it comes back
+      // the step stays FAILED but the run goes on (no cascade); if not, the cut names the window.
+      const lost = await handleFocusLoss(`after step ${id}`);
+      if (!lost.regained) return { kind: 'focus', detail: lost.own ? '' : lost.window };
+    }
     const dialog = await withProbeTimeout(
       page.evaluate(() => {
         const box = [...globalThis.document.querySelectorAll('.monaco-dialog-box')].find((node) =>
@@ -2428,12 +2656,29 @@ async function diagnoseAfterFailure(id, stuck) {
  * #127); a stuck one that reopens fine only prints a line. NOT observed: a real
  * stuck webview (the cascade was not reproduced: 300 sash drags, 200 theme switches and 150 rounds
  * with the server down, in isolation, were all clean).
+ *
+ * tooling/vscode-1146: when a selected step STARTS it also probes `document.hasFocus()` once; if the
+ * window has lost the system focus it prints the marker line of {@link handleFocusLoss}
+ * (`system focus lost before step <id>: …`) and tries to take it back, so a loss between two steps
+ * does not fail the next one. It never stops the run there (only the post-failure diagnosis does).
+ * If the window in front is the VS Code under test itself it only prints one short line and skips
+ * the recovery (see {@link handleFocusLoss}; CI run 43077896965 paid ~65 s in 11 such steps).
+ * VERIFIED once on Windows 11 (11/11/2026, `--steps 1,2`, the probe forced to false at the start
+ * of step 2, on the tree before the seconds and the probe timeout around `bringToFront` were added): "system focus lost before step 2: foreground Code pid <pid> ... regained via
+ * bringToFront" printed and step 2 ran. That only proves this path and the parsing: the one in
+ * front was VS Code itself, so a real recovery with another process in front is UNVERIFIED until a
+ * CI run loses the focus. The handling time is printed on the marker line, not in `== timings`.
  */
 async function step(name, body) {
   const id = stepIdOf(name);
   if (!selectedIds.has(id) || bailedAt !== undefined) return;
   executedIds.push(id);
   console.log(`\n== ${name}`);
+  // tooling/vscode-1146: a focus lost BETWEEN steps must not tumble the next one. A probe is
+  // milliseconds when the focus is there; a rejected probe is left to the step itself.
+  if (page !== undefined && (await workbenchHasFocus().catch(() => true)) === false) {
+    await handleFocusLoss(`before step ${id}`);
+  }
   const startedAt = performance.now();
   const failuresBefore = failures.length;
   // A stuck connection that never reached `web` (it got stuck inside `openChat`) shows only here.
@@ -2974,6 +3219,12 @@ try {
   vscodeStartedAt = performance.now();
   console.log(
     `VS Code pid ${String(vscode.pid)}, CDP port ${String(vscode.port)}, workspace ${workspace}`,
+  );
+  // A line of its own: step 39 (P7) judges by it, and the `VS Code pid` line is read by other tools.
+  console.log(
+    vscode.version === undefined
+      ? 'vscode unknown (no package.json found next to the executable)'
+      : `vscode ${vscode.version} (package.json next to the executable)`,
   );
   await connectWorkbench();
   // A wrong size throws here, before `started`, so it takes the start-up path (exit 2).
@@ -16249,7 +16500,8 @@ try {
     const closedFile = path.join(vscode.modsHome, '..', 'mods-sentinel', 'panel.closed');
     const panelLogs = [];
     let panelWeb;
-    // P7: a folder outside the mod, and a junction to it inside the mod folder.
+    // P7: a folder outside the mod, and a junction to it inside the mod folder (served or refused
+    // by VS Code depending on its version, see the P7 check).
     const outsideDir = path.join(vscode.modsHome, '..', 'mods-outside');
     const linkPath = path.join(vscode.modsHome, MOD, 'outside');
     const PIXEL_PNG = Buffer.from(
@@ -16414,6 +16666,9 @@ try {
       );
 
       // --- P7 (measure): does the page get a file through a link that leaves the mod folder? ----------
+      // Depends on the VS Code version: served before 1.146.0 (the root check was textual), refused
+      // from 1.146.0 on (microsoft/vscode#346026 resolves the real path). A link that stays inside
+      // loads on both. Unknown version: FAIL, no guess.
       const linkProbe = await panelWeb.inDoc(async (doc) => {
         const base = doc.querySelector('link[rel="stylesheet"]')?.href ?? '';
         const load = (relative) =>
@@ -16427,9 +16682,14 @@ try {
           });
         return { base, inside: await load('inside.png'), outside: await load('outside/probe.png') };
       });
+      const linksServed = linksLeaveRootServed(vscode.version);
       check(
-        linkProbe.inside === 'loaded' && linkProbe.outside === 'loaded',
-        `P7 a link inside the mod folder that points outside is served to the page (VS Code checks localResourceRoots by path; documented in docs/mods.md): inside.png ${linkProbe.inside}, outside/probe.png ${linkProbe.outside}`,
+        linksServed !== undefined &&
+          linkProbe.inside === 'loaded' &&
+          linkProbe.outside === (linksServed ? 'loaded' : 'error'),
+        linksServed === undefined
+          ? 'P7 VS Code version unknown, so the expected behaviour of a link that leaves the mod folder cannot be chosen'
+          : `P7 on VS Code ${String(vscode.version)} a link inside the mod folder that points outside is ${linksServed ? 'served to' : 'refused by'} the page, like VS Code ${linksServed ? 'before' : 'since'} 1.146 (microsoft/vscode#346026; documented in docs/mods.md): inside.png ${linkProbe.inside}, outside/probe.png ${linkProbe.outside}`,
       );
       panelLogs.length = 0;
 

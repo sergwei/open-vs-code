@@ -172,7 +172,8 @@ describe('parseAllThemesArg', () => {
 
 /**
  * Protects the pure side of the early stop and of `--with-copilot` (issue #127, #98): the text of
- * the cut line for each cause, that no tool reads it as a check, and the flag. The causes are
+ * the cut line for each cause (the focus cause with and without the window in front as detail,
+ * tooling/vscode-1146), that no tool reads it as a check, and the flag. The causes are
  * fabricated; that `run.mjs` finds them in a real VS Code is covered by its mutations M1-M3.
  */
 describe('stopLine', () => {
@@ -191,6 +192,12 @@ describe('stopLine', () => {
       kind: 'focus',
       detail: '',
       text: 'the VS Code window does not have the system focus (another window is in front)',
+    },
+    {
+      // tooling/vscode-1146: a non-empty detail names the window in front (synthetic input).
+      kind: 'focus',
+      detail: 'foreground powershell pid 7 "x" (Y)',
+      text: 'the VS Code window does not have the system focus (another window is in front: foreground powershell pid 7 "x" (Y))',
     },
     {
       kind: 'dialog',

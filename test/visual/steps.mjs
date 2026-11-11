@@ -512,7 +512,8 @@ export function parseWithCopilotArg(argv) {
  *
  * `cause` is `{ kind, detail }`: `cdp` (the chat webview stopped answering and could not be
  * reopened), `workbench` (the page of the workbench stopped answering), `focus` (the VS Code window
- * does not hold the system focus) or `dialog` (a modal dialog is open; `detail` is its text, cut to
+ * does not hold the system focus; a non-empty `detail` names the window in front, tooling/vscode-1146)
+ * or `dialog` (a modal dialog is open; `detail` is its text, cut to
  * 80 characters). The line starts with neither `ok`, `FAIL`, `warn` nor `== `, so `extractChecks`
  * and `compare-runs` ignore it, and it is not indented so it is not mistaken for part of the step.
  * Throws on another `kind`, so a new cause cannot go out without a text.
@@ -522,7 +523,7 @@ export function stopLine(id, cause) {
   const reasons = {
     cdp: `the chat webview stopped answering CDP (${detail})`,
     workbench: `the workbench stopped answering CDP (${detail})`,
-    focus: 'the VS Code window does not have the system focus (another window is in front)',
+    focus: `the VS Code window does not have the system focus (another window is in front${detail === '' ? '' : `: ${detail}`})`,
     dialog: `a modal dialog of VS Code is open ("${detail.slice(0, 80)}")`,
   };
   const reason = reasons[cause.kind];

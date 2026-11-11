@@ -32,6 +32,71 @@ export function freePort() {
 }
 
 /**
+ * Reads the version of the VS Code build that `executable` belongs to, or `undefined`.
+ *
+ * `downloadAndUnzipVSCode` returns only the path of the executable, so the version is read from
+ * the `package.json` of the app that sits next to it. Three layouts are tried in order:
+ * `<dir>/resources/app/package.json`, `<dir>/<commit>/resources/app/package.json` (the Windows
+ * archive since about 1.14x keeps the app in a folder named after the short commit) and
+ * `<dir>/../Resources/app/package.json` (macOS bundle). Never throws: an unreadable or malformed
+ * file counts as "not there" and the next layout is tried.
+ * VERIFIED by the unit test "finds the version in each of the three layouts" (folders the test
+ * makes) and "returns undefined when there is no readable version". The commit-folder layout was
+ * also read by hand from the cached Windows 11 builds of 1.142.0 to 1.146.0 (11/11/2026).
+ * HYPOTHESIS that the value equals `vscode.version` (both come from the app's own files).
+ * UNVERIFIED on macOS and Linux against a real build: the first and third layouts only run
+ * against folders the test fabricates.
+ */
+export function readVsCodeVersion(executable) {
+  const dir = path.dirname(executable);
+  const candidates = [path.join(dir, 'resources', 'app', 'package.json')];
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        candidates.push(path.join(dir, entry.name, 'resources', 'app', 'package.json'));
+      }
+    }
+  } catch {
+    // An unreadable folder only means there is no second layout to try.
+  }
+  candidates.push(path.join(dir, '..', 'Resources', 'app', 'package.json'));
+  for (const file of candidates) {
+    try {
+      const version = JSON.parse(fs.readFileSync(file, 'utf8')).version;
+      if (typeof version === 'string' && /^\d+\.\d+\.\d+/.test(version)) return version;
+    } catch {
+      // Missing or malformed: try the next layout.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Whether a link inside a webview's resource root that points OUTSIDE it is still served to the
+ * page: `true` before VS Code 1.146.0, `false` from 1.146.0 on, `undefined` when `version` is not
+ * a readable `major.minor.patch` (the caller must fail, not guess).
+ *
+ * VS Code 1.146 resolves the real path before checking the roots (microsoft/vscode#346026,
+ * "Webview: check resolved paths against local resource roots", milestone 1.146.0, read on
+ * 11/11/2026); until 1.145 the check was textual. Compared number by number: as strings "1.9.0"
+ * would sort after "1.146.0". VERIFIED by the unit test "tells which side of 1.146.0 a version
+ * is" and "returns undefined for a version it cannot read". The 1.146.0 side is also VERIFIED
+ * by two consecutive `test:visual --steps 39` runs on Windows 11 (11/11/2026): "ok   P7 on VS Code
+ * 1.146.0 a link inside the mod folder that points outside is refused by the page, like VS Code
+ * since 1.146 (microsoft/vscode#346026; documented in docs/mods.md): inside.png loaded,
+ * outside/probe.png error". The pre-1.146 side ("served to the page") is UNVERIFIED since this
+ * change: no run on a build older than 1.146.0 (the last one that did, 03/11/2026, was 1.144.0).
+ */
+export function linksLeaveRootServed(version) {
+  if (typeof version !== 'string') return undefined;
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (match === null) return undefined;
+  const [major, minor] = [Number(match[1]), Number(match[2])];
+  if (major !== 1) return major < 1;
+  return minor < 146;
+}
+
+/**
  * Environment for the child: the parent's, minus the variables a process that descends from a VS
  * Code extension host carries. `ELECTRON_RUN_AS_NODE=1` would turn `Code.exe` into plain Node
  * (exit code 9, see `.vscode-test.mjs`), and `VSCODE_*` could attach it to the parent.
@@ -112,6 +177,30 @@ export function writeSettings(userDataDir, patch) {
   return file;
 }
 
+/** Prefix of the temporary workspace folder; it shows in the title of every window that opens it. */
+export const WORKSPACE_PREFIX = 'open-vs-code-visual-';
+
+/**
+ * Tells whether the window in front belongs to the VS Code under test (`run.mjs`,
+ * `handleFocusLoss`): its pid is the main process (`mainPid`) or its title carries the EXACT folder
+ * name of this run's workspace (`workspaceName`, `path.basename(workspace)`), not just the prefix:
+ * step 25's control windows and a parallel local run share the prefix. CI printed "foreground Code
+ * pid 3780 "[Extension Development Host] open-vs-code-visual-JCfsun - Visual Studio Code [Ad"" for
+ * 11 steps of run 43077896965 while `document.hasFocus()` was false.
+ * HYPOTHESIS: the window in front was ours but not the active one in the runner's session (which
+ * would also explain why regaining the focus failed for 5-7 s); the focus inside a webview/iframe
+ * is NOT shown (Chromium reports `hasFocus()` true for a parent with a focused child frame), and
+ * that pid 3780 is a child of the process we spawned is not shown either. Would be checked by
+ * comparing that pid with the "VS Code pid" line of `visual-shard-N.txt` and by probing
+ * `document.activeElement` in the same state. Titles are cut at 80 characters by the caller.
+ * VERIFIED by `vscodeProcess.test.mjs` ("recognises the window of the VS Code under test"), with
+ * fabricated window descriptions, not a real foreground window.
+ */
+export function isOwnVsCodeWindow(front, mainPid, workspaceName) {
+  if (front === undefined) return false;
+  return front.pid === mainPid || front.title.includes(workspaceName);
+}
+
 /**
  * Creates the temporary workspace the run opens: `src/sample.ts` (30 lines, so a link to line 20
  * is meaningful), a `.env` whose read makes opencode ask for a permission, and the two project
@@ -122,7 +211,7 @@ export function writeSettings(userDataDir, patch) {
  * dot, so the `.opencode` folder adds no row to the `@` popup of step 16. Returns the folder.
  */
 export function createWorkspace() {
-  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'open-vs-code-visual-'));
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), WORKSPACE_PREFIX));
   fs.mkdirSync(path.join(folder, 'src'));
   const lines = ['// Sample file for the visual test run.'];
   for (let line = 2; line <= 30; line++) {
@@ -245,7 +334,8 @@ function installExtension(repoRoot, extensionsDir) {
  * marker in place; the fixture's state file lives in
  * `workDir` and is deleted at start like the profile. E10-mods: `OPEN_VS_CODE_MODS_HOME` points to
  * `<workDir>/mods-home`, created empty at every start (see {@link cleanEnv}). Returns `{ port, pid,
- * stop, userDataDir, xdgRoot, exited, stateFile, downMarker, modsHome }`; `stop()` kills the whole
+ * stop, userDataDir, xdgRoot, exited, stateFile, downMarker, modsHome, version }` (`version` is
+ * {@link readVsCodeVersion} of the build that was launched, or `undefined`); `stop()` kills the whole
  * process tree (the server child of the
  * extension host included) and waits until the main process is gone.
  */
@@ -372,5 +462,16 @@ export async function startVSCode({
     }
     await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 10_000))]);
   };
-  return { port, pid, stop, userDataDir, xdgRoot, exited, stateFile, downMarker, modsHome };
+  return {
+    port,
+    pid,
+    stop,
+    userDataDir,
+    xdgRoot,
+    exited,
+    stateFile,
+    downMarker,
+    modsHome,
+    version: readVsCodeVersion(executable),
+  };
 }
