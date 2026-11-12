@@ -250,7 +250,9 @@ import { chromium } from 'playwright-core';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { inflateSync } from 'node:zlib';
 import {
   createWorkspace,
   installModFixture,
@@ -1735,6 +1737,151 @@ async function closeAllEditors() {
   if (left > 0) {
     warn(`Close All Editors left ${String(left)} tab(s) open; a later tab count may include them`);
   }
+}
+
+/**
+ * Selects the tab `tab` ('chat', 'changes' or 'session') of the chat panel (issue #188) with a real
+ * mouse click on its button and waits until it reads selected. The Changes and Session panels are
+ * mounted only while their tab is active, so every check that reads "Changed files" or the
+ * Session sections opens its tab first, and a step that leaves the Chat tab puts it back before it
+ * ends: the choice is persisted with the draft and would leak into the next step. Returns false when
+ * the tab button is not there; an expired wait just returns, so the check that follows judges it.
+ */
+async function openPanelTab(tab) {
+  const pressed = await clickIn(`#panel-tab-${tab}`);
+  await waitPresent(`#panel-tab-${tab}[aria-selected="true"]`);
+  return pressed;
+}
+
+/**
+ * Decodes an 8-bit RGB or RGBA, non-interlaced PNG (what Playwright's `page.screenshot` returns) into
+ * `{ width, height, pixel(x, y) }`, `pixel` giving `[r, g, b]`. Throws on any other PNG. Written for
+ * {@link meterContrast}: the fill of a native `<meter>` is drawn by the browser from its
+ * `::-webkit-meter-*` pseudo-elements, which `getComputedStyle` does not report (every colour came
+ * back `rgba(0, 0, 0, 0)` in the run of 12/11/2026), so the colour is read from the pixels.
+ */
+function decodePng(buffer) {
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let channels = 0;
+  const parts = [];
+  while (offset < buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.toString('latin1', offset + 4, offset + 8);
+    const data = buffer.subarray(offset + 8, offset + 8 + length);
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      channels = data[9] === 6 ? 4 : data[9] === 2 ? 3 : 0;
+      if (data[8] !== 8 || channels === 0 || data[12] !== 0) {
+        throw new Error('decodePng: only 8-bit RGB or RGBA PNGs without interlacing');
+      }
+    } else if (type === 'IDAT') {
+      parts.push(data);
+    }
+    offset += 12 + length;
+  }
+  const raw = inflateSync(Buffer.concat(parts));
+  const stride = width * channels;
+  const out = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[y * (stride + 1)];
+    for (let x = 0; x < stride; x += 1) {
+      const left = x >= channels ? out[y * stride + x - channels] : 0;
+      const up = y > 0 ? out[(y - 1) * stride + x] : 0;
+      const upLeft = x >= channels && y > 0 ? out[(y - 1) * stride + x - channels] : 0;
+      let value = raw[y * (stride + 1) + 1 + x];
+      if (filter === 1) value += left;
+      else if (filter === 2) value += up;
+      else if (filter === 3) value += (left + up) >> 1;
+      else if (filter === 4) {
+        const guess = left + up - upLeft;
+        const dLeft = Math.abs(guess - left);
+        const dUp = Math.abs(guess - up);
+        const dUpLeft = Math.abs(guess - upLeft);
+        value += dLeft <= dUp && dLeft <= dUpLeft ? left : dUp <= dUpLeft ? up : upLeft;
+      }
+      out[y * stride + x] = value & 255;
+    }
+  }
+  return {
+    width,
+    height,
+    pixel: (x, y) => [...out.subarray(y * stride + x * channels, y * stride + x * channels + 3)],
+  };
+}
+
+/**
+ * WCAG contrast between the filled and the empty part of the context meter of the Session tab, read
+ * from a screenshot of the meter (see {@link decodePng}). Returns `{ fill, bar, ratio }` (the two
+ * `[r, g, b]` samples, taken 3 px inside each end of the middle row, and their contrast) or `null`
+ * when the meter is not drawn. The fill covers 86 % of the bar in the NEAR_FULL session of step 55,
+ * so both ends are sampled inside their own part. VERIFIED on Windows 11, VS Code 1.146.0
+ * (12/11/2026, DPR 1.25): step 55, "C6 in dark the fill of the high meter stands out from its bar,
+ * contrast >= 3" printed fill [204,167,0] on bar [49,49,49] (5.63), and the same check passed in
+ * light, hc-dark and hc-light. NOT observed: the colour of the meter below the `high` level.
+ */
+async function meterContrast() {
+  const point = await centreOf('#panel-session .context-meter');
+  if (!point) return null;
+  const rect = await web.inDoc((doc) => {
+    const box = doc.querySelector('#panel-session .context-meter')?.getBoundingClientRect();
+    return box ? { width: box.width, height: box.height } : null;
+  });
+  if (!rect) return null;
+  const image = decodePng(
+    await page.screenshot({
+      clip: {
+        x: Math.round(point.x - rect.width / 2),
+        y: Math.round(point.y - rect.height / 2),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      },
+      scale: 'css',
+    }),
+  );
+  const middle = Math.floor(image.height / 2);
+  const fill = image.pixel(3, middle);
+  const bar = image.pixel(image.width - 4, middle);
+  const luminance = (colour) => {
+    const [r, g, b] = colour.map((channel) => {
+      const value = channel / 255;
+      return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const [high, low] = [luminance(fill), luminance(bar)].sort((x, y) => y - x);
+  return { fill, bar, ratio: Number(((high + 0.05) / (low + 0.05)).toFixed(2)) };
+}
+
+/**
+ * Layout of the chat panel in the current cell of steps 54 and 55 (issue #188): how far the document
+ * overflows sideways, which of `selectors` have a drawn element sticking out of the document
+ * (`outside`, the selectors that matched, at most the first of each) and how many elements carry a
+ * non-empty `style` attribute (the CSP forbids them, skill solid-webview §6). Elements with no box
+ * (a `hidden` panel, an unmounted one) are skipped. Self-contained: it is serialized into the page,
+ * so it is called as `web.inDoc(panelLayout, selectors)`.
+ */
+function panelLayout(doc, selectors) {
+  const width = doc.documentElement.clientWidth;
+  const outside = [];
+  for (const selector of selectors) {
+    for (const element of doc.querySelectorAll(selector)) {
+      const rect = element.getBoundingClientRect();
+      if (rect.width > 0 && (rect.left < -1 || rect.right > width + 1)) {
+        outside.push(selector);
+        break;
+      }
+    }
+  }
+  return {
+    overflow: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+    outside,
+    styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+      (e) => (e.getAttribute('style') ?? '').trim() !== '',
+    ).length,
+  };
 }
 
 /**
@@ -6708,16 +6855,17 @@ try {
     assertNoWebviewErrors('context line');
   });
 
-  // Issue #31 (E7-session-diff): the "Changed files" list under the header and the native diff.
-  // An EDIT_FILES turn of the synthetic server changes four files of the temporary workspace (in
-  // `visual` mode it really writes them): a modified `src/sample.ts` (`value2 = 2` becomes `value2 =
-  // 22`), an added `src/added.ts`, a deleted `src/removed.ts` (this step creates it first) and an
-  // added binary `assets/logo.png`. The step opens the list with the real mouse, reads the rows,
-  // measures their contrast in the four themes, opens each kind of row and looks at the workbench:
-  // the diff editor with the original on the left and the file on the right, an empty right side
-  // for the deleted one, an empty left side for the added one, and the image itself (no diff) for
-  // the binary. The deleted row is reached with the keyboard (Tab, Tab, Tab, Enter) to prove a row
-  // is a button a keyboard user can press.
+  // Issue #31 (E7-session-diff): the "Changed files" list and the native diff. Since issue #188 the
+  // list is the content of the Changes tab (it was a closed `<details>` under the header), so the
+  // step presses that tab with the real mouse first. An EDIT_FILES turn of the synthetic server
+  // changes four files of the temporary workspace (in `visual` mode it really writes them): a
+  // modified `src/sample.ts` (`value2 = 2` becomes `value2 = 22`), an added `src/added.ts`, a deleted
+  // `src/removed.ts` (this step creates it first) and an added binary `assets/logo.png`. The step
+  // reads the rows, measures their contrast in the four themes, opens each kind of row and looks at
+  // the workbench: the diff editor with the original on the left and the file on the right, an empty
+  // right side for the deleted one, an empty left side for the added one, and the image itself (no
+  // diff) for the binary. The deleted row is reached with the keyboard (Tab, Tab, Enter from the
+  // first row) to prove a row is a button a keyboard user can press.
   await step('18 changed files and native diff (issue #31)', async () => {
     const THEMES = [
       ['light', 'Default Light Modern'],
@@ -6736,17 +6884,20 @@ try {
     check(await clickButton('New session'), 'New session is pressed');
     await waitEmptyView();
 
-    /** The list: summary text, whether it is open, and the rows with their words and names. */
+    /**
+     * The list of the Changes tab (issue #188; it used to be a `<details>` in the header area): its
+     * heading text, where it sits, and the rows with their words and names. `null` while the tab is
+     * not the active one or the session changed nothing.
+     */
     const list = () =>
       web.inDoc((doc) => {
-        const details = doc.querySelector('details.changed-files');
-        if (!details) return null;
-        const area = doc.querySelector('.header-area');
+        const section = doc.querySelector('#panel-changes section.changed-files');
+        if (!section) return null;
         return {
-          summary: details.querySelector('summary')?.textContent ?? '',
-          open: details.open,
-          inHeaderArea: details.parentElement === area,
-          rows: [...details.querySelectorAll('button.changed-file')].map((button) => ({
+          summary: section.querySelector('.changed-files-title')?.textContent ?? '',
+          inChangesPanel: section.parentElement?.id === 'panel-changes',
+          inHeaderArea: doc.querySelector('.header-area .changed-files') !== null,
+          rows: [...section.querySelectorAll('button.changed-file')].map((button) => ({
             path: button.querySelector('.session-title')?.textContent ?? '',
             meta: button.querySelector('.session-meta')?.textContent ?? '',
             name: button.getAttribute('aria-label') ?? '',
@@ -6754,10 +6905,16 @@ try {
           styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
             (e) => (e.getAttribute('style') ?? '').trim() !== '',
           ).length,
-          overflowPx: details.scrollWidth - details.clientWidth,
+          overflowPx: section.scrollWidth - section.clientWidth,
         };
       });
+    // The Changes tab stays selected through the step (the prompt box is outside the panels, so
+    // `send` works from any tab) and the step puts the Chat tab back at its end.
+    check(await openPanelTab('changes'), 'the Changes tab is pressed');
     check((await list()) === null, 'a new session shows no "Changed files"');
+    const emptyState = await waitPresent('#panel-changes .panel-empty');
+    check(emptyState !== undefined, 'the Changes tab says no file changed in this session yet');
+    await shot('18a-changed-files-empty');
 
     await send('EDIT_FILES: change a few files');
     check(await waitIdle(30_000), 'the edit turn finished');
@@ -6767,20 +6924,20 @@ try {
     console.log(`  list: ${JSON.stringify(closed)}`);
     check(
       closed?.summary === 'Changed files (4)',
-      `the summary counts the files (${JSON.stringify(closed?.summary)})`,
+      `the heading counts the files (${JSON.stringify(closed?.summary)})`,
     );
-    check(closed?.open === false, 'the list is closed by default');
-    check(closed?.inHeaderArea === true, 'the list sits in the header area under the title bar');
+    check(
+      closed?.inChangesPanel === true && closed.inHeaderArea === false,
+      'the list is in the Changes tab, already open, and not in the header area',
+    );
+    const badge = await web.inDoc(
+      (doc) => doc.querySelector('#panel-tab-changes .panel-tab-badge')?.textContent ?? '',
+    );
+    check(badge === '4', `the Changes tab badge counts the files (${JSON.stringify(badge)})`);
     check(
       closed?.styled === 0,
       `no inline style attribute in the body (${String(closed?.styled)})`,
     );
-    await shot('18a-changed-files-closed');
-
-    // Open it with the real mouse on the summary.
-    check(await clickIn('details.changed-files > summary'), 'the summary is pressed');
-    const opened = await waitFor(async () => (await list())?.open === true, 5_000, 200);
-    check(opened === true, 'a press on the summary opens the list');
     const rows = (await list())?.rows ?? [];
     console.log(`  rows: ${JSON.stringify(rows)}`);
     check(
@@ -6809,7 +6966,7 @@ try {
     for (const [name, theme] of THEMES) {
       await setTheme(theme);
       const look = await web.inDoc(measureText, {
-        summary: 'details.changed-files > summary',
+        summary: '#panel-changes .changed-files-title',
         path: 'button.changed-file .session-title',
         meta: 'button.changed-file .session-meta',
       });
@@ -6875,17 +7032,20 @@ try {
     await closeAllEditors();
 
     // --- The deleted file, with the keyboard ----------------------------------------------------
-    await clickIn('details.changed-files > summary'); // focus enters the iframe, closes the list
-    await clickIn('details.changed-files > summary'); // and opens it again
-    await waitPresent('details.changed-files[open]');
-    for (let tabs = 0; tabs < 3; tabs++) {
+    // The heading is not focusable: pressing it only gives the keyboard to the iframe, then the
+    // first row is focused by the page and two Tabs reach the third row (the deleted file).
+    await clickIn('#panel-changes .changed-files-title');
+    await web.inDoc((doc) => {
+      doc.querySelector('#panel-changes button.changed-file')?.focus();
+    });
+    for (let tabs = 0; tabs < 2; tabs++) {
       await page.keyboard.press('Tab');
       await sleep(150); // kept: pace between Tab presses so the focus read sees each one
     }
     const focused = await web.inDoc((doc) => doc.activeElement?.getAttribute('aria-label') ?? '');
     check(
       focused === 'Open diff of src/removed.ts, Deleted, 0 added, 1 deleted',
-      `three Tabs from the summary reach the deleted row (${JSON.stringify(focused)})`,
+      `two Tabs from the first row reach the deleted row (${JSON.stringify(focused)})`,
     );
     await page.keyboard.press('Enter');
     const deleted = await waitForDiff('removed.ts');
@@ -6936,6 +7096,7 @@ try {
     await shot('18g-binary-opened');
     await closeAllEditors();
 
+    check(await openPanelTab('chat'), 'the Chat tab is pressed again');
     assertNoWebviewErrors('changed files');
   });
 
@@ -6978,16 +7139,22 @@ try {
     check(await clickButton('New session'), 'New session is pressed');
     await waitEmptyView();
 
-    /** What the page shows about the revert: the log, the block, the draft and the changed files. */
+    /**
+     * What the page shows about the revert: the log, the block, the draft and the changed files
+     * (as the count badge of the Changes tab worded like its heading, because the list itself is
+     * mounted only while that tab is open).
+     */
     const view = () =>
       web.inDoc((doc) => {
         const log = doc.querySelector('[role="log"]');
         const banner = doc.querySelector('.revert-banner');
-        const details = doc.querySelector('details.changed-files');
+        // The list is mounted only in the Changes tab, so this reads the count badge of the tab (the
+        // same number the list has, in any tab) and words it like the list heading.
+        const badge = doc.querySelector('#panel-tab-changes .panel-tab-badge')?.textContent ?? null;
         return {
           messages: log?.querySelectorAll('.message').length ?? 0,
           draft: doc.querySelector('textarea')?.value ?? '',
-          changedSummary: details?.querySelector('summary')?.textContent ?? null,
+          changedSummary: badge === null ? null : `Changed files (${badge})`,
           banner:
             banner === null
               ? null
@@ -7041,11 +7208,15 @@ try {
       (await view()).changedSummary === 'Changed files (5)',
       `the summary counts five files (${JSON.stringify((await view()).changedSummary)})`,
     );
-    check(await clickIn('details.changed-files > summary'), 'the summary is pressed');
-    await waitPresent('details.changed-files[open]');
+    check(await openPanelTab('changes'), 'the Changes tab is pressed');
+    await waitPresent('#panel-changes section.changed-files');
+    const heading = await web.inDoc(
+      (doc) => doc.querySelector('#panel-changes .changed-files-title')?.textContent ?? '',
+    );
+    check(heading === 'Changed files (5)', `the heading counts five files (${heading})`);
     const largeRow = await web.inDoc((doc) => {
       const button = doc.querySelector(
-        'details.changed-files button.changed-file[data-status="too-large"]',
+        '#panel-changes .changed-files button.changed-file[data-status="too-large"]',
       );
       return button === null
         ? null
@@ -7082,7 +7253,9 @@ try {
 
     // --- Open the diff of sample.ts and LEAVE it open (pinned) ---------------------------------
     check(
-      await clickIn('details.changed-files button.changed-file[aria-label*="src/sample.ts"]'),
+      await clickIn(
+        '#panel-changes .changed-files button.changed-file[aria-label*="src/sample.ts"]',
+      ),
       'the row of src/sample.ts is pressed',
     );
     const first = await waitForDiff('sample.ts');
@@ -7091,6 +7264,8 @@ try {
       'the diff opened from "Changed files" has value2 = 2 on the left',
     );
     await command('View: Keep Editor');
+    // The message actions below live in the Chat tab.
+    check(await openPanelTab('chat'), 'the Chat tab is pressed again');
 
     // --- Revert from the message, with the real mouse -----------------------------------------
     check(
@@ -10166,12 +10341,13 @@ try {
       // --- C8 (diff): "Changed files" opens its diff outside the chat's group -----------------------
       await send(`${titleOf(PROMPT_A)} EDIT_FILES: change a few files`);
       check(await waitIdle(30_000), 'C8 the edit turn ends');
-      await waitPresent('details.changed-files');
-      await clickIn('details.changed-files > summary');
-      await waitPresent('details.changed-files[open]');
+      await openPanelTab('changes');
+      await waitPresent('#panel-changes section.changed-files');
       const chatGroupsNow = new Set((await chatTabs()).map((tab) => tab.group));
       check(
-        await clickIn('details.changed-files button.changed-file[aria-label*="src/sample.ts"]'),
+        await clickIn(
+          '#panel-changes .changed-files button.changed-file[aria-label*="src/sample.ts"]',
+        ),
         'C8 the row of src/sample.ts is pressed in "Changed files"',
       );
       const diffTab = await waitFor(
@@ -10185,6 +10361,7 @@ try {
         `C8 the diff of "Changed files" opens outside the chat's group (diff in group ${String(diffTab?.group)}, chat tabs in ${JSON.stringify([...chatGroupsNow])})`,
       );
       await shot('27f-diff');
+      await openPanelTab('chat');
 
       // --- C2 (full width): the same tab alone in its editor area ----------------------------------
       await closeSampleTabs();
@@ -17424,7 +17601,8 @@ try {
         const focusedCard = focused?.closest?.('[data-request-id]') ?? null;
         return {
           boxes: doc.querySelectorAll('.request-box').length,
-          lists: doc.querySelectorAll('[role="tablist"]').length,
+          // Only the request box: the chat panel has its own Chat · Changes · Session tablist (#188).
+          lists: doc.querySelectorAll('.request-box [role="tablist"]').length,
           tabs: tabs.map((tab) => ({
             id: tab.dataset.requestTab,
             label: tab.querySelector('.request-tab-label')?.textContent ?? '',
@@ -22109,6 +22287,754 @@ try {
       }
     },
   );
+
+  // E2-chat-panel-tabs (issue #188, phase 5): the row of tabs, the composer that stays open during a
+  // turn, the chips of the inbox and the activity footer, with the REAL keyboard and mouse. The
+  // fixture's inbox is SYNTHETIC (`inboxOf` in `fake-opencode.mjs`): what this step proves is the
+  // extension's own behaviour (UI, host, protocol), not that a real opencode queues or steers the
+  // same way. ESTIMATE of the budget: three turns (a `TOOLS SLOW` one of about 15 s, a short queued
+  // one and a `SLOWER` one that is stopped) plus the typing; nobody has timed it in a full run.
+  await step('54 chat panel tabs: queue, steer and turn activity (issue #188)', async () => {
+    const DARK = 'Default Dark Modern';
+    /** What the panel shows. Self-contained (it is serialized into the page). */
+    const state = () =>
+      web.inDoc((doc) => {
+        const text = (element) => (element?.textContent ?? '').trim();
+        const box = doc.querySelector('textarea.prompt-text');
+        return {
+          chips: [...doc.querySelectorAll('.queue-chips .queue-chip')].map((li) => ({
+            text: text(li.querySelector('.queue-chip-text')),
+            delivery: li.getAttribute('data-delivery') ?? '',
+            buttons: [...li.querySelectorAll('button')].map(
+              (button) => button.getAttribute('aria-label') ?? text(button),
+            ),
+          })),
+          users: [...doc.querySelectorAll('[role="log"] .message-user .part-text')].map(text),
+          stops: doc.querySelectorAll('[aria-label="Stop"]').length,
+          stopInActivity: doc.querySelectorAll('.activity [aria-label="Stop"]').length,
+          stopInForm: doc.querySelectorAll('.prompt-actions [aria-label="Stop"]').length,
+          sendText: text(doc.querySelector('.send-button')),
+          placeholder: box?.getAttribute('placeholder') ?? '',
+          box: box?.value ?? '',
+          label: text(doc.querySelector('.activity-label')),
+          metas: [...doc.querySelectorAll('.activity-meta')].map(text),
+          time: text(doc.querySelector('.activity-time')),
+          badge: text(doc.querySelector('#panel-tab-chat .panel-tab-badge')),
+          activeId: doc.activeElement?.id ?? '',
+          tabs: [...doc.querySelectorAll('[role="tab"]')].map(
+            (tab) =>
+              `${tab.id}:${tab.getAttribute('aria-selected')}:${tab.getAttribute('tabindex')}`,
+          ),
+          styled: [...doc.querySelectorAll('body [style], body[style]')].filter(
+            (e) => (e.getAttribute('style') ?? '').trim() !== '',
+          ).length,
+        };
+      });
+    const waitState = (predicate, ms) => waitFor(async () => predicate(await state()), ms, 150);
+    /** Empties the box, types `text` and presses `chord` (Enter queues, Ctrl+Enter steers). */
+    const compose = async (text, chord = 'Enter') => {
+      await clearPromptBox(150);
+      await page.keyboard.type(text);
+      await page.keyboard.press(chord);
+    };
+    /** A real click on the chip button whose name (aria-label or text) STARTS with `name` (`Edit: "…"`). */
+    const pressChip = async (name) => {
+      const tagged = await web.inDoc((doc, wanted) => {
+        const button = [...doc.querySelectorAll('.queue-chip button')].find((candidate) =>
+          (candidate.getAttribute('aria-label') ?? (candidate.textContent ?? '').trim()).startsWith(
+            wanted,
+          ),
+        );
+        if (!button) return false;
+        button.setAttribute('data-visual-chip', 'true');
+        return true;
+      }, name);
+      if (!tagged) return false;
+      try {
+        return await clickIn('[data-visual-chip="true"]');
+      } finally {
+        await web
+          .inDoc((doc) => {
+            for (const element of doc.querySelectorAll('[data-visual-chip]')) {
+              element.removeAttribute('data-visual-chip');
+            }
+          })
+          .catch(() => undefined);
+      }
+    };
+    try {
+      // Reconnect to the chat of the sidebar: step 37 closes the chat tab it drives without doing it,
+      // so with `--steps 37,54,55` this step would start on a closed webview (review S8 of #188).
+      await openSidebarChat();
+      await setTheme(DARK);
+      check(await clickButton('New session'), 'New session is pressed');
+      await waitEmptyView();
+      assertNoWebviewErrors('before step 54');
+
+      // --- T1 the tab row with the keyboard -------------------------------------------------------
+      let now = await state();
+      check(
+        JSON.stringify(now.tabs) ===
+          JSON.stringify([
+            'panel-tab-chat:true:0',
+            'panel-tab-changes:false:-1',
+            'panel-tab-session:false:-1',
+          ]),
+        `T1 the tabs are Chat, Changes and Session, only Chat selected and in the Tab order (${now.tabs.join(' | ')})`,
+      );
+      check(
+        await clickIn('#panel-tab-chat'),
+        'T1 the Chat tab is clicked, so the keys reach the page',
+      );
+      const landed = async (key, id) => {
+        await page.keyboard.press(key);
+        await waitPresent(`#${id}[aria-selected="true"]`);
+        const after = await state();
+        check(
+          after.activeId === id && after.tabs.filter((t) => t.includes(':true:')).length === 1,
+          `T1 ${key} selects and focuses ${id} and no other tab is selected (focus ${after.activeId}; ${after.tabs.join(' | ')})`,
+        );
+      };
+      await landed('ArrowRight', 'panel-tab-changes');
+      await landed('End', 'panel-tab-session');
+      await landed('ArrowRight', 'panel-tab-chat');
+      await landed('ArrowLeft', 'panel-tab-session');
+      await landed('Home', 'panel-tab-chat');
+      now = await state();
+      check(
+        now.tabs.includes('panel-tab-chat:true:0') &&
+          now.tabs.filter((t) => t.endsWith(':-1')).length === 2,
+        `T1 after Home only Chat is in the Tab order (${now.tabs.join(' | ')})`,
+      );
+      check(
+        now.badge === '',
+        `T1 the Chat tab has no "working" badge while idle (${JSON.stringify(now.badge)})`,
+      );
+
+      // --- T4 the activity footer, on a turn that calls tools -------------------------------------
+      await send('TOOLS SLOW parent turn');
+      const running = await waitState((s) => s.stops > 0, 10_000);
+      check(running !== undefined, 'T4 the turn started: a Stop button is in the page');
+      const verb = await waitState(
+        (s) =>
+          /^(Reading|Editing|Writing) \S*[./]\S*/.test(s.label) &&
+          s.metas.some((meta) => /^Step \d+$/.test(meta)),
+        15_000,
+      );
+      now = await state();
+      check(
+        verb !== undefined,
+        `T4 the footer names a verb and its target and the step (${JSON.stringify(now.label)}, ${JSON.stringify(now.metas)})`,
+      );
+      check(
+        now.badge === 'working',
+        `T4 the Chat tab shows the "working" badge during the turn (${JSON.stringify(now.badge)})`,
+      );
+      check(
+        now.stops === 1 && now.stopInActivity === 1 && now.stopInForm === 0,
+        `T4 exactly one Stop, in the activity footer and not in the composer (${String(now.stops)} / ${String(now.stopInActivity)} / ${String(now.stopInForm)})`,
+      );
+      const firstClock = now.time;
+      check(
+        /^\d+:\d{2}$/.test(firstClock),
+        `T4 the footer shows the elapsed time as m:ss (${JSON.stringify(firstClock)})`,
+      );
+      const advanced = await waitState(
+        (s) => s.time !== firstClock && /^\d+:\d{2}$/.test(s.time),
+        4_000,
+      );
+      check(
+        advanced !== undefined,
+        `T4 the clock advances (${firstClock} -> ${(await state()).time})`,
+      );
+      check(now.styled === 0, `T4 no inline style attribute in the body (${String(now.styled)})`);
+      await shot('54a-activity');
+
+      // --- T2 the composer stays open: queue, edit, remove, deliver ------------------------------
+      now = await state();
+      check(
+        now.sendText === 'Queue' && /steer now/i.test(now.placeholder),
+        `T2 while the turn runs the main button reads Queue and the placeholder says how to steer (${JSON.stringify(now.sendText)}, ${JSON.stringify(now.placeholder)})`,
+      );
+      await compose('queued one');
+      check(
+        (await waitState((s) => s.chips.length === 1, 8_000)) !== undefined,
+        'T2 Enter during the turn puts one chip in the queue',
+      );
+      now = await state();
+      check(
+        now.chips[0]?.text === 'Queued: "queued one"' &&
+          now.chips[0]?.delivery === 'queue' &&
+          JSON.stringify(now.chips[0]?.buttons) ===
+            JSON.stringify([
+              'Steer now: "queued one"',
+              'Edit: "queued one"',
+              'Remove from queue: "queued one"',
+            ]) &&
+          now.box === '' &&
+          !now.users.includes('queued one'),
+        `T2 the chip reads Queued: "queued one" with Steer now, Edit and Remove from queue, the box is empty and nothing was delivered yet (${JSON.stringify(now.chips)})`,
+      );
+      await shot('54b-queued-chip');
+      check(await pressChip('Edit'), 'T2 Edit is pressed');
+      check(
+        (await waitState((s) => s.chips.length === 0 && s.box === 'queued one', 8_000)) !==
+          undefined,
+        'T2 Edit cancels the chip and gives its text back to the empty box',
+      );
+      await page.keyboard.press('Enter');
+      check(
+        (await waitState((s) => s.chips.length === 1, 8_000)) !== undefined,
+        'T2 queuing the same text again brings the chip back',
+      );
+      check(await pressChip('Remove from queue'), 'T2 the remove button of the chip is pressed');
+      check(
+        (await waitState((s) => s.chips.length === 0, 8_000)) !== undefined,
+        'T2 removing the chip empties the queue',
+      );
+      await sleep(1_000); // negative window: the removed prompt must not be delivered later
+      now = await state();
+      check(
+        !now.users.includes('queued one') && now.stops === 1,
+        `T2 the removed prompt was not delivered and the turn goes on (${JSON.stringify(now.users)})`,
+      );
+      await compose('queued two');
+      check(
+        (await waitState((s) => s.chips.length === 1, 8_000)) !== undefined,
+        'T2 a second prompt is queued',
+      );
+      now = await state();
+      check(
+        !now.users.includes('queued two') && now.stops === 1,
+        'T2 the queued prompt waits for the end of the turn (not in the conversation, the turn still runs)',
+      );
+      const delivered = await waitFor(
+        async () => (await state()).users.includes('queued two'),
+        60_000,
+        200,
+      );
+      now = await state();
+      check(
+        delivered === true && now.chips.length === 0,
+        `T2 once the turn ends the prompt is delivered, joins the conversation and its chip goes (${JSON.stringify(now.users)})`,
+      );
+      check(
+        now.users.indexOf('TOOLS SLOW parent turn') < now.users.indexOf('queued two') &&
+          !now.users.includes('queued one'),
+        `T2 the conversation holds the first prompt, then the queued one, and never the removed one (${JSON.stringify(now.users)})`,
+      );
+      check(await waitIdle(30_000), 'T2 the queued turn finished');
+
+      // --- T3 steer: the chip button and Ctrl+Enter ----------------------------------------------
+      await send('SLOWER steer base');
+      check(
+        (await waitState((s) => s.stops > 0, 10_000)) !== undefined,
+        'T3 the SLOWER turn started',
+      );
+      // The fixture plays a SLOWER turn 1.2 s per event: its own prompt is delivered about 2.4 s
+      // after it was sent. Steering before that queued the next prompt ahead of it (run of
+      // 12/11/2026: the chip was re-drawn by a snapshot under the click and Steer now did nothing).
+      check(
+        (await waitState((s) => s.users.includes('SLOWER steer base'), 15_000)) !== undefined,
+        'T3 the prompt of the SLOWER turn joined the conversation, so the turn is really running',
+      );
+      await compose('steer by button');
+      check(
+        (await waitState((s) => s.chips.length === 1, 8_000)) !== undefined,
+        'T3 a prompt is queued during the SLOWER turn',
+      );
+      check(await pressChip('Steer now'), 'T3 Steer now is pressed');
+      const steered = await waitState((s) => s.users.includes('steer by button'), 10_000);
+      now = await state();
+      check(
+        steered !== undefined && now.stops === 1 && now.chips.length === 0,
+        `T3 Steer now delivers the prompt into the turn that is still running (${JSON.stringify(now.users)}, stops ${String(now.stops)})`,
+      );
+      await compose('steer by chord', 'ControlOrMeta+Enter');
+      const chorded = await waitState((s) => s.users.includes('steer by chord'), 10_000);
+      now = await state();
+      check(
+        chorded !== undefined && now.stops === 1 && now.chips.length === 0,
+        `T3 Ctrl+Enter sends the prompt to steer the turn that is still running, and VS Code does not take the key (${JSON.stringify(now.users)}, stops ${String(now.stops)})`,
+      );
+      check(await clickButton('Stop'), 'T3 the Stop of the footer is pressed');
+      // 10 s, not 30: the SLOWER turn would end by itself in about 20 s, so a Stop that did nothing
+      // must fail here instead of passing late.
+      check(await waitIdle(10_000), 'T3 the stopped turn finished');
+      now = await state();
+      check(
+        now.stops === 0 && now.chips.length === 0 && now.sendText !== 'Queue',
+        `T3 after the turn the footer is gone, the queue is empty and the button reads Send again (${JSON.stringify(now.sendText)})`,
+      );
+      assertNoWebviewErrors('step 54');
+    } finally {
+      if (await isBusy().catch(() => false)) {
+        await clickButton('Stop').catch(() => undefined);
+        await waitIdle(30_000).catch(() => undefined);
+      }
+      await openPanelTab('chat').catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+    }
+  });
+
+  // E2-chat-panel-tabs (issue #188, phase 5): the Changes and Session tabs, and the pieces of the
+  // Chat tab that depend on the width and the theme. Two turns: a `SLOWER` one that is stopped
+  // (chips and footer to judge) and a `SUBAGENT EDIT_FILES COSTLY NEAR_FULL` one that fills the
+  // Session tab. NEAR_FULL, the instructions routes and the export route are SYNTHETIC
+  // (`fake-opencode.mjs`). ESTIMATE of the budget: nobody has timed it in a full run.
+  await step('55 chat panel tabs: Changes and Session (issue #188)', async () => {
+    const DARK = 'Default Dark Modern';
+    const NARROW = 300;
+    const WIDE = 900;
+    const originalWidth = await sideBarPx();
+    const exportDir = fs.mkdtempSync(path.join(tmpdir(), 'ovc-visual-55-'));
+    const text = (selectors) => web.inDoc(measureText, selectors);
+    const panel = () =>
+      web.inDoc((doc) => {
+        const read = (element) => (element?.textContent ?? '').trim();
+        const pairs = {};
+        const terms = [...doc.querySelectorAll('#panel-session .usage-grid dt')];
+        for (const term of terms) pairs[read(term)] = read(term.nextElementSibling);
+        const meter = doc.querySelector('#panel-session .context-meter');
+        return {
+          badge: read(doc.querySelector('#panel-tab-changes .panel-tab-badge')),
+          rows: [...doc.querySelectorAll('#panel-changes button.changed-file')].length,
+          instructions: [...doc.querySelectorAll('#panel-session .instruction-row')].map((row) =>
+            read(row.querySelector('.instruction-text')),
+          ),
+          addAria: doc
+            .querySelector('#panel-session .instruction-add button')
+            ?.getAttribute('aria-disabled'),
+          inputAria: doc
+            .querySelector('#panel-session .instruction-input')
+            ?.getAttribute('aria-disabled'),
+          notes: [...doc.querySelectorAll('#panel-session .session-note')].map(read),
+          exportAria: [...doc.querySelectorAll('#panel-session .export-buttons button')].map((b) =>
+            b.getAttribute('aria-disabled'),
+          ),
+          exportBusy: doc.querySelector('#panel-session [aria-busy="true"]') !== null,
+          meter:
+            meter === null
+              ? null
+              : {
+                  value: Number(meter.getAttribute('value')),
+                  max: Number(meter.getAttribute('max')),
+                  high: Number(meter.getAttribute('high')),
+                  name: meter.getAttribute('aria-label') ?? '',
+                },
+          contextLevel:
+            doc.querySelector('#panel-session .context-box')?.getAttribute('data-level') ?? '',
+          contextText: read(doc.querySelector('#panel-session .context-text')),
+          compactAria: doc
+            .querySelector('#panel-session .context-box button')
+            ?.getAttribute('aria-disabled'),
+          usage: pairs,
+          subagents: [...doc.querySelectorAll('#panel-session .subagent-row')].map((row) => ({
+            task: read(row.querySelector('.subagent-task')),
+            state: read(row.querySelector('.subagent-state')),
+            open: row.querySelector('button')?.getAttribute('aria-label') ?? '',
+          })),
+          headerLevel:
+            doc.querySelector('.header-area .usage-line')?.getAttribute('data-level') ?? '',
+          headerText: read(doc.querySelector('.header-area .usage-line')),
+          headerCompact:
+            doc.querySelector('.header-area .usage-compact')?.checkVisibility() === true,
+        };
+      });
+    const waitPanel = (predicate, ms) => waitFor(async () => predicate(await panel()), ms, 150);
+    const contrast = (label, measured, floor = 4.5) => {
+      for (const [part, one] of Object.entries(measured)) {
+        check(
+          one !== null && one !== undefined && one.ratio >= floor,
+          `${label} the ${part} text has contrast >= ${String(floor)} (${one ? one.ratio.toFixed(2) : 'not found'})`,
+        );
+      }
+    };
+    try {
+      await setTheme(DARK);
+      await setSideBarWidth(NARROW);
+      check(await clickButton('New session'), 'New session is pressed');
+      await waitEmptyView();
+      assertNoWebviewErrors('before step 55');
+
+      // --- S2 without a session the instructions and the export are off ---------------------------
+      check(await openPanelTab('session'), 'S2 the Session tab is pressed');
+      let now = await panel();
+      check(
+        now.addAria === 'true' &&
+          now.inputAria === 'true' &&
+          now.notes.includes('Send a first message to pin instructions') &&
+          now.exportAria.length === 2 &&
+          now.exportAria.every((aria) => aria === 'true'),
+        `S2 with no session Add, the field and both exports are aria-disabled and a line says why (${JSON.stringify(now)})`,
+      );
+      // C4/C5 the empty states in the four themes
+      for (const [name, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        contrast(
+          `C5 empty Session in ${name}`,
+          await text({ heading: '#panel-session h2', note: '#panel-session .session-note' }),
+        );
+        check(await openPanelTab('changes'), `C4 the Changes tab is pressed in ${name}`);
+        contrast(
+          `C4 empty Changes in ${name}`,
+          await text({ empty: '#panel-changes .panel-empty' }),
+        );
+        check(await openPanelTab('session'), `C5 the Session tab is pressed in ${name}`);
+      }
+      await setTheme(DARK);
+
+      // --- C2/C3/W1 chips, footer and tab row of the Chat tab, narrow, in the four themes ---------
+      check(await openPanelTab('chat'), 'W1 the Chat tab is pressed');
+      await send('SLOWER chips matrix');
+      check(
+        (await waitFor(isBusy, 10_000, 100)) === true,
+        'W1 the SLOWER turn started (Stop is in the page)',
+      );
+      // The fixture plays a SLOWER turn 1.2 s per event: its prompt joins the conversation about
+      // 2.4 s after it was sent, and a chip queued before that is delivered as its own turn.
+      check(
+        (await waitFor(
+          () =>
+            web.inDoc((doc) =>
+              [...doc.querySelectorAll('[role="log"] .message-user .part-text')].some(
+                (part) => (part.textContent ?? '').trim() === 'SLOWER chips matrix',
+              ),
+            ),
+          15_000,
+          150,
+        )) === true,
+        'W1 the prompt of the SLOWER turn joined the conversation, so the turn is really running',
+      );
+      const LONG =
+        'a long queued prompt with so many words that it can only fit in the narrow side bar if it is cut with an ellipsis';
+      check(await focusPromptBox(), 'W1 the prompt box keeps the focus');
+      await page.keyboard.type(LONG);
+      await page.keyboard.press('Enter');
+      const chipped = await waitFor(
+        () => web.inDoc((doc) => doc.querySelectorAll('.queue-chips .queue-chip').length === 1),
+        8_000,
+        150,
+      );
+      check(chipped === true, 'W1 the long prompt is a chip');
+      const shape = await web.inDoc(panelLayout, [
+        '.panel-tabs',
+        '.panel-tab',
+        '.queue-chips',
+        '.queue-chip',
+        '.queue-chip > *',
+        '.activity',
+        '.activity > *',
+        '.prompt-actions button',
+        '.send-button',
+      ]);
+      check(
+        shape.overflow <= 1 && shape.outside.length === 0 && shape.styled === 0,
+        `W1 at ${String(NARROW)} px the tabs, the chip, the footer and the buttons fit the document with no style attribute (${JSON.stringify(shape)})`,
+      );
+      const cut = await web.inDoc((doc) => {
+        const span = doc.querySelector('.queue-chip-text');
+        const send = doc.querySelector('.send-button');
+        const rect = send?.getBoundingClientRect();
+        return {
+          ellipsis: span ? doc.defaultView.getComputedStyle(span).textOverflow : '',
+          clipped: span ? span.scrollWidth > span.clientWidth : false,
+          sendWhole: rect
+            ? rect.width >= send.scrollWidth - 1 &&
+              rect.right <= doc.documentElement.clientWidth + 1
+            : false,
+          badge: (doc.querySelector('#panel-tab-chat .panel-tab-badge')?.textContent ?? '').trim(),
+        };
+      });
+      check(
+        cut.ellipsis === 'ellipsis' && cut.clipped && cut.sendWhole && cut.badge === 'working',
+        `W1 the chip text ends in an ellipsis, the Queue button is whole and the working badge shows (${JSON.stringify(cut)})`,
+      );
+      for (const [name, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        contrast(
+          `C2/C3 chat in ${name}`,
+          await text({
+            chip: '.queue-chip-text',
+            steer: '.queue-chip .queue-chip-button',
+            remove: '.queue-chip .chip-remove',
+            activity: '.activity-label',
+            tabActive: '#panel-tab-chat',
+            tabInactive: '#panel-tab-changes',
+            badge: '#panel-tab-chat .panel-tab-badge',
+            queue: '.send-button',
+          }),
+        );
+        await shot(`55a-chat-${name}`);
+      }
+      await setTheme(DARK);
+      // The chip leaves with its remove button and the turn is stopped: nothing is left to drain.
+      check(
+        await clickIn('.queue-chip .chip-remove'),
+        'W1 the chip is removed before the turn is stopped',
+      );
+      // Without this wait the footer moves up under the click on Stop when the chip leaves.
+      check((await waitPresent('.queue-chips', false)) !== undefined, 'W1 the chip left the page');
+      check(await clickButton('Stop'), 'W1 Stop is pressed');
+      // 10 s, not 30: see the same wait in step 54 (a Stop that did nothing must fail here).
+      check(await waitIdle(10_000), 'W1 the stopped turn finished');
+
+      // --- one turn that fills the Session tab ----------------------------------------------------
+      await send('SUBAGENT EDIT_FILES COSTLY NEAR_FULL fill the context');
+      check(await waitIdle(60_000), 'the SUBAGENT EDIT_FILES COSTLY NEAR_FULL turn finished');
+      const high = await waitPanel((s) => s.headerLevel === 'high', 15_000);
+      now = await panel();
+      check(
+        high !== undefined && now.headerCompact && /86\s?%/.test(now.headerText),
+        `S3 criterion 7: on the Chat tab the context line is at the high level, says 86 % and has a visible Compact (${JSON.stringify([now.headerLevel, now.headerText, now.headerCompact])})`,
+      );
+
+      // --- S1 Changes ------------------------------------------------------------------------------
+      check(await openPanelTab('changes'), 'S1 the Changes tab is pressed');
+      const listed = await waitPanel((s) => s.rows === 4, 15_000);
+      now = await panel();
+      check(
+        listed !== undefined && now.badge === '4',
+        `S1 the Changes tab shows 4 files and its badge says 4 (${String(now.rows)} rows, badge ${JSON.stringify(now.badge)}); clicking a row opens the diff: step 18`,
+      );
+
+      // --- S2 instructions ------------------------------------------------------------------------
+      check(await openPanelTab('session'), 'S2 the Session tab is pressed');
+      check(await clickIn('.instruction-input'), 'S2 the instruction field is clicked');
+      await page.keyboard.type('Always answer in Galician');
+      await page.keyboard.press('Enter');
+      check(
+        (await waitPanel((s) => s.instructions.length === 1, 10_000)) !== undefined,
+        'S2 Enter pins the instruction: the host stored it, read it back and the list shows it',
+      );
+      check(await clickIn('.instruction-input'), 'S2 the field is clicked again');
+      await page.keyboard.type('Reply briefly');
+      await page.keyboard.press('Enter');
+      check(
+        (await waitPanel((s) => s.instructions.length === 2, 10_000)) !== undefined,
+        'S2 a second instruction joins the list',
+      );
+      now = await panel();
+      check(
+        JSON.stringify(now.instructions) ===
+          JSON.stringify(['Always answer in Galician', 'Reply briefly']),
+        `S2 the list keeps the order of pinning (${JSON.stringify(now.instructions)})`,
+      );
+      check(
+        await clickIn('#panel-session .instruction-row:nth-child(1) .chip-remove'),
+        'S2 the remove button of the first instruction is pressed',
+      );
+      check(
+        (await waitPanel((s) => s.instructions.length === 1, 10_000)) !== undefined &&
+          (await panel()).instructions[0] === 'Reply briefly',
+        'S2 removing deletes only that instruction on the server and the list reads the other one',
+      );
+
+      // --- S3 context -----------------------------------------------------------------------------
+      now = await panel();
+      const ratio = now.meter ? now.meter.value / now.meter.max : -1;
+      check(
+        now.meter !== null &&
+          ratio > 0.85 &&
+          ratio < 0.87 &&
+          now.meter.high === now.meter.max * 0.8 &&
+          now.meter.name === 'Context used' &&
+          now.contextLevel === 'high' &&
+          /86\s?%/.test(now.contextText) &&
+          now.compactAria !== 'true',
+        `S3 the meter holds ${String(now.meter?.value)} of ${String(now.meter?.max)} (high at ${String(now.meter?.high)}), the box is at the high level and says "${now.contextText}", and Compact is available`,
+      );
+
+      // --- S4 usage ---------------------------------------------------------------------------------
+      now = await panel();
+      check(
+        Object.keys(now.usage).includes('Input tokens') &&
+          Object.keys(now.usage).includes('Output tokens') &&
+          Object.keys(now.usage).some((term) => term.startsWith('Cost')) &&
+          now.usage['Turns'] === '2',
+        `S4 the usage block lists the tokens, a cost and 2 turns (${JSON.stringify(now.usage)})`,
+      );
+      check(
+        Object.entries(now.usage).some(
+          ([term, value]) => term.startsWith('Cost') && /0\.01/.test(value),
+        ),
+        `S4 the COSTLY step shows its cost (${JSON.stringify(now.usage)})`,
+      );
+
+      // --- S5 subagents -----------------------------------------------------------------------------
+      now = await panel();
+      check(
+        now.subagents.length >= 1 &&
+          now.subagents.every((row) => row.open.startsWith('Open subagent session')),
+        `S5 the SUBAGENT turn left a row with its state and an Open button named after the task (${JSON.stringify(now.subagents)})`,
+      );
+      check(await clickIn('#panel-session .subagent-row button'), 'S5 Open is pressed');
+      const inChild = await waitFor(
+        () =>
+          web.inDoc((doc) => doc.querySelector('nav[aria-label="Session path"] button') !== null),
+        10_000,
+        150,
+      );
+      check(inChild === true, 'S5 Open shows the child session with the crumb back to its parent');
+      check(await clickIn('nav[aria-label="Session path"] button'), 'S5 the crumb is pressed');
+      check(
+        (await waitFor(
+          () =>
+            web.inDoc((doc) => doc.querySelector('nav[aria-label="Session path"] button') === null),
+          10_000,
+          150,
+        )) === true,
+        'S5 the crumb returns to the parent session',
+      );
+      await openPanelTab('session');
+
+      // --- S6 export ------------------------------------------------------------------------------
+      const exportTo = async (format, label, file) => {
+        check(await clickButton(label), `S6 ${label} is pressed`);
+        const dialog = page.locator('.quick-input-widget input').first();
+        await dialog.waitFor({ state: 'visible', timeout: 15_000 });
+        if (!(await typeInQuickInput(dialog, file))) {
+          throw new Error(`the ${format} save dialog did not take the focus`);
+        }
+        if (format === 'markdown') await shot('55b-export-dialog');
+        // The simple dialog autocompletes with an existing file that starts the same; the two names
+        // below share no prefix, and the value is read back so a rewrite fails HERE with what the
+        // box held instead of writing another file (review W5 of #188, second pass).
+        const typed = await dialog.inputValue().catch(() => undefined);
+        check(
+          typed === file,
+          `S6 the ${format} dialog holds the path typed (${JSON.stringify(typed)})`,
+        );
+        await page.keyboard.press('Enter');
+        const written = await waitFor(() => fs.existsSync(file), 15_000, 200);
+        check(written === true, `S6 the ${format} file was written`);
+        await waitFor(quickInputHidden, 2_000, 50);
+        await waitPanel((s) => !s.exportBusy, 10_000);
+        return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+      };
+      const markdown = await exportTo(
+        'markdown',
+        'Markdown',
+        path.join(exportDir, 'transcript.md'),
+      );
+      check(
+        markdown.includes('SUBAGENT EDIT_FILES COSTLY NEAR_FULL fill the context') &&
+          /^#+ .*User/m.test(markdown) &&
+          !markdown.includes('\r'),
+        `S6 the Markdown has the prompt text and a User heading, with \\n line ends (${JSON.stringify(markdown.slice(0, 160))})`,
+      );
+      const json = await exportTo('json', 'JSON', path.join(exportDir, 'export.json'));
+      let parsed;
+      try {
+        parsed = JSON.parse(json);
+      } catch {
+        parsed = undefined;
+      }
+      check(
+        parsed !== undefined &&
+          Array.isArray(parsed.messages) &&
+          parsed.messages.length >= 2 &&
+          json.includes('fill the context'),
+        `S6 the JSON parses, holds the messages and the full text (${String(parsed?.messages?.length)} messages)`,
+      );
+      now = await panel();
+      check(
+        now.notes.some((note) => note.includes('full text of the conversation')),
+        'S6 the Export section warns that the JSON holds the whole conversation and the paths',
+      );
+
+      // --- W1/W2 the two tabs at two widths, C1/C4/C5/C6 in the four themes ------------------------
+      for (const [label, width] of [
+        ['W1', NARROW],
+        ['W2', WIDE],
+      ]) {
+        await setSideBarWidth(width);
+        for (const tab of ['changes', 'session']) {
+          check(
+            await openPanelTab(tab),
+            `${label} the ${tab} tab is pressed at ${String(width)} px`,
+          );
+          const fit = await web.inDoc(panelLayout, [
+            '.panel-tabs',
+            '.panel-tab',
+            `#panel-${tab} *`,
+          ]);
+          check(
+            fit.overflow <= 1 && fit.outside.length === 0 && fit.styled === 0,
+            `${label} the ${tab} tab fits ${String(width)} px with no style attribute (${JSON.stringify(fit)})`,
+          );
+          await shot(`55c-${tab}-${String(width)}`);
+        }
+      }
+      await setSideBarWidth(NARROW);
+      for (const [name, theme] of PROBLEM_THEMES) {
+        await setTheme(theme);
+        check(await openPanelTab('changes'), `C4 the Changes tab is pressed in ${name}`);
+        contrast(
+          `C4 Changes with rows in ${name}`,
+          await text({
+            summary: '#panel-changes .changed-files-title',
+            path: '#panel-changes .changed-file .session-title',
+            meta: '#panel-changes .changed-file .session-meta',
+            tab: '#panel-tab-changes',
+            badge: '#panel-tab-changes .panel-tab-badge',
+          }),
+        );
+        check(await openPanelTab('session'), `C5 the Session tab is pressed in ${name}`);
+        contrast(
+          `C5 Session in ${name}`,
+          await text({
+            heading: '#panel-session h2',
+            note: '#panel-session .session-note',
+            instruction: '#panel-session .instruction-text',
+            remove: '#panel-session .instruction-row .chip-remove',
+            add: '#panel-session .instruction-add button',
+            context: '#panel-session .context-text',
+            compact: '#panel-session .context-box button',
+            term: '#panel-session .usage-grid dt',
+            value: '#panel-session .usage-grid dd',
+            task: '#panel-session .subagent-task',
+            state: '#panel-session .subagent-state',
+            open: '#panel-session .subagent-row button',
+            export: '#panel-session .export-buttons button',
+          }),
+        );
+        const painted = await meterContrast();
+        check(
+          painted !== null && painted.ratio >= 3,
+          `C6 in ${name} the fill of the high meter stands out from its bar, contrast >= 3 (${JSON.stringify(painted)})`,
+        );
+        await shot(`55d-session-${name}`);
+      }
+      await setTheme(DARK);
+
+      // --- S3 Compact, from the line of the Chat tab ------------------------------------------------
+      check(await openPanelTab('chat'), 'S3 the Chat tab is pressed');
+      check(
+        await clickIn('.header-area .usage-compact'),
+        'S3 Compact of the context line is pressed',
+      );
+      const compacted = await waitFor(
+        () =>
+          web.inDoc(
+            (doc) => doc.querySelector('[role="log"] .message-notice[data-compaction]') !== null,
+          ),
+        15_000,
+        150,
+      );
+      check(compacted === true, 'S3 Compact adds the compaction notice to the conversation');
+      assertNoWebviewErrors('step 55');
+    } finally {
+      fs.rmSync(exportDir, { recursive: true, force: true });
+      if (await isBusy().catch(() => false)) {
+        await clickButton('Stop').catch(() => undefined);
+        await waitIdle(30_000).catch(() => undefined);
+      }
+      await openPanelTab('chat').catch(() => undefined);
+      await setSideBarWidth(originalWidth).catch(() => undefined);
+      await setTheme(DARK).catch(() => undefined);
+    }
+  });
 } catch (error) {
   // Before the first step: the run could not start (exit 2). Later: an unexpected failure.
   if (!started) startupError = error;
