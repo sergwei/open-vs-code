@@ -126,7 +126,28 @@ affiliated with opencode or with Microsoft.
   re-attach files but not pasted images**: paste them again.
 - **Context and cost:** a line under the session title shows how much of the model's context the
   last step used and, when the model is not free, what the session cost so far, direct subagents
-  included.
+  included. From 80 % of the window the line gains a **Compact** button, which is the warning that
+  the context is nearly full; the same figures, a meter and Compact are in the **Session** tab.
+- **Chat, Changes and Session tabs:** a row of tabs under the header switches the central area
+  between the conversation, the files the session changed, and the session's own page. The request
+  cards, the subagent strip, the activity line and the prompt box stay visible in all three, so a
+  permission request is never hidden. The tab you chose is kept when you hide and show the view.
+  **Session** holds the pinned instructions (see below), the context meter with Compact, the token
+  and cost totals, the session's subagents with Open, and **Export** (Markdown, or JSON, to a file
+  you pick; the JSON holds the full text of the conversation and the file paths, so do not attach it
+  to a public report).
+- **Write while the agent works:** the prompt box stays open during a turn. Enter **queues** the
+  message (a chip "Queued: …" appears above the box, with Steer now, Edit and a remove button; the
+  server delivers it when the turn ends) and Ctrl+Enter (Cmd+Enter on macOS) **steers** the turn
+  with it right away. Edit cancels the chip and gives its text back to an empty box. Stop and the
+  activity line (what the agent is doing, the step number, the elapsed time and how many subagents
+  run) are at the bottom of the conversation. While a turn runs, a model or agent you picked in the
+  box applies from the next message sent while idle, and `/commands` of the server are refused with
+  a notice until the turn ends (`/compact` is queued).
+- **Pinned instructions:** the Session tab can pin short instructions to the session ("Always answer
+  in Galician"); opencode sends them with every step. A value that is not plain text, pinned by
+  another client, shows as JSON with a "set by another client" tag and can be removed too. They use
+  opencode's experimental instructions API, so a newer opencode may change it.
 - **Subagent monitor:** while a subagent works or waits, a strip above the prompt box reads
   "Subagents · N" with how many work and how many wait for your answer; open it for one row per
   subagent (agent, task, current tool, elapsed time) with Open, Answer (only when it waits on a
@@ -134,9 +155,9 @@ affiliated with opencode or with Microsoft.
   conversation, the block of each `subagent` call becomes a live card (its latest tools, Open,
   Stop) and folds into "Finished · N tools · cost", "Stopped" or "Failed: reason" when the subagent
   ends. It works in the side bar and in chat tabs.
-- **Changed files:** a "Changed files (N)" list under the header shows what the agent changed in
-  the session (git repositories only); a click opens VS Code's own diff editor with the original on
-  the left and the file on the right.
+- **Changed files:** the **Changes** tab shows "Changed files (N)", what the agent changed in the
+  session (git repositories only), and its badge carries the number; a click opens VS Code's own
+  diff editor with the original on the left and the file on the right.
 - **Revert from a message:** "Revert from here" on one of your messages undoes that turn and
   everything after it, files included, and hides those messages. A block under the conversation
   lists the files it restored, "Restore" brings everything back and "Discard for good" deletes the
