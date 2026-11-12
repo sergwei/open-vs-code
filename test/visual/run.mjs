@@ -20510,30 +20510,126 @@ try {
       const first = await homeWeb.inDoc((doc) => ({
         placeholder: doc.querySelector('.home-box')?.getAttribute('placeholder') ?? null,
         pills: [...doc.querySelectorAll('.home-pill')].map((pill) => pill.textContent.trim()),
+        serverPills: doc.querySelectorAll('.home-pill[data-kind="server"]').length,
+        firstKind: doc.querySelector('.home-pill')?.getAttribute('data-kind') ?? null,
+        firstIcon: doc.querySelector('.home-pill[data-kind="model"] svg.icon') !== null,
+        firstLabel: doc.querySelector('.home-pill')?.getAttribute('aria-label') ?? null,
         empty: doc.querySelector('.home-empty')?.textContent ?? null,
         titles: [...doc.querySelectorAll('.home-heading')].map((heading) => heading.textContent),
       }));
       check(
         first.placeholder === 'What do you want to do?' &&
-          first.pills[0] === 'Server ready' &&
+          first.serverPills === 0 &&
+          first.firstKind === 'model' &&
+          first.firstIcon &&
+          (first.firstLabel ?? '').startsWith('New conversations use ') &&
           first.pills.includes('Manual') &&
           first.empty === 'Nothing running',
-        `H0 the Quick start view shows the box, "Server ready", the Manual pill and "Nothing running" (${JSON.stringify(first)})`,
+        `H0 the Quick start view shows the box, no server pill while connected, the model pill with its chevron, the Manual pill and "Nothing running" (${JSON.stringify(first)})`,
       );
       await shot('50a-home-idle');
       assertNoHomeErrors('H0');
 
+      // --- P1: the model pill opens the native picker; Escape keeps the model, a pick changes the pill --
+      const modelPill = '.home-pill[data-kind="model"]';
+      const modelPillState = () =>
+        homeWeb.inDoc((doc, selector) => {
+          const pill = doc.querySelector(selector);
+          return pill === null
+            ? null
+            : { text: pill.textContent.trim(), chosen: pill.getAttribute('data-chosen') };
+        }, modelPill);
+      const pillBefore = await modelPillState();
+      const otherName = ['Big Pickle', 'GLM-5.3-Flash Free'].find(
+        (name) => name !== pillBefore?.text,
+      );
+      const otherId = otherName === 'Big Pickle' ? 'big-pickle' : 'glm-5.3-flash-free';
+      const pickerOpen = () => waitFor(async () => !(await quickInputHidden()), 5_000, 100);
+      check(await homeClick(modelPill), 'P1 the model pill is clicked');
+      const opened = await pickerOpen();
+      const pickerRows = await waitFor(
+        async () => {
+          const rows = await page.locator('.quick-input-list .monaco-list-row').allInnerTexts();
+          return rows.some((row) => row.includes('Big Pickle')) &&
+            rows.some((row) => row.includes('GLM-5.3-Flash Free'))
+            ? rows
+            : undefined;
+        },
+        5_000,
+        100,
+      );
+      const pickerTitle = await page.locator('.quick-input-widget').first().innerText();
+      await shot('50p-home-model-picker');
+      await page.keyboard.press('Escape');
+      const closedByEscape = await waitFor(quickInputHidden, 3_000, 100);
+      await sleep(500); // negative window: Escape in the picker changes nothing in the pill
+      const pillAfterEscape = await modelPillState();
+      check(
+        opened === true &&
+          pickerRows !== undefined &&
+          pickerTitle.includes('Model for the next conversation') &&
+          closedByEscape === true &&
+          pillAfterEscape?.text === pillBefore?.text &&
+          pillAfterEscape?.chosen === pillBefore?.chosen,
+        `P1 the model pill opens the picker "Model for the next conversation" listing both models, and Escape closes it leaving the pill as it was (${JSON.stringify(pillBefore)} -> ${JSON.stringify(pillAfterEscape)})`,
+      );
+      check(await homeClick(modelPill), 'P1 the model pill is clicked again');
+      await pickerOpen();
+      const typedModel = await typeInQuickInput(
+        page.locator('.quick-input-widget input').first(),
+        otherName,
+      );
+      await waitFor(
+        () =>
+          page.evaluate(
+            (name) =>
+              (
+                globalThis.document.querySelector('.quick-input-list .monaco-list-row.focused')
+                  ?.textContent ?? ''
+              ).includes(name),
+            otherName,
+          ),
+        3_000,
+        100,
+      );
+      await page.keyboard.press('Enter');
+      const picked = await homeWait(
+        (doc, spec) => {
+          const pill = doc.querySelector(spec.selector);
+          return (
+            pill !== null &&
+            pill.textContent.trim() === spec.name &&
+            pill.getAttribute('data-chosen') === 'true'
+          );
+        },
+        { selector: modelPill, name: otherName },
+      );
+      const settingsAfterPick = (await tabsNow()).filter((tab) =>
+        tab.label.includes('OpenCode Settings'),
+      ).length;
+      check(
+        typedModel && picked !== undefined && settingsAfterPick === 0,
+        `P1 picking "${String(otherName)}" in the picker puts it in the pill with data-chosen="true" and opens no OpenCode Settings tab (typed ${String(typedModel)}, settings tabs ${String(settingsAfterPick)})`,
+      );
+      assertNoHomeErrors('P1');
+
       // --- Matrix A (idle): the box, the status strip, the empty state ---------------------------------
       await matrix('idle', (label) =>
         judgeCell(
-          `M1 ${label}: box, pills and "Nothing running" are drawn whole inside the view, no sideways overflow, no style attribute, contrast >= 4.5`,
+          `M1 ${label}: box, pills (the chosen model with its chevron among them) and "Nothing running" are drawn whole inside the view, no sideways overflow, no style attribute, contrast >= 4.5`,
           {
             box: '.home-box',
             pills: '.home-pill',
+            model: modelPill,
             mode: '.home-pill[data-kind="mode"]',
             empty: '.home-empty',
           },
-          { box: '.home-box', pill: '.home-pill[data-kind="mode"]', empty: '.home-empty' },
+          {
+            box: '.home-box',
+            model: modelPill,
+            pill: '.home-pill[data-kind="mode"]',
+            empty: '.home-empty',
+          },
         ),
       );
 
@@ -20561,6 +20657,8 @@ try {
       );
 
       // --- F1: Enter in the box opens ONE tab and the prompt reaches the model; MCPFLIP shows the pill --
+      const chosenLine = `model selected opencode/${otherId} for ses_`;
+      const chosenLinesBefore = logCount(chosenLine);
       await homeType('H50 MCPFLIP');
       await waitFor(
         async () => logCount('prompt accepted for') === promptsAtStart + 1,
@@ -20581,6 +20679,15 @@ try {
       check(
         afterEnter.tabs === tabsAtStart + 1 && afterEnter.accepted === 1 && afterEnter.value === '',
         `F1 Enter opened exactly one new tab with one accepted prompt and cleared the box (${JSON.stringify(afterEnter)})`,
+      );
+      const pillAfterStart = await modelPillState();
+      check(
+        logCount(chosenLine) > chosenLinesBefore,
+        `F1 the conversation started from the box was created with the model chosen in the picker ("model selected opencode/${otherId} for ses_…")`,
+      );
+      check(
+        pillAfterStart?.text === otherName && pillAfterStart.chosen === 'true',
+        `F1 the pill still shows the chosen model after the conversation started (${JSON.stringify(pillAfterStart)})`,
       );
       const mcpPill = await homeWait(
         (doc) => doc.querySelector('.home-pill[data-kind="mcp"]') !== null,
@@ -20756,17 +20863,16 @@ try {
         await stopLeftoverTurn();
       }
 
-      // --- F8: the model and MCP pills open the OpenCode Settings tab (one tab, not two) -------------------
+      // --- F8: the MCP pill opens the OpenCode Settings tab (the model pill no longer does) ----------------
       await closeAllEditors();
-      check(await homeClick('.home-pill[data-kind="model"]'), 'F8 the model pill is clicked');
       const settingsTab = () =>
         tabsNow().then((tabs) => tabs.filter((tab) => tab.label.includes('OpenCode Settings')));
-      await waitFor(async () => (await settingsTab()).length >= 1, 15_000, 200);
       check(await homeClick('.home-pill[data-kind="mcp"]'), 'F8 the MCP pill is clicked');
-      await sleep(1_000); // negative window: the two pills open the Settings tab once, not twice
+      await waitFor(async () => (await settingsTab()).length >= 1, 15_000, 200);
+      await sleep(1_000); // negative window: the MCP pill opens the Settings tab once, not twice
       check(
         (await settingsTab()).length === 1,
-        `F8 the model pill and the MCP pill open the OpenCode Settings tab, once (${String((await settingsTab()).length)} tab)`,
+        `F8 the MCP pill opens the OpenCode Settings tab, once (${String((await settingsTab()).length)} tab)`,
       );
       await closeAllEditors();
 
