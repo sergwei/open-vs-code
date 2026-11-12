@@ -33,8 +33,10 @@
 //   git options that run a command (`rebase --exec`, `submodule foreach`, `--upload-pack`…), `sed
 //   -i`, `awk`; `npx`, `pnpm|yarn|npm|bun exec|dlx|x`, `uv run`, `uv tool run`, `hatch env run`, `corepack <pm>`,
 //   `dotnet tool exec`, `dnx`, `asdf env`, `poetry run`… are classified by the
-//   tool they launch;
-// - reading secrets without naming them: recursive `grep` of the current directory, `rg --hidden`,
+//   tool they launch, and they also ask for the options that change where the package comes from
+//   (`--from`, `--with`, `uvx --index`, `npx --registry`…) and for `uvx --env-file` (#213);
+// - reading secrets without naming them: `mise env` and `asdf env <cmd>` with no util (#204, #213),
+//   recursive `grep` of the current directory, `rg --hidden`,
 //   a recursive `Get-ChildItem`/`dir /s`/`ls -R` that is not a list of names (in Windows a leading
 //   dot hides nothing, so `| Select-String KEY` reads the `.env` files), `printenv`, `env`, `set`,
 //   `export` or `declare -x` alone, `%VAR%`, `Get-ChildItem env:`, `tar … -`, `curl` uploads.
@@ -836,7 +838,8 @@ function interpreterAsks(command: string, args: readonly string[]): boolean {
  * - `-c`/`--call` run a shell string, and `-p`/`--package`, `--from` and `--with` change which
  *   package supplies the tool: they always ask. `npx ovsx@latest publish` asks (the tool is `ovsx`,
  *   its version dropped), `npx prettier --check .` does not. For npx, options with a value that are
- *   not listed (`--registry u`) are read as the tool: a known limit (not for uvx, see above).
+ *   not listed (`--cwd src`, `--cache c`) are read as the tool: a known limit (not for uvx, see
+ *   above). `--registry` is not one of them: {@link registryOption} makes the line ask.
  */
 function launcherAsks(args: readonly string[], launcher: string): boolean {
   // `uvx` has its own reading (issue #204): no table of options, see {@link uvxAsks}.
@@ -856,7 +859,7 @@ function launcherAsks(args: readonly string[], launcher: string): boolean {
   if (first >= args.length) first = -1;
   // Only the launcher's own options count: `npx tsc -p tsconfig.json` has the tool's `-p`.
   const own = first < 0 ? args : args.slice(0, first);
-  if (own.some(changesTheTool)) return true;
+  if (own.some((arg) => changesTheTool(arg) || registryOption(arg))) return true;
   const tool = first;
   const word = args[tool];
   if (tool < 0 || word === undefined) return false;
@@ -883,6 +886,19 @@ function changesTheTool(arg: string): boolean {
 }
 
 /**
+ * True for an option that changes the registry the package comes from: `--registry`, `--registry=u`,
+ * `--@scope:registry=u` and pnpm's `--config.registry=u` (issue #213). Asked in every door of the npm
+ * group, in the launcher's own options and before the subcommand (`npm --registry u exec tsc`).
+ * It is NOT added to {@link NPM_VALUE_OPTIONS}: that table skips the value, and `npx --registry
+ * rimraf dist` would then read `dist` instead of asking through `rimraf`. Only adds `true`.
+ * HYPOTHESIS (not run): that npm and pnpm accept any config key as `--<key>[=<value>]` and that
+ * bunx and yarn dlx ignore or reject it; asking costs nothing in a rule that never relaxes.
+ */
+function registryOption(arg: string): boolean {
+  return /^--(config\.)?(@[^:=]+:)?registry(=|$)/.test(arg);
+}
+
+/**
  * True when a `uvx` / `uv tool run` line asks (issue #204, decision of Sergio 11/11/2026: a rule with
  * no table of options). Only `--python` is known to take a separate value; every other option
  * without `=` MAY take one (uv has ~45 such options and gains more with each release, so a table
@@ -905,6 +921,16 @@ function changesTheTool(arg: string): boolean {
  * value, so `uvx --offline ruff format` is approved (read as a value, its tool would be the disk
  * command `format`). That list is not exhaustive and may go stale: an option missing from it only
  * makes the line ask more, never less.
+ * Issue #213 adds, anywhere in the walked zone, the source options {@link UVX_SOURCE_LONG}
+ * (`--index`, `--index-url`, `--extra-index-url`, `--find-links`, `--default-index`, with `=` or a
+ * separate value) and `--env-file`, and the short ones {@link UVX_SOURCE_SHORT} (`-i`, `-f`, `-qi
+ * u`, `-ihttps://…`, `-fu`, `-wnumpy==2.0`); after the tool they belong to the tool (`uvx pip-audit
+ * --index-url u` is approved). VERIFIED by the check "asks for uvx index options, uvx --env-file, npx
+ * --registry and mise env, and approves the rest" (rows `uvx -qi u ruff`, `uvx -fu ruff`, `uvx
+ * --env-file vars.txt ruff check .`, `uvx --no-env-file ruff check .`, `uvx pip-audit --index-url
+ * https://e.com/simple`; 12/11/2026, Windows 11, Node 24; fabricated text) and by an in-memory probe
+ * of main 6a4686d against the tree (15840 command lines, 0 relaxed). HYPOTHESIS: the uv option names
+ * come from https://docs.astral.sh/uv/reference/cli/ (read 12/11/2026), not run.
  * VERIFIED by the check "asks for what dnx, asdf env and uvx behind an option launch, and approves
  * the rest" of `destructiveCommand.test.ts` (rows `uvx --directory src rm -rf dist`, `uvx
  * --some-future-option v rm -rf dist`, `uvx -qw numpy ruff check .`, `uvx -q black .`, `uvx -q
@@ -930,7 +956,7 @@ function uvxAsks(args: readonly string[]): boolean {
         !before.includes('=') &&
         !UVX_VALUE_OPTIONS.has(before) &&
         !UVX_BOOLEAN_OPTIONS.has(before) &&
-        !/^-[qvnU]+$/.test(before);
+        !UVX_SHORT_BOOLEAN_GROUP.test(before);
       if (!mayBeValue) {
         end = i;
         break;
@@ -939,7 +965,11 @@ function uvxAsks(args: readonly string[]): boolean {
   }
   // Only the launcher's own options count: `uvx tsc -p tsconfig.json` has the tool's `-p`.
   const asksOption = (arg: string): boolean =>
-    changesTheTool(arg) || arg === '-w' || (/^-[a-zA-Z]{2,}$/.test(arg) && arg.includes('w'));
+    changesTheTool(arg) ||
+    arg === '-w' ||
+    (/^-[a-zA-Z]{2,}$/.test(arg) && arg.includes('w')) ||
+    UVX_SOURCE_LONG.test(arg) ||
+    UVX_SOURCE_SHORT.test(arg);
   if (args.slice(0, end).some(asksOption)) return true;
   return candidates.some((at, k) => {
     const name = toolName(args[at] ?? '');
@@ -1012,13 +1042,18 @@ const LAUNCH_WORDS = new Set(['run', 'exec', 'x']);
  * Issue #204 adds `asdf env <cmd> [util]`: `util` (default `env`, which prints the environment) is
  * classified with the rest of the line; no `cmd` or no `util`, or an option or `--` in either
  * place, asks, and an `env` anywhere after a global option of `asdf` makes the line ask (only for
- * `asdf`: `mise env` and `hatch env` are untouched). Deliberate false positives: `asdf env node` and
+ * `asdf`; `hatch env` is untouched). Deliberate false positives: `asdf env node` and
  * `asdf env node -- git status`. VERIFIED by the check "asks for what dnx, asdf env and uvx behind
  * an option launch, and approves the rest" of `destructiveCommand.test.ts` (rows `asdf env node rm
  * -rf dist`, `asdf env node`, `asdf env -x node rm -rf dist`, `asdf --x env node git push`,
  * `asdf env node node -v`; 11/11/2026, Windows 11, Node 24; fabricated text). HYPOTHESIS, read from
  * https://asdf-vm.com/manage/commands.html and `internal/cli/cli.go` of asdf (not run): what
  * `envCommand` does with the util and its arguments.
+ * Issue #213 adds `mise|rtx env` (alias `e`): it prints the environment with secrets unmasked, so it
+ * asks with any flag or argument (`mise env --paths`, which prints only PATH, asks too: deliberate,
+ * no exception that approves), behind a global option (`mise -q env`) and launched by another
+ * (`mise exec node -- mise env`). Source: https://mise.jdx.dev/cli/env.html (read 12/11/2026).
+ * HYPOTHESIS: that `rtx env` exists (asking is the safe side).
  */
 function runnerAsks(command: string, args: readonly string[]): boolean {
   if (command === 'bun' && (cluster(args, 'ep') || longOpt(args, '--eval', '--print'))) return true;
@@ -1038,9 +1073,15 @@ function runnerAsks(command: string, args: readonly string[]): boolean {
       (arg) =>
         LAUNCH_WORDS.has(arg) ||
         PACKAGE_MANAGERS.has(toolName(arg)) ||
-        (command === 'asdf' && arg === 'env'),
+        (command === 'asdf' && arg === 'env') ||
+        ((command === 'mise' || command === 'rtx') && (arg === 'env' || arg === 'e')),
     )
   ) {
+    return true;
+  }
+  // `mise env` (alias `e`) prints the environment of the configuration, secrets unmasked (issue
+  // #213): it asks whatever follows, `mise env --paths` included (deliberate false positive).
+  if ((command === 'mise' || command === 'rtx') && (args[0] === 'env' || args[0] === 'e')) {
     return true;
   }
   // The same rule one level down (issue #193): an option between the group word of a nested
@@ -1140,6 +1181,37 @@ const VERCEL_SAFE = new Set([
 
 /** Options of `npm` and `npx` that take the next word as their value (`npm exec -w a -- tool`). */
 const NPM_VALUE_OPTIONS = new Set(['-w', '--workspace', '--prefix']);
+
+/**
+ * The short boolean options of `uv tool run` that can head a clap group (`-qv`, `-qi u`): `q`, `v`,
+ * `n`, `U` (decision of Sergio, Engram #2241, issue #204) and `h`. One constant so the group
+ * detection of {@link uvxAsks} (a word after `-qv` is not a value) and the source options below
+ * cannot diverge (plan risk 1 of issue #213). HYPOTHESIS, from
+ * https://docs.astral.sh/uv/reference/cli/#uv-tool-run (not run): that no other short boolean
+ * exists; a new one only makes `-Xi u` pass unseen, a bounded fail-open.
+ */
+const UVX_SHORT_BOOLEAN_LETTERS = 'qvnU';
+
+/** A short group made only of boolean letters: the word after it is not read as a value. */
+const UVX_SHORT_BOOLEAN_GROUP = new RegExp(`^-[${UVX_SHORT_BOOLEAN_LETTERS}]+$`);
+
+/**
+ * Long options of `uv tool run` that change where the package comes from (`--index`, `--index-url`,
+ * `--extra-index-url`, `--find-links`, `--default-index`) or load an environment (`--env-file`),
+ * issue #213. Exact match with `=` or the end: `--no-index`, `--no-env-file` and `--index-strategy`
+ * do not match. HYPOTHESIS (not run): that uv rejects option prefixes (no `infer_long_args`), so
+ * `--ind` is not an alias; to check, run `uvx --ind u ruff` with a real uv.
+ */
+const UVX_SOURCE_LONG =
+  /^--(index|index-url|extra-index-url|find-links|default-index|env-file)(=|$)/;
+
+/**
+ * Short options of `uv tool run` with a source value: `-i` (index) and `-f` (find-links), alone, in a
+ * group after boolean letters (`-qi u`) or with the value glued (`-ihttps://e.com`, `-fu`); `w`
+ * (`--with`, already asked by {@link uvxAsks}) is included. HYPOTHESIS (not run): clap's grouping of
+ * short options, the effective letter being the first non-boolean one.
+ */
+const UVX_SOURCE_SHORT = new RegExp(`^-[${UVX_SHORT_BOOLEAN_LETTERS}h]*[ifw]`);
 
 /**
  * Boolean options of `uv tool run` (they take no value), read from
@@ -1358,7 +1430,12 @@ function dotnetExecAsks(args: readonly string[]): boolean {
  * pnpm and yarn the first word is read as a binary too, so the binary's own `exec` asks. VERIFIED by the check "asks
  * for a binary run by yarn or pnpm whose own subcommand is exec" of `destructiveCommand.test.ts`
  * (the matrix found the hole on 07/11/2026, Windows 11, Node 24; not run against a real yarn or
- * pnpm).
+ * pnpm). Issue #213: a registry option ({@link registryOption}) before `exec`, `dlx` or `npm x`
+ * asks (`npm --registry u exec tsc`, `npm --registry u x rimraf dist`), since `launcherAsks` only
+ * receives what follows the launching word. VERIFIED by the rows `npm --registry u exec tsc`, `pnpm
+ * --registry=u dlx tsc`, `npm --registry u x rimraf dist` and `yarn --registry u dlx tsc` of the
+ * check "asks for uvx index options, uvx --env-file, npx --registry and mise env, and approves the
+ * rest" (12/11/2026, Windows 11, Node 24; fabricated text).
  */
 function commandAsks(command: string, args: readonly string[]): boolean {
   if (ELEVATORS.has(command) || OPAQUE.has(command)) return true;
@@ -1629,6 +1706,12 @@ function commandAsks(command: string, args: readonly string[]): boolean {
       // `exec` and `dlx` (after any option with a value: `npm -w a exec`, `pnpm --filter a exec`)
       // and `npm x` run another tool: classified by the tool, like `npx`.
       const exec = args.findIndex((arg) => arg === 'exec' || arg === 'dlx');
+      // A registry option BEFORE the launching word (`npm --registry u exec tsc`, `pnpm --registry
+      // u dlx tsc`, `npm --registry u x tsc`) is not in the arguments `launcherAsks` receives (#213).
+      const launching = args.findIndex(
+        (arg) => arg === 'exec' || arg === 'dlx' || (command === 'npm' && arg === 'x'),
+      );
+      if (launching > 0 && args.slice(0, launching).some(registryOption)) return true;
       const execAsks = exec >= 0 && launcherAsks(args.slice(exec + 1), command);
       if (execAsks) return true;
       // The first word that is not an option nor the value of one (`--filter a`, `-C dir`, `--cwd
