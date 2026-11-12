@@ -20,6 +20,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Chat, Changes and Session tabs in the chat panel.** A row of tabs under the header switches the
+  central area; the request cards, the subagent strip, the activity line and the prompt box stay in
+  all three. **Changes** holds the files the session changed (moved out of the header). **Session**
+  holds pinned instructions, a context meter with Compact, token and cost totals, the session's
+  subagents with Open, and **Export** to Markdown or JSON (the JSON holds the full text and file
+  paths). The context line under the title gains a **Compact** button from 80 % of the window.
+- **Write while the agent works.** During a turn Enter queues the message (a "Queued: …" chip with
+  Steer now, Edit and remove) and Ctrl+Enter (Cmd+Enter on macOS) steers the turn with it right
+  away. Stop moved to the activity line at the bottom, which now says what the agent is doing, the
+  step, the elapsed time and how many subagents run.
+- **Pinned instructions per session** ("Always answer in Galician"), sent by opencode with every
+  step. They and Export use opencode's experimental API, so a newer opencode may change them.
 - **The shell of opencode in Settings › Advanced.** A drop-down with Automatic and the shells the
   server offers (the ones opencode only accepts for the terminal are marked). It is saved in your
   global opencode config, so it also applies to the terminal UI and every folder; a hint says when
