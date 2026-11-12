@@ -173,6 +173,17 @@
  * E10-settings-shell (issue #205) adds the shell row of Advanced to that step (one select, one
  * override hint, B6: two writes to the fake, each waiting about 0.2-0.6 s for the reload), so its
  * `budgetS` goes from 60 to 65: timed only in `--steps 53` (18.1 / 17.9 s, 11/11/2026), not in a full run.
+ * The step 54 (the row of tabs, the composer that stays open during a turn, the queue chips and the
+ * activity footer, E2-chat-panel-tabs, issue #188 phase 5) needs the 1, sends prompts and is in the
+ * groups `panel` and `composer`. Its `budgetS` of 35 is an ESTIMATE, nobody has timed it in a full
+ * run (it comes from `--steps` runs): a `TOOLS SLOW` turn of about 15 s, a short turn that was
+ * queued, a `SLOWER` turn that Stop ends, and five prompts typed one after another (about 1 s of
+ * focus each).
+ * The step 55 (the Changes and Session tabs, and the chips and the footer in the four themes and two
+ * widths, same issue) needs the 1, sends prompts and is in the group `panel`. Its `budgetS` of 25 is
+ * an ESTIMATE, nobody has timed it in a full run (it comes from `--steps` runs): two turns, 4 loops
+ * of 4 themes, 2 widths and the two save dialogs of Export. Each new group also gets a rule in
+ * `affected.mjs`.
  * Every step after the 1 needs the 1, except the 25:
  * it is the step that opens the chat webview (`openChat`) and waits for the connection, which the
  * plan's table counted as "connected" and not as a step. VERIFIED by `--steps 8` on 27/10/2026
@@ -246,6 +257,18 @@ export const STEPS = [
   { id: '52', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 40 },
   // E10-settings-sections (issue #186, PR3): ESTIMATE, see the paragraph of the step 53 above.
   { id: '53', needs: ['1'], sendsPrompt: false, groups: ['config', 'mods'], budgetS: 65 },
+  // E2-chat-panel-tabs (issue #188, phase 5): ESTIMATE of 35 s, see the paragraph of the step 54
+  // above. Measured 25.9 s and 23.9 s in the two consecutive `--steps 54,55` runs of the final tree
+  // (12/11/2026, Windows 11, VS Code 1.146.0, 0 expired waits; earlier trees took 23.7-23.9 s):
+  // 25.9 times 1.25 is 32.4, rounded up to 35 (it was 30 from the 23.9 s of the earlier trees).
+  // Three turns (a `TOOLS SLOW` one of about 15 s, a short queued one and a `SLOWER` one that is
+  // stopped).
+  { id: '54', needs: ['1'], sendsPrompt: true, groups: ['panel', 'composer'], budgetS: 35 },
+  // ESTIMATE of 25 s, see the paragraph of the step 55 above. Measured 17.8 s and 17.8 s in the two
+  // consecutive `--steps 54,55` runs of the final tree (same day, 0 expired waits): 17.8 times 1.25
+  // is 22.3, rounded up to 25. Two turns, 4 theme loops, 2 widths, two save dialogs. Not timed in a
+  // full run.
+  { id: '55', needs: ['1'], sendsPrompt: true, groups: ['panel'], budgetS: 25 },
 ];
 
 /** Every valid id, in canonical order. */
