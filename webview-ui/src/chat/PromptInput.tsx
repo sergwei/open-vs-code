@@ -7,7 +7,7 @@ import { AttachmentOpenButton } from './AttachmentOpenButton';
 import { CommandMenu } from './CommandMenu';
 import { CommandPopup, commandStatus } from './CommandPopup';
 import { hasDropPayload, imagesOf, readDrop, type DropContent } from './dropData';
-import { SendIcon, StopIcon } from './icons';
+import { SendIcon } from './icons';
 import { applyMention, findMention, type MentionToken } from './mentionQuery';
 import { MentionPopup, mentionStatus, optionId, type FileSearchView } from './MentionPopup';
 import { ModsMenu } from '../mods/ModsMenu';
@@ -17,6 +17,21 @@ import { applyCommand, filterCommands, findSlash, type SlashToken } from './slas
 import { WorkModeMenu } from './WorkModeMenu';
 
 let requestCounter = 0;
+
+/** How a prompt sent with a turn running is delivered: after the turn, or into it. */
+export type Delivery = 'queue' | 'steer';
+
+/**
+ * The key named in the placeholder that steers: "⌘" on macOS (Cmd+Enter), "Ctrl" elsewhere. Read
+ * from the user agent, the only platform hint a webview has. VERIFIED on Windows 11 (VS Code
+ * 1.146.0, 12/11/2026) that Ctrl+Enter reaches the textarea instead of a VS Code keybinding while
+ * the webview has the focus: step 54 of `test:visual`, "T3 Ctrl+Enter sends the prompt to steer the
+ * turn that is still running, and VS Code does not take the key". HYPOTHESIS for Cmd+Enter on macOS
+ * and for Linux: no run there.
+ */
+function steerModifier(): string {
+  return /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘' : 'Ctrl';
+}
 
 /** Id of the popup's listbox; the textarea points at it with `aria-controls`. One prompt per document. */
 const MENTION_LIST_ID = 'mention-list';
@@ -54,8 +69,13 @@ export function nextRequestId(): string {
  * Shift+Enter inserts a new line, and Enter during an IME composition is left alone; ArrowUp with
  * the caret at the very start (and ArrowDown at the very end) walks the prompt history, so
  * moving the caret inside a multi-line draft still works; Escape stops the turn while busy.
- * While `busy` the Stop button replaces Send (Send is disabled then, the textarea stays editable
- * so the next prompt can be written). The height follows the content with CSS
+ * Issue #188: while `busy` the textarea stays editable AND sendable: Enter, and the primary button
+ * (now the text "Queue", still `.send-button`), queue the prompt; Ctrl+Enter (Cmd+Enter on macOS)
+ * asks the parent to steer it into the running turn (`onSubmit('steer')`; at rest it is a plain
+ * Enter), and the placeholder says so. The Stop BUTTON is no longer in this form (the activity
+ * footer has the only one); Escape still stops the turn. VERIFIED in jsdom by
+ * `PromptInput.test.tsx` ("queues with Enter and steers with Ctrl+Enter or Cmd+Enter while a
+ * turn runs", "has the Queue button and no Stop button while busy"). The height follows the content with CSS
  * (`field-sizing: content`, capped by `max-height`), with no script and no inline style:
  * HYPOTHESIS that the Chromium of VS Code 1.105+ supports it (Chrome has it since 123); where
  * it does not, the box keeps its minimum height and still works. `onFocusReady` hands the parent
@@ -78,8 +98,9 @@ export function nextRequestId(): string {
  * selectors slot" and "closes its popover when the parent focuses the box, and forwards the
  * switch"), the `selectors` slot (the combined agent and model chip), the work-mode pill
  * ({@link WorkModeMenu}, E3-work-mode: Manual or Auto, person or bolt icon), a free space, and the
- * round Send / Stop button. Send and Stop are icon buttons named by `aria-label` ("Send", "Stop"; decision P9=1+b of
- * Sergio, 27/10/2026, Engram #1300), so a test or a script finds them by name, not by text. The row
+ * round Send button (a "Queue" text pill while a turn runs). Send is an icon button named by `aria-label` ("Send"; decision P9=1+b of
+ * Sergio, 27/10/2026, Engram #1300), so a test or a script finds it by name, not by text; Stop is
+ * not here any more (issue #188, see above). The row
  * wraps in a narrow side bar (CSS `flex-wrap`), and under 200 px the chip takes a row of its own.
  *
  * Issue #28, the `@` mentions. Typing an `@` that starts a word opens the {@link MentionPopup} with
@@ -206,7 +227,9 @@ export function PromptInput(props: {
   onMentionQuery(query: string | undefined): void;
   /** A result was picked: the parent adds the chip (the text is already written here). */
   onMentionPick(file: AttachmentRef): void;
-  onSubmit(): void;
+  /** Enter or the button asks for `queue`; Ctrl/Cmd+Enter asks for `steer` (issue #188). */
+  onSubmit(delivery: Delivery): void;
+  /** Escape while a turn runs; the Stop BUTTON lives in the activity footer, not here. */
   onStop(): void;
   /** "Attach file…" of the "+" menu. */
   onAttach(): void;
@@ -430,10 +453,10 @@ export function PromptInput(props: {
   };
 
   /** Sends, closing the popup first: the text it was about is leaving. */
-  const submit = (): void => {
+  const submit = (delivery: Delivery = 'queue'): void => {
     closeMention();
     applySlash(undefined);
-    props.onSubmit();
+    props.onSubmit(delivery);
   };
 
   /** Picks `file`: writes `@name` over the word, hands the chip to the parent, keeps the focus. */
@@ -569,7 +592,9 @@ export function PromptInput(props: {
     const field = event.currentTarget;
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      submit();
+      // Ctrl+Enter (Cmd+Enter on macOS) steers the running turn; at rest it is a plain Enter (the
+      // parent decides, issue #188).
+      submit(event.ctrlKey || event.metaKey ? 'steer' : 'queue');
     } else if (event.key === 'Escape' && props.busy) {
       event.preventDefault();
       props.onStop();
@@ -710,7 +735,9 @@ export function PromptInput(props: {
         placeholder={
           props.waiting
             ? l10n.t('Waiting for opencode…')
-            : l10n.t('Ask opencode… (Enter to send, Shift+Enter for a new line)')
+            : props.busy
+              ? l10n.t('Type to queue ({0}+Enter: steer now)…', steerModifier())
+              : l10n.t('Ask opencode… (Enter to send, Shift+Enter for a new line)')
         }
         value={props.draft}
         onInput={(event) => {
@@ -810,14 +837,15 @@ export function PromptInput(props: {
             </button>
           }
         >
+          {/* Issue #188: with a turn running the primary button queues the prompt (Enter does the
+              same); Stop moved to the activity footer. */}
           <button
-            class="primary send-button"
-            type="button"
-            aria-label={l10n.t('Stop')}
-            title={l10n.t('Stop')}
-            onClick={() => props.onStop()}
+            class="primary send-button queue-button"
+            type="submit"
+            disabled={props.sendDisabled}
+            title={l10n.t('Queue')}
           >
-            <StopIcon />
+            {l10n.t('Queue')}
           </button>
         </Show>
       </div>

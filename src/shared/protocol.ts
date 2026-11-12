@@ -28,6 +28,8 @@ import type {
   Part,
   PermissionAsk,
   PermissionDecision,
+  InstructionView,
+  QueuedPrompt,
   RequestResolution,
   RevertState,
   SessionStatus,
@@ -82,6 +84,42 @@ export type ModsAction = 'openFolder' | 'openSettings';
  * Linux, above any path a repository realistically holds (Windows' own limit is 32767).
  */
 export const MAX_DIFF_PATH_LENGTH = 4096;
+
+/**
+ * Longest `inboxID` that `inbox.cancel` and `inbox.steer` accept (issue #188). Our choice: the ids
+ * are opaque server ids (`msg_…`, a few dozen characters) that the host only compares with the ones
+ * it listed, so the cap just keeps a hostile webview from sending a huge string.
+ */
+export const MAX_INBOX_ID_LENGTH = 200;
+
+/**
+ * Longest instruction text `instructions.add` accepts, in characters (issue #188). Our choice: an
+ * instruction is a short standing rule, and 4000 characters is far under the 256 KiB the server
+ * takes for one entry (`InstructionEntryValueTooLargeError`), so the server's limit is never the
+ * one the user hits; it also matches {@link MAX_MOD_COMMAND_ARGS}, the other typed-text cap.
+ */
+export const MAX_INSTRUCTION_LENGTH = 4000;
+
+/**
+ * How many messages of the open session the host loads for a snapshot (the page size it asks
+ * `message.list` for; 200 is the API maximum). One constant for both sides (review W3 of #188): the
+ * host uses it as the page limit, and the Session tab uses it to say that its turn count is a lower
+ * bound once the loaded messages reach it, so the note cannot drift from what the host loads.
+ */
+export const LOADED_MESSAGE_LIMIT = 200;
+
+/**
+ * The shape of an instruction key (issue #188): the server's own rule, `^[a-z0-9][a-z0-9._-]*$`
+ * (`core/src/session/instruction-entry.ts` of the v2.2.7 tag, read). `instructions.remove` is
+ * validated against it here and against the keys the host listed in the handler.
+ */
+export const INSTRUCTION_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
+
+/** Longest instruction key `instructions.remove` accepts. Our choice: the host's own are ~16 characters. */
+export const MAX_INSTRUCTION_KEY_LENGTH = 200;
+
+/** What `session.export` can produce: a Markdown transcript, or the server's complete JSON. */
+export type ExportFormat = 'markdown' | 'json';
 
 /** Most items one `attachments.drop` may carry. The TUI's `MAX_PASTED_FILEPATHS` figure (issue #30); our choice. */
 export const MAX_DROPPED_ITEMS = 32;
@@ -227,6 +265,16 @@ export type SetupAction =
  * `subagents` (issue #189) is the digest of the direct child sessions of this session the host
  * read (`SubagentActivity`); absent when it has none or the host has not read them yet. The live
  * changes arrive as `subagent.activity`, and a snapshot REPLACES the list.
+ *
+ * `inbox` (issue #188) is the prompts of this session that were admitted but not delivered yet, in
+ * enqueue order. The live changes arrive as `session.inbox` and a snapshot REPLACES the list;
+ * absent means "the host could not read it", which is NOT the same as an empty list (the webview
+ * then keeps what it had).
+ *
+ * `instructions` (issue #188) is the instructions pinned to this session as the server listed them
+ * ({@link InstructionView}). The live changes arrive as `session.instructions` and a snapshot
+ * REPLACES the list; absent means "the host could not read it (the route is experimental)", which
+ * is NOT an empty list, and the webview then keeps what it had.
  */
 export type OpenSession = {
   sessionID: string;
@@ -235,6 +283,8 @@ export type OpenSession = {
   compactedAt?: number;
   revert?: RevertState;
   subagents?: SubagentActivity[];
+  inbox?: QueuedPrompt[];
+  instructions?: InstructionView[];
 };
 
 /**
@@ -337,6 +387,14 @@ export type UiCommand = 'prompt.focus' | 'session.new' | 'session.stop';
  * PARENT, the session the panes show) and REPLACES the entry of that child in the webview; it goes
  * only to the panes showing the parent (`session` route). Only children the host sees change are
  * sent, so a snapshot's `open.subagents` is what repairs a missed one.
+ * `session.inbox` (issue #188) is the WHOLE list of prompts of ONE session that are admitted but not
+ * delivered yet, and REPLACES what the webview holds for it (the list is short; there are no
+ * deltas). It is sent for every change the host sees (enqueued, delivered, cancelled, delivery
+ * changed) of a session a pane displays; the webview keeps it only for the open session.
+ * `session.instructions` (issue #188) is the WHOLE list of instructions pinned to ONE session and
+ * REPLACES what the webview holds for it. The host sends it after each add or remove it did itself
+ * and when the server reports a change; `error` is set (with the last list the host knew) when the
+ * list could not be read, and a later success clears it.
  */
 export type HostToWebview =
   | { type: 'connection.state'; connection: ConnectionState }
@@ -399,7 +457,14 @@ export type HostToWebview =
   | { type: 'setup.binary'; outcome: 'chosen'; path: string }
   | { type: 'mods.state'; bands: ModBand[]; commands: ModCommandOption[]; listing: ModsListing }
   | { type: 'workMode.state'; mode: WorkMode }
-  | { type: 'subagent.activity'; sessionID: string; activity: SubagentActivity };
+  | { type: 'subagent.activity'; sessionID: string; activity: SubagentActivity }
+  | { type: 'session.inbox'; sessionID: string; items: QueuedPrompt[] }
+  | {
+      type: 'session.instructions';
+      sessionID: string;
+      entries: InstructionView[];
+      error?: ErrorInfo;
+    };
 
 /**
  * Messages sent by the webview. `requestId` is generated by the webview (shared has no
@@ -484,6 +549,19 @@ export type HostToWebview =
  * `subagent.stop` (issue #189) stops ONE direct child of `parentID` (`sessionID`) or, without it,
  * every child of `parentID` still running; never the parent. The host checks that the child is a
  * direct child of `parentID` and running (`NotASubagent` otherwise) and answers `request.result`.
+ * `inbox.cancel` and `inbox.steer` (issue #188) act on ONE queued prompt (`inboxID`, an id of a
+ * `session.inbox` list the host sent) of `sessionID`: cancel it, or change its delivery to `steer`.
+ * The host acts only on an id it listed for that session and answers `request.result`; an item that
+ * was delivered meanwhile is not an error (the new `session.inbox` shows it gone).
+ * `instructions.add` (issue #188) pins `text` (non-blank, at most {@link MAX_INSTRUCTION_LENGTH}
+ * characters; the webview checks it BEFORE sending, because a message that breaks its validator is
+ * dropped with no `request.result`) to `sessionID`; the host generates the key and answers
+ * `request.result` and a new `session.instructions`. `instructions.remove` removes the entry `key`,
+ * which the host does only for a key it listed for that session. `session.export` writes the
+ * transcript of `sessionID` to a file the user picks in a native save dialog: `markdown` is built
+ * by the host from the settled messages, `json` is the server's COMPLETE export (every text and
+ * path, NOT redacted, as the TUI exports it). It is answered by `request.result` (an `info` notice
+ * says where the file went; cancelling the dialog is a success with no notice).
  */
 export type WebviewToHost =
   | { type: 'ready' }
@@ -528,6 +606,11 @@ export type WebviewToHost =
   | { type: 'workMode.set'; mode: WorkMode }
   | { type: 'mod.toggle'; modId: string; enabled: boolean }
   | { type: 'subagent.stop'; requestId: string; parentID: string; sessionID?: string }
+  | { type: 'inbox.cancel'; requestId: string; sessionID: string; inboxID: string }
+  | { type: 'inbox.steer'; requestId: string; sessionID: string; inboxID: string }
+  | { type: 'instructions.add'; requestId: string; sessionID: string; text: string }
+  | { type: 'instructions.remove'; requestId: string; sessionID: string; key: string }
+  | { type: 'session.export'; requestId: string; sessionID: string; format: ExportFormat }
   | { type: 'mods.action'; action: ModsAction }
   | { type: 'logs.show' }
   | { type: 'setup.action'; action: SetupAction }
@@ -817,6 +900,21 @@ const isDiffOpen: Validator = (m) => {
 };
 
 /**
+ * Shape of `inbox.cancel` and `inbox.steer` (issue #188): a request id, a session id and an inbox id
+ * of at most `MAX_INBOX_ID_LENGTH` characters. That the id is one the host listed for that session
+ * is the handler's check, not this guard's.
+ */
+const isInboxAction: Validator = (m) => {
+  const inboxID = field(m, 'inboxID');
+  return (
+    isNonEmptyString(field(m, 'requestId')) &&
+    isNonEmptyString(field(m, 'sessionID')) &&
+    isNonEmptyString(inboxID) &&
+    inboxID.length <= MAX_INBOX_ID_LENGTH
+  );
+};
+
+/**
  * One validator per webview-to-host `type`. The `Record` key type makes it exhaustive: adding a
  * member to `WebviewToHost` without its validator is a compile error.
  */
@@ -924,6 +1022,32 @@ const WEBVIEW_VALIDATORS: Record<WebviewToHost['type'], Validator> = {
     isNonEmptyString(field(m, 'requestId')) &&
     isNonEmptyString(field(m, 'parentID')) &&
     isOptional(field(m, 'sessionID'), isNonEmptyString),
+  'inbox.cancel': isInboxAction,
+  'inbox.steer': isInboxAction,
+  'instructions.add': (m) => {
+    const text = field(m, 'text');
+    return (
+      isNonEmptyString(field(m, 'requestId')) &&
+      isNonEmptyString(field(m, 'sessionID')) &&
+      isString(text) &&
+      text.trim().length > 0 &&
+      text.length <= MAX_INSTRUCTION_LENGTH
+    );
+  },
+  'instructions.remove': (m) => {
+    const key = field(m, 'key');
+    return (
+      isNonEmptyString(field(m, 'requestId')) &&
+      isNonEmptyString(field(m, 'sessionID')) &&
+      isString(key) &&
+      key.length <= MAX_INSTRUCTION_KEY_LENGTH &&
+      INSTRUCTION_KEY_PATTERN.test(key)
+    );
+  },
+  'session.export': (m) =>
+    isNonEmptyString(field(m, 'requestId')) &&
+    isNonEmptyString(field(m, 'sessionID')) &&
+    isOneOf(['markdown', 'json'] satisfies ExportFormat[])(field(m, 'format')),
   'mods.action': (m) => isModsAction(field(m, 'action')),
   'logs.show': noFields,
   'setup.action': (m) => isSetupAction(field(m, 'action')),
@@ -983,6 +1107,8 @@ const HOST_TYPE_SET: Record<HostToWebview['type'], true> = {
   'mods.state': true,
   'workMode.state': true,
   'subagent.activity': true,
+  'session.inbox': true,
+  'session.instructions': true,
 };
 
 /** Every `type` the host may send; derived from the exhaustive record, so it cannot drift. */

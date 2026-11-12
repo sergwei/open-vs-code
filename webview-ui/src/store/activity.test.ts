@@ -5,9 +5,9 @@
 // translator really leaves a reasoning block `completed: false` until it ends is a HYPOTHESIS of
 // `deriveActivity` and is not tested here.
 import { describe, expect, it } from 'vitest';
-import type { Part, SessionStatus } from '../../../src/shared/model';
+import type { JsonObject, Part, SessionStatus } from '../../../src/shared/model';
 import type { ConnectionState } from '../../../src/shared/protocol';
-import { deriveActivity } from './activity';
+import { deriveActivity, describeTurn } from './activity';
 
 const CONNECTED: ConnectionState = { state: 'connected', serverVersion: '2.0.32' };
 const BUSY: SessionStatus = { type: 'busy' };
@@ -109,5 +109,50 @@ describe('deriveActivity', () => {
       deriveActivity(CONNECTED, { type: 'error', error: { code: 'c', message: 'm' } }, [], true)
         .kind,
     ).toBe('error');
+  });
+});
+
+// Protects issue #188 (phase 3): the footer of a running turn names what a tool is doing ("Editing
+// src/auth/login.ts"), falls back to "Running <name>" for a tool it does not know, and counts the
+// step. FABRICATED tool parts in the shape of `src/shared/model.ts`; the `input` keys are the ones
+// `toolView.ts` reads. The inputs of real runs were seen only for shell, read, grep and edit.
+describe('describeTurn', () => {
+  const running = (name: string, input: JsonObject | undefined): Part => ({
+    type: 'tool',
+    id: 't1',
+    name,
+    state: input === undefined ? { status: 'streaming', input: '{' } : { status: 'running', input },
+  });
+  const turnOf = (part: Part, steps = 1) =>
+    describeTurn(deriveActivity(CONNECTED, BUSY, [part]), [part], steps);
+
+  it.each([
+    ['read', { path: 'src/a.ts' }, 'Reading src/a.ts'],
+    ['edit', { path: 'src/auth/login.ts' }, 'Editing src/auth/login.ts'],
+    ['write', { path: 'src/new.ts', content: 'x' }, 'Writing src/new.ts'],
+    ['shell', { command: 'npm test' }, 'Running npm test'],
+    ['grep', { pattern: 'TODO' }, 'Searching for TODO'],
+    ['glob', { pattern: '**/*.ts' }, 'Finding **/*.ts'],
+    ['webfetch', { url: 'https://example.com' }, 'Fetching https://example.com'],
+  ])('names %s with its target', (name, input, label) => {
+    expect(turnOf(running(name, input)).label).toBe(label);
+  });
+
+  it('says only the verb while the input still streams', () => {
+    expect(turnOf(running('edit', undefined)).label).toBe('Editing');
+    expect(turnOf(running('shell', undefined)).label).toBe('Running a command');
+  });
+
+  it('falls back to "Running <name>" for a tool it does not know', () => {
+    expect(turnOf(running('mystery', { foo: 1 })).label).toBe('Running mystery');
+  });
+
+  it('leaves every other activity as it is and counts the step', () => {
+    const working = deriveActivity(CONNECTED, BUSY, []);
+    expect(describeTurn(working, [], 0)).toEqual({ label: 'Working' });
+    expect(describeTurn(working, [], 3)).toEqual({ label: 'Working', step: 3 });
+    const writing = deriveActivity(CONNECTED, BUSY, [text]);
+    expect(describeTurn(writing, [text], 2).label).toBe('Writing');
+    expect(turnOf(running('read', { path: 'a' }), 4).step).toBe(4);
   });
 });

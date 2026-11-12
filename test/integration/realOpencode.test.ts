@@ -673,6 +673,110 @@ describe('real opencode', function () {
     });
 
     /**
+     * R1 of E2-chat-panel-tabs (issue #188): the contract of the three features phase 2 builds on,
+     * against a REAL server and with no model turn and no prompt delivered.
+     *  - inbox: a user input admitted with `prompt({ resume: false })` (lesson #1166: it stays in the
+     *    inbox and spends no quota) is listed by `inbox.list` as a `user` item, `cancel` removes it,
+     *    and a second `cancel` of the same id resolves (the server swallows `InboxConflictError`).
+     *    NEVER `inbox.update` to `steer`: "steering wakes session execution" and would call the model.
+     *  - instructions: `experimental.session.instructions.entry` lists nothing at first, `put` of a
+     *    string and of a JSON object are both listed back with their value, an invalid key is
+     *    refused, and `remove` empties the list (`remove` of a missing key is only checked to not
+     *    break the case, and its outcome is printed).
+     *  - export: after a `shell` message (the only history a model-less session can have),
+     *    `experimental.session.export` answers `{info, messages}` with the shell command in the
+     *    clear, and with `sanitize: true` the same command comes back as `[redacted:…]`, which is
+     *    why the extension exports JSON with `sanitize: false` (decision P1, Engram #2316).
+     * The `shell` result leaves a pending `synthetic` inbox item that this case cancels, as the
+     * revert case does (#144), so no model turn runs. The session is removed at the end.
+     * VERIFIED against an opencode **2.2.5** executable, NOT the pinned 2.2.7 (Windows 11,
+     * 12/11/2026, `OPEN_VS_CODE_REAL_OPENCODE` = the fnm CLI, `npm run test:integration -- --label
+     * real-opencode --grep "lists and cancels an inbox item"`): "✔ lists and cancels an inbox item,
+     * pins and removes an instruction and exports a session (1565ms)", "1 passing", with the case
+     * printing "instructions.remove of a missing key: resolved". So on 2.2.5 the user item is listed
+     * and cancellable twice, string and JSON values are listed back, a bad key is refused, and
+     * `sanitize: true` redacts the shell command. UNVERIFIED on 2.2.7 itself (the CLI on this
+     * machine is 2.2.5; run the case again after installing the pinned CLI). Not observed: macOS and
+     * Linux, `inbox.update` (never called on purpose) and a 413 on a too-large value.
+     */
+    it('lists and cancels an inbox item, pins and removes an instruction and exports a session', async function () {
+      this.timeout(60_000);
+      const sessionID = (await own.client.session.create({})).id;
+      const instructions = own.client.experimental.session.instructions.entry;
+      try {
+        const admitted = await own.client.session.prompt({
+          sessionID,
+          text: 'inbox contract check, never delivered',
+          resume: false,
+        });
+        const before = await own.client.session.inbox.list({ sessionID });
+        const mine = before.find((item) => item.id === admitted.id);
+        assert.strictEqual(
+          mine?.type,
+          'user',
+          `the admitted input is not listed: ${JSON.stringify(before)}`,
+        );
+        await own.client.session.inbox.cancel({ sessionID, inboxID: admitted.id });
+        await own.client.session.inbox.cancel({ sessionID, inboxID: admitted.id });
+        const after = await own.client.session.inbox.list({ sessionID });
+        assert.ok(!after.some((item) => item.id === admitted.id), 'cancel left the item listed');
+
+        assert.deepStrictEqual(await instructions.list({ sessionID }), []);
+        await instructions.put({
+          sessionID,
+          key: 'note-contract',
+          value: 'Always answer in Spanish',
+        });
+        await instructions.put({ sessionID, key: 'contract.json', value: { a: [1, 2] } });
+        const listed = await instructions.list({ sessionID });
+        assert.deepStrictEqual(
+          Object.fromEntries(listed.map((entry) => [entry.key, entry.value])),
+          { 'note-contract': 'Always answer in Spanish', 'contract.json': { a: [1, 2] } },
+        );
+        await assert.rejects(instructions.put({ sessionID, key: 'Not A Key', value: 'x' }));
+        await instructions.remove({ sessionID, key: 'note-contract' });
+        await instructions.remove({ sessionID, key: 'contract.json' });
+        assert.deepStrictEqual(await instructions.list({ sessionID }), []);
+        const missing = await instructions.remove({ sessionID, key: 'note-contract' }).then(
+          () => 'resolved',
+          (error: unknown) => (error as { _tag?: string })._tag ?? 'rejected',
+        );
+        console.log(`instructions.remove of a missing key: ${missing}`);
+
+        await own.client.session.shell({ sessionID, command: 'echo export-contract' });
+        let exported = await own.client.experimental.session.export({ sessionID });
+        const deadline = Date.now() + 20_000;
+        while (!exported.messages.some((message) => message.type === 'shell')) {
+          assert.ok(Date.now() < deadline, 'the export never listed the shell message');
+          await sleep(250);
+          exported = await own.client.experimental.session.export({ sessionID });
+        }
+        assert.strictEqual(exported.info.id, sessionID);
+        const shell = exported.messages.find((message) => message.type === 'shell');
+        assert.ok(shell?.type === 'shell' && shell.command.includes('export-contract'));
+        const redacted = await own.client.experimental.session.export({
+          sessionID,
+          sanitize: true,
+        });
+        const redactedShell = redacted.messages.find((message) => message.type === 'shell');
+        assert.ok(redactedShell?.type === 'shell', 'the redacted export lost the shell message');
+        assert.ok(
+          redactedShell.command.startsWith('[redacted:'),
+          `sanitize left the command: ${redactedShell.command}`,
+        );
+        assert.ok(!JSON.stringify(redacted).includes('export-contract'), 'sanitize left the text');
+      } finally {
+        // The `shell` result waits as a pending `synthetic` item; leave none for the removal to wake.
+        for (const item of await own.client.session.inbox.list({ sessionID }).catch(() => [])) {
+          await own.client.session.inbox
+            .cancel({ sessionID, inboxID: item.id })
+            .catch(() => undefined);
+        }
+        await own.client.session.remove({ sessionID });
+      }
+    });
+
+    /**
      * Protects the contract of the Usage view (E9-sidebar-home, issue #187, decision P3=2): the
      * experimental `experimental.session.stats` (called by its 2.2 name since issue #191; the
      * VERIFIED run below used the old `session.stats` alias; the new name passed too, see the

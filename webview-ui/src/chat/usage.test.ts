@@ -14,12 +14,14 @@ import type {
   SessionSummary,
   TokenUsage,
 } from '../../../src/shared/model';
+import { LOADED_MESSAGE_LIMIT } from '../../../src/shared/protocol';
 import {
   contextUsage,
   describeUsage,
   formatCost,
   sessionCost,
   showCost,
+  usageBreakdown,
   type ContextUsage,
 } from './usage';
 
@@ -179,6 +181,71 @@ describe('sessionCost', () => {
       ses_k: row('ses_k', undefined, { parentID: 'ses_1' }),
     };
     expect(sessionCost(sessions, 'ses_1')).toEqual({ usd: 1, withSubagents: true });
+  });
+});
+
+// Protects the figures of the Session tab's Usage section (issue #188): the session TOTALS of the
+// row (not a sum of messages), cache folded into input and reasoning into output, the cost hidden
+// when it is zero on a free model, and the turn count with its lower-bound flag. FABRICATED rows.
+describe('usageBreakdown', () => {
+  const sessionRow = (cost: number, extra: Partial<SessionSummary> = {}): SessionSummary => ({
+    id: 'ses_1',
+    createdAt: 1,
+    updatedAt: 2,
+    usage: {
+      cost,
+      tokens: { input: 100, output: 20, reasoning: 5, cacheRead: 300, cacheWrite: 40 },
+    },
+    ...extra,
+  });
+  const userMessage = (id: string): MessageInfo => ({
+    kind: 'user',
+    id,
+    createdAt: 1,
+    text: 'hi',
+    files: [],
+  });
+
+  it('is undefined while the row has no usage', () => {
+    expect(usageBreakdown({}, 'ses_1', [], catalog, undefined)).toBeUndefined();
+    const bare: SessionSummary = { id: 'ses_1', createdAt: 1, updatedAt: 2 };
+    expect(usageBreakdown({ ses_1: bare }, 'ses_1', [], catalog, undefined)).toBeUndefined();
+  });
+
+  it('folds the cache into the input and the reasoning into the output, and counts user turns', () => {
+    const result = usageBreakdown(
+      { ses_1: sessionRow(0.5) },
+      'ses_1',
+      [userMessage('u1'), reply('a1', 3, tokens()), userMessage('u2')],
+      catalog,
+      PICKLE,
+    );
+    expect(result).toEqual({
+      inputTokens: 440,
+      outputTokens: 25,
+      cost: { usd: 0.5, withSubagents: false },
+      turns: 2,
+      partial: false,
+    });
+  });
+
+  it('hides a zero cost on a free model and keeps it on a paid one', () => {
+    const free = usageBreakdown({ ses_1: sessionRow(0) }, 'ses_1', [], catalog, PICKLE);
+    expect(free?.cost).toBeUndefined();
+    const paid = usageBreakdown({ ses_1: sessionRow(0) }, 'ses_1', [], catalog, PAID);
+    expect(paid?.cost).toEqual({ usd: 0, withSubagents: false });
+  });
+
+  it('flags the turn count as a lower bound once the loaded messages reach the limit', () => {
+    const many = Array.from({ length: LOADED_MESSAGE_LIMIT }, (_, index) =>
+      userMessage(`u${String(index)}`),
+    );
+    const result = usageBreakdown({ ses_1: sessionRow(1) }, 'ses_1', many, catalog, PICKLE);
+    expect(result?.partial).toBe(true);
+    expect(result?.turns).toBe(LOADED_MESSAGE_LIMIT);
+    expect(
+      usageBreakdown({ ses_1: sessionRow(1) }, 'ses_1', many.slice(1), catalog, PICKLE)?.partial,
+    ).toBe(false);
   });
 });
 

@@ -37,7 +37,12 @@ import type {
   IntegrationOauthStatusOutput,
   ExperimentalMcpConnectInput,
   ExperimentalMcpDisconnectInput,
+  ExperimentalSessionExportInput,
+  ExperimentalSessionInstructionsEntryListInput,
+  ExperimentalSessionInstructionsEntryPutInput,
+  ExperimentalSessionInstructionsEntryRemoveInput,
   ExperimentalSessionStatsInput,
+  InstructionEntryInfo,
   McpListInput,
   McpListOutput,
   McpResourceCatalogInput,
@@ -64,7 +69,11 @@ import type {
   SessionForkInput,
   SessionFormReplyInput,
   SessionGetInput,
+  SessionInboxCancelInput,
   SessionInboxCompaction,
+  SessionInboxInfo,
+  SessionInboxListInput,
+  SessionInboxUpdateInput,
   SessionInboxUser,
   SessionInfo,
   SessionInterruptInput,
@@ -83,6 +92,7 @@ import type {
   SessionSwitchAgentInput,
   SessionStatsInfo,
   SessionSwitchModelInput,
+  SessionTransferData,
   SessionUpdateInput,
   V2Event,
 } from '@opencode/client';
@@ -232,6 +242,26 @@ export interface ChatApi {
      * `MessageNotFoundError`. Only the `type` is used here.
      */
     message: { get(input: SessionMessageGetInput): Promise<SessionMessageInfo> };
+    /**
+     * The inbox of a session (issue #188): durable work admitted but not delivered yet. `list` is
+     * `GET /api/session/:id/inbox`, answers the bare `SessionInboxInfo[]` (the client unwraps
+     * `{data}`) in enqueue order, and mixes `user`, `synthetic`, `compaction` and `move` items;
+     * the host keeps only `user`. `cancel` is `DELETE /api/session/:id/inbox/:inboxID`: 204, and an
+     * item that is no longer pending is a no-op (the handler swallows `InboxConflictError`).
+     * `update` is `PATCH /api/session/:id/inbox/:inboxID` and changes ONLY `delivery` (the text
+     * cannot be edited); "steering wakes session execution", and an item that is no longer pending
+     * throws `ConflictError`. Read in `client.d.ts` and `types.d.ts` of 2.2.7 and in the handler of
+     * the tag (`server/src/handlers/session.ts` L540-547). `list` and `cancel` (also a second
+     * `cancel` of the same id, which resolves) were seen on an opencode 2.2.5 executable by the case
+     * "lists and cancels an inbox item, pins and removes an instruction and exports a session" of
+     * `realOpencode.test.ts` (12/11/2026, Windows 11); HYPOTHESIS for `update`, which that case
+     * never calls on purpose (it would wake the model), and for everything on 2.2.7 itself.
+     */
+    inbox: {
+      list(input: SessionInboxListInput): Promise<SessionInboxInfo[]>;
+      cancel(input: SessionInboxCancelInput): Promise<void>;
+      update(input: SessionInboxUpdateInput): Promise<void>;
+    };
     form: {
       /** `POST /api/session/:sid/form/:fid/reply` (issue #44): 204, empty body. */
       reply(input: SessionFormReplyInput): Promise<void>;
@@ -351,6 +381,42 @@ export interface ChatApi {
        * shape.
        */
       stats(input?: ExperimentalSessionStatsInput): Promise<SessionStatsInfo>;
+      /**
+       * `GET /api/experimental/session/:id/export[?sanitize=true]` (issue #188): the settled messages
+       * and the row of a session as `SessionTransferData`. The host always passes `sanitize: false`
+       * (decision P1): with `sanitize: true` the server redacts EVERY text (titles, user and
+       * assistant text, reasoning, shell commands and output, file names, the directory) as
+       * `[redacted:kind:id]` rather than only secrets, so it keeps no conversation
+       * (`core/src/session/transfer.ts` of the v2.2.7 tag, read). Only messages already settled are
+       * exported. An unknown session throws `SessionNotFoundError`. EXPERIMENTAL route. The answer
+       * with and without `sanitize` was seen on an opencode 2.2.5 executable (the opt-in case "lists
+       * and cancels an inbox item, pins and removes an instruction and exports a session" of
+       * `realOpencode.test.ts`, 12/11/2026, Windows 11: the shell command came back as
+       * `[redacted:…]` only with `sanitize: true`); UNVERIFIED on 2.2.7 itself.
+       */
+      export(input: ExperimentalSessionExportInput): Promise<SessionTransferData>;
+      /**
+       * The instructions pinned to a session (issue #188), `/api/experimental/session/:id/
+       * instructions/entries[/:key]`. `list` answers the bare `InstructionEntryInfo[]` (the client
+       * unwraps `{data}`); `put` creates or replaces an entry (204) and throws
+       * `InstructionEntryValueTooLargeError` (413) above 256 KiB; `remove` deletes one (204). The
+       * core paints each entry as `<context key="k">value</context>` in the system prompt and narrates
+       * a change or a removal "at the next step boundary". Keys match `^[a-z0-9][a-z0-9._-]*$`.
+       * Read in `types.d.ts` and `client.d.ts` of 2.2.7 and the tag. EXPERIMENTAL route. Seen on an
+       * opencode 2.2.5 executable by the same opt-in case (12/11/2026, Windows 11): an empty list at
+       * first, a string and a JSON object listed back with their values, an invalid key refused and
+       * a `remove` of a key that is not there answering as success; UNVERIFIED on 2.2.7 itself, and
+       * the 413 was never provoked.
+       */
+      instructions: {
+        entry: {
+          list(
+            input: ExperimentalSessionInstructionsEntryListInput,
+          ): Promise<InstructionEntryInfo[]>;
+          put(input: ExperimentalSessionInstructionsEntryPutInput): Promise<void>;
+          remove(input: ExperimentalSessionInstructionsEntryRemoveInput): Promise<void>;
+        };
+      };
     };
     /**
      * The two writes the Settings tab uses (issue #186, PR2), `POST

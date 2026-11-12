@@ -154,6 +154,18 @@ button.secondary:hover:not(:disabled),
   background: var(--vscode-inputValidation-warningBackground, transparent);
 }
 
+/* "Compact" next to the line from 80 % (issue #188): it is the warning of a nearly full context. */
+.usage-compact {
+  display: block;
+  margin: 2px 0 0 4px;
+  padding: 0 6px;
+}
+
+.usage-compact[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* ---------- related sessions (issue #21) ---------- */
 
 /* "‹ parent" or "Forked from ..." above the title. */
@@ -186,9 +198,16 @@ button.secondary:hover:not(:disabled),
   border-radius: var(--ovc-radius-md);
 }
 
-.subagent-sessions > summary,
-.changed-files > summary {
+.subagent-sessions > summary {
   cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* The heading of the Changes tab (issue #188) reads like the summary it replaced. */
+.changed-files-title {
+  margin: 0;
+  font-size: inherit;
+  font-weight: 400;
   color: var(--vscode-descriptionForeground);
 }
 
@@ -389,6 +408,307 @@ button.secondary:hover:not(:disabled),
 .session-more[aria-disabled='true'] {
   opacity: 0.6;
   cursor: default;
+}
+
+/* ---------- panel tabs (issue #188) ---------- */
+
+/* Chat · Changes · Session under the header. Same look as the request tabs: the active one is
+   bold with an underline, the state is never colour alone. */
+.panel-tabs {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  margin-top: 4px;
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+  overflow-x: auto;
+}
+
+.panel-tab {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  color: var(--vscode-foreground);
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.panel-tab:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.panel-tab:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.panel-tab[aria-selected='true'] {
+  font-weight: 600;
+  border-bottom-color: var(--vscode-focusBorder);
+}
+
+/* The badge is text (a word or a number) on the badge colours of the theme. */
+.panel-tab-badge {
+  padding: 0 6px;
+  font-size: 0.85em;
+  font-weight: 400;
+  color: var(--vscode-badge-foreground);
+  background: var(--vscode-badge-background);
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+  border-radius: var(--ovc-radius-pill);
+}
+
+/* Each tab's panel fills <main>; the inactive ones are `hidden`. Changes and Session scroll. */
+.panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel[hidden] {
+  display: none;
+}
+
+.panel-scroll {
+  overflow-y: auto;
+}
+
+/* Empty state of the Changes tab. */
+.panel-empty {
+  margin: 8px 4px;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* ---------- Session tab (issue #188) ---------- */
+
+.session-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 2px;
+}
+
+.session-section h2 {
+  margin: 0 0 4px;
+  font-size: 1em;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+/* Foreground colour on purpose: description grey is too faint on some themes (skill §6). */
+.session-note {
+  margin: 4px 0;
+  color: var(--vscode-foreground);
+  opacity: 0.85;
+  overflow-wrap: anywhere;
+}
+
+.session-error {
+  margin: 4px 0;
+  color: var(--vscode-foreground);
+  overflow-wrap: anywhere;
+}
+
+.instruction-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.instruction-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--vscode-panel-border, transparent);
+  border-radius: var(--ovc-radius-md);
+}
+
+.instruction-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.instruction-tag {
+  flex: none;
+  padding: 0 6px;
+  font-size: 0.85em;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder, transparent));
+  border-radius: var(--ovc-radius-pill);
+}
+
+.instruction-add {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.instruction-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.instruction-add button[aria-disabled='true'],
+.context-box button[aria-disabled='true'],
+.export-buttons button[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.context-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+/* The meter is native (role meter, no style attribute): the browser paints the fill and the
+   pseudo-elements below colour it with theme variables. Past `high` the fill switches to the
+   warning colour AND the text says the percentage, so it is never colour alone. */
+.context-meter {
+  flex: 1 1 100%;
+  width: 100%;
+  height: 8px;
+  appearance: none;
+  background: transparent;
+}
+
+.context-meter::-webkit-meter-bar {
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder, transparent));
+  border-radius: var(--ovc-radius-pill);
+}
+
+.context-meter::-webkit-meter-optimum-value {
+  background: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+  border-radius: var(--ovc-radius-pill);
+}
+
+.context-meter::-webkit-meter-suboptimum-value,
+.context-meter::-webkit-meter-even-less-good-value {
+  background: var(--vscode-editorWarning-foreground, var(--vscode-focusBorder));
+  border-radius: var(--ovc-radius-pill);
+}
+
+.context-text {
+  flex: 1 1 auto;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.usage-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin: 4px 0;
+}
+
+.usage-grid dt,
+.usage-grid dd {
+  margin: 0;
+}
+
+.export-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* ---------- queued prompts and the activity footer (issue #188) ---------- */
+
+.queue-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.queue-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 2px 4px 2px 8px;
+  color: var(--vscode-foreground);
+  border: 1px solid var(--vscode-panel-border, transparent);
+  border-radius: var(--ovc-radius-md);
+}
+
+.queue-chip-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-chip-button {
+  flex: none;
+  padding: 0 6px;
+}
+
+.queue-chip-button[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* The primary button reads "Queue" while a turn runs: a pill with text instead of the round icon. */
+button.send-button.queue-button {
+  width: auto;
+  min-width: 28px;
+  padding: 0 10px;
+}
+
+/* The footer wraps in a narrow bar: the label keeps a line of its own before the meta words. */
+.activity {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+.activity-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-meta {
+  flex: none;
+  white-space: nowrap;
+}
+
+.activity-time {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Stop lives at the end of the footer line. */
+button.stop-button {
+  flex: none;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: var(--ovc-radius-pill);
 }
 
 /* ---------- conversation ---------- */
@@ -3390,6 +3710,30 @@ button.agent-model-chip {
 
 [class*='vscode-high-contrast'] .message-assistant {
   border-left-color: var(--vscode-contrastBorder);
+}
+
+/* The panel tabs and the queue chips (issue #188): no tint in high contrast either. */
+[class*='vscode-high-contrast'] .panel-tab:hover {
+  background: transparent;
+  outline: 1px dashed var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+  outline-offset: -1px;
+}
+
+[class*='vscode-high-contrast'] .panel-tab[aria-selected='true'] {
+  border-bottom-color: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+}
+
+[class*='vscode-high-contrast'] .queue-chip,
+[class*='vscode-high-contrast'] .instruction-row,
+[class*='vscode-high-contrast'] .instruction-tag,
+[class*='vscode-high-contrast'] .context-meter::-webkit-meter-bar {
+  border-color: var(--vscode-contrastBorder);
+}
+
+/* High contrast: the fill needs a border of its own to stand out from the bar. */
+[class*='vscode-high-contrast'] .context-meter::-webkit-meter-optimum-value,
+[class*='vscode-high-contrast'] .context-meter::-webkit-meter-suboptimum-value {
+  background: var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
 }
 
 /* The tab row: no tint in high contrast, so hover is a dashed outline and the active tab keeps its

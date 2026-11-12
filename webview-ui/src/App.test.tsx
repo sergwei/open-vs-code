@@ -300,6 +300,7 @@ describe('sending', () => {
       history: ['hello there'],
       files: [],
       sessionID: SES,
+      tab: 'chat',
     });
   });
 
@@ -365,15 +366,81 @@ describe('sending', () => {
     expect(h.textarea().value).toBe('second draft');
   });
 
-  it('does not send while busy, and the draft is kept', () => {
+  // Protects issue #188 (supersedes "does not send while busy"): Enter with a turn running queues
+  // the prompt and Ctrl+Enter steers it. FABRICATED host messages in jsdom.
+  it('sends a prompt typed while a turn runs as queue, and as steer with Ctrl+Enter', () => {
     const h = start();
     h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
     h.type('another');
     h.textarea().dispatchEvent(
       new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
     );
+    expect(h.sent).toMatchObject([
+      { type: 'prompt.send', sessionID: SES, text: 'another', delivery: 'queue' },
+    ]);
+    expect(h.textarea().value).toBe('');
+    const first = h.sent[0];
+    h.apply({
+      type: 'request.result',
+      requestId: first && 'requestId' in first ? first.requestId : '',
+    });
+    h.type('now please');
+    h.textarea().dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(h.sent.at(-1)).toMatchObject({ text: 'now please', delivery: 'steer' });
+  });
+
+  // Protects issue #188 (c): with no turn running Ctrl+Enter is a plain send, delivered as queue.
+  it('at rest Ctrl+Enter is a plain send', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]));
+    h.type('hello');
+    h.textarea().dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(h.sent).toMatchObject([{ type: 'prompt.send', text: 'hello', delivery: 'queue' }]);
+  });
+
+  // Protects issue #188 (b): the server runs a command at once, so with a turn running it is
+  // refused with a notice and the draft stays; a mod command is refused the same way. FABRICATED.
+  it('refuses a /command while a turn runs and keeps the draft', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }), {
+      type: 'catalog',
+      catalog: {
+        models: [],
+        providers: [],
+        agents: [],
+        commands: [{ name: 'hello', description: 'Say hello' }],
+      },
+    });
+    h.type('/hello Ana');
+    h.textarea().dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    );
     expect(h.sent).toEqual([]);
-    expect(h.textarea().value).toBe('another');
+    expect(h.textarea().value).toBe('/hello Ana');
+    expect(h.container.textContent).toContain('Commands run when the response ends');
+  });
+
+  // Protects issue #188: /compact keeps working with a turn running (the host queues it).
+  it('/compact is still sent while a turn runs', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    h.type('/compact');
+    h.button('Queue').click();
+    expect(h.sent).toMatchObject([{ type: 'session.compact', sessionID: SES }]);
   });
 
   it('sends the files chosen with Attach and lets a chip be removed first', () => {
@@ -419,10 +486,15 @@ describe('sending', () => {
 });
 
 describe('stopping', () => {
-  it('shows Stop while busy and aborts the open session', () => {
+  // Protects issue #188: the ONE Stop button lives in the activity footer, the composer has the
+  // Queue button instead. FABRICATED host messages in jsdom.
+  it('has one Stop button, in the activity footer, and it aborts the open session', () => {
     const h = start();
     h.apply(...openSession([user('m1', 'count'), assistant('m2')], { type: 'busy' }));
-    expect(h.container.querySelector('button[type="submit"]')).toBeNull();
+    expect(must(h.container, 'button[type="submit"]').textContent).toBe('Queue');
+    const stops = [...h.container.querySelectorAll('button[aria-label="Stop"]')];
+    expect(stops).toHaveLength(1);
+    expect(stops[0]?.closest('.activity')).not.toBeNull();
     h.button('Stop').click();
     expect(h.sent).toMatchObject([{ type: 'session.abort', sessionID: SES }]);
   });
@@ -1445,6 +1517,27 @@ describe('model and agent selectors (issues #23/#24)', () => {
     expect(lastSent(h)).toMatchObject({ model: PICKLE, agent: 'build' });
   });
 
+  // Protects issue #188 (supuesto a): a prompt queued while a turn runs carries NO model or agent
+  // (the host would switch them mid-turn), and the pick still goes with the next send at rest.
+  // FABRICATED catalog and snapshots, as the rest of this block.
+  it('leaves the picked model and agent out of a queued prompt and sends them at rest', () => {
+    const h = start();
+    h.apply(...withRow({ model: GLM, agent: 'plan' }), catalog);
+    pickAgent(h, 'build');
+    h.apply({ type: 'session.status', sessionID: SES, status: { type: 'busy' } });
+    h.type('later');
+    h.button('Queue').click();
+    const queued = lastSent(h);
+    expect(queued).toMatchObject({ text: 'later', delivery: 'queue' });
+    expect(queued).not.toHaveProperty('model');
+    expect(queued).not.toHaveProperty('agent');
+    h.apply({ type: 'request.result', requestId: queued.requestId });
+    h.apply({ type: 'session.status', sessionID: SES, status: { type: 'idle' } });
+    h.type('now');
+    h.button('Send').click();
+    expect(lastSent(h)).toMatchObject({ text: 'now', agent: 'build' });
+  });
+
   // Same DataCloneError, other source (review #1015 S1, found by reading the store): the picked
   // files are store elements, so `takeDraftFiles` and the `knownFiles` that Retry reads must hand out
   // plain copies. Checked by mutation: with the old `[...state.draftFiles]` both cases throw.
@@ -2160,12 +2253,12 @@ describe('@ mentions and the editor context (issues #28/#29)', () => {
   });
 });
 
-// Issue #31 (E7-session-diff): the "Changed files" `<details>` under the header, Sergio's choice of
-// 23/10/2026 (Engram #1153). FABRICATED host messages in jsdom: they confirm where it sits, that it
-// is closed by default and drawn only with files, and the message a click sends (no `requestId`,
-// the OPEN session's id and the exact listed path). The real keyboard path and the look are
-// `test:visual` checks "the list is closed by default" and "Enter on the deleted row opens a diff
-// editor".
+// Issue #31 (E7-session-diff): the "Changed files" list, which sat in a `<details>` under the header
+// (Sergio's choice of 23/10/2026, Engram #1153) and since issue #188 is the content of the Changes
+// tab. FABRICATED host messages in jsdom: they confirm where it sits, that it is mounted only while
+// its tab is active, the empty state, and the message a click sends (no `requestId`, the OPEN
+// session's id and the exact listed path). The real keyboard path and the look are the checks of
+// `test:visual` step 18 ("Enter on the deleted row opens a diff editor").
 describe('changed files (issue #31)', () => {
   const changed = (path: string, extra: Partial<ChangedFile> = {}): ChangedFile => ({
     path,
@@ -2177,15 +2270,31 @@ describe('changed files (issue #31)', () => {
     ...extra,
   });
 
-  it('draws nothing while the open session has no changed files', () => {
+  it('draws the empty state, and no list, while the open session has no changed files', () => {
     const h = start();
     h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
-    expect(h.container.querySelector('.changed-files')).toBeNull();
+    h.button('Changes').click();
+    expect(must(h.container, '#panel-changes .panel-empty').textContent).toBe(
+      'No files changed in this session yet',
+    );
     h.apply({ type: 'session.diff', sessionID: SES, files: [] });
     expect(h.container.querySelector('.changed-files')).toBeNull();
   });
 
-  it('shows a closed "Changed files (N)" under the header with one button per file', () => {
+  // Protects issue #188 phase 4: the list is mounted only while its tab is active, so no hidden
+  // copy of its buttons exists in the Chat tab.
+  it('mounts the list only while the Changes tab is active', () => {
+    const h = start();
+    h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
+    h.apply({ type: 'session.diff', sessionID: SES, files: [changed('src/a.ts')] });
+    expect(h.container.querySelector('.changed-files')).toBeNull();
+    h.button('Changes1').click();
+    expect(h.container.querySelector('#panel-changes .changed-files')).not.toBeNull();
+    h.button('Chat').click();
+    expect(h.container.querySelector('.changed-files')).toBeNull();
+  });
+
+  it('shows an open "Changed files (N)" heading in the Changes tab with one button per file', () => {
     const h = start();
     h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
     h.apply({
@@ -2193,19 +2302,23 @@ describe('changed files (issue #31)', () => {
       sessionID: SES,
       files: [changed('src/a.ts'), changed('assets/logo.png', { binary: true })],
     });
-    const details = must<HTMLDetailsElement>(h.container, 'details.changed-files');
-    expect(details.open).toBe(false);
-    expect(must(details, 'summary').textContent).toBe('Changed files (2)');
-    expect(details.parentElement?.classList.contains('header-area')).toBe(true);
+    h.button('Changes2').click();
+    const section = must(h.container, 'section.changed-files');
+    expect(must(section, 'h2').textContent).toBe('Changed files (2)');
+    // Issue #188: it moved from the header to the Changes tab.
+    expect(section.parentElement?.id).toBe('panel-changes');
+    expect(h.container.querySelector('.header-area .changed-files')).toBeNull();
     expect(
-      [...details.querySelectorAll('button')].map((b) => b.getAttribute('aria-label')),
+      [...section.querySelectorAll('button')].map((b) => b.getAttribute('aria-label')),
     ).toEqual([
       'Open diff of src/a.ts, Modified, 3 added, 1 deleted',
       'Open assets/logo.png, Binary',
     ]);
   });
 
-  it('sits after the "Subagent sessions" list', () => {
+  // Protects issue #188: the list left the header, so the "Subagent sessions" list is the last
+  // child of the header area again and the Changes tab shows the count.
+  it('is no longer in the header, and the Changes tab badge shows the count', () => {
     const h = start();
     h.apply(
       ...openWith(
@@ -2217,10 +2330,9 @@ describe('changed files (issue #31)', () => {
       ),
     );
     h.apply({ type: 'session.diff', sessionID: SES, files: [changed('src/a.ts')] });
-    const area = must(h.container, '.header-area');
-    const classes = [...area.children].map((child) => child.className);
-    expect(classes.indexOf('subagent-sessions')).toBeGreaterThan(-1);
-    expect(classes.indexOf('changed-files')).toBe(classes.indexOf('subagent-sessions') + 1);
+    const classes = [...must(h.container, '.header-area').children].map((child) => child.className);
+    expect(classes).not.toContain('changed-files');
+    expect(must(h.container, '#panel-tab-changes').textContent).toBe('Changes1');
   });
 
   it('sends session.diff.open for the open session and the exact path of the pressed row', () => {
@@ -2231,6 +2343,7 @@ describe('changed files (issue #31)', () => {
       sessionID: SES,
       files: [changed('src/a.ts'), changed('src/b.ts')],
     });
+    h.button('Changes2').click();
     h.button('Open diff of src/b.ts, Modified, 3 added, 1 deleted').click();
     expect(h.sent).toEqual([{ type: 'session.diff.open', sessionID: SES, path: 'src/b.ts' }]);
   });
@@ -2239,6 +2352,7 @@ describe('changed files (issue #31)', () => {
     const h = start();
     h.apply(...openWith([{ id: SES, title: 'Fix the build' }], [user('m1', 'hi')]));
     h.apply({ type: 'session.diff', sessionID: 'ses_other', files: [changed('src/a.ts')] });
+    h.button('Changes').click();
     expect(h.container.querySelector('.changed-files')).toBeNull();
   });
 
@@ -2251,6 +2365,7 @@ describe('changed files (issue #31)', () => {
       files: [changed('src/a.ts')],
       error: { code: 'Boom', message: 'it broke' },
     });
+    h.button('Changes1').click();
     expect(must(h.container, '.changed-files-error').textContent).toBe(
       'Could not refresh the list: it broke',
     );
@@ -3763,5 +3878,391 @@ describe('subagent bar in the App (issue #189)', () => {
     const { requestId, rest } = splitRequestId(h.sent[0]);
     expect(rest).toEqual({ type: 'subagent.stop', parentID: SES, sessionID: 'ses_k2' });
     expect(h.store.state.stopping).toEqual({ ses_k2: requestId });
+  });
+});
+
+// Protects issue #188 (phase 3, decisions P1/P2 of Sergio): the tab row changes only the area of
+// <main>, so the bottom stack (activity footer, chips, prompt box) and the context line are there
+// in every tab; the tab survives a hide/show through `uiState`; the chips cancel, steer and edit
+// through the right messages; and the footer names the tool, the step and the running subagents.
+// FABRICATED host messages in jsdom, the same harness as the rest of this file. They confirm the
+// wiring, not the layout or the clock in a real window (`test:visual` step 54, phase 5).
+describe('panel tabs and queue chips (issue #188)', () => {
+  const queued = (id: string, text: string, delivery: 'queue' | 'steer' = 'queue') => ({
+    id,
+    text,
+    delivery,
+    files: 0,
+  });
+  const inbox = (...items: ReturnType<typeof queued>[]): HostToWebview => ({
+    type: 'session.inbox',
+    sessionID: SES,
+    items,
+  });
+  const panel = (h: Harness, tab: string) => must(h.container, `#panel-${tab}`);
+
+  it('shows the Chat panel first and swaps panels with the tab row, hiding the others', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    expect(panel(h, 'chat').hidden).toBe(false);
+    expect(panel(h, 'changes').hidden).toBe(true);
+    h.button('Changes').click();
+    expect(panel(h, 'chat').hidden).toBe(true);
+    expect(panel(h, 'changes').hidden).toBe(false);
+    expect(must(h.container, '#panel-tab-changes').getAttribute('aria-selected')).toBe('true');
+    // The conversation stays mounted, so its scroll survives the swap.
+    expect(panel(h, 'chat').querySelector('[role="log"]')).not.toBeNull();
+  });
+
+  it('keeps the prompt box, the footer, the context line and the chips in every tab', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    h.apply(inbox(queued('i1', 'later')));
+    h.button('Session').click();
+    for (const selector of ['form.prompt', '.activity', '.queue-chips', '.header-area']) {
+      const element = must(h.container, selector);
+      expect(element.closest('[hidden]'), selector).toBeNull();
+      expect(element.closest('main'), selector).toBeNull();
+    }
+  });
+
+  it('saves the tab and restores it from the persisted state', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]));
+    h.button('Session').click();
+    expect(h.saved.at(-1)).toMatchObject({ tab: 'session' });
+    const again = start({ tab: 'changes' });
+    expect(panel(again, 'changes').hidden).toBe(false);
+    expect(panel(again, 'chat').hidden).toBe(true);
+  });
+
+  it('badges Chat while a turn runs and Changes with the number of files', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    expect(must(h.container, '#panel-tab-chat').textContent).toBe('Chatworking');
+    h.apply({
+      type: 'session.diff',
+      sessionID: SES,
+      files: [
+        {
+          path: 'a.ts',
+          status: 'modified',
+          additions: 1,
+          deletions: 0,
+          binary: false,
+          tooLarge: false,
+        },
+      ],
+    });
+    expect(must(h.container, '#panel-tab-changes').textContent).toBe('Changes1');
+  });
+
+  it('draws one chip per queued prompt and removes it when the host says it is gone', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    h.apply(inbox(queued('i1', 'first'), queued('i2', 'second')));
+    const texts = () =>
+      [...h.container.querySelectorAll('.queue-chip-text')].map((chip) => chip.textContent);
+    expect(texts()).toEqual(['Queued: "first"', 'Queued: "second"']);
+    h.apply(inbox(queued('i2', 'second')));
+    expect(texts()).toEqual(['Queued: "second"']);
+  });
+
+  it('asks the host to cancel and to steer the pressed chip, by its inbox id', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    h.apply(inbox(queued('i1', 'first'), queued('i2', 'second')));
+    const chip = h.container.querySelectorAll<HTMLElement>('.queue-chip')[1];
+    chip?.querySelector<HTMLButtonElement>('[aria-label^="Remove from queue"]')?.click();
+    expect(splitRequestId(h.sent[0]).rest).toEqual({
+      type: 'inbox.cancel',
+      sessionID: SES,
+      inboxID: 'i2',
+    });
+    h.apply({ type: 'request.result', requestId: splitRequestId(h.sent[0]).requestId });
+    h.container.querySelectorAll<HTMLElement>('.queue-chip')[0]?.querySelector('button')?.click();
+    expect(splitRequestId(h.sent[1]).rest).toEqual({
+      type: 'inbox.steer',
+      sessionID: SES,
+      inboxID: 'i1',
+    });
+  });
+
+  // Protects review S1 (decision of Sergio, 12/11/2026): Edit cancels first and gives the text back
+  // only when the host CONFIRMS the cancel, so the box is still empty while the request is in
+  // flight; with text in the box it only says why. Fabricated host (jsdom), no real server.
+  it('Edit cancels and hands the text back once the host confirms; with text in the box it only says why', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    h.apply(inbox(queued('i1', 'rewrite me')));
+    h.type('typing');
+    h.button('Edit').click();
+    expect(h.sent).toEqual([]);
+    expect(h.textarea().value).toBe('typing');
+    expect(h.container.textContent).toContain('Clear the message box to edit a queued message');
+    h.type('');
+    h.button('Edit').click();
+    expect(splitRequestId(h.sent[0]).rest).toEqual({
+      type: 'inbox.cancel',
+      sessionID: SES,
+      inboxID: 'i1',
+    });
+    expect(h.textarea().value).toBe(''); // not before the host confirms
+    h.apply({ type: 'request.result', requestId: splitRequestId(h.sent[0]).requestId });
+    expect(h.textarea().value).toBe('rewrite me');
+  });
+
+  // Protects review W4 (second pass of #188): with an Edit in flight a second Edit on another chip
+  // does nothing (aria-disabled, no second cancel), so the text of the first prompt is not lost
+  // when the host confirms. Fabricated host (jsdom), no real server.
+  it('keeps the text of the first Edit when a second Edit is pressed before the host answers', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    h.apply(inbox(queued('i1', 'first text'), queued('i2', 'second text')));
+    const edits = () => [
+      ...h.container.querySelectorAll<HTMLButtonElement>('[aria-label^="Edit:"]'),
+    ];
+    edits()[0]?.click();
+    expect(edits().map((b) => b.getAttribute('aria-disabled'))).toEqual(['true', 'true']);
+    expect(edits()[1]?.getAttribute('title')).toBe('Wait for the other edit to finish');
+    edits()[1]?.click();
+    expect(h.sent).toHaveLength(1);
+    h.apply({ type: 'request.result', requestId: splitRequestId(h.sent[0]).requestId });
+    expect(h.textarea().value).toBe('first text');
+  });
+
+  // Protects review S1: the server delivered the prompt before the cancel (the host answers
+  // `NotQueued`), so the text is already in the conversation and must NOT also land in the box.
+  it('Edit leaves the box empty and shows the notice when the host answers NotQueued', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    h.apply(inbox(queued('i1', 'rewrite me')));
+    h.button('Edit').click();
+    h.apply({
+      type: 'request.result',
+      requestId: splitRequestId(h.sent[0]).requestId,
+      error: { code: 'NotQueued', message: 'That prompt is no longer in the queue' },
+    });
+    expect(h.textarea().value).toBe('');
+    expect(h.container.textContent).toContain('That prompt is no longer in the queue');
+  });
+
+  // Protects review S2: with several chips the three buttons of each one are told apart by the
+  // short text of their prompt, and the visible word stays at the start of the name.
+  it('names the buttons of each chip with the text of its prompt', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy' }));
+    h.apply(inbox(queued('i1', 'first'), queued('i2', 'second')));
+    const names = [...h.container.querySelectorAll('.queue-chip button')].map((b) =>
+      b.getAttribute('aria-label'),
+    );
+    expect(names).toEqual([
+      'Steer now: "first"',
+      'Edit: "first"',
+      'Remove from queue: "first"',
+      'Steer now: "second"',
+      'Edit: "second"',
+      'Remove from queue: "second"',
+    ]);
+  });
+
+  it('names the tool, the step and the running subagents in the footer', () => {
+    const h = start();
+    h.apply(
+      ...openSession([user('m1', 'hi'), assistant('m2'), assistant('m3')], { type: 'busy' }, {
+        m3: [
+          {
+            type: 'tool',
+            id: 't1',
+            name: 'edit',
+            state: { status: 'running', input: { path: 'src/auth/login.ts' } },
+          },
+        ],
+      } as never),
+    );
+    h.apply({
+      type: 'subagent.activity',
+      sessionID: SES,
+      activity: { sessionID: 'ses_k1', parentID: SES, running: true, toolCount: 1, recent: [] },
+    });
+    const footer = must(h.container, '.activity');
+    expect(must(footer, '.activity-label').textContent).toBe('Editing src/auth/login.ts');
+    const meta = [...footer.querySelectorAll('.activity-meta')].map((node) => node.textContent);
+    expect(meta).toContain('Step 2');
+    expect(meta).toContain('1 subagent running');
+  });
+
+  it('advances the clock of the footer once a second from the server start time', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(100_000);
+      const h = start();
+      h.apply(
+        ...openSession([user('m1', 'hi'), assistant('m2')], { type: 'busy', since: 100_000 }),
+      );
+      const clock = () => must(h.container, '.activity-time').textContent;
+      expect(clock()).toBe('0:00');
+      expect(must(h.container, '.activity-time').getAttribute('aria-hidden')).toBe('true');
+      vi.advanceTimersByTime(65_000);
+      expect(clock()).toBe('1:05');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('puts Compact in the context line from 80 % and sends session.compact', () => {
+    const h = start();
+    h.apply({
+      type: 'catalog',
+      catalog: {
+        models: [
+          {
+            providerID: 'opencode',
+            id: 'big-pickle',
+            name: 'Big Pickle',
+            status: 'active',
+            contextLimit: 100_000,
+            free: true,
+            variants: [],
+            images: true,
+          },
+        ],
+        providers: [],
+        agents: [],
+      },
+    });
+    h.apply(
+      ...openSession([
+        user('m1', 'hi'),
+        assistant('m2', {
+          tokens: { input: 90_000, output: 10, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+        }),
+      ]),
+    );
+    expect(must(h.container, '.usage-line').getAttribute('data-level')).toBe('high');
+    h.button('Compact').click();
+    expect(h.sent).toMatchObject([{ type: 'session.compact', sessionID: SES }]);
+  });
+});
+
+// Protects issue #188 phase 4: the Session tab's actions reach the host with the right messages and
+// the bounds the host validates (a message over the cap is never begun, or `pending` would never
+// empty), the Add and Export buttons wait for their request, and the tab mounts only while active.
+// FABRICATED host messages in jsdom; the dialog and the real host contract are not covered here.
+describe('session tab (issue #188)', () => {
+  const entry = (key: string, text: string) => ({ key, text, json: false });
+  const field = (h: Harness) => must<HTMLInputElement>(h.container, 'input.instruction-input');
+  const typeInstruction = (h: Harness, text: string): void => {
+    const input = field(h);
+    input.value = text;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
+  it('mounts the panel only while the Session tab is active', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]));
+    expect(h.container.querySelector('.session-panel')).toBeNull();
+    h.button('Session').click();
+    expect(must(h.container, '#panel-session .session-panel')).toBeDefined();
+    h.button('Chat').click();
+    expect(h.container.querySelector('.session-panel')).toBeNull();
+  });
+
+  it('sends instructions.add with the trimmed text and waits for its result', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]));
+    h.button('Session').click();
+    typeInstruction(h, '  answer briefly ');
+    h.button('Add').click();
+    const { requestId, rest } = splitRequestId(h.sent.at(-1));
+    expect(rest).toEqual({ type: 'instructions.add', sessionID: SES, text: 'answer briefly' });
+    expect(h.store.state.pending).toContain(requestId);
+    expect(h.button('Add').getAttribute('aria-disabled')).toBe('true');
+    h.apply({ type: 'request.result', requestId });
+    expect(h.store.state.pending).toEqual([]);
+  });
+
+  it('refuses an instruction over the cap with a notice and begins nothing', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]));
+    h.button('Session').click();
+    typeInstruction(h, 'x'.repeat(4001));
+    h.button('Add').click();
+    expect(h.sent).toEqual([]);
+    expect(h.store.state.pending).toEqual([]);
+    expect(h.container.textContent).toContain('An instruction can have at most 4000 characters');
+    // The text stays in the box: nothing was sent.
+    expect(field(h).value).toHaveLength(4001);
+  });
+
+  it('sends instructions.remove for the key of the pressed row', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]), {
+      type: 'session.instructions',
+      sessionID: SES,
+      entries: [entry('note-a', 'one'), entry('note-b', 'two')],
+    });
+    h.button('Session').click();
+    h.button('Remove instruction two').click();
+    expect(splitRequestId(h.sent.at(-1)).rest).toEqual({
+      type: 'instructions.remove',
+      sessionID: SES,
+      key: 'note-b',
+    });
+  });
+
+  it('sends session.export for each format and marks the section busy until the result', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi')]));
+    h.button('Session').click();
+    h.button('Markdown').click();
+    const first = splitRequestId(h.sent.at(-1));
+    expect(first.rest).toEqual({ type: 'session.export', sessionID: SES, format: 'markdown' });
+    expect(h.container.querySelector('[aria-busy="true"]')).not.toBeNull();
+    // Still busy: a second press is ignored.
+    h.button('JSON').click();
+    expect(h.sent).toHaveLength(1);
+    h.apply({ type: 'request.result', requestId: first.requestId });
+    expect(h.container.querySelector('[aria-busy="true"]')).toBeNull();
+    h.button('JSON').click();
+    expect(splitRequestId(h.sent.at(-1)).rest).toEqual({
+      type: 'session.export',
+      sessionID: SES,
+      format: 'json',
+    });
+  });
+
+  it('runs the same compaction as the header from the Context section', () => {
+    const h = start();
+    h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));
+    h.apply({
+      type: 'message.upserted',
+      sessionID: SES,
+      message: assistant('m3', {
+        tokens: { input: 10, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+    });
+    h.button('Session').click();
+    h.button('Compact').click();
+    expect(h.sent).toMatchObject([{ type: 'session.compact', sessionID: SES }]);
+  });
+
+  it('opens a subagent session from the Subagents section', () => {
+    const h = start();
+    h.apply(
+      ...openWith(
+        [
+          { id: SES, title: 'Fix the build' },
+          { id: 'ses_k1', parentID: SES, title: 'Read the docs', agent: 'explore', createdAt: 3 },
+        ],
+        [user('m1', 'hi')],
+      ),
+    );
+    h.button('Session').click();
+    h.button('Open subagent session Read the docs').click();
+    expect(splitRequestId(h.sent.at(-1)).rest).toEqual({
+      type: 'session.open',
+      sessionID: 'ses_k1',
+    });
   });
 });

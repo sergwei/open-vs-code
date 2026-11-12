@@ -909,6 +909,210 @@ describe('subagents (issue #189)', () => {
   });
 });
 
+// Protects the queue of prompts (issue #188): `session.inbox` REPLACES the open session's list and
+// keeps the object of a chip that stays (the chip buttons keep their DOM node and focus when
+// another is removed), one for another session is ignored, a snapshot replaces the record or keeps
+// the open session's list when the host could not read it, and a removal or a server that goes
+// away empties it. Provenance: FABRICATED host messages, not a recorded stream.
+describe('inbox (issue #188)', () => {
+  const item = (id: string, delivery: 'steer' | 'queue' = 'queue') => ({
+    id,
+    text: `prompt ${id}`,
+    delivery,
+    files: 0,
+  });
+
+  it('starts empty and replaces the list of the open session, keeping the chips that stay', () => {
+    withStore((store) => {
+      expect(store.state.inbox).toEqual({});
+      store.apply({ type: 'session.inbox', sessionID: SES, items: [item('a'), item('b')] });
+      const first = store.state.inbox[SES]?.[0];
+      const second = store.state.inbox[SES]?.[1];
+      store.apply({
+        type: 'session.inbox',
+        sessionID: SES,
+        items: [item('a', 'steer'), item('b')],
+      });
+      expect(store.state.inbox[SES]?.[0]).toBe(first);
+      expect(store.state.inbox[SES]?.[1]).toBe(second);
+      expect(store.state.inbox[SES]?.[0]?.delivery).toBe('steer');
+      // Removing the first: the survivor keeps its object.
+      store.apply({ type: 'session.inbox', sessionID: SES, items: [item('b')] });
+      expect(store.state.inbox[SES]).toHaveLength(1);
+      expect(store.state.inbox[SES]?.[0]).toBe(second);
+      store.apply({ type: 'session.inbox', sessionID: SES, items: [] });
+      expect(store.state.inbox[SES]).toEqual([]);
+    });
+  });
+
+  it('ignores a list for a session that is not the open one', () => {
+    withStore((store) => {
+      store.apply({ type: 'session.inbox', sessionID: 'other', items: [item('a')] });
+      expect(store.state.inbox).toEqual({});
+    });
+  });
+
+  it('takes the list of a snapshot, and keeps the open one when the snapshot has none', () => {
+    withStore((store) => {
+      const base = openSnapshot();
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...base, open: { ...base.open, inbox: [item('a'), item('b')] } },
+      });
+      expect(store.state.inbox[SES]?.map((queued) => queued.id)).toEqual(['a', 'b']);
+      const kept = store.state.inbox[SES]?.[0];
+      // `open.inbox` absent = the host could not read it: the stream's list stands.
+      store.apply({ type: 'snapshot', snapshot: base });
+      expect(store.state.inbox[SES]?.[0]).toBe(kept);
+      // An empty list, on the other hand, is the host's word: nothing is queued.
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...base, open: { ...base.open, inbox: [] } },
+      });
+      expect(store.state.inbox[SES]).toEqual([]);
+    });
+  });
+
+  it('drops the record when a snapshot opens another session or none', () => {
+    withStore((store) => {
+      store.apply({ type: 'session.inbox', sessionID: SES, items: [item('a')] });
+      const base = openSnapshot();
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...base, open: { ...base.open, sessionID: 'ses_2' } },
+      });
+      expect(store.state.inbox).toEqual({});
+      store.apply({ type: 'session.inbox', sessionID: 'ses_2', items: [item('a')] });
+      const { open: _none, ...closed } = base;
+      store.apply({ type: 'snapshot', snapshot: closed });
+      expect(store.state.inbox).toEqual({});
+    });
+  });
+
+  it('empties the record when the open session is removed or the server goes away', () => {
+    withStore((store) => {
+      store.apply({ type: 'session.inbox', sessionID: SES, items: [item('a')] });
+      store.apply({ type: 'connection.state', connection: { state: 'stopped' } });
+      expect(store.state.inbox).toEqual({});
+      store.apply({ type: 'session.inbox', sessionID: SES, items: [item('a')] });
+      store.apply({ type: 'session.removed', sessionID: SES });
+      expect(store.state.inbox).toEqual({});
+    });
+  });
+});
+
+// Protects the instructions pinned to the open session (issue #188): `session.instructions`
+// REPLACES the list keeping the object of a row that stays, sets and clears the error that marks
+// the list as possibly old, one for another session is ignored, a snapshot replaces the record or
+// keeps the open session's list and error when the host could not read it, and a removal or a
+// server that goes away empties both. Provenance: FABRICATED host messages, not a recorded stream.
+describe('instructions (issue #188)', () => {
+  const entry = (key: string, text = `rule ${key}`) => ({ key, text, json: false });
+  const failure = { code: 'Boom', message: 'could not read' };
+
+  it('starts empty and replaces the list, keeping the rows that stay', () => {
+    withStore((store) => {
+      expect(store.state.instructions).toEqual({});
+      store.apply({
+        type: 'session.instructions',
+        sessionID: SES,
+        entries: [entry('note-a'), entry('note-b')],
+      });
+      const first = store.state.instructions[SES]?.[0];
+      const second = store.state.instructions[SES]?.[1];
+      store.apply({ type: 'session.instructions', sessionID: SES, entries: [entry('note-b')] });
+      expect(store.state.instructions[SES]).toHaveLength(1);
+      expect(store.state.instructions[SES]?.[0]).toBe(second);
+      expect(second).not.toBe(first);
+      store.apply({ type: 'session.instructions', sessionID: SES, entries: [] });
+      expect(store.state.instructions[SES]).toEqual([]);
+    });
+  });
+
+  it('ignores a list for a session that is not the open one', () => {
+    withStore((store) => {
+      store.apply({ type: 'session.instructions', sessionID: 'other', entries: [entry('note-a')] });
+      expect(store.state.instructions).toEqual({});
+    });
+  });
+
+  it('sets the error with the list and clears it with the next list without one', () => {
+    withStore((store) => {
+      store.apply({
+        type: 'session.instructions',
+        sessionID: SES,
+        entries: [entry('note-a')],
+        error: failure,
+      });
+      expect(store.state.instructionsError[SES]).toEqual(failure);
+      store.apply({ type: 'session.instructions', sessionID: SES, entries: [entry('note-a')] });
+      expect(store.state.instructionsError).toEqual({});
+    });
+  });
+
+  it('takes the list of a snapshot, and keeps the open one and its error when the snapshot has none', () => {
+    withStore((store) => {
+      const base = openSnapshot();
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...base, open: { ...base.open, instructions: [entry('note-a')] } },
+      });
+      expect(store.state.instructions[SES]?.map((view) => view.key)).toEqual(['note-a']);
+      store.apply({
+        type: 'session.instructions',
+        sessionID: SES,
+        entries: [entry('note-a')],
+        error: failure,
+      });
+      const kept = store.state.instructions[SES]?.[0];
+      // `open.instructions` absent = the host could not read them: what the webview had stands.
+      store.apply({ type: 'snapshot', snapshot: base });
+      expect(store.state.instructions[SES]?.[0]).toBe(kept);
+      expect(store.state.instructionsError[SES]).toEqual(failure);
+      // A list in the snapshot is the host's word: it replaces the entries and clears the error.
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...base, open: { ...base.open, instructions: [] } },
+      });
+      expect(store.state.instructions[SES]).toEqual([]);
+      expect(store.state.instructionsError).toEqual({});
+    });
+  });
+
+  it('drops the record when a snapshot opens another session or none', () => {
+    withStore((store) => {
+      store.apply({ type: 'session.instructions', sessionID: SES, entries: [entry('note-a')] });
+      const base = openSnapshot();
+      store.apply({
+        type: 'snapshot',
+        snapshot: { ...base, open: { ...base.open, sessionID: 'ses_2' } },
+      });
+      expect(store.state.instructions).toEqual({});
+      store.apply({ type: 'session.instructions', sessionID: 'ses_2', entries: [entry('note-a')] });
+      const { open: _none, ...closed } = base;
+      store.apply({ type: 'snapshot', snapshot: closed });
+      expect(store.state.instructions).toEqual({});
+    });
+  });
+
+  it('empties the record when the open session is removed or the server goes away', () => {
+    withStore((store) => {
+      store.apply({
+        type: 'session.instructions',
+        sessionID: SES,
+        entries: [entry('note-a')],
+        error: failure,
+      });
+      store.apply({ type: 'connection.state', connection: { state: 'stopped' } });
+      expect(store.state.instructions).toEqual({});
+      expect(store.state.instructionsError).toEqual({});
+      store.apply({ type: 'session.instructions', sessionID: SES, entries: [entry('note-a')] });
+      store.apply({ type: 'session.removed', sessionID: SES });
+      expect(store.state.instructions).toEqual({});
+    });
+  });
+});
+
 // Protects the Stop mark of the subagent monitor and the "Answer" focus request (issue #189): a
 // mark exists for each child of the request until THAT request's result arrives and never touches
 // `pending`; `requestFocus` fills the slot the dock reads. Provenance: FABRICATED messages.

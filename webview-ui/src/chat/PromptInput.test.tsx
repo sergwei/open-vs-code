@@ -343,37 +343,66 @@ describe('in Spanish (E11-i18n, phase 5a)', () => {
     expect(container.querySelector('[role="status"]')?.textContent?.trim()).toBe('1 comando');
   });
 
-  it('says "Stop" in Spanish while a turn runs', () => {
+  // Protects issue #188: the busy composer says "Poner en cola" (the shipped catalog, not a copy)
+  // and the placeholder names the steering key; FABRICATED props, jsdom.
+  it('says "Queue" in Spanish while a turn runs', () => {
     useSpanish();
-    setup({ busy: true });
-    const labels = [...(mounted?.container.querySelectorAll('button') ?? [])].map((b) =>
-      b.getAttribute('aria-label'),
-    );
-    expect(labels).toContain('Detener');
-    expect(labels).not.toContain('Enviar');
+    const { textarea } = setup({ busy: true });
+    const submit = mounted?.container.querySelector('button[type="submit"]');
+    expect(submit?.textContent).toBe('Poner en cola');
+    expect(textarea.placeholder).toContain('dirigir ahora');
   });
 });
 
 describe('busy', () => {
-  it('shows Stop instead of Send', () => {
+  // Protects issue #188: with a turn running the composer keeps a submit button, now named "Queue",
+  // and has NO Stop button (the activity footer owns the only one). FABRICATED props, jsdom.
+  it('has the Queue button and no Stop button while busy', () => {
     setup({ busy: true });
     const container = mounted?.container ?? document.body;
     const labels = [...container.querySelectorAll('button')].map((b) =>
       b.getAttribute('aria-label'),
     );
-    expect(labels).toContain('Stop');
+    expect(labels).not.toContain('Stop');
     expect(labels).not.toContain('Send');
-    expect(container.querySelector('button[type="submit"]')).toBeNull();
+    const submit = container.querySelector('button[type="submit"]');
+    expect(submit?.textContent).toBe('Queue');
+    expect(submit?.classList.contains('send-button')).toBe(true);
   });
 
-  it('calls onStop for the Stop button and for Escape, only while busy', () => {
+  // Protects issue #188: Enter asks for `queue`, Ctrl+Enter and Cmd+Enter for `steer`, with a turn
+  // running; at rest the same keys still send (the parent turns steer into a plain send).
+  // FABRICATED props, jsdom.
+  it('queues with Enter and steers with Ctrl+Enter or Cmd+Enter while a turn runs', () => {
     const busy = setup({ busy: true });
-    const stopButton = [...(mounted?.container.querySelectorAll('button') ?? [])].find(
-      (b) => b.getAttribute('aria-label') === 'Stop',
-    );
-    stopButton?.click();
+    busy.press('Enter');
+    busy.press('Enter', { ctrlKey: true });
+    busy.press('Enter', { metaKey: true });
+    expect(busy.calls.submit.mock.calls).toEqual([['queue'], ['steer'], ['steer']]);
+    mounted?.dispose();
+
+    const idle = setup({ busy: false });
+    idle.press('Enter', { ctrlKey: true });
+    expect(idle.calls.submit).toHaveBeenCalledWith('steer');
+  });
+
+  // Protects issue #188: the Queue button submits the form as `queue`.
+  it('submits as queue from the Queue button', () => {
+    const busy = setup({ busy: true });
+    must<HTMLButtonElement>(mounted?.container ?? document.body, 'button[type="submit"]').click();
+    expect(busy.calls.submit).toHaveBeenCalledWith('queue');
+  });
+
+  // Protects issue #188: the placeholder tells how to queue and steer while busy.
+  it('says how to queue and steer in the placeholder', () => {
+    const busy = setup({ busy: true });
+    expect(busy.textarea.placeholder).toBe('Type to queue (Ctrl+Enter: steer now)…');
+  });
+
+  it('calls onStop for Escape, only while busy', () => {
+    const busy = setup({ busy: true });
     busy.press('Escape');
-    expect(busy.calls.stop).toHaveBeenCalledTimes(2);
+    expect(busy.calls.stop).toHaveBeenCalledTimes(1);
     mounted?.dispose();
 
     const idle = setup({ busy: false });

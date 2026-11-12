@@ -9,6 +9,13 @@
 //     `session.status` and NO `session.idle`; lesson `estado-sesion-execution`);
 //   - the user message appears on `session.inbox.delivered`, with the payload remembered from
 //     `enqueued` (VERIFIED, same spike; `inboxID` is the id REST returns for that message);
+//   - the prompts still waiting in the inbox (issue #188) are kept per session and every
+//     `enqueued`, `delivered`, `cancelled` and `delivery.changed` of a tracked session emits the
+//     WHOLE list as `session.inbox` (it is short, so there are no deltas). `seedInbox` gives a
+//     resync the list REST read, with the inbox events that arrived after the resync began laid on
+//     top (rule "the snapshot is a photo", `opencode-api` §4). `execution.started` carries its
+//     `created` as the `since` of the `busy` status. The events and their shapes were read in the
+//     types of `@opencode/client@2.2.7`; none was recorded from a running server (UNVERIFIED);
 //   - block ids are a per-message position counter (`contentPartId`), and events are routed like
 //     the core projector does: text -> last text block, reasoning -> last reasoning block not
 //     completed, tool -> by id. `ordinal` is NOT used as an index (VERIFIED, same spike: both
@@ -41,13 +48,14 @@
 // WHOLE object, so what a snapshot/stream gap lost is repaired when the block closes. A delta for
 // an unknown message or block is dropped (deltas are not idempotent, so they cannot be replayed).
 
-import type { SessionMessageInfo, V2Event } from '@opencode/client';
+import type { SessionInboxInfo, SessionMessageInfo, V2Event } from '@opencode/client';
 import * as l10n from '@vscode/l10n';
 import type {
   ErrorInfo,
   JsonObject,
   MessageInfo,
   Part,
+  QueuedPrompt,
   SessionStatus,
   SessionSummary,
   SessionUsage,
@@ -112,6 +120,19 @@ type PendingUser = {
   sessionID: string;
   text: string;
   files: ReturnType<typeof toAttachments>;
+};
+
+/**
+ * The last thing the stream said about one inbox item, with the position it was written at (the
+ * same counter as the statuses), so a resync overlays only what came after its stamp.
+ */
+type InboxChange = {
+  sessionID: string;
+  at: number;
+  change:
+    | { kind: 'put'; item: QueuedPrompt }
+    | { kind: 'remove' }
+    | { kind: 'delivery'; delivery: QueuedPrompt['delivery'] };
 };
 
 /** A user message the stream delivered, with the session it belongs to. */
@@ -269,6 +290,29 @@ export interface EventTranslator {
    */
   forgetFrom(messageID: string, sessionID?: string): void;
   /**
+   * Reconciles the queue of prompts of `sessionID` with what REST read (issue #188) and returns it.
+   * `items` is the `session.inbox.list` answer read after {@link EventTranslator.beginResync}
+   * handed `token`; only its `user` items count. The inbox events the stream delivered AFTER
+   * `token` (default: the newest stamp) are laid on top and win: one that delivered or cancelled
+   * an item REST still lists removes it, one that enqueued an item REST does not list adds it, one
+   * that changed a delivery sets it. Nothing is cleared: the result REPLACES the session's queue,
+   * and REST items also seed the payloads `delivered` needs, so a prompt enqueued before a
+   * reconnection still becomes a user message when it is delivered. With `items` undefined (the
+   * read failed) the queue the stream built is returned untouched. Items keep REST's order, new
+   * ones are appended. Call it with the snapshot, BEFORE publishing and without an `await` between.
+   */
+  seedInbox(
+    sessionID: string,
+    items: readonly SessionInboxInfo[] | undefined,
+    token?: ResyncToken,
+  ): QueuedPrompt[];
+  /**
+   * The queue of prompts of `sessionID` as the translator holds it now (issue #188), in enqueue
+   * order; empty for a session it does not track. The host checks the ids of `inbox.cancel` and
+   * `inbox.steer` against it, so the webview can only name an item the host listed.
+   */
+  queueOf(sessionID: string): QueuedPrompt[];
+  /**
    * Sets the sessions whose messages and parts are forwarded (one per chat surface) and clears the
    * message state of the ones that stopped being tracked; state of a session that stays tracked is
    * kept. Permissions and forms are NOT tied to it: they are forwarded for every session (phase
@@ -315,6 +359,15 @@ export interface EventTranslator {
  * its own session" and "keeps the idle that arrived after the first resync began although a
  * second one began later" (fabricated events, Windows 11, 25/10/2026); not observed with a real
  * server interleaving two sessions.
+ * Issue #188 added the inbox queue: `session.inbox.enqueued`, `.delivered`, `.cancelled` and
+ * `.delivery.changed` of a tracked session emit `session.inbox` (the whole list; `delivered` also
+ * emits the user message first, and only when the list changed), `seedInbox` reconciles a resync
+ * with them, and `session.execution.started` gives the `busy` status its `since`. Compaction,
+ * synthetic and move items never enter the queue. UNVERIFIED against a running server: the events
+ * come from the types of 2.2.7 and the fake. The opt-in case "lists and cancels an inbox item, pins
+ * and removes an instruction and exports a session" of `realOpencode.test.ts` covers one queued
+ * item (it passed against an opencode 2.2.5 executable on 12/11/2026), not the order of the events
+ * with several prompts queued.
  */
 export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslator {
   const sessions = new Map<string, SessionSummary>();
@@ -346,6 +399,56 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
    * `liveStatuses`; an entry leaves when the compaction ends, fails or its turn closes.
    */
   const liveCompactions = new Map<string, { id: string; createdAt: number }>();
+  /**
+   * The prompts waiting in the inbox per tracked session (issue #188), in enqueue order. Built by
+   * the inbox events and replaced by {@link EventTranslator.seedInbox}; emitted whole as
+   * `session.inbox`.
+   */
+  const queues = new Map<string, Map<string, QueuedPrompt>>();
+  /**
+   * The last inbox event per inbox id, so `seedInbox` can lay what the stream said after a resync
+   * began over the REST list. Bounded like `liveStatuses`; unlike a `.clear()`, an entry only leaves
+   * by eviction or when its session stops being tracked.
+   */
+  const inboxEvents = new Map<string, InboxChange>();
+
+  /** Remembers what the stream said about one inbox item, evicting the oldest entry beyond the bound. */
+  const noteInbox = (inboxID: string, sessionID: string, change: InboxChange['change']): void => {
+    if (inboxEvents.size >= MAX_LIVE_STATUSES) {
+      const oldest = inboxEvents.keys().next();
+      if (!oldest.done) inboxEvents.delete(oldest.value);
+    }
+    inboxEvents.delete(inboxID); // re-insert at the end so the oldest is evicted first
+    inboxEvents.set(inboxID, { sessionID, at: ++sequence, change });
+  };
+
+  /** The `session.inbox` message with the whole queue of `sessionID` as it stands now. */
+  const inboxMessage = (sessionID: string): HostToWebview => ({
+    type: 'session.inbox',
+    sessionID,
+    items: [...(queues.get(sessionID)?.values() ?? [])],
+  });
+
+  /** Remembers the payload of a queued prompt until its `delivered`, evicting beyond the bound. */
+  const rememberPending = (inboxID: string, pending: PendingUser): void => {
+    if (pendingUsers.size >= MAX_PENDING_INBOX) {
+      const oldest = pendingUsers.keys().next();
+      if (!oldest.done) pendingUsers.delete(oldest.value);
+    }
+    pendingUsers.set(inboxID, pending);
+  };
+
+  /**
+   * Takes `inboxID` out of the queue of `sessionID` (it was delivered or cancelled) and remembers
+   * that, even when the queue never held it: a resync that began before this event must not bring
+   * the item back from its older REST list. Gives the `session.inbox` message, or `[]` when the
+   * queue did not change.
+   */
+  const dropQueued = (sessionID: string, inboxID: string): HostToWebview[] => {
+    noteInbox(inboxID, sessionID, { kind: 'remove' });
+    const removed = queues.get(sessionID)?.delete(inboxID) ?? false;
+    return removed ? [inboxMessage(sessionID)] : [];
+  };
 
   /** Remembers the compaction of `sessionID`, evicting the oldest entry beyond the bound. */
   const rememberCompaction = (sessionID: string, live: { id: string; createdAt: number }): void => {
@@ -508,7 +611,7 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
         if (live !== undefined) keepLongerText(fromRest.parts, live.parts);
         assistants.set(fromRest.info.id, fromRest);
       }
-      // Prune what REST no longer lists (it left the MESSAGE_LIMIT window or was deleted):
+      // Prune what REST no longer lists (it left the LOADED_MESSAGE_LIMIT window or was deleted):
       // `mergeLive` must not bring it back at the end of the chat, and the maps stay bounded.
       // A tracker that came from a previous seed is dropped whatever its date, because REST
       // itself once listed it; one born in the stream is only dropped when it is OLDER than
@@ -577,8 +680,53 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
       }
     },
 
+    seedInbox(sessionID, items, token = lastResync) {
+      if (items !== undefined) {
+        const next = new Map<string, QueuedPrompt>();
+        for (const item of items) {
+          if (item.type !== 'user') continue;
+          next.set(item.id, {
+            id: item.id,
+            text: item.payload.text,
+            delivery: item.delivery,
+            files: item.payload.files?.length ?? 0,
+          });
+        }
+        for (const [inboxID, entry] of inboxEvents) {
+          if (entry.sessionID !== sessionID || entry.at <= token.since) continue;
+          const { change } = entry;
+          if (change.kind === 'put') next.set(inboxID, change.item);
+          else if (change.kind === 'remove') next.delete(inboxID);
+          else {
+            const current = next.get(inboxID);
+            if (current !== undefined) next.set(inboxID, { ...current, delivery: change.delivery });
+          }
+        }
+        queues.set(sessionID, next);
+        // REST items bring the payload their `delivered` will need (the `enqueued` may have been
+        // missed in a gap); one the stream already told us about keeps its entry.
+        for (const item of items) {
+          if (item.type !== 'user' || !next.has(item.id) || pendingUsers.has(item.id)) continue;
+          rememberPending(item.id, {
+            sessionID,
+            text: item.payload.text,
+            files: toAttachments(item.payload.files),
+          });
+        }
+      }
+      return [...(queues.get(sessionID)?.values() ?? [])];
+    },
+
+    queueOf(sessionID) {
+      return [...(queues.get(sessionID)?.values() ?? [])];
+    },
+
     setTracked(sessionIDs) {
       const next = new Set(sessionIDs);
+      for (const id of [...queues.keys()]) if (!next.has(id)) queues.delete(id);
+      for (const [id, entry] of [...inboxEvents]) {
+        if (!next.has(entry.sessionID)) inboxEvents.delete(id);
+      }
       for (const [id, tracker] of [...assistants]) {
         if (!next.has(tracker.sessionID)) assistants.delete(id);
       }
@@ -667,7 +815,7 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
         }
 
         case 'session.execution.started':
-          return status(event.data.sessionID, { type: 'busy' });
+          return status(event.data.sessionID, { type: 'busy', since: event.created });
         case 'session.execution.succeeded':
         case 'session.execution.interrupted':
           return [
@@ -738,35 +886,70 @@ export function createEventTranslator(secrets: ErrorSecrets = {}): EventTranslat
         case 'session.inbox.enqueued': {
           const { data } = event;
           if (!tracked.has(data.sessionID) || data.item.type !== 'user') return [];
-          if (pendingUsers.size >= MAX_PENDING_INBOX) {
-            const oldest = pendingUsers.keys().next();
-            if (!oldest.done) pendingUsers.delete(oldest.value);
-          }
-          pendingUsers.set(data.inboxID, {
+          rememberPending(data.inboxID, {
             sessionID: data.sessionID,
             text: data.item.payload.text,
             files: toAttachments(data.item.payload.files),
           });
-          return [];
+          const item: QueuedPrompt = {
+            id: data.inboxID,
+            text: data.item.payload.text,
+            delivery: data.item.delivery,
+            files: data.item.payload.files?.length ?? 0,
+          };
+          noteInbox(data.inboxID, data.sessionID, { kind: 'put', item });
+          let queue = queues.get(data.sessionID);
+          if (queue === undefined) {
+            queue = new Map();
+            queues.set(data.sessionID, queue);
+          }
+          queue.set(item.id, item);
+          return [inboxMessage(data.sessionID)];
         }
         case 'session.inbox.delivered': {
           const { data } = event;
+          if (!tracked.has(data.sessionID)) return [];
+          const out: HostToWebview[] = [];
           const pending = pendingUsers.get(data.inboxID);
-          if (!tracked.has(data.sessionID) || pending === undefined) return [];
-          pendingUsers.delete(data.inboxID);
-          const user: Extract<MessageInfo, { kind: 'user' }> = {
-            kind: 'user',
-            id: data.inboxID,
-            createdAt: event.created,
-            text: pending.text,
-            files: pending.files,
-          };
-          if (liveUsers.size >= MAX_PENDING_INBOX) {
-            const oldest = liveUsers.keys().next();
-            if (!oldest.done) liveUsers.delete(oldest.value);
+          if (pending !== undefined) {
+            pendingUsers.delete(data.inboxID);
+            const user: Extract<MessageInfo, { kind: 'user' }> = {
+              kind: 'user',
+              id: data.inboxID,
+              createdAt: event.created,
+              text: pending.text,
+              files: pending.files,
+            };
+            if (liveUsers.size >= MAX_PENDING_INBOX) {
+              const oldest = liveUsers.keys().next();
+              if (!oldest.done) liveUsers.delete(oldest.value);
+            }
+            liveUsers.set(user.id, { sessionID: data.sessionID, user });
+            out.push(upsertMessage(data.sessionID, user));
           }
-          liveUsers.set(user.id, { sessionID: data.sessionID, user });
-          return [upsertMessage(data.sessionID, user)];
+          // The message first, then the shorter list: the webview applies both in one frame.
+          out.push(...dropQueued(data.sessionID, data.inboxID));
+          return out;
+        }
+        case 'session.inbox.cancelled': {
+          const { data } = event;
+          if (!tracked.has(data.sessionID)) return [];
+          pendingUsers.delete(data.inboxID); // it will never be delivered
+          return dropQueued(data.sessionID, data.inboxID);
+        }
+        case 'session.inbox.delivery.changed': {
+          const { data } = event;
+          if (!tracked.has(data.sessionID)) return [];
+          const current = queues.get(data.sessionID)?.get(data.inboxID);
+          if (current === undefined) {
+            // Not in the queue we built (a resync is about to bring it): remember the change.
+            noteInbox(data.inboxID, data.sessionID, { kind: 'delivery', delivery: data.delivery });
+            return [];
+          }
+          const item: QueuedPrompt = { ...current, delivery: data.delivery };
+          queues.get(data.sessionID)?.set(item.id, item);
+          noteInbox(data.inboxID, data.sessionID, { kind: 'put', item });
+          return [inboxMessage(data.sessionID)];
         }
 
         case 'session.step.started': {

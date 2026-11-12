@@ -71,8 +71,9 @@ export type MessageRoute = 'session' | 'all' | 'origin' | 'request';
  * Says where a host-to-webview message must go when there is more than one pane.
  *
  * `session`: the content of one session (`message.*`, `part.*`, `session.diff`, `session.revert`,
- * and `subagent.activity` of issue #189, whose `sessionID` is the PARENT a pane shows), only for
- * the panes showing it. `origin`: an answer to something one pane asked (`request.result`,
+ * `subagent.activity` of issue #189, whose `sessionID` is the PARENT a pane shows, and
+ * `session.inbox` and `session.instructions` of issue #188), only for the panes showing it.
+ * `origin`: an answer to something one pane asked (`request.result`,
  * `sessions.page`, `attachments.picked`, `files.found`, `ui.focus`, `ui.command`,
  * `prompt.compose` (issue #36: the prompt of one menu action goes to the one pane it was aimed
  * at, or two panes would send it twice), `snapshot`, `workMode.state` (E3-work-mode: the controller
@@ -98,6 +99,8 @@ export function routeOf(message: HostToWebview): MessageRoute {
     case 'session.diff':
     case 'session.revert':
     case 'subagent.activity': // #189: a child's digest, for the panes showing its PARENT
+    case 'session.inbox': // #188: the queue of one session, for the panes showing it
+    case 'session.instructions': // #188: the instructions pinned to one session
       return 'session';
     case 'request.result':
     case 'sessions.page':

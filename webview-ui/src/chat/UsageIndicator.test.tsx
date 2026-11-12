@@ -59,6 +59,7 @@ function start(
   messages: MessageInfo[],
   row: Partial<SessionSummary> = {},
   compactedAt?: number,
+  compact: { onCompact?: () => void; compactDisabled?: boolean } = {},
 ): { store: ChatStore; line: () => HTMLElement | null } {
   const store = createRoot(() => createChatStore());
   store.apply({ type: 'catalog', catalog });
@@ -77,12 +78,57 @@ function start(
       resolutions: [],
     },
   });
-  const view = mount(() => <UsageIndicator store={store} />);
+  const view = mount(() => (
+    <UsageIndicator
+      store={store}
+      onCompact={compact.onCompact}
+      compactDisabled={compact.compactDisabled}
+    />
+  ));
   mounted.push(view);
   return { store, line: () => view.container.querySelector<HTMLElement>('.usage-line') };
 }
 
 describe('UsageIndicator', () => {
+  // Protects issue #188 (decision P2=1): the 80 % warning IS the "Compact" button; it is absent
+  // below the high level and without a callback, and an `aria-disabled` one runs nothing.
+  // FABRICATED host messages in jsdom (tokens 170 000 of a 200 000 window = 85 %).
+  it('shows Compact only from the high level and runs the callback', () => {
+    let compacted = 0;
+    const onCompact = () => {
+      compacted += 1;
+    };
+    const low = start([answered('a', 10, 4912)], {}, undefined, { onCompact });
+    expect(low.line()?.parentElement?.querySelector('.usage-compact')).toBeNull();
+    const high = start([answered('b', 10, 170_000)], {}, undefined, { onCompact });
+    expect(high.line()?.getAttribute('data-level')).toBe('high');
+    const button = high
+      .line()
+      ?.parentElement?.querySelector<HTMLButtonElement>('button.usage-compact');
+    // Outside the sentence of the line: a screen reader's text for it is unchanged.
+    expect(high.line()?.querySelector('button')).toBeNull();
+    expect(button?.textContent).toBe('Compact');
+    button?.click();
+    expect(compacted).toBe(1);
+    const without = start([answered('c', 10, 170_000)]);
+    expect(without.line()?.parentElement?.querySelector('.usage-compact')).toBeNull();
+  });
+
+  it('does not call it while disabled, and keeps the button focusable', () => {
+    let compacted = 0;
+    const { line } = start([answered('a', 10, 170_000)], {}, undefined, {
+      onCompact: () => {
+        compacted += 1;
+      },
+      compactDisabled: true,
+    });
+    const button = line()?.parentElement?.querySelector<HTMLButtonElement>('button.usage-compact');
+    expect(button?.getAttribute('aria-disabled')).toBe('true');
+    expect(button?.disabled).toBe(false);
+    button?.click();
+    expect(compacted).toBe(0);
+  });
+
   it('draws nothing without an open session', () => {
     const store = createRoot(() => createChatStore());
     const view = mount(() => <UsageIndicator store={store} />);

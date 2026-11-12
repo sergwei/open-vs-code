@@ -263,12 +263,45 @@ export type SubagentActivity = {
  * `error` means "not running; the last execution failed" (issue #14: opencode 2.0.32 publishes
  * `session.execution.failed`, never a status event). It goes back to `busy` on the next
  * `session.execution.started`, so the UI can show the error and still accept another prompt.
+ *
+ * `since` of `busy` (issue #188) is the epoch-milliseconds time the execution started, taken from
+ * the `created` of the `session.execution.started` event (the event has no time of its own and
+ * `SessionActive` is just `{type:'running'}`). Absent when the host only knows the session is
+ * running from a REST snapshot, so a consumer must not assume it.
  */
 export type SessionStatus =
   | { type: 'idle' }
-  | { type: 'busy' }
+  | { type: 'busy'; since?: number }
   | { type: 'retry'; attempt: number; message: string; nextAt: number }
   | { type: 'error'; error: ErrorInfo };
+
+/**
+ * One user prompt that opencode admitted into the inbox of a session but has not delivered to the
+ * model yet (issue #188). `id` is the inbox id, which is also the id of the user message once it is
+ * delivered. `delivery` is how it will be delivered: `queue` after the running turn, `steer` into it.
+ * `files` is only how many attachments it carries, so the list stays small (the content never
+ * travels). The host keeps the text as the server sent it and does not cut it.
+ */
+export type QueuedPrompt = {
+  id: string;
+  text: string;
+  delivery: 'steer' | 'queue';
+  files: number;
+};
+
+/**
+ * One instruction pinned to a session (issue #188): an entry of the server's per-session
+ * instruction store, which the model reads as `<context key="…">value</context>` in its system
+ * prompt. `key` is the server key (the host generates `note-<base36>` for the ones the user adds
+ * and shows the others as they are). `text` is the value when it is a string; a value of another
+ * JSON type (written by another client) arrives as its JSON text with `json: true`, so the user
+ * can see it and remove it but the host never rewrites it.
+ */
+export type InstructionView = {
+  key: string;
+  text: string;
+  json: boolean;
+};
 
 /** File attached to a user message. Never carries the file contents (no base64). */
 export type AttachmentInfo = { name?: string; mime: string; uri?: string };

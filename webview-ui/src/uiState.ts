@@ -8,6 +8,7 @@ import type { ModelRef } from '../../src/shared/model';
 import type { AttachmentRef } from '../../src/shared/protocol';
 import { readPersistedSessionID } from '../../src/shared/tabState';
 import { MAX_HISTORY } from './chat/promptHistory';
+import { isPanelTab, type PanelTab } from './panel/panelTab';
 
 /** Most attachments kept. Our own cap, so a corrupt state cannot create hundreds of chips. */
 const MAX_FILES = 20;
@@ -39,6 +40,8 @@ export interface PersistedUi {
   files: AttachmentRef[];
   selection?: PersistedSelection;
   sessionID?: string;
+  /** The tab of the chat panel that was showing (issue #188); absent means the chat tab. */
+  tab?: PanelTab;
 }
 
 /** True for a non-empty string. */
@@ -103,6 +106,13 @@ export interface UiState extends PersistedUi {
  * "R4 C comes back lazy: title \"Untitled session\", 0 blocks, draft \"draft28-C\"" and "R10 after
  * the second Reload Window the workbench has 5 chat tabs (5 before it)". Persistence across
  * hide/show alone is UNVERIFIED (no check reads the state after only a hide).
+ *
+ * Issue #188 adds `tab`, the panel tab that was showing: it is kept only when it is one of the
+ * known tabs (`isPanelTab`), so a state of another version, or a corrupt one, simply opens the chat
+ * tab. VERIFIED by `uiState.test.ts` ("restores a saved panel tab, drops one it does not know and
+ * saves the tab") with fabricated states; that the tab survives a real hide/show is
+ * UNVERIFIED: no `test:visual` step hides and shows the view with a non-default tab selected (steps
+ * 54 and 55 only drive the tabs they select), so a restore in a real window was not observed.
  */
 export function createUiState(api: StateApi): UiState {
   const raw: unknown = api.getState();
@@ -122,6 +132,7 @@ export function createUiState(api: StateApi): UiState {
     files,
     selection,
     ...(sessionID === undefined ? {} : { sessionID }),
+    ...(isPanelTab(record.tab) ? { tab: record.tab } : {}),
     save(next) {
       api.setState({
         draft: next.draft,
@@ -129,6 +140,7 @@ export function createUiState(api: StateApi): UiState {
         files: next.files.slice(0, MAX_FILES),
         ...(next.selection === undefined ? {} : { selection: next.selection }),
         ...(next.sessionID === undefined ? {} : { sessionID: next.sessionID }),
+        ...(next.tab === undefined ? {} : { tab: next.tab }),
       });
     },
   };

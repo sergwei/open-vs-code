@@ -121,6 +121,18 @@ describe('createUiState', () => {
     expect(partly.selection).toEqual({ sessionID: 'ses_1', agent: 'plan' });
   });
 
+  // Protects issue #188: the tab of the panel survives hiding the view, and a value no version of
+  // the extension writes opens the chat tab. FABRICATED states.
+  it('restores a saved panel tab, drops one it does not know and saves the tab', () => {
+    expect(createUiState(fakeApi({ tab: 'session' }).api).tab).toBe('session');
+    expect(createUiState(fakeApi({ tab: 'changes' }).api).tab).toBe('changes');
+    expect(createUiState(fakeApi({ tab: 'settings' }).api).tab).toBeUndefined();
+    expect(createUiState(fakeApi({ tab: 3 }).api).tab).toBeUndefined();
+    const { api, writes } = fakeApi(undefined);
+    createUiState(api).save({ draft: '', history: [], files: [], tab: 'changes' });
+    expect(writes).toEqual([{ draft: '', history: [], files: [], tab: 'changes' }]);
+  });
+
   it('writes the selection when given one', () => {
     const { api, writes } = fakeApi(undefined);
     createUiState(api).save({

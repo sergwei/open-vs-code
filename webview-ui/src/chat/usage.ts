@@ -29,6 +29,7 @@ import type {
   SessionSummary,
   TokenUsage,
 } from '../../../src/shared/model';
+import { LOADED_MESSAGE_LIMIT } from '../../../src/shared/protocol';
 import { compactTokens, findModel } from '../selectors/selection';
 import { childrenOf } from '../sessions/lineage';
 
@@ -142,6 +143,49 @@ export function showCost(
   if (catalog === undefined) return false;
   const option: ModelOption | undefined = findModel(catalog, model);
   return option === undefined || !option.free;
+}
+
+/** The figures of the "Usage" section of the Session tab (issue #188). */
+export interface UsageBreakdown {
+  /** Prompt tokens of the whole session: non-cached input plus cache read and write. */
+  inputTokens: number;
+  /** Generated tokens of the whole session: output plus reasoning. */
+  outputTokens: number;
+  /** The server's cost (with direct subagents), absent when it is not worth showing ({@link showCost}). */
+  cost: SessionCost | undefined;
+  /** User messages among the loaded ones. */
+  turns: number;
+  /** True when the loaded messages reached {@link LOADED_MESSAGE_LIMIT}, so `turns` is a lower bound. */
+  partial: boolean;
+}
+
+/**
+ * The usage of the open session in four figures, or `undefined` when the session row carries no
+ * usage yet. Tokens and cost are the SERVER's session totals (`SessionInfo.tokens`/`cost`, which
+ * include the title generation and compactions that no message carries), never a sum of the
+ * messages; the turns are the user messages among those the host loaded, which is all the webview
+ * knows. `messages` are the ones the caller shows (a prepared revert hides some, see
+ * `UsageIndicator`). The cost counts the direct subagents like the header line does.
+ * VERIFIED by `usage.test.ts` "usageBreakdown" (fabricated rows and messages).
+ */
+export function usageBreakdown(
+  sessions: { readonly [sessionID: string]: SessionSummary },
+  openID: string,
+  messages: readonly MessageInfo[],
+  catalog: Catalog | undefined,
+  contextModel: ModelRef | undefined,
+): UsageBreakdown | undefined {
+  const usage = sessions[openID]?.usage;
+  if (usage === undefined) return undefined;
+  const cost = sessionCost(sessions, openID);
+  const model = contextModel ?? sessions[openID]?.model;
+  return {
+    inputTokens: usage.tokens.input + usage.tokens.cacheRead + usage.tokens.cacheWrite,
+    outputTokens: usage.tokens.output + usage.tokens.reasoning,
+    cost: cost !== undefined && showCost(cost.usd, model, catalog) ? cost : undefined,
+    turns: messages.filter((message) => message.kind === 'user').length,
+    partial: messages.length >= LOADED_MESSAGE_LIMIT,
+  };
 }
 
 const USD = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
