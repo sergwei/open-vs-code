@@ -45,7 +45,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   push` and the git options that run a command, publishing (`npm publish`, `docker push`, `gh pr
   merge`…), infrastructure and cloud destructives (`kubectl delete`, `terraform destroy`,
   `docker run|exec`…), shells and interpreters fed by stdin or inline code, launchers (`npx`,
-  `pnpm exec`, `uv run`, `dnx`, `asdf env`, `wsl`, `ssh`…) classified by what they run, SQL
+  `pnpm exec`, `uv run`, `dnx`, `asdf env`, `wsl`, `ssh`…) classified by what they run (they
+  also ask for the options that change where the package comes from, such as `uvx --index` and
+  `npx --registry`, and for `uvx --env-file`), `mise env` (it prints secrets), SQL
   clients, copies to another machine (`scp`, `rsync host:`, `sftp`) and publishing through `gh`
   (`repo create --push`, `workflow run`…), an unquoted glob or `$` in a word, a backslash in a
   command name or one that is a POSIX escape (`git pu\sh`; Windows paths such as `src\app.ts`
@@ -58,7 +60,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names (`-Name`, `-Directory`, `dir /b`), and deployments (`vercel --prod`, `firebase deploy`,
   `fly deploy`, `wrangler deploy`, `cdk deploy`, `sam deploy`, `kubectl apply`…). Known limits: it
   classifies one simple command by its text, so it does not know the value-taking options of every
-  launcher (`npx --registry u tool`), reads `%VAR%` only in capitals, does not look at `--import`
+  launcher (`bunx --cwd src tool`), reads `%VAR%` only in capitals, does not look at `--import`
   after `node --test`, and `ls -R` also asks in bash. What it does **not** see is approved: tools
   it does not name (`fd -X rm`, `trash`, `rclone`, `gsutil rm` through an alias…), an alias you
   configured (`git p` for `git push`), what a script does (`bash build.sh`, `npm run clean`) and
