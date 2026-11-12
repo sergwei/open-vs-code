@@ -1419,6 +1419,12 @@ interface Door {
   asksAlone?: string;
 }
 
+/** Reason of the index doors of uvx (#213), shared by the doors that ask alone. */
+const SOURCE_INDEX = 'changes the index the package comes from (#213)';
+
+/** Reason of the `--registry` doors of the npm family (#213). */
+const SOURCE_REGISTRY = 'changes the registry the package comes from (#213)';
+
 /**
  * The doors the classifier knows (issue #184): every prefix, launcher, separator and spelling that
  * the reviews of E3-work-mode found open for some family. It is a LIST HERE, not read from
@@ -1429,7 +1435,9 @@ interface Door {
  * are doors too; only `hatch env run` is harmless on its own. So are those of #204 (`dnx`,
  * `dotnet tool exec`, `dotnet dnx`, `dotnet -d dnx`, `dnx <pkg> --`, `asdf env node`, `uvx
  * --directory src`, `uv tool run --directory src`, `uvx -q`, `uvx -qp 3.12`): harmless on their
- * own, except `dnx -y` and `uvx -w numpy`. Doors that never ask on
+ * own, except `dnx -y` and `uvx -w numpy`. The package-source doors of #213 (uvx index options and
+ * `--env-file`, `--registry` in every door of the npm group, also before the subcommand) all ask on
+ * their own. Doors that never ask on
  * their own (the prefixes that run the next command unchanged) are in {@link HARMLESS_DOORS} as well.
  */
 const ASKING_DOORS: readonly Door[] = [
@@ -1557,6 +1565,69 @@ const ASKING_DOORS: readonly Door[] = [
     name: 'uvx -w numpy',
     wrap: (c) => `uvx -w numpy ${c}`,
     asksAlone: '-w is --with: it changes the package that supplies the tool',
+  },
+  // The package sources of #213: uvx index options and --env-file, --registry of the npm family.
+  // All ask alone (they change where the package comes from or load an environment).
+  { name: 'uvx --index u', wrap: (c) => `uvx --index u ${c}`, asksAlone: SOURCE_INDEX },
+  { name: 'uvx -i u', wrap: (c) => `uvx -i u ${c}`, asksAlone: SOURCE_INDEX },
+  {
+    name: 'uvx --extra-index-url u',
+    wrap: (c) => `uvx --extra-index-url u ${c}`,
+    asksAlone: SOURCE_INDEX,
+  },
+  {
+    name: 'uvx --find-links=u',
+    wrap: (c) => `uvx --find-links=u ${c}`,
+    asksAlone: SOURCE_INDEX,
+  },
+  { name: 'uvx -f u', wrap: (c) => `uvx -f u ${c}`, asksAlone: SOURCE_INDEX },
+  {
+    name: 'uvx --default-index u',
+    wrap: (c) => `uvx --default-index u ${c}`,
+    asksAlone: SOURCE_INDEX,
+  },
+  {
+    name: 'uv tool run --index-url u',
+    wrap: (c) => `uv tool run --index-url u ${c}`,
+    asksAlone: SOURCE_INDEX,
+  },
+  {
+    name: 'uvx --env-file vars.txt',
+    wrap: (c) => `uvx --env-file vars.txt ${c}`,
+    asksAlone: 'loads an environment that configures the run (#213)',
+  },
+  { name: 'npx --registry u', wrap: (c) => `npx --registry u ${c}`, asksAlone: SOURCE_REGISTRY },
+  {
+    name: 'npm exec --registry u',
+    wrap: (c) => `npm exec --registry u ${c}`,
+    asksAlone: SOURCE_REGISTRY,
+  },
+  {
+    name: 'npm --registry u exec',
+    wrap: (c) => `npm --registry u exec ${c}`,
+    asksAlone: SOURCE_REGISTRY,
+  },
+  {
+    name: 'npm x --registry u',
+    wrap: (c) => `npm x --registry u ${c}`,
+    asksAlone: SOURCE_REGISTRY,
+  },
+  {
+    name: 'pnpm dlx --registry u',
+    wrap: (c) => `pnpm dlx --registry u ${c}`,
+    asksAlone: SOURCE_REGISTRY,
+  },
+  {
+    name: 'pnpm --registry u dlx',
+    wrap: (c) => `pnpm --registry u dlx ${c}`,
+    asksAlone: SOURCE_REGISTRY,
+  },
+  { name: 'pnpx --registry u', wrap: (c) => `pnpx --registry u ${c}`, asksAlone: SOURCE_REGISTRY },
+  { name: 'bunx --registry u', wrap: (c) => `bunx --registry u ${c}`, asksAlone: SOURCE_REGISTRY },
+  {
+    name: 'yarn dlx --registry u',
+    wrap: (c) => `yarn dlx --registry u ${c}`,
+    asksAlone: SOURCE_REGISTRY,
   },
   {
     name: 'nix run',
@@ -1741,6 +1812,99 @@ describe('commandNeedsAsk: more nested launchers (#204)', () => {
   });
 });
 
+describe('commandNeedsAsk: package sources and printed environments (#213)', () => {
+  /**
+   * Regression of issue #213 (follow-up of #204): `uvx` index options, `uvx --env-file`, `npx
+   * --registry` (and the rest of the npm group, decision of Sergio) and `mise env` were approved.
+   * Fabricated commands; nothing run against a real uv, npm or mise; the criterion only. No operand
+   * is `x` (it matches the launching words). Asked rows that already asked for another reason
+   * (`npm_config_registry=u npx tsc`) pin the door.
+   */
+  it('asks for uvx index options, uvx --env-file, npx --registry and mise env, and approves the rest', () => {
+    for (const command of [
+      'uvx --index u ruff check .',
+      'uvx --index=u ruff check .',
+      'uvx --index-url u ruff check .',
+      'uvx --index-url=u ruff',
+      'uvx -i u ruff check .',
+      'uvx -qi u ruff',
+      'uvx -vi u ruff',
+      'uvx -ihttps://e.com/simple ruff',
+      'uvx --extra-index-url u ruff',
+      'uvx --extra-index-url=u ruff',
+      'uvx --find-links u ruff',
+      'uvx --find-links=u ruff',
+      'uvx -f u ruff',
+      'uvx -qf u ruff',
+      'uvx -fu ruff',
+      'uvx --default-index u ruff',
+      'uvx --default-index=u ruff',
+      'uv tool run --index u ruff',
+      'uv tool run -i u ruff check .',
+      'uvx -q --index u ruff',
+      'uvx --python 3.12 --index u ruff',
+      'uvx -wnumpy==2.0 ruff',
+      'uvx --env-file vars.txt ruff check .',
+      'uvx --env-file=vars.txt ruff check .',
+      'uv tool run --env-file vars.txt ruff',
+      'npx --registry u tsc',
+      'npx --registry=u tsc',
+      'npx --registry u rimraf dist',
+      'npx -y --registry u tsc',
+      'npx --@my:registry=u @my/tool',
+      'pnpx --registry u tsc',
+      'npm exec --registry u tsc',
+      'npm exec --registry=u -- tsc',
+      'npm x --registry u tsc',
+      'npm --registry u exec tsc',
+      'npm --registry u x rimraf dist',
+      'pnpm dlx --registry u tsc',
+      'pnpm --registry=u dlx tsc',
+      'pnpm dlx --config.registry=u tsc',
+      'bunx --registry u tsc',
+      'yarn dlx --registry u tsc',
+      'yarn --registry u dlx tsc',
+      'corepack pnpm dlx --registry u tsc',
+      'npm_config_registry=u npx tsc',
+      'mise env',
+      'mise e',
+      'mise env -s bash',
+      'mise env --json',
+      'mise env node@20',
+      'mise env --paths',
+      'mise -q env',
+      'mise -C d env',
+      'rtx env',
+      'mise.exe env',
+      'mise exec node -- mise env',
+      'asdf env node uvx --index u ruff',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(true);
+    }
+    for (const command of [
+      'uvx ruff check .',
+      'uvx --python 3.12 ruff check',
+      'uvx --no-index ruff format',
+      'uvx --no-env-file ruff check .',
+      'uvx --index-strategy first-index ruff check .',
+      'uvx pip-audit --index-url https://e.com/simple',
+      'uv tool run ruff check .',
+      'npx tsc',
+      'npx npm-check-updates --registry https://e.com',
+      'npx prettier --check .',
+      'pnpm dlx tsc',
+      'npm config get registry',
+      'mise exec node -- git status',
+      'mise install',
+      'mise -q install',
+      'mise ls',
+      'mise current',
+    ]) {
+      expect(commandNeedsAsk(command), command).toBe(false);
+    }
+  });
+});
+
 describe('commandNeedsAsk: launchers that nest a launcher', () => {
   /**
    * Regression of the hole of review #2051: `corepack <pm> …` and `uv tool run …` fell to "other
@@ -1878,9 +2042,14 @@ describe('commandNeedsAsk: deliberate asks the matrix pinned', () => {
 /**
  * Cores that must ask in EVERY door: one per family of the header of `destructiveCommand.ts`
  * (deleters, git, disk, infrastructure, cloud, publishing, secrets, text that cannot be seen).
- * Each core is FABRICATED text, none was run.
+ * Each core is FABRICATED text, none was run. The cores `uvx --index u ruff`, `npx --registry u tsc`
+ * and `mise env` (#213) are one per new family: `mise env` launches nothing, so it is not a door but
+ * a core, and that is how a family is tried through every door.
  */
 const DANGEROUS_CORES: readonly string[] = [
+  'uvx --index u ruff',
+  'npx --registry u tsc',
+  'mise env',
   'rm -rf src',
   'mv a b',
   'cp a b',
