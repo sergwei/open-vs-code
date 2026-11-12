@@ -6,6 +6,7 @@
 // `fake-server` suite and `test:visual` step 50.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HomeHostToWebview, HomeMode, HomeState } from '../shared/homeProtocol';
+import type { Catalog, ModelOption, ModelRef } from '../shared/model';
 import type { ConnectionState } from '../shared/protocol';
 import { HomeController, type HomeControllerDeps } from './homeController';
 import type { PendingSummary } from './pendingRequests';
@@ -21,13 +22,44 @@ function activity(sessionID: string, patch: Partial<SessionActivity> = {}): Sess
   };
 }
 
+/** A catalog entry of provider `opencode`; FABRICATED. */
+function option(id: string, name: string): ModelOption {
+  return {
+    providerID: 'opencode',
+    id,
+    name,
+    status: 'active',
+    contextLimit: 200_000,
+    free: true,
+    variants: [],
+    images: false,
+  };
+}
+
+const BIG: ModelRef = { providerID: 'opencode', id: 'big' };
+const OTHER: ModelRef = { providerID: 'opencode', id: 'other' };
+
+/** A catalog with two models whose server default is `Big Pickle`; FABRICATED. */
+function catalogOf(
+  serverDefault: ModelRef = BIG,
+  ids: readonly string[] = ['big', 'other'],
+): Catalog {
+  const names: Record<string, string> = { big: 'Big Pickle', other: 'Other' };
+  return {
+    models: ids.map((id) => option(id, names[id] ?? id)),
+    providers: [{ id: 'opencode', name: 'OpenCode' }],
+    agents: [],
+    serverDefault,
+  };
+}
+
 interface Rig {
   controller: HomeController;
   posted: HomeHostToWebview[];
   calls: string[];
   sources: {
     connection: ConnectionState;
-    model: string | undefined;
+    catalog: Catalog | undefined;
     mcp: { name: string; status: string }[];
     running: string[];
     activities: Record<string, SessionActivity>;
@@ -36,6 +68,14 @@ interface Rig {
   };
   release: (outcome: { ok: true } | { ok: false; error: string }) => void;
   startedModes: HomeMode[];
+  /** The model each start received (`undefined` when none was chosen). */
+  startedModels: (ModelRef | undefined)[];
+  /** What each opening of the picker was told was current. */
+  pickerCurrents: (ModelRef | undefined)[];
+  /** Answers the picker that is open now (`undefined` = the user cancelled). */
+  answerPick: (ref: ModelRef | undefined) => void;
+  /** The messages the controller passed to `log.warn`, in order. */
+  warnings: string[];
 }
 
 /** A controller over hand-written sources and a recorder of what it posts and calls; no VS Code. */
@@ -43,9 +83,13 @@ function rig(): Rig {
   const posted: HomeHostToWebview[] = [];
   const calls: string[] = [];
   const startedModes: HomeMode[] = [];
+  const startedModels: (ModelRef | undefined)[] = [];
+  const pickerCurrents: (ModelRef | undefined)[] = [];
+  const warnings: string[] = [];
+  let answerPick: Rig['answerPick'] = () => undefined;
   const sources: Rig['sources'] = {
     connection: { state: 'connected', serverVersion: '2.0.32' },
-    model: 'Big Pickle',
+    catalog: catalogOf(),
     mcp: [],
     running: [],
     activities: {},
@@ -55,7 +99,7 @@ function rig(): Rig {
   let release: Rig['release'] = () => undefined;
   const deps: HomeControllerDeps = {
     connection: () => sources.connection,
-    model: () => sources.model,
+    catalog: () => sources.catalog,
     mcp: () => sources.mcp,
     runningSessions: () => sources.running,
     activityOf: (id) => sources.activities[id],
@@ -63,12 +107,24 @@ function rig(): Rig {
     labelOf: (id) => `title of ${id}`,
     pending: () => sources.pending,
     post: (message) => posted.push(message),
-    log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as unknown as HomeControllerDeps['log'],
-    start: (_text, mode) => {
+    log: {
+      info: vi.fn(),
+      warn: (line: string) => warnings.push(line),
+      error: vi.fn(),
+    } as unknown as HomeControllerDeps['log'],
+    start: (_text, mode, model) => {
       calls.push('start');
       startedModes.push(mode);
+      startedModels.push(model);
       return new Promise((resolve) => {
         release = resolve;
+      });
+    },
+    pickModel: (current) => {
+      calls.push('pick');
+      pickerCurrents.push(current);
+      return new Promise((resolve) => {
+        answerPick = resolve;
       });
     },
     stop: (id) => {
@@ -86,6 +142,10 @@ function rig(): Rig {
     sources,
     release: (outcome) => release(outcome),
     startedModes,
+    startedModels,
+    pickerCurrents,
+    answerPick: (ref) => answerPick(ref),
+    warnings,
   };
 }
 
@@ -118,6 +178,7 @@ describe('HomeController state', () => {
         server: { state: 'connected' },
         canStart: true,
         model: 'Big Pickle',
+        modelChosen: false,
         mode: 'manual',
         mcp: [],
         running: [
@@ -143,7 +204,7 @@ describe('HomeController state', () => {
     r.controller.changed();
     await vi.runAllTimersAsync();
     expect(r.posted).toEqual([]); // nothing the box draws changed
-    r.sources.model = 'Other';
+    r.sources.catalog = catalogOf(OTHER);
     r.controller.changed();
     r.controller.changed();
     await vi.runAllTimersAsync();
@@ -157,7 +218,7 @@ describe('HomeController state', () => {
     r.controller.onReady();
     r.controller.onClosed();
     r.posted.length = 0;
-    r.sources.model = 'Other';
+    r.sources.catalog = catalogOf(OTHER);
     r.controller.changed();
     await vi.runAllTimersAsync();
     expect(r.posted).toEqual([]);
@@ -311,5 +372,118 @@ describe('HomeController intentions are revalidated', () => {
     await vi.runAllTimersAsync();
     expect(r.calls).toEqual(['action logs']);
     expect(states(r).at(-1)?.mode).toBe('auto');
+  });
+});
+
+// Issue #223: the model pill asks the host for a picker over ITS catalog; the pick is revalidated, is
+// the model of the next conversations from the box, is kept after a start (decision of Sergio,
+// 12/11/2026) and is dropped only when the catalog stops listing it. FABRICATED catalog and picker.
+describe('HomeController model picker', () => {
+  /** Sends `home.model`, lets the picker answer `ref`, and waits for the controller to finish. */
+  async function pick(r: Rig, ref: ModelRef | undefined): Promise<void> {
+    const done = r.controller.onMessage({ type: 'home.model' });
+    r.answerPick(ref);
+    await done;
+  }
+
+  it('home.model asks the picker with the current choice and the next state shows the chosen model', async () => {
+    const r = rig();
+    r.controller.onReady();
+    await pick(r, OTHER);
+    await vi.runAllTimersAsync();
+    expect(r.pickerCurrents).toEqual([undefined]);
+    expect(states(r).at(-1)).toMatchObject({ model: 'Other', modelChosen: true });
+    await pick(r, BIG);
+    expect(r.pickerCurrents).toEqual([undefined, OTHER]); // the second opening marks the choice
+  });
+
+  it('a cancelled pick changes nothing', async () => {
+    const r = rig();
+    r.controller.onReady();
+    r.posted.length = 0;
+    await pick(r, undefined);
+    await vi.runAllTimersAsync();
+    expect(r.posted).toEqual([]);
+    expect(r.controller.buildState()).toMatchObject({ model: 'Big Pickle', modelChosen: false });
+  });
+
+  it('a pick outside the catalog is refused with a log line', async () => {
+    const r = rig();
+    await pick(r, { providerID: 'opencode', id: 'forged' });
+    expect(r.controller.buildState().modelChosen).toBe(false);
+    expect(r.warnings).toContain('home model pick refused: not in the catalog');
+  });
+
+  it('a second home.model while the picker is open does not open another', async () => {
+    const r = rig();
+    const first = r.controller.onMessage({ type: 'home.model' });
+    await r.controller.onMessage({ type: 'home.model' });
+    expect(r.calls).toEqual(['pick']);
+    r.answerPick(undefined);
+    await first;
+    // Once it closed, the next one opens.
+    const again = r.controller.onMessage({ type: 'home.model' });
+    r.answerPick(undefined);
+    await again;
+    expect(r.calls).toEqual(['pick', 'pick']);
+  });
+
+  it('no catalog: home.model does nothing', async () => {
+    const r = rig();
+    r.sources.catalog = undefined;
+    await r.controller.onMessage({ type: 'home.model' });
+    expect(r.calls).toEqual([]);
+  });
+
+  it('start passes the chosen model and keeps it for the next start', async () => {
+    const r = rig();
+    await pick(r, OTHER);
+    const first = r.controller.onMessage({ type: 'home.start', requestId: 'a', text: 'hi' });
+    r.release({ ok: true });
+    await first;
+    expect(r.startedModels).toEqual([OTHER]);
+    expect(r.controller.buildState()).toMatchObject({ model: 'Other', modelChosen: true });
+    const second = r.controller.onMessage({ type: 'home.start', requestId: 'b', text: 'hi' });
+    r.release({ ok: false, error: 'nope' });
+    await second;
+    expect(r.startedModels).toEqual([OTHER, OTHER]);
+  });
+
+  it('a start without a choice passes no model', async () => {
+    const r = rig();
+    const start = r.controller.onMessage({ type: 'home.start', requestId: 'a', text: 'hi' });
+    r.release({ ok: true });
+    await start;
+    expect(r.startedModels).toEqual([undefined]);
+  });
+
+  it('a choice that left the catalog is dropped: the state shows the default and start passes none', async () => {
+    const r = rig();
+    await pick(r, OTHER);
+    r.sources.catalog = catalogOf(BIG, ['big']);
+    expect(r.controller.buildState()).toMatchObject({ model: 'Big Pickle', modelChosen: false });
+    const start = r.controller.onMessage({ type: 'home.start', requestId: 'a', text: 'hi' });
+    r.release({ ok: true });
+    await start;
+    expect(r.startedModels).toEqual([undefined]);
+    expect(r.warnings).toContain('home model choice dropped: not in the catalog');
+    // It stays dropped even if the model comes back: the choice is gone, not suspended.
+    r.sources.catalog = catalogOf();
+    expect(r.controller.buildState().modelChosen).toBe(false);
+  });
+
+  it('a start while there is no catalog passes none but keeps the choice, and logs no drop', async () => {
+    // Guards review W1 of #223: a reconnecting server has no catalog, and that is not "the model
+    // left the catalog". FABRICATED sources.
+    const r = rig();
+    await pick(r, OTHER);
+    r.sources.catalog = undefined;
+    const start = r.controller.onMessage({ type: 'home.start', requestId: 'a', text: 'hi' });
+    r.release({ ok: true });
+    await start;
+    expect(r.startedModels).toEqual([undefined]);
+    expect(r.warnings).not.toContain('home model choice dropped: not in the catalog');
+    r.sources.catalog = catalogOf();
+    expect(r.controller.buildState()).toMatchObject({ model: 'Other', modelChosen: true });
   });
 });

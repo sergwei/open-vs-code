@@ -18,6 +18,7 @@ function state(patch: Partial<HomeState> = {}): HomeState {
     server: { state: 'connected' },
     canStart: true,
     model: 'Big Pickle',
+    modelChosen: false,
     mode: 'manual',
     mcp: [],
     running: [],
@@ -167,7 +168,7 @@ describe('HomeApp box', () => {
 });
 
 describe('HomeApp status and rows', () => {
-  it('each pill is a button with its action; the mode asks for the OTHER mode', () => {
+  it('each pill is a button with its action; the model opens the picker and the mode asks for the OTHER mode', () => {
     current = rig(
       state({
         mcp: [{ name: 'github', status: 'failed' }],
@@ -175,14 +176,70 @@ describe('HomeApp status and rows', () => {
       }),
     );
     const pills = [...current.view.container.querySelectorAll<HTMLButtonElement>('.home-pill')];
-    expect(pills.map((p) => p.dataset.kind)).toEqual(['server', 'model', 'mode', 'mcp']);
+    // A connected server has no pill (issue #223): the old ready label was one nobody could act on.
+    expect(pills.map((p) => p.dataset.kind)).toEqual(['model', 'mode', 'mcp']);
     for (const pill of pills) pill.click();
     expect(current.sent).toEqual([
-      { type: 'home.action', action: 'logs' },
-      { type: 'home.action', action: 'settings' },
+      { type: 'home.model' },
       { type: 'home.mode', mode: 'auto' },
       { type: 'home.action', action: 'settings' },
     ]);
+  });
+
+  // Protects issue #223: the server pill is drawn in every state but `connected`, with the action
+  // it always had (Show logs while it comes up, Restart when it is down). FABRICATED states.
+  it.each([
+    ['starting', 'Starting the server', 'logs'],
+    ['reconnecting', 'Reconnecting', 'logs'],
+    ['not-started', 'Server not started', 'restart'],
+    ['unavailable', 'Server unavailable', 'restart'],
+  ] as const)('the %s server pill says "%s" and sends the %s action', (kind, text, action) => {
+    const server =
+      kind === 'not-started'
+        ? ({ state: kind, reason: 'auto-start-off' } as const)
+        : kind === 'unavailable'
+          ? ({ state: kind, reason: 'binary-missing' } as const)
+          : ({ state: kind } as const);
+    current = rig(state({ server }));
+    const pill = must<HTMLButtonElement>(current.view.container, '.home-pill[data-kind="server"]');
+    expect(pill.textContent).toBe(text);
+    pill.click();
+    expect(current.sent).toEqual([{ type: 'home.action', action }]);
+  });
+
+  it('a connected server draws no server pill, and a server that comes up removes it', () => {
+    current = rig(state({ server: { state: 'starting' } }));
+    expect(current.view.container.querySelector('.home-pill[data-kind="server"]')).not.toBeNull();
+    current.store.apply({ type: 'home.state', state: state() });
+    expect(current.view.container.querySelector('.home-pill[data-kind="server"]')).toBeNull();
+  });
+
+  // Protects issue #223: the model pill is a button that says what the next conversation uses, in
+  // its text, its `data-chosen` and its accessible name, and it keeps its element and the focus when
+  // the host posts another state (it is a `<Show>`, not a list rebuilt per state).
+  it('the model pill names the default or the choice, has an aria-hidden chevron, and keeps its element', () => {
+    current = rig(state());
+    const root = current.view.container;
+    const pill = must<HTMLButtonElement>(root, '.home-pill[data-kind="model"]');
+    expect(pill.textContent).toBe('Big Pickle');
+    expect(pill.dataset.chosen).toBe('false');
+    expect(pill.getAttribute('aria-label')).toBe(
+      'New conversations use Big Pickle. Choose a model for the next one',
+    );
+    expect(must(pill, 'svg.icon').getAttribute('aria-hidden')).toBe('true');
+    pill.focus();
+    current.store.apply({
+      type: 'home.state',
+      state: state({ model: 'GLM-5.3-Flash Free', modelChosen: true }),
+    });
+    expect(must(root, '.home-pill[data-kind="model"]')).toBe(pill);
+    expect(document.activeElement).toBe(pill);
+    expect(pill.textContent).toBe('GLM-5.3-Flash Free');
+    expect(pill.dataset.chosen).toBe('true');
+    expect(pill.getAttribute('aria-label')).toBe(
+      'Next conversation uses GLM-5.3-Flash Free. Choose another model',
+    );
+    expect(current.sent).toEqual([]); // opening the picker is the click, never a state
   });
 
   it('a stopped server pill restarts it', () => {

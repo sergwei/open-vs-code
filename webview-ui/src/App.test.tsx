@@ -3008,6 +3008,79 @@ describe('prompt.compose (issue #36)', () => {
     expect(h.store.state.pending).toHaveLength(1);
   });
 
+  // Issue #223: the Quick start view's model choice rides in the compose. The model is a draft of
+  // the webview, so the compose makes it the draft BEFORE sending (the `prompt.send` carries it and
+  // the chip shows it) or before putting the text in the box; one the catalog does not list is
+  // ignored. FABRICATED catalog (shape as in the selectors describe); that a real tab does the same
+  // is the fake-server integration case and `test:visual` step 50 of this task.
+  describe('with a model (issue #223)', () => {
+    const PICKLE = { providerID: 'opencode', id: 'big-pickle' };
+    const GLM = { providerID: 'opencode', id: 'glm-5.3-flash-free' };
+    const option = (id: string, name: string) => ({
+      providerID: 'opencode',
+      id,
+      name,
+      status: 'active' as const,
+      contextLimit: 200000,
+      free: true,
+      variants: [],
+      images: true,
+    });
+    const catalog: HostToWebview = {
+      type: 'catalog',
+      catalog: {
+        models: [
+          option('big-pickle', 'Big Pickle'),
+          option('glm-5.3-flash-free', 'GLM-5.3-Flash Free'),
+        ],
+        providers: [{ id: 'opencode', name: 'OpenCode' }],
+        agents: [{ id: 'build', name: 'Build' }],
+        serverDefault: PICKLE,
+        preferredModel: PICKLE,
+        defaultAgent: 'build',
+      },
+    };
+    const chipText = (h: Harness): string =>
+      must<HTMLButtonElement>(h.container, 'button.agent-model-chip').textContent;
+
+    it('sends with the chosen model and the chip shows it', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi'), assistant('m2')]), catalog);
+      h.apply({ type: 'prompt.compose', text: TEXT, files: [], send: true, model: GLM });
+      const message = prompts(h)[0];
+      if (message?.type !== 'prompt.send') throw new Error('not a prompt.send');
+      expect(message.model).toEqual(GLM);
+      expect(chipText(h)).toContain('GLM-5.3-Flash Free');
+    });
+
+    it('keeps the chosen model as the draft when the text falls to the box', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi'), assistant('m2')]), catalog);
+      h.apply({ type: 'connection.state', connection: { state: 'starting' } });
+      h.apply({ type: 'prompt.compose', text: TEXT, files: [], send: true, model: GLM });
+      expect(prompts(h)).toHaveLength(0);
+      expect(h.textarea().value).toBe(TEXT);
+      expect(chipText(h)).toContain('GLM-5.3-Flash Free');
+    });
+
+    it('ignores a model the catalog does not list and sends with the usual one', () => {
+      const h = start();
+      h.apply(...openSession([user('m1', 'hi'), assistant('m2')]), catalog);
+      h.apply({
+        type: 'prompt.compose',
+        text: TEXT,
+        files: [],
+        send: true,
+        model: { providerID: 'opencode', id: 'gone' },
+      });
+      const message = prompts(h)[0];
+      if (message?.type !== 'prompt.send') throw new Error('not a prompt.send');
+      // An open session with no model of its own sends none (the server decides), as before.
+      expect(message.model).toBeUndefined();
+      expect(chipText(h)).toContain('Big Pickle');
+    });
+  });
+
   it('puts text and chips in an empty draft when send is false, with no notice', () => {
     const h = start();
     h.apply(...openSession([user('m1', 'hi'), assistant('m2')]));

@@ -110,6 +110,7 @@ import {
   type UiCommand,
 } from '../../../src/shared/protocol';
 import { describeRequest, outcomeLabel } from '../requests/permissionText';
+import { plainModel } from '../selectors/selection';
 import { applyPage, removeRow, upsertRow } from '../sessions/browserRows';
 
 /** Most one-line results kept after requests are answered. Our own choice for a narrow view. */
@@ -326,9 +327,16 @@ export interface ChatState {
   /**
    * The `prompt.compose` messages (issue #36) `App` has not carried out yet, oldest first. A QUEUE
    * for the same reason as {@link uiCommands}: two actions of one frame must both survive the
-   * `batch` of `listenHost`. `seq` grows with every message.
+   * `batch` of `listenHost`. `seq` grows with every message. `model` (issue #223) is the model the
+   * Quick start view chose for this conversation, as a plain copy; absent for every other compose.
    */
-  composes: { text: string; files: AttachmentRef[]; send: boolean; seq: number }[];
+  composes: {
+    text: string;
+    files: AttachmentRef[];
+    send: boolean;
+    model?: ModelRef;
+    seq: number;
+  }[];
   /** `requestId`s sent and not answered yet; the input stays disabled while any is in flight. */
   pending: string[];
   notices: Notice[];
@@ -430,7 +438,12 @@ export interface ChatStore {
    * Empties the queue of `prompt.compose`s and returns them, oldest first, as PLAIN copies (the
    * store's own elements are Proxies, which `postMessage` cannot clone).
    */
-  takeComposes: () => { text: string; files: AttachmentRef[]; send: boolean }[];
+  takeComposes: () => {
+    text: string;
+    files: AttachmentRef[];
+    send: boolean;
+    model?: ModelRef;
+  }[];
   /** Picks the model for the next prompt of the open session (no message goes to the host). */
   selectModel: (model: ModelRef) => void;
   /** Picks the agent for the next prompt of the open session (no message goes to the host). */
@@ -1095,6 +1108,7 @@ export function createChatStore(): ChatStore {
         text: m.text,
         files: m.files.map((file) => ({ uri: file.uri, name: file.name })),
         send: m.send,
+        ...(m.model === undefined ? {} : { model: plainModel(m.model) }),
         seq: ++composeCounter,
       });
     },
@@ -1240,6 +1254,7 @@ export function createChatStore(): ChatStore {
         text: entry.text,
         files: entry.files.map((file) => ({ uri: file.uri, name: file.name })),
         send: entry.send,
+        ...(entry.model === undefined ? {} : { model: plainModel(entry.model) }),
       }));
       setState('composes', []);
       return taken;

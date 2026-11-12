@@ -8,7 +8,7 @@ import {
   type HomeWebviewToHost,
 } from '../../../src/shared/homeProtocol';
 import { plural } from '../../../src/shared/l10n';
-import { WarningIcon } from '../chat/icons';
+import { ChevronIcon, WarningIcon } from '../chat/icons';
 import type { HomeStore } from './homeStore';
 import type { HomeUi } from './homeUiState';
 
@@ -81,11 +81,9 @@ function runningText(row: HomeRunning): string {
   return parts.join(' · ');
 }
 
-/** The word of the server pill. */
+/** The word of the server pill, which is only drawn while the server is not `connected`. */
 function serverText(server: HomeState['server']): string {
   switch (server.state) {
-    case 'connected':
-      return l10n.t('Server ready');
     case 'starting':
       return l10n.t('Starting the server');
     case 'reconnecting':
@@ -114,9 +112,13 @@ function blockedText(state: HomeState): string | undefined {
  * sent. The draft lives in the webview state, so hiding the view keeps it; it is cleared only when
  * the host says the conversation started. While it starts, or when the server is unusable, the box is
  * `aria-disabled` (never `disabled`: the focus must not drop to the body) and ignores Enter.
- * The status strip is four kinds of button: server (Show logs, or Restart when it is down), model
- * (opens the OpenCode Settings tab), mode (toggles Manual/Auto for the NEXT conversation; the host
- * holds it) and one per MCP server in error (tone in the border and the icon, text in the foreground
+ * The status strip is four kinds of button: server (drawn ONLY while the server is not `connected`,
+ * so a healthy server says nothing; Show logs, or Restart when it is down), model (a button with a
+ * chevron that sends `home.model`: the host opens a native QuickPick of its catalog and the pick is
+ * the model of the NEXT conversations from the box; `data-chosen` and the accessible name say
+ * whether it is the user's choice or the default; it never opens Settings), mode (toggles
+ * Manual/Auto for the NEXT conversation; the host holds it) and one per MCP server in error (tone
+ * in the border and the icon, text in the foreground
  * colour: `--vscode-errorForeground` fails contrast on the sidebar). Stop is `aria-disabled` while
  * the host works on it. The clock of a running row is computed here from `since` once a second and is
  * `aria-hidden`, so a screen reader hears neither ticks nor stale times; the elapsed time reaches
@@ -133,14 +135,17 @@ function blockedText(state: HomeState): string | undefined {
  * with `aria-disabled` and focus, the same Stop button and focus across a new state of the same
  * session, focus to the box after a successful keyboard Stop, focus left alone after a Stop pressed
  * with the focus elsewhere, clock with fake timers, live region,
- * no `style` attribute).
+ * no `style` attribute, the server pill in each state but `connected`, and the model pill's
+ * `home.model`, `data-chosen`, accessible names and chevron).
  * VERIFIED in a real window by `--steps 29,34,49,50` (Windows 11, VS Code 1.145.2, 08/11/2026, run
  * after the `lists` and `elapsedName` changes): "all visual checks passed", step 50 among them,
  * e.g. "ok   M3 running row at 170 px (bar 170), light: the running row with its title, clock and
  * Stop is drawn whole inside the view, Stop is a whole button named "Stop …", contrast >= 4.5"
  * (M1 is the idle box and pills, M2 the MCP strip, M3 the running row, M4 the waiting row). Not
  * observed in a real window: a state posted while a row button has the keyboard focus (the jsdom
- * test covers it).
+ * test covers it). UNVERIFIED until a check reads `document.activeElement`: where the focus goes
+ * when the native model picker closes (the pill stays mounted across states, which jsdom covers, but
+ * the hand-back of the focus by VS Code to the webview was not observed).
  */
 export function HomeApp(props: { store: HomeStore; send: SendHome; ui: HomeUi }) {
   const [now, setNow] = createSignal(Date.now());
@@ -291,22 +296,24 @@ export function HomeApp(props: { store: HomeStore; send: SendHome; ui: HomeUi })
         {(state) => (
           <>
             <ul class="home-pills" role="list" aria-label={l10n.t('Status')}>
-              <li>
-                <button
-                  type="button"
-                  class="home-pill"
-                  data-kind="server"
-                  data-state={state().server.state}
-                  onClick={() => {
-                    const down =
-                      state().server.state === 'unavailable' ||
-                      state().server.state === 'not-started';
-                    props.send({ type: 'home.action', action: down ? 'restart' : 'logs' });
-                  }}
-                >
-                  {serverText(state().server)}
-                </button>
-              </li>
+              <Show when={state().server.state !== 'connected'}>
+                <li>
+                  <button
+                    type="button"
+                    class="home-pill"
+                    data-kind="server"
+                    data-state={state().server.state}
+                    onClick={() => {
+                      const down =
+                        state().server.state === 'unavailable' ||
+                        state().server.state === 'not-started';
+                      props.send({ type: 'home.action', action: down ? 'restart' : 'logs' });
+                    }}
+                  >
+                    {serverText(state().server)}
+                  </button>
+                </li>
+              </Show>
               <Show when={state().model}>
                 {(model) => (
                   <li>
@@ -314,12 +321,21 @@ export function HomeApp(props: { store: HomeStore; send: SendHome; ui: HomeUi })
                       type="button"
                       class="home-pill"
                       data-kind="model"
-                      aria-label={l10n.t('New sessions use {0}. Open settings', model())}
+                      data-chosen={state().modelChosen ? 'true' : 'false'}
+                      aria-label={
+                        state().modelChosen
+                          ? l10n.t('Next conversation uses {0}. Choose another model', model())
+                          : l10n.t(
+                              'New conversations use {0}. Choose a model for the next one',
+                              model(),
+                            )
+                      }
                       onClick={() => {
-                        props.send({ type: 'home.action', action: 'settings' });
+                        props.send({ type: 'home.model' });
                       }}
                     >
-                      {model()}
+                      <span>{model()}</span>
+                      <ChevronIcon />
                     </button>
                   </li>
                 )}

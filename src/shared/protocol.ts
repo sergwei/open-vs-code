@@ -362,7 +362,10 @@ export type UiCommand = 'prompt.focus' | 'session.new' | 'session.stop';
  * the draft too). Exceptions, on purpose: chips the host refused with `AttachmentRejected` do not
  * come back, past `MAX_KEPT_COMPOSES` waiting in a hidden pane the oldest is dropped, and a compose
  * out of bounds is refused whole (`ComposeRefused`). Like `ui.command` it is a one-shot action,
- * never state.
+ * never state. Only the Quick start view (issue #223) sets the optional `model`: the model the user
+ * picked there for the conversation it starts. The model is a draft of the WEBVIEW (applied on
+ * send), so the webview applies it as its draft BEFORE sending, or before it puts the text in the
+ * box, and ignores it when its catalog does not list it.
  * Check {@link isComposeInBounds} before acting on one.
  * `session.revert` (issue #32) REPLACES the revert the webview holds for ONE session; the webview
  * keeps it only if `sessionID` is the open session, and an absent `revert` means "no revert" (it
@@ -449,7 +452,13 @@ export type HostToWebview =
     }
   | { type: 'ui.focus'; target: { kind: 'permission' | 'form'; sessionID: string; id: string } }
   | { type: 'ui.command'; command: UiCommand }
-  | { type: 'prompt.compose'; text: string; files: AttachmentRef[]; send: boolean }
+  | {
+      type: 'prompt.compose';
+      text: string;
+      files: AttachmentRef[];
+      send: boolean;
+      model?: ModelRef;
+    }
   | { type: 'session.diff'; sessionID: string; files: ChangedFile[]; error?: ErrorInfo }
   | { type: 'session.revert'; sessionID: string; revert?: RevertState }
   | { type: 'notice'; level: 'info' | 'warning' | 'error'; error: ErrorInfo }

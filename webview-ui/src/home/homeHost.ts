@@ -26,7 +26,10 @@ export function postHome(message: HomeWebviewToHost): void {
  * VERIFIED by `homeHost.test.ts` (a mocked `vscodeApi`, a hand-driven `requestAnimationFrame` and
  * fabricated messages: a host that answers `ready` at once finds the listener, order is kept, a
  * bad message is dropped). VERIFIED that a real VS Code delivers to it by the full
- * `test:visual` run of E9-sidebar-home (Windows 11, VS Code 1.145.2, 08/11/2026): "ok   H0 the Quick start view shows the box, "Server ready", the
+ * `test:visual` run of E9-sidebar-home (Windows 11, VS Code 1.145.2, 08/11/2026: its H0 check, in
+ * the wording of that time, printed `ok` too) and by two `--steps 43,50,51` runs of the fix round of
+ * E9-home-model-picker (Windows 11, VS Code 1.146.0, 12/11/2026), whose H0 reads: "ok   H0 the Quick
+ * start view shows the box, no server pill while connected, the model pill with its chevron, the
  * Manual pill and "Nothing running"" (the state arrived after `ready`).
  */
 export function connectHomeHost(apply: (message: HomeHostToWebview) => void): () => void {
