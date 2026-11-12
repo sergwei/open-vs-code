@@ -86,7 +86,7 @@ export const AFFECTED_RULES = [
   // cross-cutting already.
   {
     pattern:
-      /^src\/extension\/(sessionChanges|changesView|usageStats|usageView|sidebarHome|homeController|homeView)\.ts$|^webview-ui\/src\/home\//,
+      /^src\/extension\/(sessionChanges|changesView|usageStats|usageView|sidebarHome|homeController|homeModelPick|homeView)\.ts$|^webview-ui\/src\/home\//,
     groups: ['home'],
   },
   { pattern: /^webview-ui\/src\/sessions\//, groups: ['sessions'] },

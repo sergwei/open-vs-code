@@ -157,6 +157,10 @@
  * the same full run: 60.1 s, times 1.25 is 75.1, rounded up to 80. That full run had one FAIL, a
  * check of step 25 that passed 3 of 3 alone (intermittent, no verified cause); the full run on the
  * final tree passed every check (49 at 35.9 s, 50 at 59.4 s), so the budgets stand.
+ * The budget of the step 50 went from 80 to 90 with the model picker of issue #223 (two openings of
+ * the native QuickPick, no new turn): an ESTIMATE, no full run has timed it yet (two
+ * `--steps 43,50,51` runs timed the step alone at 41.5 s and 42.8 s, which is not comparable with
+ * the 59.4 s of a full run).
  * The step 52 (the MCP servers with actions, E10-settings-mcp, issue #186 PR2) needs the 1, sends no
  * prompt and is in the group `config`. Its `budgetS` of 40 is an ESTIMATE, nobody has timed it in a
  * full run: 12 cells of rows (3 widths x 4 themes, with the open details of two widths inside the
@@ -247,7 +251,7 @@ export const STEPS = [
   { id: '47', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 40 },
   { id: '48', needs: ['1'], sendsPrompt: false, groups: ['config'], budgetS: 30 },
   { id: '49', needs: ['1'], sendsPrompt: true, groups: ['home', 'sessions'], budgetS: 50 },
-  { id: '50', needs: ['1'], sendsPrompt: true, groups: ['home'], budgetS: 80 },
+  { id: '50', needs: ['1'], sendsPrompt: true, groups: ['home'], budgetS: 90 },
   // E2-subagent-monitor (issue #189): a CREW turn of about 15 s, the Stop and Answer clicks, 16
   // theme cells with side bar drags, the folded cards, a chat tab and three CREW rounds. Measured:
   // 47.2 s in `--steps 51` and 47.6 s in the full run on the final tree (08/11/2026, Windows 11,
