@@ -9,6 +9,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Quick start: the model pill picks the model of the next conversation.** It is a button with a
+  chevron that opens a picker (grouped by provider, searchable); the conversation you start from the
+  box uses that model (it lasts until you pick another or reload the window), and
+  `openVsCode.defaultModel` is not touched. The server pill now shows only
+  when the server is not ready.
 - **Built and tested against opencode 2.2.7** (was 2.0.32): the `@opencode/client` pin and the
   recommended CLI move together. Calls to the experimental routes (usage stats, MCP connect and
   disconnect) now use the `client.experimental.*` methods.

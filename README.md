@@ -47,10 +47,17 @@ affiliated with opencode or with Microsoft.
   [Known limitations](#known-limitations)).
 
 - **Quick start at the top of the container** (with `chatLocation` set to `editor`). A small box:
-  type and press Enter to open a NEW tab that starts the conversation with that tab's model, agent
-  and mods (Shift+Enter breaks the line; text only, no attachments). A status strip shows the
-  server, the model a new session uses, the mode of the next conversation (Manual or Auto) and any
-  MCP server in error; each pill is a button (logs or restart, settings, switch mode). **Running**
+  type and press Enter to open a NEW tab that starts the conversation with the model you picked
+  (or, if you did not pick one, that tab's usual model), with its agent and mods (Shift+Enter
+  breaks the line; text only, no attachments). A status strip shows the model, the mode of the next
+  conversation (Manual or Auto), any MCP server in error and, only while the server is not ready
+  (starting, reconnecting, not started or down), the server; each pill is a button. The model pill
+  opens a picker for the model of the next conversation: it does not change
+  `openVsCode.defaultModel`, it lasts until you pick another or reload the window, and, like any
+  message, the model then becomes the last one used, which new sessions propose while that setting
+  is empty. The other pills open the logs or restart the server, the settings, or switch the mode;
+  with the server ready, the logs are in **OpenCode: Show Logs**.
+  **Running**
   lists the root sessions that run now with their activity, a clock and Stop (which also stops
   subagents running in the background); **Waiting for you** lists permissions and questions, and
   Reply opens the conversation with the card focused.
