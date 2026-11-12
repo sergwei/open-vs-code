@@ -15,6 +15,14 @@
  * path the webview may name (non-empty, no NUL, at most `MAX_DIFF_PATH_LENGTH`); whether the host
  * lists that path is the handler's check, tested in `chatController.test.ts`.
  *
+ * E2-chat-panel-tabs (#188): samples for `session.inbox`, `inbox.cancel` and `inbox.steer`, and the
+ * shape guard of the two requests (ids non-empty, `inboxID` at most `MAX_INBOX_ID_LENGTH`); that
+ * the id is one the host listed is the handler's check, tested in `chatController.panel.test.ts`.
+ *
+ * E2-chat-panel-tabs (#188), phase 2: samples for `session.instructions`, `instructions.add`,
+ * `instructions.remove` and `session.export`, and their shape guards (text non-blank and capped,
+ * key following the server's rule, format a closed enum).
+ *
  * ALL DATA HERE IS FABRICATED by hand from the types. These tests prove the logic of the
  * guards; they do NOT prove that opencode emits these shapes (that needs a real `opencode
  * serve`, issues #8/#9) nor that VS Code delivers them unchanged (issue #2, F5).
@@ -35,6 +43,9 @@ import {
   MAX_COMMAND_NAME_LENGTH,
   MAX_FILE_SEARCH_LENGTH,
   MAX_IMAGE_BASE64_LENGTH,
+  MAX_INBOX_ID_LENGTH,
+  MAX_INSTRUCTION_KEY_LENGTH,
+  MAX_INSTRUCTION_LENGTH,
   MAX_MOD_COMMAND_ARGS,
   MAX_SESSION_SEARCH_LENGTH,
   MAX_SESSION_TITLE_LENGTH,
@@ -211,6 +222,23 @@ const HOST_SAMPLES: SamplesOf<HostToWebview> = {
       ],
     },
   },
+  'session.inbox': {
+    type: 'session.inbox',
+    sessionID: 's1',
+    items: [
+      { id: 'msg_1', text: 'then run the tests', delivery: 'queue', files: 0 },
+      { id: 'msg_2', text: 'use the other file', delivery: 'steer', files: 2 },
+    ],
+  },
+  'session.instructions': {
+    type: 'session.instructions',
+    sessionID: 's1',
+    entries: [
+      { key: 'note-1', text: 'Always answer in Spanish', json: false },
+      { key: 'meta', text: '{"a":1}', json: true },
+    ],
+    error: { code: 'UnexpectedStatus', message: 'could not read the instructions' },
+  },
   'prompt.compose': {
     type: 'prompt.compose',
     text: 'Explain what @src/a.ts#2-3 does.',
@@ -334,6 +362,21 @@ const WEBVIEW_SAMPLES: SamplesOf<WebviewToHost> = {
   'workMode.set': { type: 'workMode.set', mode: 'auto' },
   'mod.toggle': { type: 'mod.toggle', modId: 'hello-station', enabled: false },
   'subagent.stop': { type: 'subagent.stop', requestId: 'r1', parentID: 's1', sessionID: 'c1' },
+  'inbox.cancel': { type: 'inbox.cancel', requestId: 'r1', sessionID: 's1', inboxID: 'msg_1' },
+  'inbox.steer': { type: 'inbox.steer', requestId: 'r1', sessionID: 's1', inboxID: 'msg_1' },
+  'instructions.add': {
+    type: 'instructions.add',
+    requestId: 'r1',
+    sessionID: 's1',
+    text: 'Always answer in Spanish',
+  },
+  'instructions.remove': {
+    type: 'instructions.remove',
+    requestId: 'r1',
+    sessionID: 's1',
+    key: 'note-1',
+  },
+  'session.export': { type: 'session.export', requestId: 'r1', sessionID: 's1', format: 'json' },
   'mods.action': { type: 'mods.action', action: 'openFolder' },
   'logs.show': { type: 'logs.show' },
   'setup.action': { type: 'setup.action', action: 'binary.choose' },
@@ -430,6 +473,89 @@ describe('isWebviewToHost', () => {
     for (const message of bad)
       expect(isWebviewToHost(message), JSON.stringify(message)).toBe(false);
     expect(isWebviewToHost({ ...base, extra: 1 })).toBe(true);
+  });
+
+  // E2-chat-panel-tabs (issue #188). Fabricated messages pinning the SHAPE guard of `inbox.cancel`
+  // and `inbox.steer` (three ids, none empty or non-string, `inboxID` capped); that the id is one the
+  // host listed for that session is the handler's check (`chatController.panel.test.ts`). Both types
+  // share one validator, so each is run through every case.
+  it.each(['inbox.cancel', 'inbox.steer'] as const)(
+    'validates %s: requestId, sessionID and an inboxID of bounded length',
+    (type) => {
+      const base = { type, requestId: 'r1', sessionID: 's1', inboxID: 'msg_1' };
+      expect(isWebviewToHost(base)).toBe(true);
+      expect(isWebviewToHost({ ...base, inboxID: 'a'.repeat(MAX_INBOX_ID_LENGTH) })).toBe(true);
+      const bad: unknown[] = [
+        { ...base, inboxID: 'a'.repeat(MAX_INBOX_ID_LENGTH + 1) },
+        { ...base, inboxID: '' },
+        { ...base, inboxID: 4 },
+        { ...base, sessionID: '' },
+        { ...base, requestId: '' },
+        { type, requestId: 'r1', sessionID: 's1' },
+        { type, requestId: 'r1', inboxID: 'msg_1' },
+        { type, sessionID: 's1', inboxID: 'msg_1' },
+      ];
+      for (const message of bad)
+        expect(isWebviewToHost(message), JSON.stringify(message)).toBe(false);
+    },
+  );
+
+  // E2-chat-panel-tabs (issue #188), phase 2. Fabricated messages pinning the guards of the pinned
+  // instructions and the export: the text must be non-blank and capped (a message that fails is
+  // dropped by the host, so the webview checks first), the key must follow the server's rule and
+  // be capped, and the export format is a closed enum (no `sanitize` option: decision P1).
+  it('validates instructions.add: ids, a non-blank text of bounded length', () => {
+    const base = { type: 'instructions.add', requestId: 'r1', sessionID: 's1', text: 'Be brief' };
+    expect(isWebviewToHost(base)).toBe(true);
+    expect(isWebviewToHost({ ...base, text: 'x'.repeat(MAX_INSTRUCTION_LENGTH) })).toBe(true);
+    const bad: unknown[] = [
+      { ...base, text: '' },
+      { ...base, text: ' \n\t ' },
+      { ...base, text: 'x'.repeat(MAX_INSTRUCTION_LENGTH + 1) },
+      { ...base, text: 7 },
+      { ...base, sessionID: '' },
+      { ...base, requestId: '' },
+      { type: 'instructions.add', requestId: 'r1', text: 'Be brief' },
+    ];
+    for (const message of bad)
+      expect(isWebviewToHost(message), JSON.stringify(message)).toBe(false);
+  });
+
+  it('validates instructions.remove: ids and a key the server would accept', () => {
+    const base = { type: 'instructions.remove', requestId: 'r1', sessionID: 's1', key: 'note-1a' };
+    expect(isWebviewToHost(base)).toBe(true);
+    expect(isWebviewToHost({ ...base, key: '0.a_b-c' })).toBe(true);
+    expect(isWebviewToHost({ ...base, key: 'a'.repeat(MAX_INSTRUCTION_KEY_LENGTH) })).toBe(true);
+    const bad: unknown[] = [
+      { ...base, key: '' },
+      { ...base, key: 'Note-1' },
+      { ...base, key: '-note' },
+      { ...base, key: '.note' },
+      { ...base, key: 'note one' },
+      { ...base, key: '../x' },
+      { ...base, key: 'a'.repeat(MAX_INSTRUCTION_KEY_LENGTH + 1) },
+      { ...base, key: 4 },
+      { ...base, sessionID: '' },
+      { type: 'instructions.remove', requestId: 'r1', sessionID: 's1' },
+    ];
+    for (const message of bad)
+      expect(isWebviewToHost(message), JSON.stringify(message)).toBe(false);
+  });
+
+  it('validates session.export: ids and a closed format', () => {
+    const base = { type: 'session.export', requestId: 'r1', sessionID: 's1', format: 'markdown' };
+    expect(isWebviewToHost(base)).toBe(true);
+    expect(isWebviewToHost({ ...base, format: 'json' })).toBe(true);
+    const bad: unknown[] = [
+      { ...base, format: 'pdf' },
+      { ...base, format: 'JSON' },
+      { ...base, format: undefined },
+      { ...base, sessionID: '' },
+      { ...base, requestId: '' },
+      { type: 'session.export', requestId: 'r1', format: 'json' },
+    ];
+    for (const message of bad)
+      expect(isWebviewToHost(message), JSON.stringify(message)).toBe(false);
   });
 
   // E10-mod-toggles. Fabricated messages pinning the guards of the per-mod switch: the id is checked

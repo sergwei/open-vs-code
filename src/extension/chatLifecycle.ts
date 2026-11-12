@@ -95,6 +95,7 @@ import { registerSidebarHome } from './sidebarHome';
 import { registerSessionsView, type SessionsState } from './sessionsView';
 import { registerSessionsOrganize, sessionIDOf, type OrganizeAnswers } from './sessionsOrganize';
 import { createSessionTree, type SessionTreePage } from './sessionTree';
+import { saveExport } from './sessionExportUi';
 import { askSessionTitle, confirmRevertDiscard, confirmSessionDelete } from './sessionUi';
 
 /**
@@ -928,6 +929,7 @@ export function registerChat(
         return true;
       },
     },
+    saveExport,
   });
 
   /** The session remembered for the folder the server serves now, if any. */

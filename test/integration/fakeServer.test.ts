@@ -173,6 +173,47 @@ async function startCrew(log: LogCursor): Promise<Crew> {
   return { parentID, walkerID, askerID, failerID, permissionID };
 }
 
+/**
+ * Sends a prompt with `delivery` to the session that is running a turn and returns the inbox id
+ * the server admitted it under (issue #188).
+ *
+ * The prompt goes through the same `prompt.send` message as `sendPrompt` but with the delivery of
+ * the case, and the id is read from the `inbox enqueued <id> for <session> (<delivery>)` line of
+ * the controller. The id returned is the first one with that delivery that was NOT in the log
+ * before the prompt was sent (the first turn of the case logs its own `enqueued` with `queue`).
+ * Fails if no such line appears within 10 s. A SLOW first turn lasts about 5 s, so the prompt
+ * arrives while it runs. VERIFIED on Windows 11 (12/11/2026, the full `npm run test:integration` on the
+ * final tree, fake-server label 80 passing) by the three cases that use it: "✔ queues a prompt sent during a SLOW turn and delivers it after the
+ * turn", "✔ cancels a queued prompt" and "✔ steers a prompt into the running turn".
+ */
+async function queuePrompt(
+  log: LogCursor,
+  sessionID: string,
+  delivery: 'steer' | 'queue',
+  text: string,
+): Promise<string> {
+  const lines = new RegExp(`inbox enqueued (msg_\\S+) for ${sessionID} \\(${delivery}\\)`, 'g');
+  const idsInLog = (): string[] => [...log.added().matchAll(lines)].map((line) => line[1] ?? '');
+  const known = new Set(idsInLog());
+  await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+    type: 'prompt.send',
+    requestId: `integration-inbox-${String(Date.now())}`,
+    sessionID,
+    text,
+    delivery,
+    files: [],
+  });
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const fresh = idsInLog().find((id) => !known.has(id));
+    if (fresh !== undefined) return fresh;
+    if (Date.now() >= deadline) {
+      assert.fail(`the ${delivery} prompt was not enqueued within 10 s; log:\n${log.added()}`);
+    }
+    await sleep(100);
+  }
+}
+
 describe('fake server', function () {
   this.timeout(60_000);
   // The session of the edit turn (issue #31), for the case that follows it: they share the server.
@@ -407,6 +448,173 @@ describe('fake server', function () {
     await log.waitFor(`turn finished: interrupted for ${sessionID}`, 15_000);
     await sleep(SETTLE_MS);
     log.assertAbsent('turn finished: succeeded');
+  });
+
+  /**
+   * A prompt sent with `delivery: 'queue'` while a SLOW turn runs waits in the inbox and plays as a
+   * turn of its own once the first one ends (issue #188).
+   *
+   * Protects: the host sending `queue` to a busy session, the `session.inbox.enqueued` /
+   * `delivered` events reaching the log, and their ORDER: `enqueued` while the first turn runs,
+   * `delivered` only after its `turn finished`, and exactly two turns. SYNTHETIC: the fake invents
+   * the semantics of the inbox (see `inboxOf` in `fake-opencode.mjs`); whether a real opencode
+   * delivers a queued prompt right after the running turn is the HYPOTHESIS R1 of the plan, not
+   * seen. VERIFIED on Windows 11 (12/11/2026, the full `npm run test:integration` on the final
+   * tree, fake-server label 80 passing): the line "✔ queues a prompt sent during a SLOW turn and delivers it after the
+   * turn"; not observed: macOS and Linux (the CI runs them).
+   */
+  it('queues a prompt sent during a SLOW turn and delivers it after the turn', async function () {
+    const log = await openLogCursor();
+    await sendPrompt(log, 'SLOW: count to a hundred');
+    const sessionID = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+    assert.ok(sessionID, `no session id in the log:\n${log.added()}`);
+    const queued = await queuePrompt(log, sessionID, 'queue', 'second prompt, after the turn');
+    assert.ok(
+      !log.added().includes('turn finished:'),
+      `the first turn ended before the second was queued; log:\n${log.added()}`,
+    );
+    await matchInLog(
+      log,
+      new RegExp(
+        `turn finished: succeeded for ${sessionID}[\\s\\S]*inbox delivered ${queued} for ${sessionID}[\\s\\S]*turn finished: succeeded for ${sessionID}`,
+      ),
+      TURN_WAIT_MS,
+      'the queued prompt delivered after the first turn, and its own turn',
+    );
+    await sleep(SETTLE_MS); // negative window: no third turn
+    assert.strictEqual(countOf(log, 'turn finished:'), 2, `log:\n${log.added()}`);
+  });
+
+  /**
+   * A queued prompt is cancelled through `inbox.cancel` and never plays (issue #188).
+   *
+   * Protects: the request reaching `inbox.cancel` of the server with the id the host listed, the
+   * `session.inbox.cancelled` event, and the prompt NOT being delivered afterwards (one turn only).
+   * SYNTHETIC fake, see the previous case. VERIFIED on Windows 11 (12/11/2026, the full
+   * `npm run test:integration` on the final tree, fake-server label 80 passing): the line "✔ cancels a queued prompt"; not observed: macOS and Linux.
+   */
+  it('cancels a queued prompt', async function () {
+    const log = await openLogCursor();
+    await sendPrompt(log, 'SLOW: count to a hundred');
+    const sessionID = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+    assert.ok(sessionID, `no session id in the log:\n${log.added()}`);
+    const queued = await queuePrompt(log, sessionID, 'queue', 'second prompt, to be cancelled');
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'inbox.cancel',
+      requestId: 'fake-inbox-cancel-1',
+      sessionID,
+      inboxID: queued,
+    });
+    await log.waitFor(`inbox cancelled ${queued} for ${sessionID}`, 10_000);
+    await log.waitFor(`turn finished: succeeded for ${sessionID}`, TURN_WAIT_MS);
+    await sleep(SETTLE_MS); // negative window: the cancelled prompt must not be delivered or played
+    log.assertAbsent(`inbox delivered ${queued}`);
+    assert.strictEqual(countOf(log, 'turn finished:'), 1, `log:\n${log.added()}`);
+  });
+
+  /**
+   * Steering a prompt delivers it into the running turn, with no turn of its own (issue #188).
+   *
+   * Two prompts: one sent as `steer` and one sent as `queue` and then switched with `inbox.steer`.
+   * Protects: the `delivery` the host sends, `inbox.steer` reaching `update`, the
+   * `session.inbox.delivery.changed` event, and BOTH being delivered while the SLOW turn still
+   * runs (before its `turn finished`), which then happens once. SYNTHETIC fake (steer = delivery
+   * about 150 ms later); a real opencode "steers at the next step", which the fake only imitates.
+   * VERIFIED on Windows 11 (12/11/2026, the full `npm run test:integration` on the final tree,
+   * fake-server label 80 passing): the line "✔ steers a
+   * prompt into the running turn"; not observed: macOS and Linux.
+   */
+  it('steers a prompt into the running turn', async function () {
+    const log = await openLogCursor();
+    await sendPrompt(log, 'SLOW: count to a hundred');
+    const sessionID = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+    assert.ok(sessionID, `no session id in the log:\n${log.added()}`);
+    const direct = await queuePrompt(log, sessionID, 'steer', 'steer this in at once');
+    await log.waitFor(`inbox delivered ${direct} for ${sessionID}`, 10_000);
+    const switched = await queuePrompt(log, sessionID, 'queue', 'queued, then steered');
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'inbox.steer',
+      requestId: 'fake-inbox-steer-1',
+      sessionID,
+      inboxID: switched,
+    });
+    await log.waitFor(`inbox delivery changed ${switched} for ${sessionID} (steer)`, 10_000);
+    await log.waitFor(`inbox delivered ${switched} for ${sessionID}`, 10_000);
+    assert.ok(
+      !log.added().includes('turn finished:'),
+      `a steered prompt was delivered only after the turn; log:\n${log.added()}`,
+    );
+    await log.waitFor(`turn finished: succeeded for ${sessionID}`, TURN_WAIT_MS);
+    await sleep(SETTLE_MS); // negative window: neither steered prompt opens a turn of its own
+    assert.strictEqual(countOf(log, 'turn finished:'), 1, `log:\n${log.added()}`);
+  });
+
+  /**
+   * An instruction is pinned to the session, listed again and removed (issue #188).
+   *
+   * Protects the whole host path in a real VS Code against the fixture: `instructions.add` reaching
+   * the experimental `PUT .../instructions/entries/:key` with a generated `note-…` key, the host
+   * reading the list back (`instructions of <sid>: 1 pinned`), `instructions.remove` of that same key
+   * reaching `DELETE`, and the list read back empty. SYNTHETIC: the fake invents the routes' answers
+   * from the types of 2.2.7 (see `handleSessionExperimental`); the opt-in case R1 of
+   * `realOpencode.test.ts` is what asks a real server. VERIFIED on Windows 11 (12/11/2026,
+   * `npm run test:integration -- --label fake-server`, 80 passing): the line "✔ pins, lists and
+   * removes a session instruction"; not observed: macOS and Linux (the CI runs them).
+   */
+  it('pins, lists and removes a session instruction', async function () {
+    const log = await openLogCursor();
+    await sendPrompt(log, 'a quick prompt that opens a session');
+    const sessionID = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+    assert.ok(sessionID, `no session id in the log:\n${log.added()}`);
+    await log.waitFor(`turn finished: succeeded for ${sessionID}`, TURN_WAIT_MS);
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'instructions.add',
+      requestId: 'fake-instruction-add-1',
+      sessionID,
+      text: 'Always answer in Spanish',
+    });
+    const pinned = await matchInLog(
+      log,
+      new RegExp(`instruction pinned (note-[a-z0-9]+) to ${sessionID}`),
+      10_000,
+      'the instruction pinned',
+    );
+    const key = pinned[1] ?? '';
+    await log.waitFor(`instructions of ${sessionID}: 1 pinned`, 10_000);
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'instructions.remove',
+      requestId: 'fake-instruction-remove-1',
+      sessionID,
+      key,
+    });
+    await log.waitFor(`instruction removed ${key} from ${sessionID}`, 10_000);
+    await log.waitFor(`instructions of ${sessionID}: 0 pinned`, 10_000);
+  });
+
+  /**
+   * A key the host never listed is refused and never reaches the server (issue #188).
+   *
+   * Protects the host's revalidation of `instructions.remove` end to end: a well-formed key that
+   * nobody pinned (the webview is untrusted) answers `NotPinned` in the log and no `instruction
+   * removed` line follows. Needs the session the previous case left open. SYNTHETIC fixture, as the
+   * previous case. VERIFIED on Windows 11 (12/11/2026, `--label fake-server`, 80 passing): the line
+   * "✔ refuses to remove a key it did not list"; not observed: macOS and Linux.
+   */
+  it('refuses to remove a key it did not list', async function () {
+    const log = await openLogCursor();
+    await sendPrompt(log, 'a quick prompt that reuses the session');
+    const sessionID = /prompt accepted for (ses_\S+)/.exec(log.added())?.[1];
+    assert.ok(sessionID, `no session id in the log:\n${log.added()}`);
+    await log.waitFor(`turn finished: succeeded for ${sessionID}`, TURN_WAIT_MS);
+    await vscode.commands.executeCommand(INJECT_WEBVIEW_MESSAGE_COMMAND_ID, {
+      type: 'instructions.remove',
+      requestId: 'fake-instruction-remove-2',
+      sessionID,
+      key: 'note-neverlisted',
+    });
+    await log.waitFor('request fake-instruction-remove-2 failed: NotPinned', 10_000);
+    await sleep(SETTLE_MS); // negative window: a refused removal must not reach the server
+    log.assertAbsent('instruction removed note-neverlisted');
   });
 
   /**

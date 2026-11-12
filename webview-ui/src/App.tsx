@@ -1,11 +1,14 @@
 import * as l10n from '@vscode/l10n';
 import { createEffect, createMemo, createSignal, on, onCleanup, Show, untrack } from 'solid-js';
+import type { QueuedPrompt } from '../../src/shared/model';
 import {
   isComposeInBounds,
   MAX_DROPPED_ITEMS,
   MAX_DROPPED_URI_LENGTH,
+  MAX_INSTRUCTION_LENGTH,
   MAX_MOD_COMMAND_ARGS,
   type AttachmentRef,
+  type ExportFormat,
 } from '../../src/shared/protocol';
 import { RevertBanner } from './changes/RevertBanner';
 import { splitAtRevert } from './changes/revertView';
@@ -19,7 +22,7 @@ import { HostContext, type SendToHost } from './chat/hostContext';
 import { readImage } from './chat/imageFile';
 import { mentionsFor } from './chat/mentionQuery';
 import { MessageList, type UserMessage } from './chat/MessageList';
-import { nextRequestId, PromptInput } from './chat/PromptInput';
+import { nextRequestId, PromptInput, type Delivery } from './chat/PromptInput';
 import { createHistory } from './chat/promptHistory';
 import {
   CLIENT_COMMANDS,
@@ -42,7 +45,12 @@ import {
   withVariant,
   type SelectionInput,
 } from './selectors/selection';
-import { deriveActivity } from './store/activity';
+import { ChangesPanel } from './panel/ChangesPanel';
+import { PanelTabs, panelId, tabId } from './panel/PanelTabs';
+import type { PanelTab } from './panel/panelTab';
+import { SessionPanel } from './panel/SessionPanel';
+import { QueueChips } from './panel/QueueChips';
+import { deriveActivity, describeTurn } from './store/activity';
 import type { ChatStore } from './store/chatStore';
 import { SubagentBar } from './subagents/SubagentBar';
 import { createSubagentMonitor, SubagentProvider } from './subagents/SubagentContext';
@@ -227,7 +235,8 @@ interface LastRevert {
  * parent turn ends by itself after Stop all". UNVERIFIED in a real VS Code: the focus returning to
  * the prompt when a row or the bar goes away (no check reads it).
  *
- * Issue #31: the header shows the "Changed files" list of the open session, and `openChangedFile`
+ * Issue #31: the "Changed files" list of the open session (in the Changes tab since issue #188,
+ * it used to be in the header), and `openChangedFile`
  * turns a click on a row into `session.diff.open` for the open session (no `requestId`).
  *
  * Issue #32 (decisions of Sergio, 23/10/2026, Engram #1174): "Revert from here" on user messages
@@ -250,9 +259,30 @@ interface LastRevert {
  * carried out by {@link runCompose}: sent with the Send code, or put in the prompt box when that is
  * not possible (decisions of Sergio, 29/10/2026, Engram `E9-context-menus/decisions/p1-p13-t1-t4`).
  *
- * Decisions: Send is disabled while the session is busy and Stop takes its place (plan decision
- * 6; `steer`/`queue` while busy is not offered); every prompt goes with `delivery: 'queue'`;
- * Retry resends the text of the last user message of the open session, with the attachments of
+ * Issue #188 (E2-chat-panel-tabs, phase 3; decisions P1/P2 of Sergio, 12/11/2026): a row of tabs
+ * Chat · Changes · Session ({@link PanelTabs}) sits under the header and changes ONLY the area of
+ * `<main>`: the three panels exist and the inactive ones are `hidden`, so the conversation keeps its
+ * scroll. The header with the context line (and its "Compact" from 80 %), the revert banner, mod
+ * bands, request dock, subagent bar, activity footer, queue chips and the prompt box are outside
+ * `<main>` and show in all three tabs, so a permission request is never hidden. The chosen tab is
+ * persisted with the draft (`uiState.tab`). Phase 4: the Changes and Session panels
+ * ({@link ChangesPanel}, {@link SessionPanel}) are mounted only while their tab is active (the Chat
+ * panel stays mounted, hidden, to keep its scroll). The Session tab's actions are
+ * {@link addInstruction} / {@link removeInstruction} (`instructions.add` / `instructions.remove`),
+ * {@link exportSession} (`session.export`: the host shows the save dialog, and the buttons are
+ * `aria-busy` until its `request.result`) and the existing {@link compact}. Each begins a request, so
+ * Send waits for it like for any other (the save dialog blocks the prompt while it is open:
+ * accepted). VERIFIED in jsdom by `App.test.tsx` ("session tab (issue #188)"). The chips ({@link QueueChips}) show the prompts of the open session the server
+ * holds (`state.inbox`); ✕ asks `inbox.cancel`, "Steer now" `inbox.steer`, "Edit" cancels and, once the host
+ * confirms it, hands the text back to a box that was EMPTY at the click. VERIFIED in jsdom by `App.test.tsx` ("panel tabs and queue chips
+ * (issue #188)"). VERIFIED in a real VS Code (Windows 11, VS Code 1.146.0, 12/11/2026) by
+ * `test:visual` step 54: "T2 Edit cancels the chip and gives its text back to the empty box",
+ * "T2 removing the chip empties the queue" and "T3 Steer now delivers the prompt into the turn that
+ * is still running"; and by step 55: "S3 Compact adds the compaction notice to the conversation".
+ * UNVERIFIED: macOS and Linux, and Edit with a NON-empty box in a real window (Vitest only).
+ *
+ * Decisions: until issue #188 Send was disabled while the session was busy and Stop took its place;
+ * now Enter queues and Ctrl/Cmd+Enter steers (see {@link submit}) and Stop is in the footer; Retry resends the text of the last user message of the open session, with the attachments of
  * it that this document picked itself (the host only accepts URIs it emitted; the planner's spike
  * against a real opencode 2.0.32 saw the stored `source.uri` keep the URL as sent, query included,
  * so the echoed URI matches; HYPOTHESIS for messages read back through `message.list`, and the
@@ -275,6 +305,8 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     agent: props.uiState.selection.agent,
   });
   const [draft, setDraft] = createSignal(props.uiState.draft);
+  /** The tab of the panel that shows in `<main>` (issue #188); persisted with the draft. */
+  const [tab, setTab] = createSignal<PanelTab>(props.uiState.tab ?? 'chat');
   const [announcement, setAnnouncement] = createSignal('');
   let focusInput: (() => void) | undefined;
   /** Closes the panel of the agent and model chip; set by the chip itself (review W1). */
@@ -283,6 +315,10 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   let lastCommand: LastCommand | undefined;
   const [lastFork, setLastFork] = createSignal<LastFork | undefined>(undefined);
   const [lastRevert, setLastRevert] = createSignal<LastRevert | undefined>(undefined);
+  /** The "Edit" of a queued chip waiting for the host to confirm the cancel (see {@link editQueued}). */
+  const [lastEdit, setLastEdit] = createSignal<{ requestId: string; text: string } | undefined>(
+    undefined,
+  );
   /** `requestId` of a clear or commit in flight (the stage has its own, in `lastRevert`). */
   const [revertRequest, setRevertRequest] = createSignal<string | undefined>(undefined);
   let stopRequested = false;
@@ -323,6 +359,47 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   const activity = createMemo(() =>
     deriveActivity(state.connection, status(), lastAssistantParts(), compacting()),
   );
+  /** Assistant messages after the last user message: the "Step N" of the footer (issue #188). */
+  const turnStep = () => {
+    const shown = messages();
+    let count = 0;
+    for (let index = shown.length - 1; index >= 0; index--) {
+      const message = shown[index];
+      if (message?.kind === 'user') break;
+      if (message?.kind === 'assistant') count += 1;
+    }
+    return count;
+  };
+  const turn = createMemo(() => describeTurn(activity(), lastAssistantParts(), turnStep()));
+  /**
+   * When the running turn started: the server's time (`busy.since`, from `execution.started`), or,
+   * when the host only knew the session was running from a snapshot, the moment this document first
+   * saw it busy (so a reloaded view restarts the clock: accepted, plan risk R9). Cleared when the
+   * session stops being busy, so the next turn starts its own clock.
+   */
+  let seenBusyAt: number | undefined;
+  const turnSince = createMemo((): number | undefined => {
+    if (!busy()) {
+      seenBusyAt = undefined;
+      return undefined;
+    }
+    const current = status();
+    const since = current?.type === 'busy' ? current.since : undefined;
+    if (since !== undefined) return since;
+    seenBusyAt ??= Date.now();
+    return seenBusyAt;
+  });
+  /** Direct children of the open session that are running (the footer's "N subagents running"). */
+  const subagentsRunning = () => {
+    const parentID = state.open.sessionID;
+    if (parentID === undefined) return 0;
+    return Object.values(state.subagents).filter(
+      (entry) => entry.parentID === parentID && entry.running,
+    ).length;
+  };
+  /** The prompts of the open session the server holds in its inbox (the chips). */
+  const queued = () =>
+    state.open.sessionID === undefined ? [] : (state.inbox[state.open.sessionID] ?? []);
   /**
    * The server's commands plus the ones this webview carries out (`/compact`) and the ones mods
    * registered (E10-mods): the server's wins on a clash.
@@ -357,7 +434,13 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
   const problem = createMemo(() => describeProblem(state.connection));
   // Issue #124: with autoStart off the first prompt starts the server (the host waits for it).
   const notStarted = () => state.connection.state === 'not-started';
-  const canSend = () => (connected() || notStarted()) && !busy() && state.pending.length === 0;
+  /**
+   * True when a prompt can go out NOW, even with a turn running (issue #188: it is then queued or
+   * steered). Retry, Compose and the Retry button of the status strip keep {@link canSend}, which
+   * also needs an idle session.
+   */
+  const canSubmit = () => (connected() || notStarted()) && state.pending.length === 0;
+  const canSend = () => canSubmit() && !busy();
   /**
    * True when the draft is a mod command that can run now: no turn in progress, nothing pending,
    * and NO condition on the connection (issue #155). Keeps Send active in starting/reconnecting.
@@ -412,6 +495,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       history: history.entries(),
       files: state.draftFiles.map((file) => ({ uri: file.uri, name: file.name })),
       ...(sessionID === undefined ? {} : { sessionID }),
+      tab: tab(),
       ...(hasPick
         ? {
             selection: {
@@ -507,6 +591,22 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     focusInput?.();
   });
 
+  // The "Edit" of a chip hands its text back to the box only once the host CONFIRMED the cancel (a
+  // `request.result` without a notice). A refusal (`NotQueued`: the server delivered the prompt
+  // meanwhile) leaves the box as it was and its notice says why; the prompt is then already in the
+  // conversation, so giving it back too would invite sending it twice (review S1 of #188). Same
+  // reads of `pending` and `notices` before the early return as the effects above.
+  createEffect(() => {
+    const pending = state.pending.slice();
+    const notices = state.notices.slice();
+    const edit = lastEdit();
+    if (edit === undefined || pending.includes(edit.requestId)) return;
+    setLastEdit(undefined);
+    if (notices.some((notice) => notice.requestId === edit.requestId)) return;
+    putInDraft(edit.text); // an empty box gets the text; text typed meanwhile is kept, ours added
+    focusInput?.();
+  });
+
   // A finished Restore or Discard for good (no notice) focuses the prompt: the button that had the
   // focus lives in the banner, which unmounts when the revert goes away. Same reads as above.
   createEffect(() => {
@@ -584,12 +684,21 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
    * while the message carries only the arguments, and the files go without `mention`. With
    * `fromCompose` (a `prompt.compose` of the host) a failure appends the text to the user's draft
    * instead of restoring it only into an empty box.
+   *
+   * Issue #188: `delivery` is `queue` (after the turn) or `steer` (into it) and is honoured only
+   * while the session is busy; at rest it goes out as `queue`. With a turn running the model and
+   * agent the user picked are left out of the message (supuesto S4a of the plan: the host would
+   * switch them mid-turn); they stay in the draft for the next send at rest. VERIFIED in jsdom by
+   * `App.test.tsx` ("leaves the picked model and agent out of a queued prompt and sends them at
+   * rest", "sends a prompt typed while a turn runs as queue, and as steer with Ctrl+Enter", "at
+   * rest Ctrl+Enter is a plain send").
    */
   const sendPrompt = (
     text: string,
     files: AttachmentRef[],
     command?: { name: string; args: string },
     fromCompose = false,
+    delivery: Delivery = 'queue',
   ): void => {
     const requestId = nextRequestId();
     lastSend = { requestId, text, files, ...(fromCompose ? { compose: true } : {}) };
@@ -608,13 +717,16 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       requestId,
       ...(state.open.sessionID === undefined ? {} : { sessionID: state.open.sessionID }),
       ...(command === undefined ? { text } : { command: command.name, text: command.args }),
-      delivery: 'queue',
+      // At rest `steer` means nothing (there is no turn to steer), so it is a plain send.
+      delivery: busy() ? delivery : 'queue',
       // `lastSend.files` stays the plain refs: a failed send puts those back as chips.
       files:
         command === undefined
           ? mentionsFor(text, files)
           : files.map((file) => ({ uri: file.uri, name: file.name })),
-      ...selectionToSend(selectionInput()),
+      // With a turn running the model and agent picked are NOT sent: the host would switch them in
+      // the middle of the turn. They stay in the draft and go with the next prompt at rest.
+      ...(busy() ? {} : selectionToSend(selectionInput())),
     });
     focusInput?.();
   };
@@ -627,8 +739,15 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
    * conversation open) too, and never as a prompt, which in `not-started` would have started the
    * server. Only a turn in
    * progress or a pending request holds it back, like the band's button.
+   *
+   * Issue #188: a turn in progress no longer holds a normal prompt back ({@link canSubmit}): it goes
+   * out queued, or steered for Ctrl/Cmd+Enter. `/compact` still works (it is queued by the host).
+   * Any other `/command` with a turn running is refused with the notice "Commands run when the
+   * response ends" and the draft stays, because the server runs a command immediately; that covers
+   * the commands of mods too. VERIFIED in jsdom by `App.test.tsx` ("refuses a /command while a turn
+   * runs and keeps the draft", "/compact is still sent while a turn runs").
    */
-  const submit = (): void => {
+  const submit = (delivery: Delivery = 'queue'): void => {
     const text = draft().trim();
     if (text === '' && state.draftFiles.length === 0) return;
     // A command of a mod is carried out by the host and never becomes a prompt (E10-mods): no
@@ -641,7 +760,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       persist();
       return;
     }
-    if (!canSend()) return;
+    if (!canSubmit()) return;
     // Without a catalog the list holds at most the mods' commands (issue #155), so the client
     // commands are added back here: "/compact" never goes out as a prompt.
     const command = parseCommand(
@@ -658,11 +777,64 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
       compact();
       return;
     }
+    // A command of the server (and a mod's, which the branch above leaves to the end of the turn)
+    // runs at once, not in the queue, so with a turn running it is refused and the draft stays.
+    if (busy() && command !== undefined) {
+      props.store.notify('info', {
+        code: 'CommandsWaitForTheTurn',
+        message: l10n.t('Commands run when the response ends'),
+      });
+      return;
+    }
     const files = props.store.takeDraftFiles();
     history.push(text);
     setDraft('');
     persist();
-    sendPrompt(text, files, command);
+    sendPrompt(text, files, command, false, delivery);
+  };
+
+  /** Removes a queued prompt on the server; the chip goes when the new `session.inbox` arrives. */
+  const cancelQueued = (item: QueuedPrompt): string | undefined => {
+    const sessionID = state.open.sessionID;
+    if (sessionID === undefined) return undefined;
+    const requestId = nextRequestId();
+    props.store.begin(requestId);
+    props.send({ type: 'inbox.cancel', requestId, sessionID, inboxID: item.id });
+    return requestId;
+  };
+
+  /** Changes a queued prompt to `steer`, so the running turn takes it at its next step. */
+  const steerQueued = (item: QueuedPrompt): void => {
+    const sessionID = state.open.sessionID;
+    if (sessionID === undefined) return;
+    const requestId = nextRequestId();
+    props.store.begin(requestId);
+    props.send({ type: 'inbox.steer', requestId, sessionID, inboxID: item.id });
+  };
+
+  /**
+   * "Edit" of a chip: the server cannot edit a queued text, so the prompt is cancelled and its text
+   * goes back to the box, but ONLY when the box is empty at the click (never over what the user is
+   * typing); with text in the box a notice says why nothing happened and the prompt stays queued.
+   * The text goes back only AFTER the host confirms the cancel (the effect on `lastEdit`): if the
+   * server delivered the prompt meanwhile the host answers `NotQueued`, a notice says so, and the
+   * box stays empty because the text is already in the conversation (review S1 of #188, decision of
+   * Sergio 12/11/2026). The attachments it carried are not given back (the host sends only their
+   * count). While an Edit is in flight (`lastEdit()` set) every other Edit does nothing and its
+   * button is `aria-disabled`: `lastEdit` holds one request, so a second one would overwrite it and
+   * the text of the first prompt would be lost (review W4 of #188, second pass).
+   */
+  const editQueued = (item: QueuedPrompt): void => {
+    if (lastEdit() !== undefined) return;
+    if (draft().trim() !== '') {
+      props.store.notify('info', {
+        code: 'EditNeedsEmptyBox',
+        message: l10n.t('Clear the message box to edit a queued message'),
+      });
+      return;
+    }
+    const requestId = cancelQueued(item);
+    if (requestId !== undefined) setLastEdit({ requestId, text: item.text });
   };
 
   /**
@@ -1095,6 +1267,54 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
     stop: stopSubagent,
   });
 
+  /** `requestId` of the last `instructions.add` / `instructions.remove` (the Session tab's "Add" waits on it). */
+  const [instructionRequest, setInstructionRequest] = createSignal<string | undefined>(undefined);
+  /** `requestId` of the last `session.export` (its buttons wait on it, the save dialog may be open). */
+  const [exportRequest, setExportRequest] = createSignal<string | undefined>(undefined);
+
+  /**
+   * Pins `text` to the open session (Session tab, issue #188). Returns `false` and sends nothing
+   * without a session, with a blank text, or over {@link MAX_INSTRUCTION_LENGTH}: the host would drop
+   * such a message without a `request.result` and leave the request pending (skill solid-webview
+   * §3), so the over-long case says why in a notice. Returns `true` when the message went out.
+   */
+  const addInstruction = (text: string): boolean => {
+    const sessionID = state.open.sessionID;
+    if (sessionID === undefined || text.trim() === '') return false;
+    if (text.length > MAX_INSTRUCTION_LENGTH) {
+      props.store.notify('info', {
+        code: 'InstructionTooLong',
+        message: l10n.t('An instruction can have at most {0} characters', MAX_INSTRUCTION_LENGTH),
+      });
+      return false;
+    }
+    const requestId = nextRequestId();
+    props.store.begin(requestId);
+    setInstructionRequest(requestId);
+    props.send({ type: 'instructions.add', requestId, sessionID, text });
+    return true;
+  };
+
+  /** Removes the instruction `key` of the open session; the row goes when the new list arrives. */
+  const removeInstruction = (key: string): void => {
+    const sessionID = state.open.sessionID;
+    if (sessionID === undefined) return;
+    const requestId = nextRequestId();
+    props.store.begin(requestId);
+    setInstructionRequest(requestId);
+    props.send({ type: 'instructions.remove', requestId, sessionID, key });
+  };
+
+  /** Asks the host to export the open session as `format`; it shows the save dialog itself. */
+  const exportSession = (format: ExportFormat): void => {
+    const sessionID = state.open.sessionID;
+    if (sessionID === undefined) return;
+    const requestId = nextRequestId();
+    props.store.begin(requestId);
+    setExportRequest(requestId);
+    props.send({ type: 'session.export', requestId, sessionID, format });
+  };
+
   /**
    * Asks the host to open the diff of a row of "Changed files" (issue #31). The host opens it only
    * if it listed that path for the open session, so a stale click costs a notice, nothing more.
@@ -1126,48 +1346,105 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
               onNewSession={newSession}
               closePickerRequest={closePickerRequest()}
               onOpenSession={openSession}
-              onOpenChangedFile={openChangedFile}
+              onCompact={compact}
+              compactDisabled={!connected() || state.pending.length > 0}
+            />
+            <PanelTabs
+              active={tab()}
+              onSelect={setTab}
+              working={busy()}
+              changedCount={state.diff.files.length}
             />
             <main class="chat-main">
-              <Show
-                when={state.open.messages.length > 0}
-                fallback={
-                  <Show
-                    when={problem()}
-                    fallback={
-                      <EmptyState
-                        onPick={(text) => {
-                          setDraft(text);
-                          focusInput?.();
-                        }}
-                      />
-                    }
-                  >
-                    {(current) => <ConnectionCard problem={current()} />}
-                  </Show>
-                }
+              <div
+                class="panel"
+                role="tabpanel"
+                id={panelId('chat')}
+                aria-labelledby={tabId('chat')}
+                hidden={tab() !== 'chat'}
               >
-                <MessageList
-                  open={state.open}
-                  messages={messages()}
-                  catalog={state.catalog}
-                  resolutions={state.resolutions}
-                  requests={state.requests}
-                  busy={busy()}
-                  canRetry={lastUser() !== undefined}
-                  forkDisabled={forkDisabled()}
-                  revertDisabled={revertDisabled()}
-                  onRetry={retry}
-                  onFork={forkFrom}
-                  onRevert={revertFrom}
-                  onOpenSession={openSession}
-                  trailing={
-                    <Show when={problem()}>
+                <Show
+                  when={state.open.messages.length > 0}
+                  fallback={
+                    <Show
+                      when={problem()}
+                      fallback={
+                        <EmptyState
+                          onPick={(text) => {
+                            setDraft(text);
+                            focusInput?.();
+                          }}
+                        />
+                      }
+                    >
                       {(current) => <ConnectionCard problem={current()} />}
                     </Show>
                   }
-                />
-              </Show>
+                >
+                  <MessageList
+                    open={state.open}
+                    messages={messages()}
+                    catalog={state.catalog}
+                    resolutions={state.resolutions}
+                    requests={state.requests}
+                    busy={busy()}
+                    canRetry={lastUser() !== undefined}
+                    forkDisabled={forkDisabled()}
+                    revertDisabled={revertDisabled()}
+                    onRetry={retry}
+                    onFork={forkFrom}
+                    onRevert={revertFrom}
+                    onOpenSession={openSession}
+                    trailing={
+                      <Show when={problem()}>
+                        {(current) => <ConnectionCard problem={current()} />}
+                      </Show>
+                    }
+                  />
+                </Show>
+              </div>
+              <div
+                class="panel panel-scroll"
+                role="tabpanel"
+                id={panelId('changes')}
+                aria-labelledby={tabId('changes')}
+                hidden={tab() !== 'changes'}
+              >
+                {/* Mounted only while its tab is active: a hidden copy would duplicate the buttons
+                    and fields other queries look for. */}
+                <Show when={tab() === 'changes'}>
+                  <ChangesPanel
+                    files={state.diff.files}
+                    error={state.diff.error}
+                    onOpen={openChangedFile}
+                  />
+                </Show>
+              </div>
+              <div
+                class="panel panel-scroll"
+                role="tabpanel"
+                id={panelId('session')}
+                aria-labelledby={tabId('session')}
+                hidden={tab() !== 'session'}
+              >
+                <Show when={tab() === 'session'}>
+                  <SessionPanel
+                    store={props.store}
+                    instructionsBusy={
+                      instructionRequest() !== undefined &&
+                      state.pending.includes(instructionRequest() ?? '')
+                    }
+                    exporting={
+                      exportRequest() !== undefined && state.pending.includes(exportRequest() ?? '')
+                    }
+                    compactDisabled={!connected() || state.pending.length > 0}
+                    onAddInstruction={addInstruction}
+                    onRemoveInstruction={removeInstruction}
+                    onCompact={compact}
+                    onExport={exportSession}
+                  />
+                </Show>
+              </div>
             </main>
             <Show when={state.open.revert}>
               {(revert) => (
@@ -1207,10 +1484,25 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
             <StatusBar
               state={state}
               activity={activity()}
+              turn={turn()}
+              since={turnSince()}
+              subagentsRunning={subagentsRunning()}
               announcement={announcement()}
               canRetry={lastUser() !== undefined && canSend() && !lastMessageHasError()}
               onRetry={retry}
+              onStop={stop}
               onDismiss={props.store.dismissNotice}
+            />
+            <QueueChips
+              items={queued()}
+              canEdit={draft().trim() === ''}
+              editPending={lastEdit() !== undefined}
+              onRemove={cancelQueued}
+              onSteer={steerQueued}
+              onEdit={editQueued}
+              focusInput={() => {
+                focusInput?.();
+              }}
             />
             <PromptInput
               draft={draft()}
@@ -1221,7 +1513,7 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
               files={state.draftFiles}
               busy={busy()}
               waiting={!connected() && !notStarted()}
-              sendDisabled={!canSend() && !canRunModDraft()}
+              sendDisabled={!canSubmit() && !canRunModDraft()}
               attachDisabled={!connected()}
               workMode={state.workMode}
               onWorkMode={(mode) => {
@@ -1248,7 +1540,9 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
                 props.store.addDraftFiles([{ uri: file.uri, name: file.name }]);
                 clearFileSearch();
               }}
-              onSubmit={submit}
+              onSubmit={(delivery) => {
+                submit(delivery);
+              }}
               onStop={stop}
               onAttach={() => {
                 attach('file');

@@ -21,7 +21,11 @@
 // The info lines of the log are STABLE on purpose: the opt-in integration test waits for them
 // (`webview ready`, `event stream connected`, `snapshot sent`, `prompt accepted for`,
 // `turn finished`, `abort requested for <sid> (interrupted: <bool>)`,
-// `compaction requested for <sid> (input <id>)` (issue #125),
+// `compaction requested for <sid> (input <id>)` (issue #125), `inbox enqueued|delivered|cancelled
+// <id> for <sid>` (with `(<delivery>)` on `enqueued`) and `inbox delivery changed <id> for <sid>
+// (<delivery>)`, `instruction pinned <key> to <sid>`, `instruction removed <key> from <sid>`,
+// `instructions of <sid>: <n> pinned` (the list the host just read and posted) and
+// `session <sid> exported as markdown|json` / `export of <sid> cancelled` (issue #188),
 // `subagent session <child> created under <parent>` (issue #189), and from phase 3
 // `permission asked <id> for <sid> (<action>)`, `permission <id> resolved: <decision>`,
 // `form asked <id> for <sid>`, `form <id> resolved: answered|cancelled`,
@@ -102,12 +106,13 @@
 // <sid>` (or `for draft of pane <n>`), `permission auto-approved <id> for <sid> (<action>)`,
 // `permission auto-approve failed <id>: <code>` and `permission auto-approve skipped <id>: gone`.
 
-import type { V2Event } from '@opencode/client';
+import type { SessionInboxInfo, V2Event } from '@opencode/client';
 import * as l10n from '@vscode/l10n';
 import { plural } from '../shared/l10n';
 import type {
   Catalog,
   ErrorInfo,
+  InstructionView,
   ModelRef,
   PermissionAsk,
   SessionStatus,
@@ -120,6 +125,8 @@ import {
   isComposeInBounds,
   MAX_DROPPED_ITEMS,
   MAX_FILE_SEARCH_LENGTH,
+  LOADED_MESSAGE_LIMIT,
+  MAX_INSTRUCTION_LENGTH,
   MAX_SESSION_TITLE_LENGTH,
   type AttachmentRef,
   type ConnectionState,
@@ -161,7 +168,14 @@ import {
   type ActivityListener,
   type SessionActivity,
 } from './sessionActivity';
+import {
+  InstructionLedger,
+  instructionText,
+  newInstructionKey,
+  toInstructionViews,
+} from './sessionInstructions';
 import { createSessionLineage, MAX_LINEAGE_DEPTH } from './sessionLineage';
+import { formatSessionTranscript, type ExportFile } from './sessionTranscript';
 import { toSubagentActivity } from './subagentDigest';
 import { createSessionReverts } from './sessionRevert';
 import {
@@ -198,8 +212,6 @@ const MAX_RESOLVED_SESSIONS = 200;
 /** How many `session.get` of {@link ChatController.readSessions} run at once (own choice, Q12=1). */
 const RESOLVE_CONCURRENCY = 4;
 
-/** How many messages of the open session the snapshot asks for (the API maximum is 200). */
-const MESSAGE_LIMIT = 200;
 /** Children whose messages one {@link ChatController.refreshSubagents} call reads (decision P4=1 of #189). */
 const MAX_SUBAGENT_READS = 10;
 
@@ -518,6 +530,13 @@ export interface ChatControllerDeps {
   /** The buttons of the setup guide and the error card (E2, issue #85). */
   setup: SetupCommands;
   ui: ChatUi;
+  /**
+   * Asks the user where to save an exported session and writes the file (issue #188, implemented
+   * in `sessionExportUi.ts`). Resolves the NAME of the file written, or `undefined` when the user
+   * cancels the dialog; rejects when the write fails. Absent in the tests written before it and in
+   * any host without a save dialog: `session.export` then answers `ExportUnavailable`.
+   */
+  saveExport?(file: ExportFile): Promise<string | undefined>;
   /** The SSE loop; replaced in tests. */
   runStream?: typeof runEventStream;
 }
@@ -631,6 +650,20 @@ interface PaneRead {
   rawMessages: Awaited<ReturnType<ChatApi['message']['list']>>['data'];
   sessions: SessionSummary[];
   statuses: { [sessionID: string]: SessionStatus };
+  /**
+   * The inbox of the open session as REST listed it (issue #188), all item types; `undefined` when
+   * no session is open or the read failed (then the translator's own queue is published).
+   */
+  inbox: SessionInboxInfo[] | undefined;
+  /**
+   * The instructions of the open session as REST listed them (issue #188); `undefined` when no
+   * session is open or the read failed (the route is experimental). `instructionsEpoch` is the
+   * value of {@link ChatController}'s counter FOR THAT SESSION when the read STARTED: if it moved by
+   * publication time, an add, a remove or a server event of that session changed the list meanwhile
+   * and this one is stale (a change of another session does not make it so).
+   */
+  instructions: InstructionView[] | undefined;
+  instructionsEpoch: number;
 }
 
 /**
@@ -639,8 +672,9 @@ interface PaneRead {
  * Decisions (plan `E2-mvp-prototype/plan-fase1`): the open session is the last one this extension
  * created or opened, kept in `workspaceState` (alternative discarded: the most recent of
  * `session.list`, which could drop a prompt into a session of the TUI); with none, the first
- * prompt creates one. `prompt.send` always goes with the delivery the webview chose (the UI sends
- * `queue`). A resync started while another one is in flight wins: only the newest publishes.
+ * prompt creates one. `prompt.send` always goes with the delivery the webview chose (the composer
+ * sends `queue`, or `steer` when the user picked "Steer now" on a chip of the queue, issue #188).
+ * A resync started while another one is in flight wins: only the newest publishes.
  * Phase 2 (`plan-fase2`) added abort, the editor actions behind `deps.editor` and attachments
  * restricted to what the picker emitted; it did not touch `resync`, `onEvent` or the translator.
  * Phase 3 (`plan-fase3`) adds, in this class: permission replies and form replies/cancels; the
@@ -781,6 +815,28 @@ export class ChatController {
    * {@link resolveLineage}; emptied when the folder changes.
    */
   private readonly lineage = createSessionLineage();
+  /**
+   * What the host last listed as pinned instructions of each session (issue #188): the guard of
+   * `instructions.remove` and the fallback list when a re-read fails. Emptied by
+   * {@link stopStream}; a session leaves it in {@link onSessionRemoved}.
+   */
+  private readonly instructions = new InstructionLedger();
+  /**
+   * Per session: moves whenever the instructions of THAT session change under a snapshot's feet
+   * (an add or remove of ours, before and after the call, or a `session.instructions.updated`
+   * event): a snapshot whose read began before the move drops its instruction list (see
+   * {@link PaneRead}). Keyed by session because panes show different sessions at once: a global
+   * counter let a change of session B discard the list of a snapshot that opened session A (review
+   * W1 of #188). A session absent from the map is at 0; {@link stopStream} empties it, and the
+   * snapshots of the old server are already dropped by `pane.generation`.
+   */
+  private readonly instructionsEpochs = new Map<string, number>();
+  /**
+   * Per session: ticket of the newest instruction list read ({@link publishInstructions}). An older
+   * read of the SAME session that finishes after a newer one started does not post, so a late stale
+   * list cannot replace a fresh one; a read of another session never makes it drop (review W1).
+   */
+  private readonly instructionsTickets = new Map<string, number>();
   /**
    * What every session is doing (E9-sidebar-home, issue #187; the base of #189). Created and owned
    * here, not injected: the controller is the only one that sees every event and every snapshot.
@@ -1645,12 +1701,12 @@ export class ChatController {
           const page = await client.message.list({
             sessionID: childID,
             order: 'desc',
-            limit: MESSAGE_LIMIT,
+            limit: LOADED_MESSAGE_LIMIT,
           });
           if (this.disposed || client !== this.client) return;
           this.seededChildren.add(childID);
           this.activity.seedTools(childID, [...page.data].reverse(), {
-            partial: page.data.length >= MESSAGE_LIMIT,
+            partial: page.data.length >= LOADED_MESSAGE_LIMIT,
           });
         } catch (error) {
           this.log.debug(`could not read the messages of a subagent: ${logErrorOf(error)}`);
@@ -1711,6 +1767,260 @@ export class ChatController {
       return;
     }
     this.result(pane, requestId);
+  }
+
+  /**
+   * `inbox.cancel` and `inbox.steer` (issue #188): cancels ONE queued prompt, or changes its
+   * delivery to `steer` so it joins the running turn. Revalidated here: only an id the translator
+   * lists in the queue of that session is acted on (the webview is untrusted), anything else
+   * answers `NotQueued` and calls nothing; a `steer` on an item already `steer` answers success
+   * without a call. A `ConflictError` from `update` means the item left the inbox meanwhile (it was
+   * delivered or cancelled): that is not an error for the user, so the request succeeds and the
+   * pane is resynced to show the truth. `cancel` on an item that is no longer pending is a no-op on
+   * the server. The change itself reaches the pane through the inbox events, never from here.
+   * VERIFIED by `chatController.panel.test.ts` "cancels a queued prompt", "steers a queued prompt",
+   * "refuses an id it did not list" and "treats a conflict on steer as benign and resyncs" (fabricated
+   * client, Windows 11, 12/11/2026). UNVERIFIED against a running server: whether `update` really
+   * throws `ConflictError` for a delivered item was read in the tag, not provoked.
+   */
+  private async changeInbox(
+    pane: ChatPane,
+    message: Extract<WebviewToHost, { type: 'inbox.cancel' | 'inbox.steer' }>,
+  ): Promise<void> {
+    const { requestId, sessionID, inboxID } = message;
+    const client = this.client;
+    if (client === undefined) return this.result(pane, requestId, unavailable());
+    const item = this.translator.queueOf(sessionID).find((queued) => queued.id === inboxID);
+    if (item === undefined) {
+      return this.result(
+        pane,
+        requestId,
+        refusal('NotQueued', () => l10n.t('That prompt is no longer in the queue')),
+      );
+    }
+    try {
+      if (message.type === 'inbox.cancel') {
+        await client.session.inbox.cancel({ sessionID, inboxID });
+        this.log.info(`queued prompt ${inboxID} cancelled in ${sessionID}`);
+      } else if (item.delivery !== 'steer') {
+        await client.session.inbox.update({ sessionID, inboxID, delivery: 'steer' });
+        this.log.info(`queued prompt ${inboxID} steered in ${sessionID}`);
+      }
+      this.result(pane, requestId);
+    } catch (error) {
+      if (tagOf(error) !== 'ConflictError') return this.result(pane, requestId, error);
+      this.log.debug(`queued prompt ${inboxID} was already gone when steering it`);
+      this.result(pane, requestId);
+      await this.resync([pane]);
+    }
+  }
+
+  /**
+   * `instructions.add` (issue #188): pins the text as a new instruction of `sessionID`. The host
+   * revalidates the text ({@link instructionText}), generates the key itself (`note-…`, never one
+   * already listed, so an add cannot overwrite an entry), stores the text as a string and reads
+   * the list again; the list is posted BEFORE the success so the entry is on screen when the
+   * request unlocks. The epoch moves before and after the call so a snapshot read in flight does
+   * not publish a list that misses the entry. A refusal of the server is the request's error:
+   * `InstructionEntryValueTooLargeError` (413, cannot happen under the 4000-character cap) reads
+   * as `InstructionTooLarge`. The text is never logged: the line is `instruction pinned <key> to
+   * <sid>`. The unit cases use a fabricated client; the `put` and `list` it makes were seen on an
+   * opencode 2.2.5 executable by the opt-in case of `realOpencode.test.ts` (UNVERIFIED on 2.2.7),
+   * and the whole path ran against the fake in "pins, lists and removes a session instruction".
+   * VERIFIED by `chatController.panel.test.ts` "pins an instruction and lists it again", "refuses
+   * a blank instruction without calling the server" and "answers the 413 of the server" (Windows
+   * 11, 12/11/2026).
+   */
+  private async addInstruction(
+    pane: ChatPane,
+    message: Extract<WebviewToHost, { type: 'instructions.add' }>,
+  ): Promise<void> {
+    const { requestId, sessionID } = message;
+    const client = this.client;
+    if (client === undefined) return this.result(pane, requestId, unavailable());
+    const text = instructionText(message.text);
+    if (text === undefined) {
+      return this.result(
+        pane,
+        requestId,
+        refusal('InvalidInstruction', () =>
+          l10n.t(
+            'An instruction cannot be empty or longer than {0} characters',
+            MAX_INSTRUCTION_LENGTH,
+          ),
+        ),
+      );
+    }
+    const key = newInstructionKey(this.instructions.keysOf(sessionID), Date.now(), Math.random);
+    let failure: unknown;
+    this.bumpInstructionsEpoch(sessionID);
+    try {
+      await client.experimental.session.instructions.entry.put({ sessionID, key, value: text });
+      this.log.info(`instruction pinned ${key} to ${sessionID}`);
+    } catch (error) {
+      failure =
+        tagOf(error) === 'InstructionEntryValueTooLargeError'
+          ? refusal('InstructionTooLarge', () =>
+              l10n.t('That instruction is too long for the server'),
+            )
+          : error;
+    }
+    this.bumpInstructionsEpoch(sessionID);
+    await this.publishInstructions(sessionID);
+    this.result(pane, requestId, failure);
+  }
+
+  /**
+   * `instructions.remove` (issue #188): removes the entry `key` of `sessionID`, only if the host
+   * listed that key for that session (the webview is untrusted and an entry can be one another
+   * client wrote); anything else answers `NotPinned` and calls nothing. The list is read again
+   * whether the call worked or not, so the view shows the truth when the entry was already gone.
+   * The line is `instruction removed <key> from <sid>`. A `remove` of a key that is not there
+   * answered as success on an opencode 2.2.5 executable (opt-in case of `realOpencode.test.ts`;
+   * UNVERIFIED on 2.2.7), so the failure branch here has only been driven with a fabricated client.
+   * VERIFIED by `chatController.panel.test.ts` "removes a listed instruction" and "refuses to
+   * remove a key it did not list" (fabricated client, Windows 11, 12/11/2026).
+   */
+  private async removeInstruction(
+    pane: ChatPane,
+    message: Extract<WebviewToHost, { type: 'instructions.remove' }>,
+  ): Promise<void> {
+    const { requestId, sessionID, key } = message;
+    const client = this.client;
+    if (client === undefined) return this.result(pane, requestId, unavailable());
+    if (!this.instructions.lists(sessionID, key)) {
+      return this.result(
+        pane,
+        requestId,
+        refusal('NotPinned', () => l10n.t('That instruction is no longer pinned')),
+      );
+    }
+    let failure: unknown;
+    this.bumpInstructionsEpoch(sessionID);
+    try {
+      await client.experimental.session.instructions.entry.remove({ sessionID, key });
+      this.log.info(`instruction removed ${key} from ${sessionID}`);
+    } catch (error) {
+      failure = error;
+    }
+    this.bumpInstructionsEpoch(sessionID);
+    await this.publishInstructions(sessionID);
+    this.result(pane, requestId, failure);
+  }
+
+  /**
+   * Reads the instructions of `sessionID` and posts them as `session.instructions` to the panes
+   * showing it (issue #188), recording them in the ledger. Never rejects: a failed read posts the
+   * LAST list the host knew with the scrubbed `error`, so the view keeps its entries and says why
+   * they may be old; a later success clears the error. Only the newest read OF THAT SESSION posts
+   * (`instructionsTickets`): an older one that finishes late is dropped, because the newer one is
+   * still to post; reads of other sessions do not count. Nothing is
+   * posted without a server. The text of an instruction is not logged; a successful read writes
+   * the stable line `instructions of <sid>: <n> pinned` (the count only), which the integration
+   * cases "pins, lists and removes a session instruction" and "refuses to remove a key it did not
+   * list" wait on.
+   * VERIFIED by `chatController.panel.test.ts` "keeps the last list and reports the error when the
+   * instructions cannot be read", "drops the answer of an older read of the instructions" and
+   * "does not drop the read of a session because another session started a read" (fabricated
+   * client, Windows 11, 12/11/2026; the last one fails when the ticket is shared by all sessions).
+   */
+  private async publishInstructions(sessionID: string): Promise<void> {
+    const client = this.client;
+    if (client === undefined) return;
+    const ticket = (this.instructionsTickets.get(sessionID) ?? 0) + 1;
+    this.instructionsTickets.set(sessionID, ticket);
+    let message: HostToWebview;
+    try {
+      const entries = toInstructionViews(
+        await client.experimental.session.instructions.entry.list({ sessionID }),
+      );
+      if (ticket !== this.instructionsTickets.get(sessionID)) return;
+      this.instructions.record(sessionID, entries);
+      this.log.info(`instructions of ${sessionID}: ${String(entries.length)} pinned`);
+      message = { type: 'session.instructions', sessionID, entries };
+    } catch (error) {
+      if (ticket !== this.instructionsTickets.get(sessionID)) return;
+      const info = toErrorInfo(error, this.secrets);
+      this.log.warn(`could not read the instructions of ${sessionID}: ${logTextOf(info)}`);
+      message = {
+        type: 'session.instructions',
+        sessionID,
+        entries: this.instructions.viewsOf(sessionID),
+        error: info,
+      };
+    }
+    this.publish([message]);
+  }
+
+  /** Current instruction epoch of `sessionID` (0 when unknown or no session is open). */
+  private instructionsEpochOf(sessionID: string | undefined): number {
+    return sessionID === undefined ? 0 : (this.instructionsEpochs.get(sessionID) ?? 0);
+  }
+
+  /** Moves the instruction epoch of `sessionID`, and only of it (review W1 of #188). */
+  private bumpInstructionsEpoch(sessionID: string): void {
+    this.instructionsEpochs.set(sessionID, this.instructionsEpochOf(sessionID) + 1);
+  }
+
+  /**
+   * `session.export` (issue #188, decision P1 of Sergio, Engram #2316): exports `sessionID` to a
+   * file the user picks. `markdown` is {@link formatSessionTranscript} of the server's export;
+   * `json` is that export as it comes (`sanitize: false` on purpose, like the TUI: the server's
+   * `sanitize: true` redacts every text, so the file would keep no conversation), pretty-printed,
+   * with a final newline. Both use `\n`. The save dialog is `deps.saveExport` (the name proposed
+   * is `session-<id>.md|json` with the id cleaned to `[A-Za-z0-9._-]`, so no platform refuses it);
+   * cancelling it is a success with no notice, a save is an `info` notice "Exported to <file name>"
+   * (the name, never the path). Without the dep the answer is `ExportUnavailable`. Nothing of the
+   * content is logged: the lines are `session <sid> exported as <format>` and `export of <sid>
+   * cancelled`. The export call itself was seen on an opencode 2.2.5 executable (opt-in case of
+   * `realOpencode.test.ts`; UNVERIFIED on 2.2.7). VERIFIED against the SIMPLE save dialog
+   * (`files.simpleDialog.enable`) on Windows 11, VS Code 1.146.0 (12/11/2026) by `test:visual` step
+   * 55: "S6 the markdown file was written", "S6 the Markdown has the prompt text and a User heading,
+   * with \n line ends" and "S6 the JSON parses, holds the messages and the full text". UNVERIFIED
+   * against the native dialogs of Windows, macOS and Linux.
+   * VERIFIED by `chatController.panel.test.ts` "exports the Markdown transcript through the save
+   * dialog", "exports the complete JSON without sanitising", "says nothing when the dialog is
+   * cancelled" and "answers ExportUnavailable without a dialog" (fabricated client and dialog,
+   * Windows 11, 12/11/2026).
+   */
+  private async exportSession(
+    pane: ChatPane,
+    message: Extract<WebviewToHost, { type: 'session.export' }>,
+  ): Promise<void> {
+    const { requestId, sessionID, format } = message;
+    const client = this.client;
+    if (client === undefined) return this.result(pane, requestId, unavailable());
+    if (this.deps.saveExport === undefined) {
+      return this.result(
+        pane,
+        requestId,
+        refusal('ExportUnavailable', () => l10n.t('Exporting is not available in this window')),
+      );
+    }
+    try {
+      const data = await client.experimental.session.export({ sessionID, sanitize: false });
+      const content =
+        format === 'json' ? `${JSON.stringify(data, null, 2)}\n` : formatSessionTranscript(data);
+      const safeID = sessionID.replace(/[^A-Za-z0-9._-]/g, '_');
+      const saved = await this.deps.saveExport({
+        suggestedName: `session-${safeID}.${format === 'json' ? 'json' : 'md'}`,
+        content,
+        folder: this.server?.folder,
+      });
+      if (saved === undefined) {
+        this.log.info(`export of ${sessionID} cancelled`);
+      } else {
+        this.log.info(`session ${sessionID} exported as ${format}`);
+        pane.post({
+          type: 'notice',
+          level: 'info',
+          error: { code: 'SessionExported', message: l10n.t('Exported to {0}', saved) },
+        });
+      }
+      this.result(pane, requestId);
+    } catch (error) {
+      this.result(pane, requestId, error);
+    }
   }
 
   /**
@@ -2058,6 +2368,8 @@ export class ChatController {
    * so do the lineage walks in flight (E4); the lineage rows already learned stay. The settings sink
    * is detached too (issue #128): the integrations and MCP servers it read described that server.
    * The activity registry is emptied too (E9-sidebar-home): its listeners hear every id it knew.
+   * The ledger of listed instructions is emptied (issue #188) and its epoch moves, so a snapshot
+   * read of the old server cannot publish a list.
    */
   private stopStream(): void {
     this.streamAbort?.abort();
@@ -2075,6 +2387,8 @@ export class ChatController {
     this.deps.serverConfig?.detach(); // issue #128: what it read described the server that left
     this.activity.reset(); // E9-sidebar-home: what it said described the server that left
     this.seededChildren.clear(); // #189: the seeded counts went with the registry
+    this.instructions.clear(); // #188: the keys listed belonged to the server that left
+    this.instructionsEpochs.clear();
     this.locationGeneration++;
     // The tree's cursors embed the old server's query, and an answer in flight belongs to it.
     this.treeBrowser.reset();
@@ -2188,6 +2502,18 @@ export class ChatController {
    * without stopping the others" of `fakeServer.test.ts` finds the three children through that
    * line (synthetic server, not a real opencode). No unit test reads it (the test logger is a
    * stub).
+   * Issue #188: the `session.inbox.*` events of user prompts also write one stable info line each
+   * (`inbox enqueued|delivered|cancelled <id> for <sid>`, `inbox delivery changed <id> for <sid>
+   * (<delivery>)`), ids and delivery only. VERIFIED against the synthetic server on Windows 11
+   * (12/11/2026, the full `npm run test:integration` on the final tree, fake-server label 80
+   * passing): the cases
+   * "queues a prompt sent during a SLOW turn and delivers it after the turn", "cancels a queued
+   * prompt" and "steers a prompt into the running turn" wait on those lines.
+   * Issue #188: a `session.instructions.updated` of a session some pane shows moves
+   * the epoch of THAT session (`instructionsEpochs`) and reads the list again ({@link publishInstructions}) before the event is
+   * translated; the translator ignores the event itself. VERIFIED by `chatController.panel.test.ts`
+   * "reads the instructions again when the server says they changed" (fabricated client, Windows
+   * 11, 12/11/2026); the event never reached the host from a real server.
    */
   private onEvent(event: V2Event): void {
     try {
@@ -2269,6 +2595,34 @@ export class ChatController {
           reason = ` (${failure.code}: ${failure.message})`;
         }
         this.log.info(`turn finished: ${outcome} for ${event.data.sessionID}${reason}`);
+      }
+      // Issue #188: the life of a queued prompt, ids and delivery only, never the text. Stable
+      // lines: the integration cases "queues a prompt sent during a SLOW turn and delivers it after
+      // the turn", "cancels a queued prompt" and "steers a prompt into the running turn" wait on them.
+      if (event.type === 'session.inbox.enqueued' && event.data.item.type === 'user') {
+        this.log.info(
+          `inbox enqueued ${event.data.inboxID} for ${event.data.sessionID} (${event.data.item.delivery})`,
+        );
+      } else if (
+        event.type === 'session.inbox.delivered' ||
+        event.type === 'session.inbox.cancelled'
+      ) {
+        const verb = event.type.slice('session.inbox.'.length);
+        this.log.info(`inbox ${verb} ${event.data.inboxID} for ${event.data.sessionID}`);
+      } else if (event.type === 'session.inbox.delivery.changed') {
+        this.log.info(
+          `inbox delivery changed ${event.data.inboxID} for ${event.data.sessionID} (${event.data.delivery})`,
+        );
+      }
+      // Issue #188: another client (or our own put, whose event may come before or after the
+      // answer) changed the instructions of a session a pane shows: the event carries only hashes,
+      // so the list is read again. The epoch move drops a snapshot read that began before it.
+      if (
+        event.type === 'session.instructions.updated' &&
+        this.panesOf(event.data.sessionID).length > 0
+      ) {
+        this.bumpInstructionsEpoch(event.data.sessionID);
+        void this.publishInstructions(event.data.sessionID);
       }
       this.publish(this.translator.translate(event));
       if (
@@ -2419,10 +2773,11 @@ export class ChatController {
    * its own view when it receives the same `session.removed`. An info notice, to those panes
    * only, says so unless the delete was ours (`deleting`). Idempotent: the second report finds no
    * pane showing it. Whatever it was, the session's "Changed files" state is forgotten in every
-   * pane (issue #31).
+   * pane (issue #31), and so is the list of instructions the host kept for it (issue #188).
    */
   private onSessionRemoved(sessionID: string): void {
     const ours = this.deleting.delete(sessionID);
+    this.instructions.forget(sessionID);
     for (const pane of this.panes.values()) {
       pane.diffs.forget(sessionID);
       pane.reverts.forget(sessionID);
@@ -2984,6 +3339,11 @@ export class ChatController {
    * `session.get` failed): "no row" is not "no revert", and applying `undefined` would clear a
    * revert the server still has, showing the hidden messages again while the files stay reverted
    * (review W2).
+   * Issue #188: the inbox of the open session is read in the same `Promise.all` as its messages
+   * and children ({@link readInbox}); the snapshot reconciles it with the stream in
+   * {@link publishSnapshot}. The instructions of the session are read there too
+   * ({@link readInstructions}) with the epoch of that session (`instructionsEpochs`) at the start, and a failure of
+   * that read leaves the snapshot without them rather than failing it.
    */
   private async readPane(
     client: ChatApi,
@@ -2998,13 +3358,20 @@ export class ChatController {
     for (const id of Object.keys(active)) statuses[id] = { type: 'busy' };
     let open: OpenSession | undefined;
     let rawMessages: PaneRead['rawMessages'] = [];
+    let inbox: SessionInboxInfo[] | undefined;
+    let instructions: InstructionView[] | undefined;
     const openID = pane.sessionID;
+    const instructionsEpoch = this.instructionsEpochOf(openID);
     if (openID !== undefined) {
       try {
-        const [messages, children] = await Promise.all([
-          client.message.list({ sessionID: openID, order: 'desc', limit: MESSAGE_LIMIT }),
+        const [messages, children, listedInbox, listedInstructions] = await Promise.all([
+          client.message.list({ sessionID: openID, order: 'desc', limit: LOADED_MESSAGE_LIMIT }),
           this.readChildren(client, server.folder, openID),
+          this.readInbox(client, openID),
+          this.readInstructions(client, openID),
         ]);
+        inbox = listedInbox;
+        instructions = listedInstructions;
         rawMessages = [...messages.data].reverse(); // REST returned newest first
         open = { sessionID: openID, messages: [], parts: {} };
         for (const raw of rawMessages) {
@@ -3053,7 +3420,60 @@ export class ChatController {
       }
     }
     this.restored.delete(pane.id);
-    return { openID, open, rawMessages, sessions, statuses };
+    return {
+      openID,
+      open,
+      rawMessages,
+      sessions,
+      statuses,
+      inbox,
+      instructions,
+      instructionsEpoch,
+    };
+  }
+
+  /**
+   * The instructions pinned to `sessionID` as REST lists them (issue #188), read in parallel with
+   * its messages. Like {@link readInbox} it is cosmetic for the snapshot: a failure (the route is
+   * EXPERIMENTAL and may be gone in another version) is a `debug` line and `undefined`, so the
+   * snapshot carries no list and the webview keeps what it had; `SessionNotFoundError` rethrows so
+   * {@link readPane} forgets the session as it does for the messages. The `list` itself was seen on
+   * an opencode 2.2.5 executable (opt-in case of `realOpencode.test.ts`; UNVERIFIED on 2.2.7); the
+   * failure branch only with a fabricated client.
+   */
+  private async readInstructions(
+    client: ChatApi,
+    sessionID: string,
+  ): Promise<InstructionView[] | undefined> {
+    try {
+      return toInstructionViews(
+        await client.experimental.session.instructions.entry.list({ sessionID }),
+      );
+    } catch (error) {
+      if (isSessionNotFound(error)) throw error;
+      this.log.debug(`could not read the instructions of the open session: ${logErrorOf(error)}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * The inbox of `sessionID` as REST lists it (issue #188), read in parallel with its messages.
+   * Cosmetic for the snapshot, so a failure is a `debug` line and `undefined` (the snapshot then
+   * carries the queue the stream built), EXCEPT `SessionNotFoundError`, which rethrows so
+   * {@link readPane} forgets the session exactly as it does for the messages. UNVERIFIED against a
+   * running server: the route and its answer were read in the client types of 2.2.7 only.
+   */
+  private async readInbox(
+    client: ChatApi,
+    sessionID: string,
+  ): Promise<SessionInboxInfo[] | undefined> {
+    try {
+      return await client.session.inbox.list({ sessionID });
+    } catch (error) {
+      if (isSessionNotFound(error)) throw error;
+      this.log.debug(`could not read the inbox of the open session: ${logErrorOf(error)}`);
+      return undefined;
+    }
   }
 
   /**
@@ -3098,6 +3518,21 @@ export class ChatController {
    * carries the digest of the open session's children the registry knows (absent with none).
    * VERIFIED by `chatController.subagents.test.ts` "puts the digest of the children in the
    * snapshot of the open session" (fabricated client, Windows 11, 08/11/2026).
+   * Issue #188: `open.inbox` is the queue of the open session, always set when a session is open
+   * (`translator.seedInbox` of the list {@link readPane} read, or the stream's own queue when that
+   * read failed); an inbox event that arrived after `token` wins over the REST list in both
+   * directions (VERIFIED by `chatController.panel.test.ts`, "keeps in the snapshot a prompt
+   * enqueued during the read" and "leaves out of the snapshot a prompt delivered during the read",
+   * fabricated client, Windows 11, 12/11/2026).
+   * Issue #188, instructions: `open.instructions` is the list {@link readPane} read, and is
+   * published (and recorded in the ledger that guards `instructions.remove`) ONLY when
+   * the epoch of THAT session is still the one the read started with; if an add, a remove or a
+   * `session.instructions.updated` of it moved it, the snapshot carries no list and the webview
+   * keeps its own, which the change's `session.instructions` already made right. A change of another
+   * session leaves the list in. VERIFIED by `chatController.panel.test.ts` "puts the instructions in
+   * the snapshot", "leaves the instructions out of a snapshot whose read an add overtook" and "keeps
+   * the instructions of a snapshot when another session changed meanwhile" (fabricated client,
+   * Windows 11, 12/11/2026; the last one fails when the epoch is shared by all sessions).
    */
   private publishSnapshot(
     pane: ChatPane,
@@ -3134,6 +3569,21 @@ export class ChatController {
       merge: this.panes.size > 1 || this.treeMirrored,
     });
     const complete = open === undefined ? undefined : this.translator.mergeLive(open);
+    // #188: the queue of prompts, REST's list with the inbox events since `token` laid on top (no
+    // `await` between this and the post below, so an event cannot slip in; see `seedInbox`).
+    if (complete !== undefined) {
+      complete.inbox = this.translator.seedInbox(complete.sessionID, read.inbox, token);
+      // #188: the instructions, only if nothing changed them since the read began (an add, a
+      // remove or a server event bumps the epoch of this session); otherwise the snapshot carries none,
+      // the webview keeps its list and the change's own `session.instructions` is the truth.
+      if (
+        read.instructions !== undefined &&
+        read.instructionsEpoch === this.instructionsEpochOf(complete.sessionID)
+      ) {
+        complete.instructions = read.instructions;
+        this.instructions.record(complete.sessionID, read.instructions);
+      }
+    }
     // #189: the children among the rows are learned (their listener publishes AFTER this
     // snapshot, in a microtask) and their digests ride in `open.subagents`.
     this.activity.learn(rows);
@@ -3685,7 +4135,8 @@ export class ChatController {
   /**
    * `session.compact` (issue #125): asks the server to compact the conversation of `sessionID`.
    *
-   * Calls `session.compact` with `delivery: 'queue'`, like every prompt of this UI, and answers the
+   * Calls `session.compact` with `delivery: 'queue'` (the same one a plain prompt of the composer uses; a queued item can be
+   * steered afterwards from its chip, issue #188), and answers the
    * request as soon as the server admitted the item; the summary is made afterwards and its
    * progress reaches the chat as the notice the translator builds from `session.compaction.*`.
    * A server refusal (unknown session) answers with the usual scrubbed error. When there is
@@ -5027,6 +5478,21 @@ export class ChatController {
       },
       'subagent.stop': (m) => {
         pending.push(this.stopSubagents(pane, m));
+      },
+      'inbox.cancel': (m) => {
+        pending.push(this.changeInbox(pane, m));
+      },
+      'inbox.steer': (m) => {
+        pending.push(this.changeInbox(pane, m));
+      },
+      'instructions.add': (m) => {
+        pending.push(this.addInstruction(pane, m));
+      },
+      'instructions.remove': (m) => {
+        pending.push(this.removeInstruction(pane, m));
+      },
+      'session.export': (m) => {
+        pending.push(this.exportSession(pane, m));
       },
       'permission.reply': (m) => {
         pending.push(this.answerPermission(pane, m));

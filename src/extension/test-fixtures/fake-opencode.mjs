@@ -39,6 +39,27 @@
 // Phase 2 adds `POST /api/session/:id/interrupt` (answers the bare `{"interrupted":true|false}`)
 // and a SLOW switch: a prompt containing SLOW plays its events 300 ms apart so it can be
 // interrupted. Both are SYNTHETIC, written from the route and the types read in 2.0.32.
+// E2-chat-panel-tabs (issue #188) adds the INBOX, SYNTHETIC and written from the types and route
+// descriptions of 2.2.7 (nothing seen on a running server): a prompt that arrives while the session
+// runs waits in the inbox (`session.inbox.enqueued`) instead of overlapping the turn. `queue` plays
+// as a turn of its own when the running one ends (in enqueue order); `steer` is delivered into the
+// running turn about 150 ms later (`session.inbox.delivered`) with no turn of its own.
+// `GET /api/session/:id/inbox` lists the pending items, `DELETE .../inbox/:inboxID` cancels one
+// (`session.inbox.cancelled`; a missing one is a no-op 204) and `PATCH .../inbox/:inboxID`
+// `{delivery}` changes its delivery (`session.inbox.delivery.changed`; a missing one is a 409
+// `ConflictError`; `steer` wakes an idle session). An interrupt leaves what waited and the next
+// waiting prompt then plays. See `inboxOf`.
+// Phase 2 of the same issue adds, also SYNTHETIC and from the types of 2.2.7: the pinned
+// instructions `GET|PUT|DELETE /api/experimental/session/:id/instructions/entries[/:key]` (an
+// in-memory `key -> JSON value` map per session; a key that breaks `^[a-z0-9][a-z0-9._-]*$` is a
+// 400 `InvalidRequestError`, a value over 256 KiB a 413 `InstructionEntryValueTooLargeError`, a
+// change publishes `session.instructions.updated` with hashes and no value, removing a missing key
+// is a silent 204) and `GET /api/experimental/session/:id/export[?sanitize=true]` (the row and the
+// history as `{info, messages}`; with `sanitize=true` every title, text, command, output and
+// directory becomes `[redacted:kind:n]`, which is what the real one does to ALL text, read in
+// `transfer.ts` of the tag, not observed). A prompt containing NEAR_FULL (INVENTED trigger) makes
+// its step report 86 % of the context window of the chosen model, so the context line reaches its
+// `high` level on the default catalog.
 // Phase 3 adds permissions and questions, all SYNTHETIC and written from the routes and types read
 // in 2.0.32 (never seen against a server except where `realOpencode.test.ts` says so): a prompt
 // containing ASK_PERMISSION runs the turn up to a tool call and a `permission.asked`
@@ -249,7 +270,31 @@ function exitAfterStderr(text, code) {
 const sseClients = new Set();
 const sessions = new Map(); // id -> SessionInfo
 const history = new Map(); // id -> messages, oldest first
-const running = new Set(); // ids with a turn in flight
+/**
+ * The ids with a turn in flight. A session that LEAVES the set (its turn succeeded, failed or was
+ * interrupted) drains its inbox a moment later ({@link drainInbox}): the prompts queued while it ran
+ * play as turns of their own, one after another. The delay keeps the `execution.*` event that ended
+ * the turn ahead of the next turn's `enqueued`/`execution.started` on the stream (INVENTED, issue
+ * #188; the real order with several prompts queued was never recorded).
+ */
+class RunningSet extends Set {
+  delete(sessionID) {
+    const had = super.delete(sessionID);
+    if (had) setTimeout(() => drainInbox(sessionID), DRAIN_DELAY_MS);
+    return had;
+  }
+}
+const running = new RunningSet(); // ids with a turn in flight
+/** Wait before the inbox of a session that just stopped running is drained, in ms (INVENTED). */
+const DRAIN_DELAY_MS = 40;
+/** Wait before a `steer` prompt is delivered into the turn in flight, in ms (INVENTED, issue #188). */
+const STEER_DELAY_MS = 150;
+/**
+ * Session id -> the user prompts admitted while a turn ran and not delivered yet, oldest first, as
+ * `{ id, text, files, delivery }` (`files` in the wire shape of {@link toWireFiles}). INVENTED
+ * semantics of the inbox (issue #188), read from the types and descriptions of 2.2.7 only.
+ */
+const inboxes = new Map();
 const turnTimers = new Map(); // id -> timers of the turn in flight, cleared by an interrupt
 const pendingPermissions = new Map(); // id -> PermissionRequest, in order of arrival
 const pendingForms = new Map(); // id -> FormInfo
@@ -712,6 +757,125 @@ function toolInputSteps(a, id, name, input) {
     () => broadcast('session.tool.input.started', { ...a, id, name }),
     () => broadcast('session.tool.input.ended', { ...a, id, text: JSON.stringify(input) }),
   ];
+}
+
+/** The pinned instructions of each session (issue #188): sessionID -> Map(key -> JSON value). */
+const instructionEntries = new Map();
+/** Counter behind the fake hashes of `session.instructions.updated`. */
+let instructionRevision = 0;
+/** The server's key rule, read in the tag (`^[a-z0-9][a-z0-9._-]*$`). */
+const INSTRUCTION_KEY = /^[a-z0-9][a-z0-9._-]*$/;
+/** The server's limit for one entry value, in bytes (256 KiB, read in the tag). */
+const INSTRUCTION_MAX_BYTES = 262_144;
+
+/**
+ * Replaces every text of an exported session by `[redacted:<kind>:<n>]`, the way the real
+ * `sanitize: true` does for ALL text, not only secrets (title, user and assistant text, reasoning,
+ * shell command and output, and the directory; read in `transfer.ts` of the v2.2.7 tag, never
+ * observed). The structure, ids and times stay. SYNTHETIC: the numbering is ours.
+ */
+function redactTransfer(transfer) {
+  let count = 0;
+  const redact = (kind) => `[redacted:${kind}:${String((count += 1))}]`;
+  const info = { ...transfer.info };
+  if (typeof info.title === 'string') info.title = redact('title');
+  if (info.location !== undefined) info.location = { ...info.location, directory: redact('path') };
+  const messages = transfer.messages.map((message) => {
+    const copy = { ...message };
+    if (typeof copy.text === 'string') copy.text = redact('text');
+    if (typeof copy.command === 'string') copy.command = redact('command');
+    if (copy.output !== undefined) copy.output = { ...copy.output, output: redact('output') };
+    if (Array.isArray(copy.content)) {
+      copy.content = copy.content.map((block) =>
+        typeof block.text === 'string' ? { ...block, text: redact(block.type) } : block,
+      );
+    }
+    return copy;
+  });
+  return { info, messages };
+}
+
+/**
+ * Answers `GET|PUT|DELETE /api/experimental/session/:id/instructions/entries[/:key]` and `GET
+ * /api/experimental/session/:id/export` (issue #188); false when the request is none of them.
+ * SYNTHETIC, from the types of 2.2.7: a missing session is the usual 404 `SessionNotFoundError`;
+ * `PUT` stores the `value` of the body (a bad key is a 400 `InvalidRequestError`, a value over
+ * {@link INSTRUCTION_MAX_BYTES} bytes a 413 `InstructionEntryValueTooLargeError`) and answers 204;
+ * `DELETE` answers 204 whether the key exists or not; a change that really happened publishes
+ * `session.instructions.updated` with a fake hash per key (or `removed`) and no value. The list is
+ * `{data}` in insertion order. The export answers `{data: {info, messages}}`, redacted with
+ * `?sanitize=true`.
+ */
+function handleSessionExperimental(request, response) {
+  const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+  const route =
+    /^\/api\/experimental\/session\/([^/]+)\/(instructions\/entries(?:\/([^/]+))?|export)$/.exec(
+      url.pathname,
+    );
+  if (route === null) return false;
+  const sessionID = decodeURIComponent(route[1]);
+  const session = sessions.get(sessionID);
+  if (session === undefined) {
+    json(response, 404, {
+      _tag: 'SessionNotFoundError',
+      message: `Session not found: ${sessionID}`,
+    });
+    return true;
+  }
+  if (route[2] === 'export') {
+    if (request.method !== 'GET') return false;
+    const transfer = { info: session, messages: history.get(sessionID) ?? [] };
+    json(response, 200, {
+      data: url.searchParams.get('sanitize') === 'true' ? redactTransfer(transfer) : transfer,
+    });
+    return true;
+  }
+  let entries = instructionEntries.get(sessionID);
+  if (entries === undefined) {
+    entries = new Map();
+    instructionEntries.set(sessionID, entries);
+  }
+  const key = route[3] === undefined ? undefined : decodeURIComponent(route[3]);
+  if (request.method === 'GET' && key === undefined) {
+    json(response, 200, {
+      data: [...entries].map(([entryKey, value]) => ({ key: entryKey, value })),
+    });
+    return true;
+  }
+  if (request.method === 'PUT' && key !== undefined) {
+    readBody(request).then((body) => {
+      if (!INSTRUCTION_KEY.test(key)) {
+        json(response, 400, { _tag: 'InvalidRequestError', message: `Invalid key: ${key}` });
+        return;
+      }
+      const bytes = Buffer.byteLength(JSON.stringify(body.value ?? null));
+      if (bytes > INSTRUCTION_MAX_BYTES) {
+        json(response, 413, {
+          _tag: 'InstructionEntryValueTooLargeError',
+          actualBytes: bytes,
+          maxBytes: INSTRUCTION_MAX_BYTES,
+          message: 'Instruction value is too large',
+        });
+        return;
+      }
+      entries.set(key, body.value ?? null);
+      instructionRevision += 1;
+      broadcast('session.instructions.updated', {
+        sessionID,
+        delta: { [key]: `hash_${String(instructionRevision)}` },
+      });
+      noContent(response);
+    });
+    return true;
+  }
+  if (request.method === 'DELETE' && key !== undefined) {
+    if (entries.delete(key)) {
+      broadcast('session.instructions.updated', { sessionID, delta: { [key]: 'removed' } });
+    }
+    noContent(response);
+    return true;
+  }
+  return false;
 }
 
 /** Sends a JSON answer wrapped the way the real server wraps REST results. */
@@ -1359,6 +1523,22 @@ function selectOnSession(session, sub, body) {
 /** Tokens every step reports (issue #25): 1200 + 40 + 8 + 3000 = 4248 in the context. SYNTHETIC. */
 const STEP_TOKENS = { input: 1200, output: 40, reasoning: 8, cache: { read: 3000, write: 0 } };
 
+/**
+ * The tokens a step reports (issue #188, INVENTED trigger NEAR_FULL): normally {@link STEP_TOKENS};
+ * with NEAR_FULL in the prompt, 86 % of the context window of the model the session uses (the
+ * catalog's `limit.context`), made of 40 output, 8 reasoning, 3000 cache-read and the rest input,
+ * so the context line of the webview reads 86 % and its `high` level shows. A session on an unknown
+ * model uses the first catalog window.
+ */
+function stepTokensFor(sessionID, text) {
+  if (!text.includes('NEAR_FULL')) return STEP_TOKENS;
+  const modelID = selectionOf(sessionID).model?.id;
+  const window = (CATALOG_MODELS.find((model) => model.id === modelID) ?? CATALOG_MODELS[0]).limit
+    .context;
+  const total = Math.floor(window * 0.86);
+  return { input: total - 3048, output: 40, reasoning: 8, cache: { read: 3000, write: 0 } };
+}
+
 /** Cost of a step whose prompt contains COSTLY, in USD. SYNTHETIC. */
 const COSTLY_STEP_COST = 0.0123;
 
@@ -1501,9 +1681,14 @@ function playCompaction(sessionID, inputID) {
  * 20 s, INVENTED, for the running row of `test:visual` step 50). A prompt containing CREW (issue
  * #189) plays three `subagent` calls whose children run their own turns (see {@link crewTurn});
  * the parent's body then waits in `gates` until the three ended, so the same function also plays
- * a CHILD turn, with the words of the child's prompt.
+ * a CHILD turn, with the words of the child's prompt. A prompt containing NEAR_FULL (issue #188,
+ * INVENTED) makes the step report 86 % of the context window of the session's model
+ * ({@link stepTokensFor}) instead of the usual {@link STEP_TOKENS}.
+ * `alreadyEnqueued` (issue #188, INVENTED semantics) is set by {@link drainInbox} for a prompt that
+ * waited in the inbox: its `session.inbox.enqueued` was published when it arrived, so the turn does
+ * not publish it again and starts at `session.execution.started`.
  */
-function playTurn(sessionID, inboxID, text, files = []) {
+function playTurn(sessionID, inboxID, text, files = [], alreadyEnqueued = false) {
   // MCPFLIP (E10-config-views, issue #128; INVENTED trigger, see {@link flipMcp}): flips an MCP
   // server and the turn then plays as usual.
   if (text.includes('MCPFLIP')) flipMcp();
@@ -1583,6 +1768,8 @@ function playTurn(sessionID, inboxID, text, files = []) {
   const firstTurn = !history.get(sessionID).some((message) => message.type === 'assistant');
   // Issue #25: COSTLY makes the step cost money (the catalog stays free).
   const stepCost = text.includes('COSTLY') ? COSTLY_STEP_COST : 0;
+  // Issue #188: NEAR_FULL makes the step report 86 % of the context window.
+  const stepTokens = stepTokensFor(sessionID, text);
   const asking = text.includes('ASK_PERMISSION')
     ? 'permission'
     : text.includes('ASK_QUESTION')
@@ -1591,16 +1778,22 @@ function playTurn(sessionID, inboxID, text, files = []) {
   /** The asking tool of this turn, once it exists; its block joins the REST message at the end. */
   let toolBlock;
   const steps = [
-    () =>
-      broadcast('session.inbox.enqueued', {
-        sessionID,
-        inboxID,
-        item: {
-          type: 'user',
-          payload: { text, ...(files.length > 0 ? { files } : {}) },
-          delivery: 'queue',
-        },
-      }),
+    // A prompt that waited in the inbox (issue #188) was enqueued, with its own delivery, when it
+    // arrived; only the turn it opens plays from `execution.started` on.
+    ...(alreadyEnqueued
+      ? []
+      : [
+          () =>
+            broadcast('session.inbox.enqueued', {
+              sessionID,
+              inboxID,
+              item: {
+                type: 'user',
+                payload: { text, ...(files.length > 0 ? { files } : {}) },
+                delivery: 'queue',
+              },
+            }),
+        ]),
     () => broadcast('session.execution.started', { sessionID }),
     () => {
       history.get(sessionID).push({
@@ -1666,7 +1859,7 @@ function playTurn(sessionID, inboxID, text, files = []) {
           time: { created: Date.now(), completed: Date.now() },
           finish: 'stop',
           cost: stepCost,
-          tokens: STEP_TOKENS,
+          tokens: stepTokens,
           content: [
             ...(toolBlock === undefined ? [] : [toolBlock()].flat()),
             { type: 'reasoning', text: 'thinking about it', time: { created: 1, completed: 2 } },
@@ -1683,10 +1876,10 @@ function playTurn(sessionID, inboxID, text, files = []) {
           ...a,
           finish: 'stop',
           cost: stepCost,
-          tokens: STEP_TOKENS,
+          tokens: stepTokens,
           ...(changed === undefined ? {} : { snapshot: nextId('snap'), files: changed }),
         });
-        addUsage(sessionID, stepCost, STEP_TOKENS);
+        addUsage(sessionID, stepCost, stepTokens);
       },
       ...(text.includes('COMPACT') ? compactionSteps(sessionID, nextId('msg')) : []),
       () => {
@@ -1808,6 +2001,96 @@ function dropRequests(sessionID, announce) {
 }
 
 /**
+ * The inbox of the prompt route and of the three `/inbox` routes (issue #188). INVENTED semantics,
+ * written from the types and descriptions of 2.2.7 (`inbox.list` "durable enqueued session work not
+ * yet delivered, ordered by enqueue sequence"; `cancel` of an item that is not pending is a no-op;
+ * `update` changes only the delivery and "steering wakes session execution", `ConflictError` when
+ * the item is no longer pending); NOTHING here was seen on a running server:
+ *  - a prompt that arrives while the session RUNS is admitted into the inbox and published as
+ *    `session.inbox.enqueued` with its delivery. `queue` waits for the end of the turn
+ *    ({@link drainInbox}); `steer` is delivered into the turn in flight {@link STEER_DELAY_MS} later
+ *    (`session.inbox.delivered`, the user message joins the history) with no turn of its own;
+ *  - `DELETE` removes a pending item (`session.inbox.cancelled`), anything else is a no-op;
+ *  - `PATCH` of a pending item to another delivery publishes `session.inbox.delivery.changed`, and
+ *    to `steer` delivers it into the running turn, or starts a turn with it if the session is idle;
+ *    a missing item is a 409 `ConflictError`;
+ *  - a turn that stops (any way) lets the oldest waiting prompt play next; an interrupt too.
+ */
+function inboxOf(sessionID) {
+  let items = inboxes.get(sessionID);
+  if (items === undefined) {
+    items = [];
+    inboxes.set(sessionID, items);
+  }
+  return items;
+}
+
+/** The wire shape of an inbox item, as `session.inbox.list` and the prompt route answer it. */
+function inboxWire(sessionID, item) {
+  return {
+    id: item.id,
+    sessionID,
+    time: { created: item.created },
+    type: 'user',
+    payload: { text: item.text, ...(item.files.length > 0 ? { files: item.files } : {}) },
+    delivery: item.delivery,
+  };
+}
+
+/**
+ * Admits a prompt that arrived while `sessionID` runs: stores it, publishes `enqueued` and, for
+ * `steer`, schedules its delivery into the turn in flight. Returns the item.
+ */
+function admitWhileRunning(sessionID, inboxID, text, files, delivery) {
+  const item = { id: inboxID, text, files, delivery, created: Date.now() };
+  inboxOf(sessionID).push(item);
+  broadcast('session.inbox.enqueued', {
+    sessionID,
+    inboxID,
+    item: {
+      type: 'user',
+      payload: { text, ...(files.length > 0 ? { files } : {}) },
+      delivery,
+    },
+  });
+  if (delivery === 'steer') scheduleSteer(sessionID, inboxID);
+  return item;
+}
+
+/**
+ * Delivers a pending item into the turn in flight after {@link STEER_DELAY_MS}: out of the inbox,
+ * into the history, `session.inbox.delivered`. The timer joins `turnTimers`, so an interrupt drops
+ * it and the item stays pending (then {@link drainInbox} gives it a turn). Does nothing if the item
+ * was cancelled meanwhile or the turn ended.
+ */
+function scheduleSteer(sessionID, inboxID) {
+  const timer = setTimeout(() => {
+    const items = inboxes.get(sessionID) ?? [];
+    const index = items.findIndex((item) => item.id === inboxID);
+    if (index < 0 || !running.has(sessionID)) return;
+    const [item] = items.splice(index, 1);
+    history.get(sessionID)?.push({
+      id: item.id,
+      type: 'user',
+      text: item.text,
+      ...(item.files.length > 0 ? { files: item.files } : {}),
+      time: { created: Date.now() },
+    });
+    broadcast('session.inbox.delivered', { sessionID, inboxID });
+  }, STEER_DELAY_MS);
+  turnTimers.set(sessionID, [...(turnTimers.get(sessionID) ?? []), timer]);
+}
+
+/** Plays the oldest waiting prompt of an idle session as a turn of its own; see {@link RunningSet}. */
+function drainInbox(sessionID) {
+  if (running.has(sessionID) || !sessions.has(sessionID)) return;
+  const item = inboxes.get(sessionID)?.shift();
+  if (item === undefined) return;
+  running.add(sessionID);
+  playTurn(sessionID, item.id, item.text, item.files, true);
+}
+
+/**
  * Imitates `POST /api/session/:id/interrupt`: SYNTHETIC. Answers the BARE body `{interrupted}`
  * (no `{data}` wrapper, like the real route read in the client chunk of 2.0.32) and, when a turn
  * was in flight, drops its remaining events, fails the step in flight (`session.step.failed`,
@@ -1902,6 +2185,8 @@ function removeSession(sessionID) {
     removeSession(child.id);
   }
   dropRequests(sessionID, false);
+  inboxes.delete(sessionID);
+  instructionEntries.delete(sessionID);
   sessions.delete(sessionID);
   history.delete(sessionID);
   sessionEdits.delete(sessionID);
@@ -3042,6 +3327,10 @@ function sessionStats(params) {
  * Answers the chat routes (and, issue #128, the read routes `GET /api/integration[/:id]`, `GET
  * /api/mcp` and `GET /api/mcp/resource`); returns false when the request is not one of them. The
  * stats route also counts its requests (`statsCalls`, one stderr line each; issue #187).
+ * Issue #188 adds the inbox: `GET /api/session/:id/inbox`, `DELETE` and `PATCH` of
+ * `/api/session/:id/inbox/:inboxID`, and a `prompt` that arrives while the session runs is admitted
+ * into the inbox instead of playing a second turn on top of the first (see {@link inboxOf} for the
+ * INVENTED semantics).
  * Authentication was already checked by the caller.
  */
 function handleChat(request, response) {
@@ -3173,6 +3462,7 @@ function handleChat(request, response) {
   if (handleIntegrationWrites(request, response, location)) return true;
   if (handleMcpWrites(request, response)) return true;
   if (handleConfig(request, response)) return true;
+  if (handleSessionExperimental(request, response)) return true;
   if (method === 'GET' && path === '/api/mcp') {
     json(response, 200, { location, data: mcpServers });
     return true;
@@ -3219,7 +3509,7 @@ function handleChat(request, response) {
   const act = /^\/api\/session\/([^/]+)\/(permission|form)\/([^/]+)(?:\/(reply))?$/.exec(path);
   if (act !== null) return handleAnswer(request, response, act);
   const match =
-    /^\/api\/session\/([^/]+)(?:\/(message\/[^/]+|message|permission|form|prompt|command|interrupt|compact|fork|model|agent|diff|revert\/stage|revert\/commit|revert))?$/.exec(
+    /^\/api\/session\/([^/]+)(?:\/(message\/[^/]+|message|permission|form|prompt|command|interrupt|compact|fork|model|agent|diff|inbox\/[^/]+|inbox|revert\/stage|revert\/commit|revert))?$/.exec(
       path,
     );
   if (match === null) return false;
@@ -3342,8 +3632,68 @@ function handleChat(request, response) {
     readBody(request).then((body) => runCommand(response, session, body, location.directory));
     return true;
   }
+  if (method === 'GET' && sub === 'inbox') {
+    json(response, 200, {
+      data: (inboxes.get(session.id) ?? []).map((item) => inboxWire(session.id, item)),
+    });
+    return true;
+  }
+  if ((method === 'DELETE' || method === 'PATCH') && sub?.startsWith('inbox/')) {
+    const inboxID = decodeURIComponent(sub.slice('inbox/'.length));
+    const items = inboxes.get(session.id) ?? [];
+    const index = items.findIndex((item) => item.id === inboxID);
+    if (method === 'DELETE') {
+      // An item that is not pending is a no-op (the real handler swallows `InboxConflictError`).
+      if (index >= 0) {
+        items.splice(index, 1);
+        broadcast('session.inbox.cancelled', { sessionID: session.id, inboxID });
+      }
+      noContent(response);
+      return true;
+    }
+    readBody(request).then((body) => {
+      // Looked up AFTER the body arrived: a turn may have delivered or drained it meanwhile.
+      const item = (inboxes.get(session.id) ?? []).find((pending) => pending.id === inboxID);
+      if (item === undefined) {
+        json(response, 409, {
+          _tag: 'ConflictError',
+          message: `Inbox item is no longer pending: ${inboxID}`,
+        });
+        return;
+      }
+      const delivery = body.delivery === 'steer' ? 'steer' : 'queue';
+      if (delivery !== item.delivery) {
+        item.delivery = delivery;
+        broadcast('session.inbox.delivery.changed', {
+          sessionID: session.id,
+          inboxID,
+          delivery,
+        });
+      }
+      // "Steering wakes session execution": into the turn in flight, or a turn of its own if idle.
+      if (delivery === 'steer') {
+        if (running.has(session.id)) scheduleSteer(session.id, inboxID);
+        else drainInbox(session.id);
+      }
+      noContent(response);
+    });
+    return true;
+  }
   if (method === 'POST' && sub === 'prompt') {
     readBody(request).then((body) => {
+      // A prompt that arrives while a turn runs waits in the inbox (issue #188) instead of
+      // overlapping it; its answer is the same admitted item.
+      if (running.has(session.id)) {
+        const admitted = admitWhileRunning(
+          session.id,
+          nextId('msg'),
+          String(body.text),
+          toWireFiles(body.files),
+          body.delivery === 'queue' ? 'queue' : 'steer',
+        );
+        json(response, 200, { data: inboxWire(session.id, admitted) });
+        return;
+      }
       // A prompt with a revert staged commits it first, like `session.ts@843a6c51` L164-165 (READ).
       commitStaged(session);
       const inboxID = nextId('msg');

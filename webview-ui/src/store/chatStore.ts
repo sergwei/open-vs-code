@@ -63,6 +63,17 @@
  *    OPEN session, by child id. `subagent.activity` replaces ONE child's entry (kept as the same
  *    object, its `recent` tools matched by `id`) and only when its parent is the open session; a
  *    snapshot replaces the whole record; it is emptied when the open session is removed.
+ *  - E2-chat-panel-tabs (issue #188) adds `inbox`, the prompts of the OPEN session that the server
+ *    admitted but has not delivered yet, by session id (only the open session is ever held).
+ *    `session.inbox` REPLACES that session's list (reconciled by `id`, so a chip keeps its object
+ *    while its delivery changes) and only for the open session; a snapshot replaces the record with
+ *    `open.inbox` or, when the host could not read it (absent), keeps what the open session had;
+ *    it is emptied when the open session is removed and when the server goes away. Nothing is sent
+ *    when the list arrives: cancelling or steering a prompt is the component's request.
+ *    It also adds `instructions` (+ `instructionsError`), the instructions pinned to the OPEN
+ *    session with the same rules as `inbox`: `session.instructions` replaces the list (reconciled
+ *    by `key`), a snapshot replaces it or keeps it when `open.instructions` is absent, and it is
+ *    emptied with the open session and with the server.
  * VERIFIED by `chatStore.test.ts` with fabricated messages (confirms this logic, not the host
  * contract). UNVERIFIED in a real webview until the F5 of issue #14.
  */
@@ -81,6 +92,8 @@ import type {
   ModsListing,
   Part,
   PermissionAsk,
+  InstructionView,
+  QueuedPrompt,
   RequestResolution,
   RevertState,
   SessionStatus,
@@ -261,6 +274,18 @@ export interface ChatState {
    * Empty until the host sends one; belongs to `open.sessionID` only.
    */
   subagents: { [childID: string]: SubagentActivity };
+  /**
+   * The prompts admitted but not delivered yet, by session id, in enqueue order (issue #188). Holds
+   * the open session only; an absent entry means "none".
+   */
+  inbox: { [sessionID: string]: QueuedPrompt[] };
+  /**
+   * The instructions pinned to the open session, by session id (issue #188). Holds the open
+   * session only; an absent entry means "none known". `instructionsError` is why the host could
+   * not read the list last time (the entries are then the last it knew), absent when it could.
+   */
+  instructions: { [sessionID: string]: InstructionView[] };
+  instructionsError: { [sessionID: string]: ErrorInfo };
   /**
    * Child id -> `requestId` of the `subagent.stop` in flight for it (issue #189). The Stop button
    * shows "Stopping…" and locks while the entry exists; it goes away with the `request.result` of
@@ -446,6 +471,15 @@ function emptyOpen(): OpenView {
  * and the matching `request.result` clears it, `pending` untouched) and `requestFocus`, which fills
  * the same `focusTarget` slot as a host `ui.focus`.
  * VERIFIED by the `stopping and requestFocus (issue #189)` cases of `chatStore.test.ts` (fabricated).
+ * Since issue #188 it also holds `inbox` (see the module header): `session.inbox` replaces the open
+ * session's queue, a snapshot replaces it or keeps it when `open.inbox` is absent, and a removal or
+ * a server that goes away empties it.
+ * VERIFIED by the `inbox (issue #188)` cases of `chatStore.test.ts` (fabricated messages).
+ * It also holds `instructions` and `instructionsError` (issue #188): `session.instructions`
+ * replaces the open session's list and sets or clears its error, a snapshot replaces both or, when
+ * `open.instructions` is absent, keeps the open session's, and a removal or a server that goes away
+ * empties them.
+ * VERIFIED by the `instructions (issue #188)` cases of `chatStore.test.ts` (fabricated messages).
  */
 export function createChatStore(): ChatStore {
   const [state, setState] = createStore<ChatState>({
@@ -474,6 +508,9 @@ export function createChatStore(): ChatStore {
     diff: emptyDiff(),
     open: emptyOpen(),
     subagents: {},
+    inbox: {},
+    instructions: {},
+    instructionsError: {},
     stopping: {},
     requests: { permissions: [], forms: [] },
     resolved: [],
@@ -623,6 +660,9 @@ export function createChatStore(): ChatStore {
           setState('requestErrors', reconcile({}));
           // The host forgot the list with the server and would refuse a click on it (issue #31).
           setState('diff', emptyDiff());
+          setState('inbox', reconcile({}));
+          setState('instructions', reconcile({}));
+          setState('instructionsError', reconcile({}));
         }
       });
     },
@@ -659,6 +699,41 @@ export function createChatStore(): ChatStore {
           { key: 'id' },
         ),
       );
+      // #188: the queue of the session this snapshot opens. Without `open.inbox` the host could not
+      // read it: keep the open session's list (the stream keeps it right) and drop the others.
+      if (open?.inbox !== undefined) {
+        setState('inbox', reconcile({ [open.sessionID]: open.inbox }, { key: 'id' }));
+      } else {
+        setState(
+          'inbox',
+          produce((inbox) => {
+            for (const id of Object.keys(inbox)) if (id !== open?.sessionID) delete inbox[id];
+          }),
+        );
+      }
+      // #188: the instructions of the session this snapshot opens; absent = the host could not
+      // read them, so the open session keeps its list and its error (the others are dropped).
+      if (open?.instructions !== undefined) {
+        setState(
+          'instructions',
+          reconcile({ [open.sessionID]: open.instructions }, { key: 'key' }),
+        );
+        setState('instructionsError', reconcile({}));
+      } else {
+        setState(
+          'instructions',
+          produce((instructions) => {
+            for (const id of Object.keys(instructions))
+              if (id !== open?.sessionID) delete instructions[id];
+          }),
+        );
+        setState(
+          'instructionsError',
+          produce((errors) => {
+            for (const id of Object.keys(errors)) if (id !== open?.sessionID) delete errors[id];
+          }),
+        );
+      }
       rebuildIndexes();
       dropForeignSelection(open?.sessionID);
       // The list belongs to one session: another one open (or none) must not show it. The host
@@ -750,6 +825,9 @@ export function createChatStore(): ChatStore {
           setState('open', reconcile(emptyOpen(), { key: 'id' }));
           setState('resolutions', reconcile({}));
           setState('subagents', reconcile({}));
+          setState('inbox', reconcile({}));
+          setState('instructions', reconcile({}));
+          setState('instructionsError', reconcile({}));
           rebuildIndexes();
           dropForeignSelection(undefined);
           setState('diff', emptyDiff());
@@ -777,6 +855,25 @@ export function createChatStore(): ChatStore {
     'subagent.activity': (m) => {
       if (!isOpen(m.sessionID)) return;
       setState('subagents', m.activity.sessionID, reconcile(m.activity, { key: 'id' }));
+    },
+
+    // #188: REPLACES the queue of the open session. `reconcile` by `id` keeps the object of a chip
+    // that is still queued, so its buttons keep their DOM node (and the focus) while another goes.
+    'session.inbox': (m) => {
+      if (!isOpen(m.sessionID)) return;
+      setState('inbox', m.sessionID, reconcile(m.items, { key: 'id' }));
+    },
+
+    // #188: REPLACES the instructions of the open session, entry objects kept by `key` so a row
+    // keeps its DOM (and the focus on its remove button) while another one goes. `error` marks the
+    // list as possibly old; a message without it clears the mark.
+    'session.instructions': (m) => {
+      if (!isOpen(m.sessionID)) return;
+      batch(() => {
+        setState('instructions', m.sessionID, reconcile(m.entries, { key: 'key' }));
+        if (m.error === undefined) setState('instructionsError', reconcile({}));
+        else setState('instructionsError', { [m.sessionID]: m.error });
+      });
     },
 
     'message.upserted': (m) => {

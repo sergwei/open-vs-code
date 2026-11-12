@@ -260,7 +260,10 @@ const questionForm = (id: string, sessionID = 'ses_old'): FormInfo =>
 /**
  * A fake client recording its calls; every method has a harmless default (the `experimental`
  * stubs, which the controller never calls, `experimental.session.stats` answering an empty window
- * only so the type is whole).
+ * only so the type is whole, and `session.inbox`, which lists nothing and is not recorded in
+ * `calls` so the read counts of the snapshot tests stay as they were). Issue #188, phase 2: its
+ * `experimental.session.export` and `instructions.entry.*` reject, so the instruction read of every
+ * snapshot fails quietly (no list in the snapshot) and these older cases see nothing new.
  */
 function fakeApi(options: FakeOptions = {}) {
   const calls: string[] = [];
@@ -371,6 +374,13 @@ function fakeApi(options: FakeOptions = {}) {
           if (options.revertError !== undefined) return failWith(options.revertError);
           return Promise.resolve();
         },
+      },
+      // Issue #188: an empty inbox, NOT recorded in `calls` (the tests that count the reads of a
+      // snapshot would change); the cases of the inbox live in `chatController.panel.test.ts`.
+      inbox: {
+        list: () => Promise.resolve([]),
+        cancel: () => Promise.resolve(),
+        update: () => Promise.resolve(),
       },
       message: {
         get: ({ sessionID, messageID }) => {
@@ -589,6 +599,18 @@ function fakeApi(options: FakeOptions = {}) {
             activity: [],
             models: [],
           }),
+        // Issue #188: the controller reads the instructions with every snapshot; this stub makes
+        // that read fail (a debug line, no list in the snapshot) so the older cases stay unchanged.
+        // The cases that drive instructions and export are in `chatController.panel.test.ts`.
+        export: () =>
+          Promise.reject(new Error('experimental.session.export is not used by these cases')),
+        instructions: {
+          entry: {
+            list: () => Promise.reject(new Error('instructions are not used by these cases')),
+            put: () => Promise.reject(new Error('instructions are not used by these cases')),
+            remove: () => Promise.reject(new Error('instructions are not used by these cases')),
+          },
+        },
       },
       mcp: {
         connect: () =>

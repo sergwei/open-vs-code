@@ -13,7 +13,7 @@
 // step.ended -> execution.succeeded`, and `execution.failed` with `provider.no-route`); ids,
 // texts and timestamps are made up. The tool, permission, form and retry events come from the
 // TYPES only. These tests confirm OUR translation logic, not the contract with the server.
-import type { SessionMessageInfo, V2Event } from '@opencode/client';
+import type { SessionInboxInfo, SessionMessageInfo, V2Event } from '@opencode/client';
 import { describe, expect, it } from 'vitest';
 import type { HostToWebview } from '../shared/protocol';
 import { createEventTranslator } from './eventTranslator';
@@ -81,16 +81,25 @@ function okTurn(): V2Event[] {
 const types = (messages: HostToWebview[]): string[] => messages.map((m) => m.type);
 
 describe('a successful turn (recorded order)', () => {
+  // Issue #188 changed the expectations of this case: `enqueued` now emits the queue first, `busy`
+  // carries the `created` of `execution.started` as `since`, and `delivered` emits the user message
+  // and then the emptied queue. The ORDER is still the recorded one.
   it('emits busy, the user message on delivered, the assistant on step.started and idle at the end', () => {
     const t = createEventTranslator();
     t.setOpen(SES);
     const out = run(t, okTurn());
-    expect(out[0]).toEqual({ type: 'session.status', sessionID: SES, status: { type: 'busy' } });
-    expect(out[1]).toMatchObject({
+    expect(out[0]).toMatchObject({ type: 'session.inbox', items: [{ id: USER }] });
+    expect(out[1]).toEqual({
+      type: 'session.status',
+      sessionID: SES,
+      status: { type: 'busy', since: 1000 },
+    });
+    expect(out[2]).toMatchObject({
       type: 'message.upserted',
       message: { kind: 'user', id: USER, text: 'Reply with exactly: hello there', createdAt: 1100 },
     });
-    expect(out[2]).toMatchObject({
+    expect(out[3]).toEqual({ type: 'session.inbox', sessionID: SES, items: [] });
+    expect(out[4]).toMatchObject({
       type: 'message.upserted',
       message: { kind: 'assistant', id: ASSISTANT, agent: 'build' },
     });
@@ -713,9 +722,10 @@ describe('seed merges instead of emptying (review BLOCKER)', () => {
       }),
     );
     t.seed(empty);
-    expect(t.translate(ev('session.inbox.delivered', { sessionID: SES, inboxID: USER }))).toEqual([
-      expect.objectContaining({ type: 'message.upserted' }),
-    ]);
+    // Issue #188: the emptied queue follows the message.
+    expect(
+      types(t.translate(ev('session.inbox.delivered', { sessionID: SES, inboxID: USER }))),
+    ).toEqual(['message.upserted', 'session.inbox']);
   });
 
   it('mergeLive adds the in-flight messages and their accumulated blocks to a snapshot', () => {
@@ -1004,6 +1014,256 @@ describe('seed from a REST snapshot', () => {
       }),
     );
     expect(out[0]).toMatchObject({ type: 'part.delta', partID: `${ASSISTANT}#1`, delta: 'tial' });
+  });
+});
+
+// E2-chat-panel-tabs (issue #188): the queue of prompts waiting in the inbox. Protects against:
+//   - a chip that never leaves (a `delivered` or `cancelled` that does not shorten the list), or one
+//     that stays after the other client cancelled it;
+//   - a resync that brings back what the stream already removed, or loses what the stream added
+//     while REST was being read (rule "the snapshot is a photo", `opencode-api` §4), in BOTH senses;
+//   - a prompt enqueued before a reconnection that never becomes a user message when delivered.
+// Provenance: FABRICATED events built from the types of `@opencode/client@2.2.7` (the four
+// `session.inbox.*` shapes); no recording of a queue exists (UNVERIFIED against a running server).
+describe('inbox queue (issue #188)', () => {
+  const enqueue = (
+    inboxID: string,
+    text: string,
+    delivery: 'steer' | 'queue' = 'queue',
+    extra: object = {},
+  ): V2Event =>
+    ev('session.inbox.enqueued', {
+      sessionID: SES,
+      inboxID,
+      item: { type: 'user', payload: { text, ...extra }, delivery },
+    });
+  /** An item as `session.inbox.list` returns it (`user` unless `type` says otherwise). */
+  const rest = (id: string, text: string, delivery: 'steer' | 'queue' = 'queue', type = 'user') =>
+    JSON.parse(
+      JSON.stringify({
+        id,
+        sessionID: SES,
+        time: { created: 1 },
+        type,
+        payload: type === 'user' ? { text } : {},
+        delivery,
+      }),
+    ) as SessionInboxInfo;
+  const ids = (items: ReadonlyArray<{ id: string }>): string[] => items.map((item) => item.id);
+
+  it('emits the whole queue on every enqueued, in enqueue order, with the file count', () => {
+    const t = createEventTranslator();
+    t.setOpen(SES);
+    const first = t.translate(
+      enqueue('msg_1', 'first', 'queue', {
+        files: [{ mime: 'text/plain', source: { type: 'uri', uri: 'file:///a' } }],
+      }),
+    );
+    expect(first).toEqual([
+      {
+        type: 'session.inbox',
+        sessionID: SES,
+        items: [{ id: 'msg_1', text: 'first', delivery: 'queue', files: 1 }],
+      },
+    ]);
+    const second = t.translate(enqueue('msg_2', 'second', 'steer'));
+    expect(second[0]).toMatchObject({
+      items: [
+        { id: 'msg_1', delivery: 'queue' },
+        { id: 'msg_2', delivery: 'steer', files: 0 },
+      ],
+    });
+  });
+
+  it('ignores compaction and synthetic items, and sessions that are not tracked', () => {
+    const t = createEventTranslator();
+    t.setOpen(SES);
+    for (const item of [
+      { type: 'compaction', payload: {}, delivery: 'queue' },
+      { type: 'synthetic', payload: { text: 'reminder' }, delivery: 'steer' },
+    ]) {
+      expect(
+        t.translate(ev('session.inbox.enqueued', { sessionID: SES, inboxID: 'msg_x', item })),
+      ).toEqual([]);
+    }
+    expect(
+      t.translate(
+        ev('session.inbox.enqueued', {
+          sessionID: 'ses_other',
+          inboxID: 'msg_y',
+          item: { type: 'user', payload: { text: 'x' }, delivery: 'queue' },
+        }),
+      ),
+    ).toEqual([]);
+    expect(t.queueOf(SES)).toEqual([]);
+    expect(t.queueOf('ses_other')).toEqual([]);
+  });
+
+  it('delivers one item: its user message first, then the shorter queue', () => {
+    const t = createEventTranslator();
+    t.setOpen(SES);
+    run(t, [enqueue('msg_1', 'first'), enqueue('msg_2', 'second')]);
+    const out = t.translate(
+      ev('session.inbox.delivered', { sessionID: SES, inboxID: 'msg_1' }, 1500),
+    );
+    expect(types(out)).toEqual(['message.upserted', 'session.inbox']);
+    expect(out[0]).toMatchObject({ message: { id: 'msg_1', text: 'first', createdAt: 1500 } });
+    expect(out[1]).toMatchObject({ type: 'session.inbox' });
+    expect(ids(t.queueOf(SES))).toEqual(['msg_2']);
+  });
+
+  it('removes a cancelled item without a user message, and never creates one for it later', () => {
+    const t = createEventTranslator();
+    t.setOpen(SES);
+    run(t, [enqueue('msg_1', 'first')]);
+    expect(
+      t.translate(ev('session.inbox.cancelled', { sessionID: SES, inboxID: 'msg_1' })),
+    ).toEqual([{ type: 'session.inbox', sessionID: SES, items: [] }]);
+    expect(
+      t.translate(ev('session.inbox.delivered', { sessionID: SES, inboxID: 'msg_1' })),
+    ).toEqual([]);
+    // Cancelling what the queue never held says nothing.
+    expect(
+      t.translate(ev('session.inbox.cancelled', { sessionID: SES, inboxID: 'msg_9' })),
+    ).toEqual([]);
+  });
+
+  it('changes the delivery in place, keeping the order, and ignores an item it does not hold', () => {
+    const t = createEventTranslator();
+    t.setOpen(SES);
+    run(t, [enqueue('msg_1', 'first'), enqueue('msg_2', 'second')]);
+    const out = t.translate(
+      ev('session.inbox.delivery.changed', { sessionID: SES, inboxID: 'msg_1', delivery: 'steer' }),
+    );
+    expect(out).toEqual([
+      {
+        type: 'session.inbox',
+        sessionID: SES,
+        items: [
+          { id: 'msg_1', text: 'first', delivery: 'steer', files: 0 },
+          { id: 'msg_2', text: 'second', delivery: 'queue', files: 0 },
+        ],
+      },
+    ]);
+    expect(
+      t.translate(
+        ev('session.inbox.delivery.changed', {
+          sessionID: SES,
+          inboxID: 'msg_9',
+          delivery: 'steer',
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('gives the busy status the created time of execution.started as since', () => {
+    const t = createEventTranslator();
+    expect(t.translate(ev('session.execution.started', { sessionID: SES }, 4242))).toEqual([
+      { type: 'session.status', sessionID: SES, status: { type: 'busy', since: 4242 } },
+    ]);
+  });
+
+  describe('seedInbox', () => {
+    it('returns the REST user items, drops the other kinds and seeds the payload of a delivered', () => {
+      const t = createEventTranslator();
+      t.setOpen(SES);
+      const token = t.beginResync();
+      const seeded = t.seedInbox(
+        SES,
+        [rest('msg_1', 'before the reconnection'), rest('msg_c', '', 'queue', 'compaction')],
+        token,
+      );
+      expect(seeded).toEqual([
+        { id: 'msg_1', text: 'before the reconnection', delivery: 'queue', files: 0 },
+      ]);
+      // The `enqueued` was lost in a gap: the REST payload is what makes the delivery a message.
+      const out = t.translate(ev('session.inbox.delivered', { sessionID: SES, inboxID: 'msg_1' }));
+      expect(out[0]).toMatchObject({
+        type: 'message.upserted',
+        message: { kind: 'user', id: 'msg_1', text: 'before the reconnection' },
+      });
+    });
+
+    it('keeps the queue the stream built when the REST read failed (items undefined)', () => {
+      const t = createEventTranslator();
+      t.setOpen(SES);
+      run(t, [enqueue('msg_1', 'first')]);
+      expect(ids(t.seedInbox(SES, undefined))).toEqual(['msg_1']);
+    });
+
+    it('prunes what REST no longer lists when the stream said it before the resync began', () => {
+      const t = createEventTranslator();
+      t.setOpen(SES);
+      run(t, [enqueue('msg_1', 'first'), enqueue('msg_2', 'second')]);
+      const token = t.beginResync();
+      expect(ids(t.seedInbox(SES, [rest('msg_2', 'second')], token))).toEqual(['msg_2']);
+      expect(ids(t.queueOf(SES))).toEqual(['msg_2']);
+    });
+
+    // The snapshot rule, one case per direction. Each begins the resync, lets the stream speak
+    // while "REST is being read", and seeds with the (older) REST list.
+    it('keeps a prompt enqueued during the read although REST did not list it (appears)', () => {
+      const t = createEventTranslator();
+      t.setOpen(SES);
+      const token = t.beginResync();
+      run(t, [enqueue('msg_new', 'typed during the read')]);
+      expect(ids(t.seedInbox(SES, [rest('msg_1', 'old')], token))).toEqual(['msg_1', 'msg_new']);
+    });
+
+    it('drops a prompt delivered during the read although REST still listed it (disappears)', () => {
+      const t = createEventTranslator();
+      t.setOpen(SES);
+      run(t, [enqueue('msg_1', 'first')]);
+      const token = t.beginResync();
+      run(t, [ev('session.inbox.delivered', { sessionID: SES, inboxID: 'msg_1' })]);
+      expect(t.seedInbox(SES, [rest('msg_1', 'first')], token)).toEqual([]);
+    });
+
+    it('drops a prompt cancelled during the read although REST still listed it (disappears)', () => {
+      const t = createEventTranslator();
+      t.setOpen(SES);
+      const token = t.beginResync();
+      run(t, [ev('session.inbox.cancelled', { sessionID: SES, inboxID: 'msg_1' })]);
+      expect(t.seedInbox(SES, [rest('msg_1', 'first'), rest('msg_2', 'second')], token)).toEqual([
+        { id: 'msg_2', text: 'second', delivery: 'queue', files: 0 },
+      ]);
+    });
+
+    it('applies a delivery change made during the read to the item REST listed (changes)', () => {
+      const t = createEventTranslator();
+      t.setOpen(SES);
+      const token = t.beginResync();
+      run(t, [
+        ev('session.inbox.delivery.changed', {
+          sessionID: SES,
+          inboxID: 'msg_1',
+          delivery: 'steer',
+        }),
+      ]);
+      expect(t.seedInbox(SES, [rest('msg_1', 'first', 'queue')], token)[0]).toMatchObject({
+        id: 'msg_1',
+        delivery: 'steer',
+      });
+    });
+
+    it('lets REST win over an event older than the resync stamp', () => {
+      const t = createEventTranslator();
+      t.setOpen(SES);
+      run(t, [
+        enqueue('msg_1', 'first'),
+        ev('session.inbox.cancelled', { sessionID: SES, inboxID: 'msg_1' }),
+      ]);
+      const token = t.beginResync(); // REST was read after the cancel and lists it again
+      expect(ids(t.seedInbox(SES, [rest('msg_1', 'first')], token))).toEqual(['msg_1']);
+    });
+
+    it('forgets the queue of a session that stops being tracked', () => {
+      const t = createEventTranslator();
+      t.setOpen(SES);
+      run(t, [enqueue('msg_1', 'first')]);
+      t.setOpen('ses_other');
+      expect(t.queueOf(SES)).toEqual([]);
+    });
   });
 });
 

@@ -1,8 +1,6 @@
 import * as l10n from '@vscode/l10n';
 import { createEffect, createMemo, createSignal, For, on, Show } from 'solid-js';
 import type { SessionSummary } from '../../../src/shared/model';
-import { changedFilesSummary } from '../changes/changedFileText';
-import { ChangedFilesList } from '../changes/ChangedFilesList';
 import { childrenOf } from '../sessions/lineage';
 import { SessionPicker } from '../sessions/SessionPicker';
 import { displayLabel, emptyTitle } from '../sessions/sessionGroups';
@@ -39,12 +37,9 @@ const PICKER_ID = 'session-picker';
  * "Open subagent session <title>, <agent · Running · Needs input>" for each child.
  * Issue #25 adds {@link UsageIndicator} right under the bar: the context and cost line of the open
  * session (Sergio's placement choice, 22/10/2026), above the subagent list and under the title.
- * Issue #31 adds a second `<details>` right after it: "Changed files (N)" (Sergio's choice of
- * 23/10/2026, Engram #1153), closed by default and drawn only when the open session has changed
- * files. It holds {@link ChangedFilesList}, the same presentational rows issue #32 will reuse; a
- * click reports the path through `onOpenChangedFile` and the host opens the diff. When the host
- * could not refresh the list, one line under the summary says so (`state.diff.error`) and the
- * rows are the last list it had.
+ * Issue #31 once put the "Changed files (N)" `<details>` here; since issue #188 (phase 3) it lives
+ * in the Changes tab of the panel (mounted by `App`), and the header keeps the title, the buttons,
+ * the context line (with "Compact" from 80 %, see {@link UsageIndicator}) and the subagent sessions.
  * In an editor tab (`<meta name="open-vs-code-surface" content="tab">`, written by the host;
  * issue #77, E3) there is NO "Sessions" button and no picker: the native Sessions tree view is the
  * one place to browse sessions. Title, New session and "Subagent sessions (N)" stay. The surface
@@ -67,7 +62,10 @@ export function Header(props: {
   /** Grows each time the host's New Session command runs (issue #35); the session list closes, as on the button. */
   closePickerRequest: number;
   onOpenSession(sessionID: string): void;
-  onOpenChangedFile: (path: string) => void;
+  /** "Compact" of the context line from 80 % (issue #188, decision P2=1); see {@link UsageIndicator}. */
+  onCompact?: () => void;
+  /** The "Compact" button is `aria-disabled` while true. */
+  compactDisabled?: boolean;
 }) {
   const state = props.store.state;
   const inTab =
@@ -223,7 +221,11 @@ export function Header(props: {
           {l10n.t('New session')}
         </button>
       </header>
-      <UsageIndicator store={props.store} />
+      <UsageIndicator
+        store={props.store}
+        onCompact={props.onCompact}
+        compactDisabled={props.compactDisabled}
+      />
       <Show when={children().length > 0}>
         <details class="subagent-sessions">
           <summary>{l10n.t('Subagent sessions ({0})', children().length)}</summary>
@@ -249,19 +251,6 @@ export function Header(props: {
               )}
             </For>
           </ul>
-        </details>
-      </Show>
-      <Show when={state.diff.files.length > 0}>
-        <details class="changed-files">
-          <summary>{changedFilesSummary(state.diff.files.length)}</summary>
-          <Show when={state.diff.error}>
-            {(failure) => (
-              <p class="changed-files-error">
-                {l10n.t('Could not refresh the list: {0}', failure().message)}
-              </p>
-            )}
-          </Show>
-          <ChangedFilesList files={state.diff.files} onOpen={props.onOpenChangedFile} />
         </details>
       </Show>
       <Show when={pickerOpen()}>

@@ -112,7 +112,7 @@ export function SendIcon() {
   );
 }
 
-/** A filled square: the round Stop button. */
+/** A filled square: the Stop button of the activity footer (it was in the prompt row before #188). */
 export function StopIcon() {
   return (
     <svg class="icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
