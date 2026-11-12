@@ -1,6 +1,6 @@
 import * as l10n from '@vscode/l10n';
 import { createEffect, createMemo, createSignal, on, onCleanup, Show, untrack } from 'solid-js';
-import type { QueuedPrompt } from '../../src/shared/model';
+import type { ModelRef, QueuedPrompt } from '../../src/shared/model';
 import {
   isComposeInBounds,
   MAX_DROPPED_ITEMS,
@@ -40,6 +40,7 @@ import { AgentModelMenu } from './selectors/AgentModelMenu';
 import {
   effectiveAgent,
   effectiveModel,
+  findModel,
   selectionToSend,
   variantChoices,
   withVariant,
@@ -1113,7 +1114,22 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
    * long: it is in the box") when it waited in a hidden pane past the TTL. If a compose that WAS
    * sent fails, the failure effect appends its text to the draft the same way (W2). A message out
    * of bounds ({@link isComposeInBounds}) is refused here, BEFORE `begin`: the host would drop its
-   * `prompt.send` without a `request.result` and Send would stay locked.
+   * `prompt.send` without a `request.result` and Send would stay locked. A compose with `model`
+   * (issue #223, the Quick start view's choice) first makes it the draft model of the tab
+   * (`selectModel`), whether the text is then sent or put in the box, so the send carries it and the
+   * model chip shows it; a model the catalog does not list is ignored without a notice and the usual
+   * model applies. WITH a server, `onPaneReady` publishes the cached catalog after the resync and
+   * before `flushComposes` (HYPOTHESIS: read in the code of `chatController.onPaneReady`, not
+   * observed in a log), so the catalog is there when this runs; WITHOUT a server there is no catalog,
+   * the model is ignored and the text is still sent or put in the box (UNVERIFIED in a real window).
+   * VERIFIED by `App.test.tsx` "with a model (issue #223)": "sends with the chosen model and the
+   * chip shows it", "keeps the chosen model as the draft when the text falls to the box" and "ignores
+   * a model the catalog does not list and sends with the usual one" (jsdom, FABRICATED host
+   * messages, 12/11/2026). VERIFIED in a real window with a server (Windows 11, VS Code 1.146.0,
+   * 12/11/2026, `test:visual` `--steps 43,50,51`, a partial run): "ok   F1 the conversation started
+   * from the box was created with the model chosen in the picker ("model selected
+   * opencode/glm-5.3-flash-free for ses_…")", and the `fake-server` integration case "starts a
+   * conversation from the home view with the model chosen in its picker" (same OS and date).
    * VERIFIED by `App.test.tsx` "prompt.compose" (jsdom, fabricated host messages, 29/10/2026).
    * VERIFIED in a real window (`npm run test:visual`, Windows 11, VS Code 1.144.0, 29/10/2026,
    * full run): "C3 the draft the user was writing is untouched ("my draft", 0 chips)", "C6 while
@@ -1122,13 +1138,21 @@ export function App(props: { store: ChatStore; send: SendToHost; uiState: UiStat
    * focus". UNVERIFIED in a real window: the not-connected fallback, a failed compose send (W2)
    * and the out-of-bounds refusal (only jsdom runs them).
    */
-  const runCompose = (compose: { text: string; files: AttachmentRef[]; send: boolean }): void => {
+  const runCompose = (compose: {
+    text: string;
+    files: AttachmentRef[];
+    send: boolean;
+    model?: ModelRef;
+  }): void => {
     if (!isComposeInBounds(compose)) {
       props.store.notify('warning', {
         code: 'ComposeRefused',
         message: l10n.t('The prompt from the context menu could not be used'),
       });
       return;
+    }
+    if (compose.model !== undefined && findModel(state.catalog, compose.model) !== undefined) {
+      props.store.selectModel(compose.model);
     }
     if (compose.send && canSend()) {
       sendPrompt(compose.text, compose.files, undefined, true);

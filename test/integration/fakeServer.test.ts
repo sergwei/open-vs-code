@@ -2021,6 +2021,61 @@ describe('fake server', function () {
     });
 
     /**
+     * The model pill's picker (issue #223): `home.model` opens the picker (here the one-use answer
+     * of `TEST_SESSION_ANSWERS_COMMAND_ID` stands in for the native QuickPick, which the test API
+     * cannot drive; `test:visual` step 50 P1 uses the real one), the state names the chosen model,
+     * the conversation started from the box is created with it (`model selected opencode/<id> for
+     * ses_…`) and the choice is still there afterwards (decision B). A `home.model` with a field
+     * is dropped by the guard. Protects the whole chain: guard, controller, `composeFromHome` with
+     * the model, the webview applying it before sending, `session.create` with the model.
+     * Provenance: the SYNTHETIC server with its two models (`big-pickle`, `glm-5.3-flash-free`).
+     */
+    it('starts a conversation from the home view with the model chosen in its picker', async function () {
+      const log = await openLogCursor();
+      try {
+        await setChatLocation('editor', log);
+        await log.waitForQuiet();
+        const shown = (await homeState()).model;
+        const other =
+          shown === 'Big Pickle'
+            ? { id: 'glm-5.3-flash-free', name: 'GLM-5.3-Flash Free' }
+            : { id: 'big-pickle', name: 'Big Pickle' };
+        log.mark();
+        assert.strictEqual(
+          await homeSend({ type: 'home.model', model: { providerID: 'opencode', id: other.id } }),
+          undefined,
+        );
+        await vscode.commands.executeCommand(TEST_SESSION_ANSWERS_COMMAND_ID, {
+          homeModel: `opencode/${other.id}`,
+        });
+        await homeSend({ type: 'home.model' });
+        await log.waitFor(
+          `home model chosen for the next conversation: opencode/${other.id}`,
+          10_000,
+        );
+        const chosen = await homeState();
+        assert.strictEqual(chosen.model, other.name, JSON.stringify(chosen));
+        assert.strictEqual(chosen.modelChosen, true);
+
+        const result = await homeSend({
+          type: 'home.start',
+          requestId: 'rm',
+          text: 'say hello with the chosen model',
+        });
+        assert.deepStrictEqual(result, { type: 'home.result', requestId: 'rm', ok: true });
+        await log.waitFor(`model selected opencode/${other.id} for ses_`, TURN_WAIT_MS);
+        await log.waitFor('prompt accepted for ses_', TURN_WAIT_MS);
+        await log.waitFor('turn finished: succeeded', TURN_WAIT_MS);
+        const after = await homeState();
+        assert.strictEqual(after.modelChosen, true, 'the choice must survive the start (B)');
+        assert.strictEqual(after.model, other.name);
+      } finally {
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        await restoreChatLocation(await openLogCursor());
+      }
+    });
+
+    /**
      * Stop from the home view: a SLOW turn started from the box runs for about 5 s, the view lists its
      * ROOT as running, a forged id is refused (no interrupt, a log line, a failed result) and the real
      * one is interrupted with the origin suffix of the side bar. Protects the host-side revalidation

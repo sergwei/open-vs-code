@@ -16,10 +16,13 @@ import type {
   HomeWebviewToHost,
 } from '../shared/homeProtocol';
 import { MAX_HOME_LABEL } from '../shared/homeProtocol';
+import type { Catalog, ModelRef } from '../shared/model';
 import type { ConnectionState } from '../shared/protocol';
+import { isAvailable } from './modelPreference';
 import type { ServerLog } from './opencodeServer';
 import type { PendingSummary } from './pendingRequests';
 import type { ActivityStep, SessionActivity } from './sessionActivity';
+import { statusModelLabel } from './serverStatus';
 
 /** Most rows of each list the state carries. Our own choice: the box is a few hundred pixels tall. */
 export const MAX_HOME_ROWS = 50;
@@ -31,8 +34,8 @@ const MAX_PARENT_HOPS = 16;
 /** The read-only sources the state is built from; every read is lazy and never touches the server. */
 export interface HomeSources {
   connection(): ConnectionState;
-  /** The model a NEW session starts with, in words, or `undefined` while it is unknown. */
-  model(): string | undefined;
+  /** The catalog of the server, or `undefined` while it is unknown (the default model comes from it). */
+  catalog(): Catalog | undefined;
   /** The MCP servers the host knows, with their status as the server reported it. */
   mcp(): readonly { name: string; status: string }[];
   runningSessions(): readonly string[];
@@ -47,10 +50,19 @@ export interface HomeSources {
 /** What an intention does once the host accepted it. */
 export interface HomeActions {
   /**
-   * Starts a conversation from the box in a NEW tab, in the work mode asked for. Resolves with the
-   * outcome; `error` is text for the user.
+   * Starts a conversation from the box in a NEW tab, in the work mode asked for and, when the user
+   * chose one, with `model`. Resolves with the outcome; `error` is text for the user.
    */
-  start(text: string, mode: HomeMode): Promise<{ ok: true } | { ok: false; error: string }>;
+  start(
+    text: string,
+    mode: HomeMode,
+    model?: ModelRef,
+  ): Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * Asks the user for a model of `catalog` (`current` is marked). Resolves with the pick, or
+   * `undefined` when the user cancelled.
+   */
+  pickModel(current: ModelRef | undefined, catalog: Catalog): Promise<ModelRef | undefined>;
   /** Stops the work of the tree of `rootID`; `false` when the host saw nothing of it running. */
   stop(rootID: string): Promise<boolean>;
   /** Puts the root of the session in a tab and focuses the card of the request. */
@@ -94,17 +106,38 @@ function activityOf(step: ActivityStep | undefined): HomeActivity | undefined {
  * as running; `home.start` one at a time (a second Enter while a tab is being opened is refused, so
  * a double press cannot open two tabs). Mode: the host holds the work mode of the NEXT conversation
  * from the box (default manual, not persisted).
+ *
+ * Model (issue #223): `home.model` carries no field. The host opens the picker over its OWN catalog
+ * ({@link HomeActions.pickModel}, one at a time: a second intention while it is open is refused),
+ * and the answer is revalidated against the catalog as it is NOW (a model that left it while the
+ * picker was open is refused with a log line). The pick is the model of the NEXT conversations from
+ * the box and, like the mode, it is KEPT after a start (decision of Sergio, 12/11/2026) and not
+ * persisted: a reloaded window starts on the default. It is dropped when a catalog EXISTS and no
+ * longer lists it (state falls back to the default label; `home.start` passes none and logs it);
+ * while there is no catalog (the server restarting or reconnecting) `home.start` passes no model
+ * but the choice is kept. It never writes `openVsCode.defaultModel`.
  * VERIFIED by `homeController.test.ts` (fabricated sources: complete state after ready, one post per
- * burst, no post when the key is unchanged, MCP pills, each revalidation and the in-flight start).
+ * burst, no post when the key is unchanged, MCP pills, each revalidation and the in-flight start,
+ * and the model cases: chosen state, cancel, refused pick, one picker at a time, kept after a start,
+ * dropped when it left the catalog and kept across a start with no catalog).
  */
 export class HomeController {
   private ready = false;
   private mode: HomeMode = 'manual';
+  private model: ModelRef | undefined;
+  private picking = false;
   private lastKey: string | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private starting = false;
 
   constructor(private readonly deps: HomeControllerDeps) {}
+
+  /** The model chosen for the next conversation if the catalog still lists it, else `undefined`. */
+  private chosen(): ModelRef | undefined {
+    const catalog = this.deps.catalog();
+    if (this.model === undefined || catalog === undefined) return undefined;
+    return isAvailable(this.model, catalog.models) ? this.model : undefined;
+  }
 
   /** The root a session belongs to: the lineage's, else its own parents as the registry knows them. */
   private rootFor(sessionID: string): string {
@@ -122,7 +155,9 @@ export class HomeController {
   /**
    * The whole state as of now. Running rows are the ROOTS that run or have a running descendant,
    * the oldest execution first (rows with no known start last); a running child never gets a row of
-   * its own, it is counted and described inside its root's row.
+   * its own, it is counted and described inside its root's row. `model` is the name of the model
+   * chosen for the next conversation when the catalog still lists it (`modelChosen` true), else the
+   * default's label.
    */
   buildState(): HomeState {
     const connection = this.deps.connection();
@@ -182,7 +217,13 @@ export class HomeController {
       }
     }
     mcp.length = Math.min(mcp.length, MAX_HOME_MCP);
-    const model = this.deps.model();
+    const catalog = this.deps.catalog();
+    const chosen = this.chosen();
+    const model =
+      chosen === undefined
+        ? statusModelLabel(catalog)
+        : (catalog?.models.find((m) => m.providerID === chosen.providerID && m.id === chosen.id)
+            ?.name ?? `${chosen.providerID}/${chosen.id}`);
     const reason =
       connection.state === 'unavailable' || connection.state === 'not-started'
         ? connection.reason
@@ -191,6 +232,7 @@ export class HomeController {
       server: { state: connection.state, ...(reason === undefined ? {} : { reason }) },
       canStart: connection.state !== 'unavailable',
       ...(model === undefined ? {} : { model: clean(model) }),
+      modelChosen: chosen !== undefined,
       mode: this.mode,
       mcp,
       running: rows,
@@ -229,6 +271,10 @@ export class HomeController {
   /**
    * Handles one message that passed `isHomeWebviewToHost` (`home.ready` is {@link onReady}'s).
    * Never throws: the failure of an action becomes a `home.result` with the text for the user.
+   * `home.model` opens the picker (see the class header for its revalidation) and answers with a
+   * new state, never a `home.result`; `home.start` passes the chosen model if the catalog still has
+   * it and keeps it afterwards. With NO catalog it passes none and keeps the choice; with a catalog
+   * that no longer lists it, it passes none, logs and drops the choice.
    */
   async onMessage(message: HomeWebviewToHost): Promise<void> {
     switch (message.type) {
@@ -239,6 +285,39 @@ export class HomeController {
         this.mode = message.mode;
         this.changed();
         return;
+      case 'home.model': {
+        const catalog = this.deps.catalog();
+        if (catalog === undefined) {
+          this.deps.log.warn('home model picker refused: no catalog yet');
+          return;
+        }
+        if (this.picking) {
+          this.deps.log.warn('home model picker already open');
+          return;
+        }
+        this.picking = true;
+        let picked: ModelRef | undefined;
+        try {
+          picked = await this.deps.pickModel(this.chosen(), catalog);
+        } catch {
+          picked = undefined;
+        } finally {
+          this.picking = false;
+        }
+        if (picked === undefined) return;
+        // The catalog may have been reloaded while the picker was open: check against it as it is now.
+        const fresh = this.deps.catalog();
+        if (fresh === undefined || !isAvailable(picked, fresh.models)) {
+          this.deps.log.warn('home model pick refused: not in the catalog');
+          return;
+        }
+        this.model = picked;
+        this.deps.log.info(
+          `home model chosen for the next conversation: ${picked.providerID}/${picked.id}`,
+        );
+        this.changed();
+        return;
+      }
       case 'home.action':
         this.deps.action(message.action);
         return;
@@ -295,7 +374,16 @@ export class HomeController {
         }
         this.starting = true;
         try {
-          const outcome = await this.deps.start(message.text, this.mode);
+          // Without a catalog (the server is restarting or reconnecting) the start goes without a
+          // model but the choice is KEPT: it is dropped only when a catalog exists and no longer
+          // lists it (review of #223, W1).
+          const model = this.chosen();
+          const catalog = this.deps.catalog();
+          if (this.model !== undefined && model === undefined && catalog !== undefined) {
+            this.deps.log.warn('home model choice dropped: not in the catalog');
+            this.model = undefined;
+          }
+          const outcome = await this.deps.start(message.text, this.mode, model);
           this.result(message.requestId, outcome.ok, outcome.ok ? undefined : outcome.error);
         } catch {
           this.result(message.requestId, false, l10n.t('The conversation could not be started'));

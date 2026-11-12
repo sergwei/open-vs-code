@@ -13,7 +13,7 @@
 
 import * as l10n from '@vscode/l10n';
 import * as vscode from 'vscode';
-import type { Catalog, ErrorInfo } from '../shared/model';
+import type { Catalog, ErrorInfo, ModelRef } from '../shared/model';
 import {
   isHomeWebviewToHost,
   type HomeHostToWebview,
@@ -21,6 +21,8 @@ import {
 } from '../shared/homeProtocol';
 import { registerChangesView, type ChangesView } from './changesView';
 import { HomeController, type HomeControllerDeps } from './homeController';
+import { homeModelItems, pickedRef } from './homeModelPick';
+import { parseModelSetting } from './modelPreference';
 import { registerHomeView } from './homeView';
 import {
   OPEN_CHANGED_FILE_COMMAND_ID,
@@ -62,7 +64,12 @@ export interface SidebarHomeDeps {
    * What the Quick start view reads and does (its own sources and actions: see `HomeControllerDeps`),
    * plus the two subscriptions that tell it to look again. Each `on*` returns the unsubscribe.
    */
-  quick: Omit<HomeControllerDeps, 'post' | 'log'> & {
+  quick: Omit<HomeControllerDeps, 'post' | 'log' | 'pickModel'> & {
+    /**
+     * Test mode only: the pre-loaded answer of the NEXT model picker (`provider/id` picks it, `null`
+     * cancels; read once, `undefined` means "no answer: open the real QuickPick").
+     */
+    testModelAnswer?(): string | null | undefined;
     onActivity(listener: () => void): () => void;
     onConfig(listener: () => void): () => void;
   };
@@ -158,6 +165,15 @@ function descriptionText(item: vscode.TreeItem): string | undefined {
  * It also creates the Quick start view (`homeView.ts`) and its controller (`homeController.ts`,
  * fed by `deps.quick`), which re-compose their state when `quickChanged`, the registry's activity or
  * the server config say so; in Test mode `quickMessage` and `quickState` drive it without a webview.
+ * The model pill's picker (issue #223) is a native QuickPick built here from `homeModelItems`
+ * (providers as separators, the current model checked); in Test mode a pre-loaded answer
+ * (`deps.quick.testModelAnswer`, one use) replaces it. VERIFIED on Windows 11, VS Code 1.146.0, 12/11/2026: the
+ * `fake-server` case "starts a conversation from the home view with the model chosen in its picker"
+ * (the answer path) and, with the real QuickPick opened by a mouse click, "ok   P1 the model pill
+ * opens the picker "Model for the next conversation" listing both models, and Escape closes it
+ * leaving the pill as it was" of `test:visual` step 50. UNVERIFIED until a check reads
+ * `document.activeElement`: where the focus goes when the QuickPick closes (VS Code is expected to
+ * give it back to the webview; the next check clicks the box anyway, so a loss would not show).
  * The usage reacts to a turn END seen as a session leaving the running set (the registry is the
  * controller's; this module only compares two sets), and to the connection going up or down.
  * VERIFIED (Windows 11, VS Code 1.145.2, 08/11/2026, `npm run test:integration` with all labels,
@@ -202,6 +218,29 @@ export function registerSidebarHome(deps: SidebarHomeDeps): SidebarHome {
   const quick = new HomeController({
     ...deps.quick,
     log: deps.log,
+    pickModel: async (current, catalog) => {
+      // Test mode: a pre-loaded answer stands for the QuickPick, which would hang the test command.
+      const answer = deps.quick.testModelAnswer?.();
+      if (answer !== undefined) {
+        if (answer === null) return undefined;
+        const wanted = parseModelSetting(answer);
+        return wanted.kind === 'model' ? pickedRef(catalog, wanted.model) : undefined;
+      }
+      const items: (vscode.QuickPickItem & { ref?: ModelRef })[] = homeModelItems(
+        catalog,
+        current,
+      ).map((item) =>
+        item.kind === 'separator'
+          ? { label: item.label, kind: vscode.QuickPickItemKind.Separator }
+          : { label: item.label, description: item.description, ref: item.ref },
+      );
+      const picked = await vscode.window.showQuickPick(items, {
+        title: l10n.t('Model for the next conversation'),
+        placeHolder: l10n.t('Search models'),
+        matchOnDescription: true,
+      });
+      return picked?.ref === undefined ? undefined : pickedRef(catalog, picked.ref);
+    },
     post: (message) => {
       // `homeView` is assigned right below; `post` only runs after a message, never before.
       homeView.provider.post(message);

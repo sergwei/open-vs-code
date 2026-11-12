@@ -135,6 +135,26 @@ describe('composeFromHome', () => {
     });
     expect(t.controller.composeFromHome(999, 'x')).toMatchObject({ status: 'rejected' });
   });
+
+  // Protects issue #223: the model chosen in the home view reaches the tab inside the compose (the
+  // webview applies it as its draft before sending), and a start without a choice has no `model`
+  // key at all, so the tab's preferred model applies as before. Fabricated pane, no server.
+  it('composeFromHome carries the model of the home view in the compose, and none when there is no choice', () => {
+    const t = setup();
+    const model = { providerID: 'opencode', id: 'big-pickle', variant: 'high' };
+    t.controller.composeFromHome(t.pane.id, 'With a model', model);
+    expect(t.posted).toContainEqual({
+      type: 'prompt.compose',
+      text: 'With a model',
+      files: [],
+      send: true,
+      model,
+    });
+    t.controller.composeFromHome(t.pane.id, 'No model');
+    const plain = t.posted.find((m) => m.type === 'prompt.compose' && m.text === 'No model');
+    expect(plain).toBeDefined();
+    expect(plain !== undefined && 'model' in plain).toBe(false);
+  });
 });
 
 describe('revertBoundaryOf', () => {

@@ -84,7 +84,7 @@ import { safeLog } from './opencodeServer';
 import { createSetupActions } from './setupActions';
 import { pickSavedPermissionsToRevoke } from './savedPermissionsUi';
 import { restartServerWithFeedback } from './serverLifecycle';
-import { describeServerStatus, statusModelLabel } from './serverStatus';
+import { describeServerStatus } from './serverStatus';
 import type { ServerManager } from './serverManager';
 import { registerSessionDiffProvider } from './sessionDiffEditor';
 import type { PendingSummary } from './pendingRequests';
@@ -271,9 +271,10 @@ function warnSessionFailure(action: 'rename' | 'delete' | 'loadMore', error: unk
  * left side served; `onRenewed` joins both. Under `ExtensionMode.Test`,
  * `TEST_SIDEBAR_VIEWS_COMMAND_ID` reads what the two trees draw.
  * Phase 4 (Quick start): the same `registerSidebarHome` also owns the `openVsCode.home` webview
- * view; the lifecycle gives it the sources of its state (connection, model label, MCP rows of the
- * server config, the registry's activity and the pending requests) and its actions: `start` opens a
- * NEW tab and composes the text with `send: true` (Auto first goes through `workMode.set`), `stop`
+ * view; the lifecycle gives it the sources of its state (connection, the model catalog, MCP rows of
+ * the server config, the registry's activity and the pending requests) and its actions: `start` opens
+ * a NEW tab and composes the text with `send: true` (Auto first goes through `workMode.set`; the
+ * model the user chose in the box, if any, rides in the compose: issue #223), `stop`
  * is `controller.stopSession`, `reply` and `open` reuse `SHOW_REQUEST_COMMAND_ID` and
  * `OPEN_SESSION_COMMAND_ID`. Under `ExtensionMode.Test`, `TEST_HOME_MESSAGE_COMMAND_ID` and
  * `TEST_HOME_STATE_COMMAND_ID` drive it without a webview.
@@ -425,7 +426,8 @@ function warnSessionFailure(action: 'rename' | 'delete' | 'loadMore', error: unk
  * mode. Delete reads the tab that shows the session BEFORE deleting and closes it afterwards (P8).
  * Failures of these commands are native warnings. Under `ExtensionMode.Test` the command
  * `TEST_SESSION_ANSWERS_COMMAND_ID` pre-answers the Rename box and the Delete modal, which the test
- * API cannot operate. VERIFIED by a full `test:visual` (Windows 11, VS Code 1.144.0, 30/10/2026,
+ * API cannot operate, and (`homeModel`, issue #223: `provider/id` or `null`, one use) the model
+ * picker of the Quick start view. VERIFIED by a full `test:visual` (Windows 11, VS Code 1.144.0, 30/10/2026,
  * 0 FAIL, with `RevealOrder`): "ok   B6 during the turn the row of N reads "Running · Tab · 11:15 AM"
  * and then "Needs input · Running · Tab · 11:15 AM", and the badge of the Sessions view is "1"",
  * "ok   V3 the context menu of a session row lists Rename Session… and then Delete Session", "ok
@@ -585,7 +587,12 @@ export function registerChat(
   let connection: ConnectionState | undefined;
   // Answers for the NEXT Rename box, Delete modal and the dialogs of the organizing commands, set
   // only by the Test-mode command below (the organizing ones are read by `sessionsOrganize.ts`).
-  const testAnswers: { title?: string | null; confirmDelete?: boolean } & OrganizeAnswers = {};
+  const testAnswers: {
+    title?: string | null;
+    confirmDelete?: boolean;
+    /** The next Quick start model picker: `provider/id` picks it, `null` cancels (issue #223). */
+    homeModel?: string | null;
+  } & OrganizeAnswers = {};
   // The first page of the last full read, to reconcile the organization again when the tree
   // comes into use (`chatLocation` switched to `editor` after the page arrived).
   let lastPage: Pick<SessionTreePage, 'rows' | 'hasMore'> | undefined;
@@ -1168,7 +1175,13 @@ export function registerChat(
     channel,
     quick: {
       connection: () => statusConnection,
-      model: () => statusModelLabel(statusCatalog),
+      catalog: () => statusCatalog,
+      testModelAnswer: () => {
+        // One use, like the other Test-mode answers: `null` cancels the picker.
+        const answer = testAnswers.homeModel;
+        delete testAnswers.homeModel;
+        return answer;
+      },
       mcp: () => serverConfig.snapshot().mcp.servers,
       runningSessions: () => controller.runningSessions(),
       activityOf: (sessionID) => controller.activityOf(sessionID),
@@ -1176,13 +1189,14 @@ export function registerChat(
       labelOf: (sessionID) => controller.labelOf(sessionID),
       pending: () => pendingRequests,
       // One new tab, the work mode asked for in the box, then the text as `prompt.compose` with
-      // `send: true`: the tab's own model, agent and mods apply and the first send creates the session.
-      start: async (text, workMode) => {
+      // `send: true`: the tab's own agent and mods apply, its model too unless the user chose one in
+      // the box (it rides in the compose), and the first send creates the session.
+      start: async (text, workMode, model) => {
         const paneId = openTab(undefined, true);
         if (workMode === 'auto') {
           await controller.handle(paneId, { type: 'workMode.set', mode: 'auto' });
         }
-        const outcome = controller.composeFromHome(paneId, text);
+        const outcome = controller.composeFromHome(paneId, text, model);
         return outcome.status === 'rejected'
           ? { ok: false, error: outcome.error.message }
           : { ok: true };
@@ -1722,6 +1736,9 @@ export function registerChat(
           typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
         if (typeof args.title === 'string' || args.title === null) testAnswers.title = args.title;
         if (typeof args.confirmDelete === 'boolean') testAnswers.confirmDelete = args.confirmDelete;
+        if (typeof args.homeModel === 'string' || args.homeModel === null) {
+          testAnswers.homeModel = args.homeModel;
+        }
         // The organizing dialogs: same one-shot rule, `null` cancels.
         if (typeof args.folderName === 'string' || args.folderName === null) {
           testAnswers.folderName = args.folderName;

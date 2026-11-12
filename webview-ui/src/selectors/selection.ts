@@ -24,6 +24,7 @@ import type {
   ProviderOption,
   SessionSummary,
 } from '../../../src/shared/model';
+import { compactTokens, modelMetaText, orderedProviders } from '../../../src/shared/modelText';
 
 /** Lower-cases, turns every run of non-letters/digits into one space and trims (upstream). */
 export const normalizeModelSearch = (value: string): string =>
@@ -60,7 +61,7 @@ export function sameModel(a: ModelRef, b: ModelRef): boolean {
  * in a real VS Code and the prompt never left (found by `test:visual` step 11, 21/10/2026, which
  * jsdom cannot see because its `postMessage` does not clone). Anything put in a message is copied.
  */
-function plainModel(ref: ModelRef): ModelRef {
+export function plainModel(ref: ModelRef): ModelRef {
   const copy: ModelRef = { providerID: ref.providerID, id: ref.id };
   if (ref.variant !== undefined) copy.variant = ref.variant;
   return copy;
@@ -222,13 +223,8 @@ export type ModelGroup = { provider: ProviderOption; models: ModelOption[] };
  */
 export function groupModels(catalog: Catalog | undefined, search: string): ModelGroup[] {
   if (catalog === undefined) return [];
-  const known = new Map<string, ProviderOption>(catalog.providers.map((p) => [p.id, p]));
-  const orphans = [...new Set(catalog.models.map((m) => m.providerID))]
-    .filter((id) => !known.has(id))
-    .sort();
-  const providers = [...catalog.providers, ...orphans.map((id) => ({ id, name: id }))];
   const groups: ModelGroup[] = [];
-  for (const provider of providers) {
+  for (const provider of orderedProviders(catalog)) {
     const models = catalog.models.filter(
       (m) =>
         m.providerID === provider.id && matchesModelSearch(search, [m.name, m.id, provider.name]),
@@ -238,26 +234,16 @@ export function groupModels(catalog: Catalog | undefined, search: string): Model
   return groups;
 }
 
-/**
- * "200K" / "1M" for a token count; whole numbers only, rounded down. Exported since issue #25: the
- * context line in the header (`chat/usage.ts`) writes its numbers the same way as the model list.
- */
-export function compactTokens(count: number): string {
-  if (count >= 1_000_000) return `${String(Math.floor(count / 1_000_000))}M`;
-  if (count >= 1_000) return `${String(Math.floor(count / 1_000))}K`;
-  return String(count);
-}
+/** Re-exported from `src/shared/modelText.ts` (moved there by issue #223; the Quick start picker uses it too). */
+export { compactTokens };
 
 /**
  * The one-line detail under a model name, built as ONE string (lesson #926): "Free · 200K context ·
- * beta". "Free" only when the model is free, the status only when it is not `active`.
+ * beta". The rule lives in `modelMetaText` (shared with the host's Quick start picker); the words
+ * are translated here, with the same keys the host uses.
  */
 export function modelMeta(option: ModelOption): string {
-  const fields: string[] = [];
-  if (option.free) fields.push(l10n.t('Free'));
-  fields.push(l10n.t('{0} context', compactTokens(option.contextLimit)));
-  if (option.status !== 'active') fields.push(option.status);
-  return fields.join(' · ');
+  return modelMetaText(option, l10n.t('Free'), (tokens) => l10n.t('{0} context', tokens));
 }
 
 /** The name of the model for display: the catalog's, else `providerID/id` for one that left it. */

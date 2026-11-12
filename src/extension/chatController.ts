@@ -1605,14 +1605,18 @@ export class ChatController {
    * made here, which would skip the catalog's model choice). Same outcome contract as
    * {@link composeFromMod}: `rejected` with the sanitized error for a missing pane or a blank text
    * (the only bound {@link isComposeInBounds} puts on a compose without files: there is no cap on
-   * the length); nothing is composed then. Logs the fact, never the text.
+   * the length); nothing is composed then. Logs the fact, never the text. `model` (issue #223) is
+   * the model the user chose in the home view, if any: it rides in the compose, and the webview
+   * applies it as its draft before it sends (the model is a draft of the webview, not of the host);
+   * without it the compose has no `model` key and the tab's preferred model applies.
    * VERIFIED by `chatController.home.test.ts` "composeFromHome composes with send true and refuses
-   * a blank text and a missing pane" (fabricated pane, Windows 11, 07/11/2026).
+   * a blank text and a missing pane" (fabricated pane, Windows 11, 07/11/2026) and "composeFromHome
+   * carries the model of the home view in the compose, and none when there is no choice".
    * VERIFIED end to end by the full `test:visual` run of E9-sidebar-home (Windows 11, VS Code
    * 1.145.2, 08/11/2026): "ok   F1 Enter
    * opened exactly one new tab with one accepted prompt and cleared the box".
    */
-  composeFromHome(paneId: number, text: string): ComposeOutcome {
+  composeFromHome(paneId: number, text: string, model?: ModelRef): ComposeOutcome {
     const pane = this.paneById(paneId);
     const refuse = (error: unknown): ComposeOutcome => {
       const info = toErrorInfo(error, this.secrets);
@@ -1626,7 +1630,13 @@ export class ChatController {
       return refuse(codedError('ComposeRefused', () => l10n.t('Write something to start')));
     }
     this.log.info('home composed a prompt');
-    pane.compose({ type: 'prompt.compose', text, files: [], send: true });
+    pane.compose({
+      type: 'prompt.compose',
+      text,
+      files: [],
+      send: true,
+      ...(model === undefined ? {} : { model }),
+    });
     return { status: 'composed' };
   }
 

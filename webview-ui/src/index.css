@@ -3932,7 +3932,8 @@ button.home-pill[data-kind='mcp'] {
   border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-foreground));
 }
 
-button.home-pill[data-kind='mcp'] .icon {
+button.home-pill[data-kind='mcp'] .icon,
+button.home-pill[data-kind='model'] .icon {
   flex: none;
 }
 

@@ -26,6 +26,7 @@ describe('isHomeWebviewToHost', () => {
       { type: 'home.action', action: 'settings' },
       { type: 'home.mode', mode: 'manual' },
       { type: 'home.mode', mode: 'auto' },
+      { type: 'home.model' },
     ];
     for (const message of valid) expect(isHomeWebviewToHost(message)).toBe(true);
   });
@@ -64,8 +65,13 @@ describe('isHomeWebviewToHost', () => {
     expect(isHomeWebviewToHost({ type: 'prompt.send', text: 'x' })).toBe(false);
   });
 
-  it('refuses extra fields such as a port or a password (rule 1)', () => {
+  it('refuses extra fields such as a port or a password (rule 1), and a model named by the webview', () => {
+    // `home.model` carries no field: the webview never names a model, the host offers the list.
+    expect(
+      isHomeWebviewToHost({ type: 'home.model', model: { providerID: 'opencode', id: 'big' } }),
+    ).toBe(false);
     for (const extra of ['port', 'password', 'url', 'key', 'path']) {
+      expect(isHomeWebviewToHost({ type: 'home.model', [extra]: 'x' })).toBe(false);
       expect(isHomeWebviewToHost({ type: 'home.ready', [extra]: 'x' })).toBe(false);
       expect(
         isHomeWebviewToHost({ type: 'home.start', requestId: 'r', text: 'hi', [extra]: 'x' }),
