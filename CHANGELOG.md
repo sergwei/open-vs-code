@@ -7,24 +7,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+## [1.1.0] - 2026-11-13
 
-- **Quick start: the model pill picks the model of the next conversation.** It is a button with a
-  chevron that opens a picker (grouped by provider, searchable); the conversation you start from the
-  box uses that model (it lasts until you pick another or reload the window), and
-  `openVsCode.defaultModel` is not touched. The server pill now shows only
-  when the server is not ready.
-- **Built and tested against opencode 2.2.7** (was 2.0.32): the `@opencode/client` pin and the
-  recommended CLI move together. Calls to the experimental routes (usage stats, MCP connect and
-  disconnect) now use the `client.experimental.*` methods.
-- **Several pending requests share one box.** Instead of stacking one card on top of another, the
-  permissions and questions the agent is waiting on sit in a single box with a tab per request
-  (icon and name, the active one underlined, "1 of 3" on the right) and only the active request
-  below. The tab names always show whole; if they do not fit, the row scrolls sideways. With a
-  single request nothing changes.
+A sidebar home, tabs in the chat panel, a redesigned Settings tab, a subagent monitor and a
+Manual/Auto work mode.
 
 ### Added
 
+- **A sidebar home** (with `chatLocation` set to `editor`). **Quick start**, above the Sessions
+  tree, is a small box: type and press Enter to open a new chat tab that starts the conversation.
+  Its model pill opens a picker (grouped by provider, searchable) for the model of the next
+  conversation; it lasts until you pick another or reload the window and does not touch
+  `openVsCode.defaultModel`. A status strip shows the model, the mode of the next conversation, any
+  MCP server in error and, only while it is not ready, the server. **Running** lists the root sessions that
+  run now with their activity, a clock and **Stop**, which also stops their subagents; **Waiting
+  for you** lists permissions and questions, and Reply opens the conversation with the card
+  focused. Under the Sessions tree, **Changes of the sessions** lists the files each session changed
+  (click one for VS Code's diff), and **Usage (all projects)** shows cost and tokens for today and
+  the last 7 days by model, for every project in your opencode database. New title-bar buttons
+  **OpenCode: Refresh Changes** and **OpenCode: Refresh Usage**. The usage route is experimental in
+  opencode, so a newer opencode may change it.
+- **A redesigned Settings tab.** A header with search and four clickable status cards (server,
+  providers, default model, MCP servers), and side sections: General (chat location, automatic
+  start), Providers (compact rows and an Add provider picker), Models (the default model), MCP
+  servers, Mods (a switch per mod, Reload and Open folder), Work mode and Advanced (the server
+  password, the saved permissions, the plugin decision of the folder). Below 600 px the sections fold into
+  a strip.
+- **Connect, disconnect and sign in to MCP servers** from Settings (they were read only). The
+  change lasts until opencode restarts.
+- **Subagent monitor.** While a subagent works or waits, a strip above the prompt box reads
+  "Subagents · N"; open it for one row per subagent (agent, task, current tool, elapsed time) with
+  Open, Answer, Stop and a **Stop all** that never stops the main turn. In the conversation, each
+  subagent call becomes a live card that folds into "Finished", "Stopped" or "Failed" when it ends.
 - **Chat, Changes and Session tabs in the chat panel.** A row of tabs under the header switches the
   central area; the request cards, the subagent strip, the activity line and the prompt box stay in
   all three. **Changes** holds the files the session changed (moved out of the header). **Session**
@@ -86,6 +100,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   session and a reload start in Manual. New command **OpenCode: Toggle Work Mode** (no default
   shortcut). Auto only answers what opencode asks: what its configuration allows without asking
   runs the same in both modes.
+
+### Changed
+
+- **Built and tested against opencode 2.2.7** (was 2.0.32): the `@opencode/client` pin and the
+  recommended CLI move together. Calls to the experimental routes (usage stats, MCP connect and
+  disconnect) now use the `client.experimental.*` methods.
+- **Several pending requests share one box.** Instead of stacking one card on top of another, the
+  permissions and questions the agent is waiting on sit in a single box with a tab per request
+  (icon and name, the active one underlined, "1 of 3" on the right) and only the active request
+  below. The tab names always show whole; if they do not fit, the row scrolls sideways. With a
+  single request nothing changes.
 
 ## [1.0.0] - 2026-11-04
 

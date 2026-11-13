@@ -2,7 +2,7 @@
   "name": "open-vs-code",
   "displayName": "OpenCode Station",
   "description": "%extension.description%",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "sergwei",
   "license": "SEE LICENSE IN LICENSE",
   "author": {
