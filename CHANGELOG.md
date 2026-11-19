@@ -18,7 +18,25 @@ español, pero no falta ningún cambio de los que nota el usuario.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-19
+
 ### English
+
+New session and the settings gear always in sight at the top of Quick start, a fix for `~/` file
+links and a shorter README, now also in Spanish.
+
+#### Added
+
+- **A bar at the top of Quick start, always visible,** with **New session** (opens a new chat tab)
+  and a gear that opens the **OpenCode Settings** tab. With several views in the side bar, VS Code
+  only shows the title-bar actions while the pointer is over the view, so the gear was hard to
+  find. When the side bar is 240 px wide or less, New session shows only its icon (issue #230,
+  PR #233).
+
+#### Changed
+
+- **A compact README, also in Spanish** (`README.es.md`); the details moved to `docs/`. The
+  changelog is now written in English and Spanish (issue #231, PR #232).
 
 #### Fixed
 
@@ -28,6 +46,22 @@ español, pero no falta ningún cambio de los que nota el usuario.
   path that was tried, truncated (issue #228, PR #229).
 
 ### Español
+
+Nueva sesión y el engranaje de la configuración, siempre a la vista arriba de Inicio rápido; los
+enlaces a archivos con `~/` ya funcionan, y el README es más corto y está también en español.
+
+#### Añadido
+
+- **Una barra siempre visible arriba de Inicio rápido,** con **Nueva sesión** (abre una pestaña de
+  chat nueva) y un engranaje que abre la pestaña **Configuración de OpenCode**. Cuando hay varias
+  vistas en la barra lateral, VS Code solo enseña las acciones de la barra de título al pasar el
+  ratón por encima de la vista, así que costaba dar con el engranaje. Si la barra lateral mide
+  240 px de ancho o menos, de Nueva sesión queda solo el icono (issue #230, PR #233).
+
+#### Cambiado
+
+- **El README es ahora breve y está también en español** (`README.es.md`); los detalles han pasado
+  a `docs/`. El registro de cambios se escribe en inglés y en español (issue #231, PR #232).
 
 #### Corregido
 

@@ -41,9 +41,10 @@ git), see
 1. Open a folder and click the **OpenCode** icon in the Activity Bar. The extension starts
    `opencode serve` for the folder (on `127.0.0.1`, random port and password) and stops it when the
    window closes.
-2. Press **New Session** in the **Sessions** view to open a chat tab beside your code. Type and press
-   Enter; Escape or **Stop** interrupts a turn. `Ctrl+Alt+P` (`Cmd+Alt+P` on macOS) jumps to the
-   prompt and back to the editor.
+2. Press **New session** at the top of the **Quick start** view (or **New Session** in the empty
+   **Sessions** view) to open a chat tab beside your code. Type and press Enter; Escape or **Stop**
+   interrupts a turn. `Ctrl+Alt+P` (`Cmd+Alt+P` on macOS) jumps to the prompt and back to the
+   editor.
 3. To ask about code without opening the chat, select it, right-click and choose **Explain with
    OpenCode** or **Fix with OpenCode** (or **Add to OpenCode Chat**). In the Explorer, right-click
    files to explain or attach them.
@@ -60,7 +61,8 @@ Each point is described in
 - **Sessions** tree: grouped by date, search, rename, delete, fork from any message, folders, pins,
   archive, filters and a "Needs attention" section. Subagent sessions open from their parent.
 - **Quick start** box at the top of the view: open a new chat tab with the model you pick, see
-  what is running or waiting for you, and check the status of the server and MCP servers. Under the
+  what is running or waiting for you, and check the status of the server and MCP servers. Its bar,
+  always visible, has **New session** and a gear that opens the OpenCode Settings tab. Under the
   tree, **Changes** of the sessions (click for VS Code's diff) and **Usage** (cost and tokens, today
   and 7 days, all projects).
 - **Permissions and questions** as cards you answer with a click, with a notification and a badge
