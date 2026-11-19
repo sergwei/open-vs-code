@@ -8,7 +8,7 @@
 // system (symlinks are not resolved by design).
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { hasImageExtension, resolveInsideFolder, toAttachmentName } from './pathPolicy';
+import { expandHome, hasImageExtension, resolveInsideFolder, toAttachmentName } from './pathPolicy';
 
 // E2 (issue #85, decision P11). Fabricated names: they pin the extension list and the case rule.
 describe('hasImageExtension', () => {
@@ -84,6 +84,50 @@ describe('resolveInsideFolder (posix)', () => {
     expect(resolveInsideFolder(folder, '../etc/passwd', p)).toBeUndefined();
     expect(resolveInsideFolder(folder, '/wsx/a', p)).toBeUndefined();
     expect(resolveInsideFolder(folder, 'file:///etc/passwd', p)).toBeUndefined();
+  });
+});
+
+// Issue #228: macOS users clicked `~/proj/src/a.ts` in the chat and got "does not exist", because
+// the `~` was taken as a folder name inside the workspace. Fabricated paths (the user's real path
+// was not shared); they pin which forms expand, and that expansion never widens the policy.
+describe('expandHome', () => {
+  const ana = () => '/Users/ana';
+
+  it('expands a leading ~/ on posix and leaves every other form alone', () => {
+    const p = path.posix;
+    expect(expandHome('~/proj/src/a.ts', ana, p)).toBe('/Users/ana/proj/src/a.ts');
+    expect(expandHome('~', ana, p)).toBe('~');
+    expect(expandHome('~bob/a.ts', ana, p)).toBe('~bob/a.ts');
+    expect(expandHome('a/~/b.ts', ana, p)).toBe('a/~/b.ts');
+    expect(expandHome('./~/x.ts', ana, p)).toBe('./~/x.ts');
+    expect(expandHome('src/a.ts', ana, p)).toBe('src/a.ts');
+    expect(expandHome('~\\a.ts', ana, p)).toBe('~\\a.ts');
+  });
+
+  it('expands both ~/ and ~\\ on win32', () => {
+    const w = path.win32;
+    const home = () => 'C:\\Users\\ana';
+    expect(expandHome('~\\proj\\a.ts', home, w)).toBe('C:\\Users\\ana\\proj\\a.ts');
+    expect(expandHome('~/proj/a.ts', home, w)).toBe('C:\\Users\\ana\\proj\\a.ts');
+  });
+
+  // HYPOTHESIS (Node docs, not reproduced): os.homedir() throws with no HOME and no passwd entry.
+  // Whatever it does, a plain path must not depend on it; the getter here is a fabricated stand-in.
+  it('does not ask for the home folder unless the path starts with ~', () => {
+    const throwing = () => {
+      throw new Error('no home');
+    };
+    expect(expandHome('src/a.ts', throwing, path.posix)).toBe('src/a.ts');
+    expect(() => expandHome('~/a.ts', throwing, path.posix)).toThrow('no home');
+  });
+
+  it('still goes through the folder policy: inside opens, outside stays refused', () => {
+    const p = path.posix;
+    const open = (raw: string) =>
+      resolveInsideFolder('/Users/ana/proj', expandHome(raw, ana, p), p);
+    expect(open('~/proj/src/a.ts')).toBe('/Users/ana/proj/src/a.ts');
+    expect(open('~/.ssh/id_rsa')).toBeUndefined();
+    expect(open('~/proj/../other/a.ts')).toBeUndefined();
   });
 });
 

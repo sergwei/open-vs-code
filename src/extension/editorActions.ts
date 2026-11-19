@@ -5,9 +5,11 @@
 // `ChatControllerDeps.editor`.
 //
 // Privacy: the text to copy or insert is code from the model and may contain secrets from the
-// user's files, so it is never logged. What is logged is a rejected path (truncated).
+// user's files, so it is never logged. What is logged is a rejected path, or the path of a chat
+// link whose file was not found (issue #228), both truncated to `LOG_PATH_MAX`.
 
 import * as l10n from '@vscode/l10n';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
@@ -20,6 +22,7 @@ import { isInServedFolder, selectionLines, toEditorRef } from './fileMentions';
 import { bothTexts } from './l10nEnglish';
 import type { ServerLog } from './opencodeServer';
 import {
+  expandHome,
   hasImageExtension,
   IMAGE_EXTENSIONS,
   resolveInsideFolder,
@@ -28,7 +31,10 @@ import {
 import { pickWorkspaceFolder } from './serverManager';
 import { openSessionDiff } from './sessionDiffEditor';
 
-/** Longest rejected path written to the log; our own cap, so a huge string cannot flood it. */
+/**
+ * Longest path (rejected, or not found by `open`) written to the log; our own cap, so a huge
+ * string cannot flood it.
+ */
 const LOG_PATH_MAX = 200;
 
 /**
@@ -303,7 +309,13 @@ export function targetColumn(placement: EditorPlacement): vscode.ViewColumn | un
  * (`pathPolicy.ts`); symlinks are not resolved. `open` resolves the path against `servedFolder`
  * (the folder the SERVER serves) when the controller gives it, and only otherwise against the
  * folder the host would pick (issue #28: with several workspace folders a chip of the served one
- * must open); the multi-root case itself was not run. `editorContext` is {@link readEditorContext}.
+ * must open); the multi-root case itself was not run. Issue #228: before that policy, `open`
+ * expands a leading `~/` to `os.homedir()` ({@link expandHome}), so a `~/…` path the model wrote
+ * opens when it lies inside the folder and is still refused when it does not; when the file is
+ * missing, `open` logs the attempted path truncated to `LOG_PATH_MAX` (the notice keeps only the
+ * basename). VERIFIED for
+ * the expansion only by `pathPolicy.test.ts` (fabricated paths, Windows 11); UNVERIFIED: the new
+ * log line and a `~/…` click in a real window, on any OS. `editorContext` is {@link readEditorContext}.
  * `openDiff` (issue #31) is {@link openSessionDiff}: the controller has already checked the
  * whitelist, so it opens whatever target it is given.
  * VERIFIED in a real VS Code 1.142 on Windows 11 (20/10/2026, `npm run test:integration`): `newFile`
@@ -340,7 +352,10 @@ export function createEditorActions(
           l10n.t('Open a folder to open files from the chat'),
         );
       }
-      const resolved = resolveInsideFolder(folder, target);
+      const resolved = resolveInsideFolder(
+        folder,
+        expandHome(target, () => os.homedir()),
+      );
       if (resolved === undefined) {
         // JSON.stringify escapes newlines and control characters, so a hostile path cannot forge
         // log lines.
@@ -355,6 +370,11 @@ export function createEditorActions(
       try {
         document = await vscode.workspace.openTextDocument(vscode.Uri.file(resolved));
       } catch {
+        // The notice shows only the basename; the attempted path is what tells a wrong base folder or
+        // an unexpanded prefix apart (issue #228 could not be diagnosed from the log without it).
+        log.warn(
+          `could not open a file from the chat: ${JSON.stringify(resolved.slice(0, LOG_PATH_MAX))}`,
+        );
         throw new EditorActionError('FileNotFound', () =>
           l10n.t(
             'Could not open {0}: it does not exist or is not a text file',
