@@ -56,6 +56,31 @@ export function resolveInsideFolder(
 }
 
 /**
+ * Expands a leading `~/` (and `~\` with `path.win32`) of a path the model wrote to the folder
+ * `home()` returns; any other text comes back unchanged.
+ *
+ * Why (issue #228): Node does not expand `~`, so `~/proj/src/a.ts` was resolved as
+ * `<folder>/~/proj/src/a.ts`, passed {@link resolveInsideFolder} (it is lexically inside) and
+ * failed as "does not exist". Models write `~/…` naturally on macOS and Linux; the bug was
+ * reported by macOS users with the exact message. This only rewrites the text: the result must
+ * still go through {@link resolveInsideFolder}, so a `~/.ssh/…` path stays refused. A bare `~`,
+ * `~user/…` (another user's home, which would need a passwd lookup) and a `~` in the middle of a
+ * path are left alone on purpose. Accepted trade-off: a folder literally named `~` inside the
+ * workspace can no longer be opened as `~/…` (it still opens as `./~/…`). `home` is a getter,
+ * called only for a `~` path, so a failing home lookup cannot break every other file link.
+ * HYPOTHESIS, from the Node docs and not reproduced: `os.homedir()` throws when HOME is unset and
+ * the uid has no passwd entry (reproduce with `env -u HOME` under such a uid). Callers: only
+ * `editor.open`, not attachments, mentions or mods, whose paths never come from model prose.
+ * VERIFIED by `pathPolicy.test.ts` ("expandHome") with `path.posix` and `path.win32` (fabricated
+ * inputs, run on Windows 11), including that `./~/x.ts` is left alone and that the getter is not
+ * called for other text. UNVERIFIED: a click in a real macOS window.
+ */
+export function expandHome(raw: string, home: () => string, impl: PathImpl = path): string {
+  const prefixed = raw.startsWith('~/') || (impl.sep === '\\' && raw.startsWith('~\\'));
+  return prefixed ? impl.resolve(home(), raw.slice(2)) : raw;
+}
+
+/**
  * Name shown on an attachment chip: the path relative to `folder` with `/` separators, or the
  * basename when the file is outside it (the user may attach any file, but the host never shows a
  * long absolute path).
