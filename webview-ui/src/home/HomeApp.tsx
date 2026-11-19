@@ -8,7 +8,7 @@ import {
   type HomeWebviewToHost,
 } from '../../../src/shared/homeProtocol';
 import { plural } from '../../../src/shared/l10n';
-import { ChevronIcon, WarningIcon } from '../chat/icons';
+import { ChevronIcon, GearIcon, PlusIcon, WarningIcon } from '../chat/icons';
 import type { HomeStore } from './homeStore';
 import type { HomeUi } from './homeUiState';
 
@@ -128,6 +128,16 @@ function blockedText(state: HomeState): string | undefined {
  * region announces rows that appear or go, never ticks. The focus never moves by itself, except that
  * after a successful Stop pressed with the keyboard it goes to the box before the row disappears.
  * Colours and sizes are in `index.css` (`.home-*`, `--vscode-*` only, no inline style).
+ * Above the box sits a toolbar (`.home-toolbar`, E9-sidebar-top-actions, decisions P1=1 and P2=1 of
+ * Sergio): "New session" (icon and text) and a gear (icon only, `aria-label` and `title` "OpenCode
+ * settings"), sending `home.action` `newSession` and `settings`. It is drawn from the first frame,
+ * before any `home.state` and outside the `Show` of the state, and its buttons are never
+ * `disabled`: the gear is the way out when the server cannot start, and New session opens a lazy
+ * tab that shows the setup guide. They use their own classes, not `.home-pill` (the status strip)
+ * nor `.home-action` (Stop and Reply). In a narrow view (a media query in `index.css`, where the
+ * label no longer fits on one line) the label of New session is hidden visually but stays in the
+ * DOM, so the button is only the plus icon and keeps its accessible name; its `title` shows the
+ * name as a tooltip in both modes (decision of Sergio, 19/11/2026).
  * The rows come from `store.lists`, whose identities are stable per key (running by sessionID,
  * waiting by `kind:id`, MCP by name), so a state posted on every tool start of a running session
  * keeps the same buttons and the keyboard focus on them.
@@ -136,7 +146,16 @@ function blockedText(state: HomeState): string | undefined {
  * session, focus to the box after a successful keyboard Stop, focus left alone after a Stop pressed
  * with the focus elsewhere, clock with fake timers, live region,
  * no `style` attribute, the server pill in each state but `connected`, and the model pill's
- * `home.model`, `data-chosen`, accessible names and chevron).
+ * `home.model`, `data-chosen`, accessible names and chevron; the toolbar: present before any state
+ * and first in the root, its accessible names, the label of New session in its own span and its
+ * `title`, its two messages, and never disabled with the server unavailable; jsdom has no layout,
+ * so the narrow mode is not there). VERIFIED in a real window by `--steps 29,34,49,50` (Windows 11,
+ * VS Code 1.147.0, 19/11/2026, "all visual checks passed"): "ok   T0 the toolbar is the first child
+ * of the Quick start document, before the box, with the buttons "New session" and "OpenCode
+ * settings" and its top at 0", "ok   T1 the toolbar New session opened exactly one new chat tab and
+ * sent no prompt (tabs 0 -> 1)", "ok   T2 the toolbar gear opens the OpenCode Settings tab, once (1
+ * tab)", the toolbar cells of M1 and the narrow mode (see the step 50 comment of `run.mjs`, checks
+ * N1 and N2).
  * VERIFIED in a real window by `--steps 29,34,49,50` (Windows 11, VS Code 1.145.2, 08/11/2026, run
  * after the `lists` and `elapsedName` changes): "all visual checks passed", step 50 among them,
  * e.g. "ok   M3 running row at 170 px (bar 170), light: the running row with its title, clock and
@@ -257,6 +276,32 @@ export function HomeApp(props: { store: HomeStore; send: SendHome; ui: HomeUi })
 
   return (
     <section class="home-root" aria-label={l10n.t('Quick start')}>
+      <div class="home-toolbar" role="group" aria-label={l10n.t('Quick actions')}>
+        <button
+          type="button"
+          class="home-tool"
+          data-action="newSession"
+          title={l10n.t('New session')}
+          onClick={() => {
+            props.send({ type: 'home.action', action: 'newSession' });
+          }}
+        >
+          <PlusIcon />
+          <span class="home-tool-label">{l10n.t('New session')}</span>
+        </button>
+        <button
+          type="button"
+          class="home-tool"
+          data-action="settings"
+          aria-label={l10n.t('OpenCode settings')}
+          title={l10n.t('OpenCode settings')}
+          onClick={() => {
+            props.send({ type: 'home.action', action: 'settings' });
+          }}
+        >
+          <GearIcon />
+        </button>
+      </div>
       <div class="home-box-wrap">
         <textarea
           class="home-box"

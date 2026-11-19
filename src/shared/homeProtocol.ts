@@ -25,8 +25,11 @@ export const MAX_HOME_LABEL = 200;
 /** Whether the NEXT conversation that starts from the box asks before it acts (`manual`) or not. */
 export type HomeMode = 'manual' | 'auto';
 
-/** The actions of the status pills: existing commands, nothing else can be asked. */
-export type HomeAction = 'restart' | 'logs' | 'settings';
+/**
+ * The actions of the status pills and of the toolbar (`newSession`, E9-sidebar-top-actions):
+ * existing commands, nothing else can be asked.
+ */
+export type HomeAction = 'restart' | 'logs' | 'settings' | 'newSession';
 
 /** What a running session is doing, in words the webview translates. */
 export type HomeActivity =
@@ -133,7 +136,12 @@ const WEBVIEW_SHAPES: Record<
     keys: ['action'],
     valid: (m) => {
       const action = field(m, 'action');
-      return action === 'restart' || action === 'logs' || action === 'settings';
+      return (
+        action === 'restart' ||
+        action === 'logs' ||
+        action === 'settings' ||
+        action === 'newSession'
+      );
     },
   },
   'home.mode': {
@@ -168,6 +176,11 @@ const WEBVIEW_SHAPES: Record<
  * (Windows 11, VS Code 1.146.0, 12/11/2026, "all visual checks passed"): "ok   P1 picking
  * "GLM-5.3-Flash Free" in the picker puts it in the pill with data-chosen="true" and opens no
  * OpenCode Settings tab" and "ok   F8 the MCP pill opens the OpenCode Settings tab, once (1 tab)".
+ * The `home.action` value `newSession` (toolbar, E9-sidebar-top-actions) is VERIFIED only by
+ * fabricated messages in `homeProtocol.test.ts` (accepted; `new-session`, `NEWSESSION` and `search`
+ * refused). VERIFIED from a real DOM click by `--steps 29,34,49,50` (Windows 11, VS Code 1.147.0,
+ * 19/11/2026, "all visual checks passed"): "ok   T1 the toolbar New session opened exactly one new
+ * chat tab and sent no prompt (tabs 0 -> 1)".
  */
 export function isHomeWebviewToHost(value: unknown): value is HomeWebviewToHost {
   try {

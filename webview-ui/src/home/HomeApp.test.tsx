@@ -432,6 +432,75 @@ describe('HomeApp status and rows', () => {
   });
 });
 
+// Protects E9-sidebar-top-actions (decisions P1=1, P2=1): the toolbar is the always-visible way to
+// start a session and open the settings, so it exists before any state, it is the first thing in the
+// root, it is never disabled (the gear is the fix when the server is down) and it carries no style.
+// FABRICATED states in jsdom; the drawn bar and the real clicks are `test:visual` step 50.
+describe('HomeApp toolbar', () => {
+  it('is drawn before any state, first in the root and before the box, with two buttons', () => {
+    current = rig();
+    const root = must(current.view.container, '.home-root');
+    const bar = must(root, '.home-toolbar');
+    expect(root.firstElementChild).toBe(bar);
+    expect(bar.getAttribute('role')).toBe('group');
+    expect(bar.querySelectorAll('button.home-tool')).toHaveLength(2);
+    expect(
+      bar.compareDocumentPosition(must(root, '.home-box')) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  // The narrow mode (label clipped, icon only) is a media query that jsdom cannot evaluate: what is
+  // protected here is what that mode relies on, the label in its own span INSIDE the button (so the
+  // accessible name is the same in both modes) and the `title` tooltip. The drawn result is the N1
+  // and N2 checks of `test:visual` step 50.
+  it('names New session by its text and the gear by aria-label and title, icons hidden', () => {
+    current = rig(state());
+    const make = must<HTMLButtonElement>(current.view.container, '[data-action="newSession"]');
+    const gear = must<HTMLButtonElement>(current.view.container, '[data-action="settings"]');
+    expect(make.textContent).toBe('New session');
+    expect(must(make, 'span.home-tool-label').textContent).toBe('New session');
+    expect(make.getAttribute('title')).toBe('New session');
+    expect(gear.getAttribute('aria-label')).toBe('OpenCode settings');
+    expect(gear.getAttribute('title')).toBe('OpenCode settings');
+    expect(gear.textContent).toBe('');
+    for (const button of [make, gear]) {
+      expect(button.querySelector('svg.icon')?.getAttribute('aria-hidden')).toBe('true');
+    }
+  });
+
+  it('sends home.action newSession and settings, in the order they are clicked', () => {
+    current = rig(state());
+    must<HTMLButtonElement>(current.view.container, '[data-action="newSession"]').click();
+    must<HTMLButtonElement>(current.view.container, '[data-action="settings"]').click();
+    expect(current.sent).toEqual([
+      { type: 'home.action', action: 'newSession' },
+      { type: 'home.action', action: 'settings' },
+    ]);
+  });
+
+  it('is never disabled, with an unavailable server and a box that cannot start', () => {
+    current = rig(
+      state({ canStart: false, server: { state: 'unavailable', reason: 'binary-missing' } }),
+    );
+    const buttons = current.view.container.querySelectorAll<HTMLButtonElement>('button.home-tool');
+    expect(buttons).toHaveLength(2);
+    for (const button of buttons) {
+      expect(button.disabled).toBe(false);
+      expect(button.getAttribute('aria-disabled')).not.toBe('true');
+    }
+  });
+
+  it('has no style attribute and is not counted among the status pills', () => {
+    current = rig(state({ mcp: [{ name: 'github', status: 'failed' }] }));
+    const bar = must(current.view.container, '.home-toolbar');
+    expect(bar.hasAttribute('style')).toBe(false);
+    expect(bar.querySelectorAll('[style]')).toHaveLength(0);
+    expect(bar.querySelector('.home-pill, .home-action')).toBeNull();
+    const pills = [...current.view.container.querySelectorAll<HTMLElement>('.home-pill')];
+    expect(pills.map((p) => p.dataset.kind)).toEqual(['model', 'mode', 'mcp']);
+  });
+});
+
 describe('formatElapsed', () => {
   it('writes m:ss, h:mm:ss, and never a negative time', () => {
     expect(formatElapsed(0)).toBe('0:00');

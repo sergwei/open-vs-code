@@ -373,6 +373,18 @@ describe('HomeController intentions are revalidated', () => {
     expect(r.calls).toEqual(['action logs']);
     expect(states(r).at(-1)?.mode).toBe('auto');
   });
+
+  // E9-sidebar-top-actions: the toolbar's New session goes through the same `action` dependency as
+  // the pills and answers nothing (the host opens the tab itself). Fabricated rig: the real command
+  // is covered by the fake-server integration case.
+  it('forwards the New session action of the toolbar and posts no result', async () => {
+    const r = rig();
+    r.controller.onReady();
+    const before = r.posted.length;
+    await r.controller.onMessage({ type: 'home.action', action: 'newSession' });
+    expect(r.calls).toEqual(['action newSession']);
+    expect(r.posted.slice(before).some((m) => m.type === 'home.result')).toBe(false);
+  });
 });
 
 // Issue #223: the model pill asks the host for a picker over ITS catalog; the pick is revalidated, is

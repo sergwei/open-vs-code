@@ -2021,6 +2021,36 @@ describe('fake server', function () {
     });
 
     /**
+     * The toolbar's New session (E9-sidebar-top-actions): `home.action` with `newSession` runs the
+     * host's own `openVsCode.newSession` command, which opens ONE lazy chat tab and sends no prompt
+     * (the session is created by the first send). Protects the guard accepting the value, the
+     * `Record<HomeAction, string>` of `chatLifecycle.ts` mapping it, and the command not opening a
+     * second tab. Provenance: the SYNTHETIC server; the message is fed through the Test-mode command
+     * (same guard and controller as the webview), a real DOM click is `test:visual` step 50 T1.
+     */
+    it('the toolbar New session of the home view opens one new chat tab and sends no prompt', async function () {
+      const log = await openLogCursor();
+      try {
+        await setChatLocation('editor', log);
+        await log.waitForQuiet();
+        const before = chatTabs().length;
+        log.mark();
+        assert.strictEqual(
+          await homeSend({ type: 'home.action', action: 'newSession' }),
+          undefined,
+        );
+        await waitForChatTabs(before + 1);
+        // negative window: New session opens exactly one tab and sends no prompt
+        await sleep(SETTLE_MS);
+        assert.strictEqual(chatTabs().length, before + 1, describeChatLayout());
+        assert.strictEqual(countOf(log, 'prompt accepted for'), 0, `log:\n${log.added()}`);
+      } finally {
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        await restoreChatLocation(await openLogCursor());
+      }
+    });
+
+    /**
      * The model pill's picker (issue #223): `home.model` opens the picker (here the one-use answer
      * of `TEST_SESSION_ANSWERS_COMMAND_ID` stands in for the native QuickPick, which the test API
      * cannot drive; `test:visual` step 50 P1 uses the real one), the state names the chosen model,
