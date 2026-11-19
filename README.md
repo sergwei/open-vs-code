@@ -1,187 +1,21 @@
 # OpenCode Station
 
+**English** | [Español](https://github.com/sergwei/open-vs-code/blob/main/README.es.md)
+
 Unofficial GUI for opencode in Visual Studio Code.
 
-A mouse-friendly chat interface for [opencode](https://github.com/anomalyco/opencode), inside
-VS Code. It gives opencode the kind of graphical interface the Claude Code extension has, so you
-do not depend on the limits of a terminal (many terminals on Linux and macOS do not support the
-mouse).
+A mouse-friendly chat interface for [opencode](https://github.com/anomalyco/opencode), inside VS
+Code, in the style of the Claude Code extension, so you do not depend on the limits of a terminal
+(many terminals on Linux and macOS do not support the mouse). The extension is a **client of
+`opencode serve`**, not a wrapper around the terminal UI: it starts the server for your workspace
+and talks to it over HTTP. It is not affiliated with opencode or with Microsoft.
 
-The extension is a **client of `opencode serve`**, not a wrapper around the terminal UI: it starts
-the server for your workspace and talks to it over HTTP. This is an unofficial project: it is not
-affiliated with opencode or with Microsoft.
+![A chat tab showing a reply with a TypeScript and a bash code block (each with Copy, Insert and New file buttons), a table, a bullet list and inline code](docs/images/chat-markdown.png)
+
+![A chat tab where a read of .env waits for approval: a permission card above the prompt box with the buttons Allow once, Always allow, Reject and Reject with feedback](docs/images/permission-card.png)
 
 > **Only opencode v2 is supported** (major version 2, tested with 2.2.7). The 1.x line
 > (`opencode-ai`) does not work with this extension.
-
-## Features
-
-- **Streaming chat** with Markdown, syntax highlighting and code actions: copy, insert at the
-  cursor, open in a new file, and open `path:line` references in the editor.
-
-  ![A chat tab showing a reply with a TypeScript and a bash code block (each with Copy, Insert and New file buttons), a table, a bullet list and inline code](docs/images/chat-markdown.png)
-
-- **Permission and question cards.** When opencode asks, you answer with a click. With the chat
-  hidden, or (with chat tabs) when the request belongs to a tab that is not in front, you get a
-  notification and a badge on the Activity Bar icon. With several requests waiting they share one
-  box with a tab each.
-
-  ![A chat tab where a read of .env waits for approval: a permission card above the prompt box with the buttons Allow once, Always allow, Reject and Reject with feedback](docs/images/permission-card.png)
-
-- **Sessions:** a list with groups and search, rename, delete, fork from any of your messages and
-  jump into subagent sessions. The open session is remembered per workspace.
-
-  ![A forked session in a chat tab: a "Forked from" crumb at the top, the first exchange only, the Fork from here and Revert from here buttons on the user message, and the next message ("Reply with exactly: TWO") waiting in the prompt box](docs/images/fork-session.png)
-
-- **Organize the Sessions tree** (with `chatLocation` set to `editor`). Put sessions in **folders**
-  (and folders inside folders) by dragging the rows or with **Move to Folder…**, **Pin** the ones
-  you keep coming back to (they sit under **Pinned** at the top) and **Archive** the ones you are
-  done with (they go to a collapsed **Archived** section, and **Unarchive** brings them back to
-  their folder). A **Needs attention** section above them repeats the sessions that are running or
-  waiting for your answer, so they are never buried in a folder or an archive. **Filter
-  Sessions…** keeps only the running ones, the ones waiting for input or the ones open in a tab
-  (**Clear Filters** removes it), and the tooltip of a row shows its cost and tokens, its folder
-  and, for a session with a tab, how many files it changed. Archiving and folders only change how
-  the list looks: nothing is deleted from opencode, and **Search Sessions…** still finds archived
-  sessions and says so. Folders, pins and the archive are kept per workspace folder by VS Code (see
-  [Known limitations](#known-limitations)).
-
-- **Quick start at the top of the container** (with `chatLocation` set to `editor`). A small box:
-  type and press Enter to open a NEW tab that starts the conversation with the model you picked
-  (or, if you did not pick one, that tab's usual model), with its agent and mods (Shift+Enter
-  breaks the line; text only, no attachments). A status strip shows the model, the mode of the next
-  conversation (Manual or Auto), any MCP server in error and, only while the server is not ready
-  (starting, reconnecting, not started or down), the server; each pill is a button. The model pill
-  opens a picker for the model of the next conversation: it does not change
-  `openVsCode.defaultModel`, it lasts until you pick another or reload the window, and, like any
-  message, the model then becomes the last one used, which new sessions propose while that setting
-  is empty. The other pills open the logs or restart the server, the settings, or switch the mode;
-  with the server ready, the logs are in **OpenCode: Show Logs**.
-  **Running**
-  lists the root sessions that run now with their activity, a clock and Stop (which also stops
-  subagents running in the background); **Waiting for you** lists permissions and questions, and
-  Reply opens the conversation with the card focused.
-
-- **Changes and usage under the Sessions tree** (with `chatLocation` set to `editor`; both start
-  collapsed the first time; VS Code then remembers what you open or close). **Changes of the sessions** lists the sessions that have a tab, that changed files in
-  this window or that are in today's group; expand one to read its files with `+added −deleted`,
-  and click a file to open VS Code's diff of it, also for a session with no tab. **Usage (all
-  projects)** shows cost and tokens for today and the last 7 days by model. It counts EVERY
-  project in your opencode database, not only this folder, and it asks the server nothing while it
-  is collapsed or hidden. A model that reports no cost reads "cost not reported" (or "free" when the
-  catalog says so), and the total then says "≥". The usage route is experimental in opencode, so a
-  future opencode version may change it.
-
-- **Server status in the status bar.** An `OpenCode` item shows whether the server is starting,
-  running (with the model a new session will use), not started or unavailable; click it to open the
-  chat.
-
-- **The chat in editor tabs or in the side bar.** By default (`openVsCode.chatLocation` is
-  `editor`) every session opens in its own editor tab, beside your code, and the OpenCode view is a
-  native **Sessions** tree; set it to `sidebar` to keep one chat in the side bar instead. The tree
-  lists the sessions of the folder grouped by Today, Yesterday, Previous 7 days
-  and Older, each row with its state shown by an icon (Running, Needs input, Failed) and, when the
-  side bar has room, in words (also Fork, Tab) before the time, with Rename and Delete on the row, a **Search Sessions…** button that searches the titles on the
-  server, and a **Show more sessions** row. Clicking a session opens it in a tab, or brings that tab
-  to the front if it already has one, instead of opening another. Changing the setting takes effect at once: the session
-  of the side bar opens in a tab, and going back leaves the tabs open. After **Developer: Reload
-  Window** the tabs come back, each with its session, its draft and its
-  title.
-
-- **One chip for agent and model:** the prompt bar shows "agent · model" (with the reasoning level
-  and a connection dot); it opens a panel where you choose the agent (Build, Plan…), the model and,
-  when the model offers them, a reasoning variant.
-
-  ![The agent and model panel open above the prompt box of a chat tab: the agents (Build, Plan, Docs) on the left, a model search and the models by provider on the right, and the reasoning levels under them](docs/images/agent-model-chip.png)
-
-- **Slash commands (issue #33):** type `/` at the start of the prompt, or press the **/** button
-  next to the "+", to list opencode's commands (the built-in `init` and `review`, the ones in your
-  project's `.opencode/command` folder and the ones from MCP servers). Choosing one writes
-  `/name` and a space into the box so you can add arguments; Enter runs it. A `/word` that is not on the list
-  is sent as a normal prompt. The conversation shows the expanded text of the command, as opencode
-  stores it, not what you typed.
-- **Editor and Explorer context menus (issue #36):** right-click in a text editor for **Add to
-  OpenCode Chat** (attaches the selection, or the whole file when nothing is selected),
-  **Explain with OpenCode** and **Fix with OpenCode**. Explain and Fix send a ready-made prompt at
-  once (`Explain what @src/a.ts#2-3 does.`, `Fix the problems in @src/a.ts#2-3.`) with the
-  selection attached; Fix also lists the errors and warnings VS Code reports for that range (up to
-  20). In the Explorer, **Explain with OpenCode** works on one or several files. If the chat cannot
-  send right then (a turn is running, or the server is not connected yet; with `autoStart` off and
-  the server not started, the prompt is sent and starts it), the prompt is left in
-  the prompt box with a notice, and your own draft is never overwritten. The entries only appear
-  on files that exist on disk. From the Explorer, folders and files outside the workspace folder
-  are counted in a notice inside the chat ("1 selected item was not added…"); from the editor
-  and the Command Palette, a refused file (outside the workspace folder) shows a native VS Code
-  warning. A prompt that waited too long for the chat to be shown (over 10 seconds) is left in
-  the prompt box, with a notice, instead of being sent.
-- **Collapsible tool cards** for shell, read, grep and edit calls, with diffs for edits.
-- **`@` mentions** to add files to the prompt, and a "+" menu in the prompt bar with **Add
-  selection** (attaches the editor selection), **Attach file…**, **Attach image…** and **Mention a
-  file**.
-- **Drop files and paste images (issue #30):** right-click files in the Explorer and choose
-  **Add to OpenCode Chat** (works in every VS Code version), or drag them from the Explorer onto the
-  prompt box **while holding Shift** (VS Code only delivers a drop to a side-bar view with Shift
-  held: that is the side-bar chat, `chatLocation` set to `sidebar`; the editor tabs of the default
-  location are not checked for this). Only regular files inside the workspace folder are
-  added, and a dropped file must also be one that opencode lists (what git ignores, `.env`
-  included, cannot be dropped: use "Attach file…" in the "+" menu for that); folders and anything else are skipped with
-  one notice that counts them. Paste an image (PNG, JPEG, GIF or WebP, up to 10 MiB) with
-  Ctrl/Cmd+V to attach it, with a thumbnail on its chip; an image dropped from your system's file
-  manager is attached the same way, and any other file dropped from there is refused with a notice
-  (drop it from the VS Code Explorer, or use "Attach file…"). If the selected model cannot read images,
-  the chat says so and opencode tells the model. **Retry, "Fork from here" and "Revert from here"
-  re-attach files but not pasted images**: paste them again.
-- **Context and cost:** a line under the session title shows how much of the model's context the
-  last step used and, when the model is not free, what the session cost so far, direct subagents
-  included. From 80 % of the window the line gains a **Compact** button, which is the warning that
-  the context is nearly full; the same figures, a meter and Compact are in the **Session** tab.
-- **Chat, Changes and Session tabs:** a row of tabs under the header switches the central area
-  between the conversation, the files the session changed, and the session's own page. The request
-  cards, the subagent strip, the activity line and the prompt box stay visible in all three, so a
-  permission request is never hidden. The tab you chose is kept when you hide and show the view.
-  **Session** holds the pinned instructions (see below), the context meter with Compact, the token
-  and cost totals, the session's subagents with Open, and **Export** (Markdown, or JSON, to a file
-  you pick; the JSON holds the full text of the conversation and the file paths, so do not attach it
-  to a public report).
-- **Write while the agent works:** the prompt box stays open during a turn. Enter **queues** the
-  message (a chip "Queued: …" appears above the box, with Steer now, Edit and a remove button; the
-  server delivers it when the turn ends) and Ctrl+Enter (Cmd+Enter on macOS) **steers** the turn
-  with it right away. Edit cancels the chip and gives its text back to an empty box. Stop and the
-  activity line (what the agent is doing, the step number, the elapsed time and how many subagents
-  run) are at the bottom of the conversation. While a turn runs, a model or agent you picked in the
-  box applies from the next message sent while idle, and `/commands` of the server are refused with
-  a notice until the turn ends (`/compact` is queued).
-- **Pinned instructions:** the Session tab can pin short instructions to the session ("Always answer
-  in Galician"); opencode sends them with every step. A value that is not plain text, pinned by
-  another client, shows as JSON with a "set by another client" tag and can be removed too. They use
-  opencode's experimental instructions API, so a newer opencode may change it.
-- **Subagent monitor:** while a subagent works or waits, a strip above the prompt box reads
-  "Subagents · N" with how many work and how many wait for your answer; open it for one row per
-  subagent (agent, task, current tool, elapsed time) with Open, Answer (only when it waits on a
-  permission or form), Stop and a **Stop all** that never stops the main turn. In the
-  conversation, the block of each `subagent` call becomes a live card (its latest tools, Open,
-  Stop) and folds into "Finished · N tools · cost", "Stopped" or "Failed: reason" when the subagent
-  ends. It works in the side bar and in chat tabs.
-- **Changed files:** the **Changes** tab shows "Changed files (N)", what the agent changed in the
-  session (git repositories only), and its badge carries the number; a click opens VS Code's own
-  diff editor with the original on the left and the file on the right.
-- **Revert from a message:** "Revert from here" on one of your messages undoes that turn and
-  everything after it, files included, and hides those messages. A block under the conversation
-  lists the files it restored, "Restore" brings everything back and "Discard for good" deletes the
-  hidden messages. Sending a new message also makes the revert final. The revert also replaces
-  edits you made by hand to those files after the reverted turns touched them: "Restore" brings them back
-  (but drops what you edited while reverted), and once the revert is final they are gone.
-- **Themes and accessibility:** light, dark and high-contrast, keyboard navigation and screen
-  reader labels. Colors come from your VS Code theme.
-- **OpenCode Settings tab:** providers with connect and remove (an API key goes in a masked VS Code
-  input box, OAuth signs in through your browser, or an external method), and the MCP servers with
-  their status and resources, with Connect, Disconnect and Sign in until opencode restarts. It also
-  holds the chat location and the automatic start of the server, the mods of the workspace (one
-  switch each, Reload and Open folder), what Manual and Auto mean in Work mode (with a button that
-  opens the chat), and, in Advanced, the server password, the saved permissions, the decision
-  about the plugins of the folder and the shell of opencode (saved in the global opencode config,
-  so it also applies to the terminal UI and every folder). Open it with the gear of the Chat and Sessions views, or with
-  "OpenCode: Open Settings…".
 
 ## Requirements
 
@@ -190,307 +24,113 @@ affiliated with opencode or with Microsoft.
   - npm: `npm i -g @opencode/cli`. With npm 11 the install script is blocked and the binary is not
     created; use `npm i -g --allow-scripts=@opencode/cli @opencode/cli` instead.
   - Homebrew: `brew install anomalyco/tap/opencode-v2`.
-- A provider and model configured in opencode.
-
-## Languages
-
-The extension is in English and Spanish, and follows the display language of VS Code: the command
-titles, settings, notices, dialogs and both webviews. **VS Code only switches to Spanish if the
-[Spanish Language Pack](https://marketplace.visualstudio.com/items?itemName=MS-CEINTL.vscode-language-pack-es)
-is installed**; without it everything stays in English. To pick the language, install the pack and run
-**Configure Display Language** from the Command Palette (`Ctrl+Shift+P`), choose `Español` and restart
-VS Code; choose `English` to go back. The log lines in the "OpenCode" and "OpenCode Mods" output
-channels are always in English, whatever the language, and so are the channel names. Adding a language and the translation guide:
-[docs/i18n.md](docs/i18n.md).
+- A provider and model configured in opencode. No provider yet? Open the **OpenCode Settings** tab,
+  go to **Providers**, click **+ Add provider** and pick one (API key or sign-in).
 
 ## Installation
 
 Search for **OpenCode Station** in the Extensions view of VS Code, or install it from the
 [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=sergwei.open-vs-code).
 Editors that use [Open VSX](https://open-vsx.org/extension/sergwei/open-vs-code) (VSCodium, Cursor
-and others) find it there under the same name.
+and others) find it there under the same name. To build the `.vsix` from source instead (Node 24 and
+git), see
+[Building the .vsix](https://github.com/sergwei/open-vs-code/blob/main/docs/features.md#building-the-vsix-from-source).
 
-To build the `.vsix` from the source code instead (Node 24 and git are needed):
+## Quick start
 
-1. Clone the repository: `git clone https://github.com/sergwei/open-vs-code.git`
-2. In the cloned folder, install the dependencies: `npm ci`
-3. Build the package: `npm run vsix`. It writes `open-vs-code-<version>.vsix` in that folder.
-4. In VS Code, run **Extensions: Install from VSIX...** from the Command Palette and pick that
-   file (or `code --install-extension open-vs-code-<version>.vsix`).
+1. Open a folder and click the **OpenCode** icon in the Activity Bar. The extension starts
+   `opencode serve` for the folder (on `127.0.0.1`, random port and password) and stops it when the
+   window closes.
+2. Press **New Session** in the **Sessions** view to open a chat tab beside your code. Type and press
+   Enter; Escape or **Stop** interrupts a turn. `Ctrl+Alt+P` (`Cmd+Alt+P` on macOS) jumps to the
+   prompt and back to the editor.
+3. To ask about code without opening the chat, select it, right-click and choose **Explain with
+   OpenCode** or **Fix with OpenCode** (or **Add to OpenCode Chat**). In the Explorer, right-click
+   files to explain or attach them.
 
-## Usage
+## What you get
 
-1. Open a folder in VS Code and click the **OpenCode** icon in the Activity Bar: the **Sessions**
-   view lists the sessions of the folder. Press **New Session** in its title bar to open a chat tab
-   beside your code.
-2. The extension starts `opencode serve` for the workspace folder, on `127.0.0.1` with a random port
-   and a random password, and stops it when the window closes.
-3. Type a prompt in the tab and press Enter. Press Escape or **Stop** to interrupt a turn. From the editor,
-   press Ctrl+Alt+P (Cmd+Alt+P on macOS) to jump to the prompt; press it again to come back to the
-   editor (see [Keyboard shortcuts](#keyboard-shortcuts)).
+Each point is described in
+[Features and usage in detail](https://github.com/sergwei/open-vs-code/blob/main/docs/features.md).
 
-To ask about code without opening the chat first, select it in the editor, right-click and choose
-**Explain with OpenCode** or **Fix with OpenCode**; to send whole files, right-click them in the
-Explorer and choose **Explain with OpenCode**. The chat opens by itself and the prompt is sent in
-the open session.
-
-The chat lives in editor tabs by default (`openVsCode.chatLocation` is `editor`). The OpenCode view
-lists the sessions of the folder: click one (or press Enter on it) to open it, `F2` renames the
-selected one and `Delete` deletes it. **New Session** opens a new tab, **Open Chat** brings the most
-recent tab to the front (or opens the last session of the folder when there is none). The chat in a
-tab has no Sessions button: the tree is the one place to browse sessions. Insert at cursor and Add
-selection write into the last text editor you used, and file links and diffs open outside the
-chat's group.
-
-To organize the list, right-click a session: **Pin**, **Move to Folder…** and **Archive** are there
-(select several rows to act on all of them, or drag them onto a folder). **New Folder…** is in the
-`…` menu of the view title and in the Command Palette; right-click a folder for **New Subfolder…**,
-**Rename Folder…** and **Delete Folder** (its sessions go back to the date groups, none is
-deleted). The funnel button in the title bar opens **Filter Sessions…**, and **Clear Filters**
-appears next to it while a filter is on. The filters live only in memory: a window reload clears them.
-
-To keep one chat in the side bar instead, set `openVsCode.chatLocation` to `sidebar` (Settings:
-Chat Location); the OpenCode view then is the **Chat** view, and the tabs you had open stay open.
-
-In a multi-root workspace, choose the folder opencode works in with **OpenCode: Select Workspace
-Folder**.
+- **Chat** with streaming Markdown, syntax highlighting, code actions, collapsible tool cards with
+  diffs, and a context and cost line (with **Compact** from 80 % of the window).
+- **Chat tabs or side bar** (`openVsCode.chatLocation`): one editor tab per session by default, or a
+  single chat in the side bar. Tabs come back after a window reload.
+- **Sessions** tree: grouped by date, search, rename, delete, fork from any message, folders, pins,
+  archive, filters and a "Needs attention" section. Subagent sessions open from their parent.
+- **Quick start** box at the top of the view: open a new chat tab with the model you pick, see
+  what is running or waiting for you, and check the status of the server and MCP servers. Under the
+  tree, **Changes** of the sessions (click for VS Code's diff) and **Usage** (cost and tokens, today
+  and 7 days, all projects).
+- **Permissions and questions** as cards you answer with a click, with a notification and a badge
+  when the chat is hidden. Several requests share one box with a tab each.
+- **Work mode** (Manual / Auto) per session: Auto answers "allow once" for you, except for secrets,
+  leaving the project, deleting, publishing or destructive commands (a heuristic, not a guarantee).
+- **Agent and model chip**, reasoning variants, `/` slash commands (opencode's own, your project's
+  and MCP's), `@` mentions and a "+" menu to attach the selection, files and images.
+- **Attach and drop:** right-click in the Explorer, drag with Shift (side bar chat) or paste images
+  (PNG, JPEG, GIF, WebP, up to 10 MiB).
+- **Write while the agent works:** Enter queues a message, `Ctrl+Enter` (`Cmd+Enter`) steers the
+  turn. A **subagent monitor** lists subagents with Open, Answer and Stop.
+- **Session tab:** pinned instructions, context meter, totals, subagents and **Export** (Markdown or
+  JSON).
+- **Changed files and revert:** the **Changes** tab opens VS Code's diff; "Revert from here" undoes
+  a turn, files included, and can be restored.
+- **OpenCode Settings** tab: providers (API key, OAuth), MCP servers, mods, work mode and advanced
+  options. **Mods** are your own JavaScript, loaded from your user folder only; see
+  [mods](https://github.com/sergwei/open-vs-code/blob/main/docs/mods.md).
+- Light, dark and high-contrast themes, keyboard navigation and screen reader labels. The UI is in
+  English and Spanish and follows the display language of VS Code (Spanish needs the
+  [Spanish Language Pack](https://marketplace.visualstudio.com/items?itemName=MS-CEINTL.vscode-language-pack-es)).
+  A status bar item shows the state of the server.
 
 ## Settings
 
-| Setting | Scope | Default | What it does |
-| --- | --- | --- | --- |
-| `openVsCode.opencodePath` | machine | empty | Absolute path to the opencode **v2** executable. Empty searches `PATH` for `opencode2`, then `opencode`. On Windows an npm `opencode.cmd` shim is accepted. Not used while `openVsCode.serverUrl` is set. |
-| `openVsCode.serverUrl` | machine | empty | Address of an opencode **v2** server that is already running on **this machine**, for example `http://127.0.0.1:4096`. Empty lets the extension launch its own server. The extension then does not use `openVsCode.opencodePath`. See [Using a server you started](#using-a-server-you-started). |
-| `openVsCode.defaultModel` | window | empty | Model every **new** chat session starts with, written `provider/model` (for example `opencode/big-pickle`). It wins over the last model you used. A badly written or unavailable value is ignored with a warning. |
-| `openVsCode.autoStart` | window | `true` | Launch the opencode server when the window starts. Turn it off and the chat shows **not started**; **OpenCode: Restart Server**, the Start button or your first prompt starts it. No effect while `openVsCode.serverUrl` is set. |
-| `openVsCode.mods.enabled` | machine | `true` | Load the mods in the OpenCode mods folder. A mod is JavaScript that runs with your user's permissions in its own worker thread; it is **not** sandboxed. Turn it off to load none, in every workspace. A workspace cannot change it. To turn off one mod in one workspace use the mods button of the prompt bar (see [docs/mods.md](docs/mods.md)). |
-| `openVsCode.chatLocation` | window | `editor` | Where the chat lives: `editor` (one editor tab per session, and the OpenCode view lists the sessions) or `sidebar` (one chat in the OpenCode view). Any other value counts as `editor`. |
+Search for "OpenCode" in Settings. The ones people change most:
 
-## Commands
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `openVsCode.chatLocation` | `editor` | `editor`: a chat tab per session. `sidebar`: one chat in the side bar. |
+| `openVsCode.defaultModel` | empty | Model for new sessions, as `provider/model`. |
+| `openVsCode.opencodePath` | empty | Path to the opencode v2 executable, if it is not on `PATH`. |
+| `openVsCode.serverUrl` | empty | Use an opencode v2 server already running on this machine. |
+| `openVsCode.autoStart` | `true` | Start the server when the window starts. |
 
-All commands are in the Command Palette under the **OpenCode** category, except the ones without a
-category below, which live in the right-click menus. The three editor entries are also in the
-Command Palette (they act on the active editor); the two Explorer entries are not.
+`openVsCode.mods.enabled` and the full list, every command and the keyboard shortcuts are in
+[Settings, commands and shortcuts](https://github.com/sergwei/open-vs-code/blob/main/docs/commands.md).
 
-| Command | What it does |
-| --- | --- |
-| **OpenCode: Show Logs** | Opens the OpenCode output channel. |
-| **OpenCode: Manage Mods…** | Lists the mods found in the mods folder with their state (active, failed and why, or off in this workspace), and offers Reload, Open Mods Folder and Show Logs. |
-| **OpenCode: Reload Mods** | Stops every mod and discovers them again, except the ones switched off in this workspace. |
-| **OpenCode: Open Mods Folder** | Creates the mods folder if needed and reveals it in the file manager. |
-| **OpenCode: Run Mod Command…** | Picks one of the commands that mods registered and runs it. |
-| **OpenCode: Restart Server** | Restarts the server the extension launched (it also starts it when `openVsCode.autoStart` is off), or reconnects to the server in `openVsCode.serverUrl` when that setting is set. Also an entry in the `...` menu of the title bar of the Chat view (`chatLocation` set to `sidebar`) and of the Sessions view. |
-| **OpenCode: Forget Plugin Decision for This Folder** | Forgets your Start anyway / Don't start answer for the folder the server runs in, so the extension asks again before it starts opencode there. It stops nothing and starts nothing. |
-| **OpenCode: Select Workspace Folder** | Chooses which folder the server runs in (multi-root workspaces only). |
-| **OpenCode: Manage Saved Permissions** | Lists the permissions you chose to always allow and lets you revoke them. |
-| **OpenCode: Set Server Password** | Stores the password of the server in `openVsCode.serverUrl` in VS Code's SecretStorage. |
-| **OpenCode: Forget Server Password** | Deletes that stored password. |
-| **OpenCode: Open Chat** | Shows the chat and puts the caret in the prompt. |
-| **OpenCode: Focus Prompt** | Puts the caret in the prompt; pressed again while the chat has the focus, it returns to the editor. |
-| **OpenCode: New Session** | Opens a new empty chat tab (the default, `chatLocation` set to `editor`). With `chatLocation` set to `sidebar` it is the same as the **New session** button: the next prompt starts a new session and your draft is kept. |
-| **OpenCode: Open Settings…** | Opens the **OpenCode Settings** tab (or shows it if it is already open): the providers of the opencode server, with **Connect** (API key in a masked box of VS Code, OAuth in your browser, or an external method) and **Remove**, and the MCP servers of the folder with their status and resources (with **Connect**, **Disconnect** and **Sign in**, which last until opencode restarts, and **Refresh**), plus the **General**, **Mods**, **Work mode** and **Advanced** sections (chat location and automatic start, a switch per mod, an **Open chat** button, the server password, the saved permissions, the shell of opencode, which is saved in the global opencode config). It is also the gear in the title bar of the Chat and Sessions views. Credentials are saved by opencode for all your projects; the extension never stores or logs a key. |
-| **OpenCode: Open Extension Settings** | Opens Settings filtered to this extension (a link at the foot of the OpenCode Settings tab). |
-| **OpenCode: Stop Response** | Same as **Stop**: interrupts the running turn. Run from the editor it also shows the chat; with no turn running it only says "No response is running". |
-| **OpenCode: Toggle Work Mode** | Switches the chat's session between **Manual** (opencode's own rules decide when a permission is asked) and **Auto** (the extension answers "allow once" to the permission requests of that session and its subagents, but keeps the card for what it recognises as reading a secret (`.env` files, SSH keys, certificates, credentials, also when a shell command names one), going outside the project, deleting or moving files, publishing or pushing (`git push`, `npm publish`, `docker push`, `gh pr merge`…) or running a destructive or unclassifiable shell command (disk, git, Kubernetes, Terraform, Docker, cloud CLIs, stdin or inline code, launchers such as `npx`, `uv run` or `ssh`, copies to another machine such as `scp` or `rsync host:`, uploads to the cloud (`aws s3 sync . s3://b`; downloads pass), framework database resets (`rails db:drop`, `php artisan migrate:fresh`), a recursive listing that is not names only (`Get-ChildItem -Recurse`, `dir /s`, also `ls -R` in bash), deployments (`vercel --prod`, `firebase deploy`, `fly deploy`, `kubectl apply`…), publishing through `gh`, an unquoted glob or `$`, a backslash escape; Windows paths such as `src\app.ts` are fine). For shell commands that check is a heuristic blacklist, not a guarantee: it does not see aliases you configured, what a script does, or tools it does not list. The agent's own questions still reach you). Has no default key; bind one in Keyboard Shortcuts if you want. |
-| **OpenCode: Rename Session…** | Row of the Sessions list (shown while `chatLocation` is not `sidebar`; the default is `editor`): asks for a new title. Also the pencil on the row and `F2`; not in the Command Palette. |
-| **OpenCode: Delete Session** | Row of the Sessions list: after a confirmation, deletes the session for every opencode client and closes its tab. Also the bin on the row and `Delete`; not in the Command Palette. |
-| **OpenCode: Search Sessions…** | Searches the session titles on the server and opens the one you pick. Only offered while `chatLocation` is not `sidebar` (the default is `editor`). Also a button in the Sessions title bar. |
-| **OpenCode: New Folder…** | Creates a folder in the Sessions list to organize sessions in. Only offered while `chatLocation` is not `sidebar`. Also in the `…` menu of the Sessions title bar. |
-| **OpenCode: New Subfolder…** | Row menu of a folder: creates a folder inside it. Not in the Command Palette. |
-| **OpenCode: Rename Folder…** | Row menu of a folder: asks for a new name. Not in the Command Palette. |
-| **OpenCode: Delete Folder** | Row menu of a folder: after a confirmation, deletes the folder and its subfolders. The sessions inside go back to the date groups; no session is deleted. Not in the Command Palette. |
-| **OpenCode: Move to Folder…** | Row menu of a session (or of several selected): picks a folder, "No Folder" or a new folder. You can also drag the rows onto a folder. Not in the Command Palette. |
-| **OpenCode: Pin** | Row menu of a session: shows it under "Pinned" at the top of the list. Not in the Command Palette. |
-| **OpenCode: Unpin** | Row menu of a pinned session: puts it back. Not in the Command Palette. |
-| **OpenCode: Archive** | Row menu of a session: moves it to the collapsed "Archived" section at the end (its folder is remembered). Not in the Command Palette. |
-| **OpenCode: Unarchive** | Row menu of an archived session: brings it back to its folder or date group. Not in the Command Palette. |
-| **OpenCode: Filter Sessions…** | Shows only the sessions that are running, wait for your input or are open in a tab (the ones you tick are ORed). Only offered while `chatLocation` is not `sidebar`. Also a button in the Sessions title bar. |
-| **OpenCode: Clear Filters** | Turns the Sessions filters off. Offered only while a filter is on; also a button in the Sessions title bar. |
-| **OpenCode: Refresh Changes** | Button in the title bar of the **Changes of the sessions** view: reads again the files of the sessions you have expanded. Not in the Command Palette. |
-| **OpenCode: Refresh Usage** | Button in the title bar of the **Usage (all projects)** view: reads both periods again. Not in the Command Palette. |
-| **Add to OpenCode Chat** | Explorer right-click menu: attaches the selected files to the prompt. |
-| **Add to OpenCode Chat** | Editor right-click menu: attaches the selection (the whole file when nothing is selected). |
-| **Explain with OpenCode** | Editor right-click menu: sends "Explain what @file#lines does." with the selection (or the file) attached. |
-| **Explain with OpenCode** | Explorer right-click menu: sends "Explain what @a and @b do." with the selected files attached. |
-| **Fix with OpenCode** | Editor right-click menu: sends "Fix the problems in @file#lines." with the selection attached and the errors and warnings VS Code reports there (up to 20). |
+## Main limitations
 
-## Keyboard shortcuts
-
-Four commands have a default shortcut. Change them in **File > Preferences > Keyboard Shortcuts**
-(search for "OpenCode"); the other commands have none by default and you can bind them there too.
-
-| Windows / Linux | macOS | Command | Works when |
-| --- | --- | --- | --- |
-| `Ctrl+Alt+P` | `Cmd+Alt+P` | OpenCode: Focus Prompt | the editor or the chat has the focus |
-| `Ctrl+Alt+N` | `Cmd+Alt+N` | OpenCode: New Session | the chat has the focus |
-| `F2` | `F2` | OpenCode: Rename Session… | the Sessions list has the focus |
-| `Delete` | `Cmd+Backspace` | OpenCode: Delete Session | the Sessions list has the focus |
-
-On Windows, Ctrl+Alt is the same as AltGr: if your keyboard layout types a character with AltGr+P
-or AltGr+N, rebind the shortcut in Keyboard Shortcuts or it will run the command instead of typing.
-
-## Using a server you started
-
-Set `openVsCode.serverUrl` to a server that is already running on the same machine
-(`127.0.0.1`, `[::1]` or `localhost`, over `http` or `https`). The extension then does not launch
-its own. If the server has a password, run **OpenCode: Set Server Password**; the user name is
-always `opencode`.
-
-## Known limitations
-
-- Only opencode v2; only a server on the local machine.
-- The subagent monitor shows no elapsed time for a subagent that was already running when you
-  opened the session, until that subagent's next event (a decided limit: there is no fallback). It
-  shows no percentage, counts tools up to "200+", and it has only been exercised with the synthetic
-  server: no subagent turn of a real opencode was run, the background case (`background: true`)
-  included, and that stopping one subagent leaves its parent turn going on is read from opencode's
-  source, not observed.
-- VS Code may not see the PATH of a shell that uses a Node version manager such as fnm or nvm,
-  depending on how VS Code is launched (for example, not from that shell). If the extension cannot
-  find opencode, set `openVsCode.opencodePath` to the executable
-  (`opencode.exe` on Windows).
+- Only opencode v2, and only a server on the local machine.
 - The folders, pins and archive of the Sessions tree live in VS Code's workspace storage, not in
-  opencode, so the opencode TUI and other clients do not see them. VS Code ties that storage to the
-  folder's path and to when it was created: **moving or renaming the project folder, cloning it
-  again, or opening it by itself instead of through its `.code-workspace` file starts with an empty
-  organization and loses the one you had**, and nothing tells you so. In that case opencode also stops
-  listing the old sessions in this window, because it keeps each session under the exact folder
-  path it was created in; so the organization is the smaller loss. There is no export or import of
-  the organization yet.
-- "Allowed once" lines in the history do not survive **Developer: Reload Window**: opencode keeps no
-  trace of a permission that was allowed once.
-- Dragging files from the Explorer onto the chat is reported not to work in VS Code 1.140 or later:
-  the drop does not reach extension views, with or without Shift
-  ([microsoft/vscode#339036](https://github.com/microsoft/vscode/issues/339036), open; this
-  project has not been able to reproduce a real drag in its own tests). It is reported to work up
-  to 1.139. **Add to OpenCode Chat**, Attach and `@` mentions work in every version.
-- The default shortcuts use Ctrl+Alt (Cmd+Alt on macOS), which is AltGr on Windows; see
-  [Keyboard shortcuts](#keyboard-shortcuts) to rebind them. They are checked against the default
-  shortcuts of VS Code, not against those of your desktop environment or other extensions.
-- The editor and Explorer context menus were only tried on Windows. On macOS and Linux (and on
-  macOS with `window.titleBarStyle` set to `native`) VS Code may draw the menus natively; they
-  should work the same, but this project has not run them there.
-- The editor menu entries read the **saved** file: opencode reads the file from disk, so with
-  unsaved changes the line numbers may not match what the model sees. Explain and Fix then do not
-  send by themselves: they leave the prompt in the box with an "Unsaved changes" notice. Files that
-  are not on disk (untitled, `git:` or output documents) have no entries.
-- In `editor` mode every chat tab keeps its page in memory while it is hidden
-  (`retainContextWhenHidden`), so each open tab costs memory; there is no cap on the number of tabs.
-- Chat tabs are restored after **Developer: Reload Window**, but VS Code only brings back a tab
-  when it is shown: the tabs in the background are restored when you open them, not before. A
-  restored tab whose session is already open in another tab (or in the side bar view) closes itself
-  and reveals the one that has it. One whose session was deleted comes back empty, with the notice
-  "This session no longer exists", and keeps its draft. With `sidebar` the restored tabs stay open
-  next to the view, as extra tabs.
-- The Sessions tree lists the root sessions of the folder (50 at a time); subagent sessions are not
-  rows, you reach them from the tab of their parent. **Needs input** marks a row for a request of
-  its own session or of a subagent at any depth below it. The rows are emptied
-  while the server is not running and come back on the next reconnection. The order only changes
-  with the events that move a session's update time, so it can be stale until the next
-  reconnection.
-- Deleting a session deletes its subagent sessions too (opencode does it). A tab that was showing
-  one of those subagent sessions gets the notice "deleted outside this view", although you deleted
-  it yourself from the Sessions tree.
-- While chat tabs are open, the extension starts when the window opens (VS Code needs it to restore
-  them), so the opencode server starts even if you do not touch the chat.
-- In `editor` mode a pending permission or question shows only in the tab of its session (and, for
-  a subagent, in the tab of an ancestor session); the side bar chat still shows every one. You get
-  the native notification, titled with the chat it comes from, when no chat tab that shows the
-  request is the active editor, and **Open chat** reveals that tab (the tab of the root session for
-  a subagent with no tab of its own). With two tabs side by side, a request from the one you are
-  not in raises the notification and leaves your focus where it was; its card is not focused
-  until you go to that tab (or press **Open chat**). With the side bar chat visible, a new request
-  shows its card and the badge, but it neither moves the focus nor raises a notification. The chat
-  tabs left over from `editor` mode keep showing only the requests of their own session and lineage
-  in `sidebar` mode too, and **Open chat** looks in those tabs before the side bar chat.
-- In `editor` mode, switching to another served folder (for example with **Select Workspace
-  Folder**) while tabs are open leaves them empty, with the old title, until they are reloaded; only
-  the first chat gets the session remembered for the new folder.
-- The draft in the prompt box does not travel when `openVsCode.chatLocation` changes: the text and the
-  attachments of the old surface stay with it.
-- The editor tabs were only tried on Windows; the integration tests run on Windows, macOS and Linux,
-  but the visual checks of the tabs do not.
-- OpenCode Settings tab: opencode does not check an API key when you connect it, so the tab says
-  "Connected" even with a wrong key and the failure shows on your first prompt. Browser OAuth
-  methods probably fail in a remote window (SSH, WSL, Codespaces), because opencode listens for the
-  callback on the remote machine; device-code methods work. In a remote window the tab says under
-  every OAuth method that the sign-in "may not work if it sends you back from the browser" (it also
-  says it for device-code methods, which do work). When the sign-in link carries `%26`, `%2B` or
-  `%3D` in its query, VS Code would change it on its way to the browser, so the tab does not open
-  it: the notification offers **Copy link** and you open the link in your browser yourself.
-  "Sign in with ChatGPT" uses the fixed port 1455, which another process may already hold.
-  opencode saves the credentials for all your projects, not only this one. The tab does not come
-  back after Reload Window.
+  opencode: moving, renaming or re-cloning the project folder loses them.
+- Dragging files from the Explorer onto the chat is reported not to work in VS Code 1.140 or later;
+  **Add to OpenCode Chat**, Attach and `@` mentions always work.
+- The default shortcuts use Ctrl+Alt, which is AltGr on Windows: rebind them if your layout needs it.
 - Mostly tested on Windows; CI builds and tests on Windows, macOS and Linux.
+
+The full list is in
+[Known limitations](https://github.com/sergwei/open-vs-code/blob/main/docs/limitations.md).
 
 ## Privacy and security
 
-**Workspace Trust.** The extension does not support untrusted workspaces
-(`capabilities.untrustedWorkspaces.supported: false`): while a folder is in Restricted Mode, VS Code
-does not load it. The reason is that opencode can run what the project defines, with the
-permissions of your user: a slash command in `.opencode/command` whose text contains `` !`cmd` ``
-runs that shell command on your machine when you run the command. Trust the folder only if you
-trust whoever wrote its `.opencode` files, its `opencode.json` and its `AGENTS.md`. (Checked by
-`npm run test:visual`, step 25, on VS Code 1.144.0 and Windows 11 only.)
-
-**Plugins of the folder.** opencode loads and runs, without asking, the plugins a project brings:
-`.ts` and `.js` files in `.opencode/plugin/` and `.opencode/plugins/`, and every entry of `plugins`
-(or `plugin`) in `opencode.json` / `opencode.jsonc` and in `.opencode/opencode.json(c)`, npm package
-names included (opencode downloads and runs them). It looks in the folder you opened **and in every
-folder above it**. Before the extension starts opencode in such a folder it shows a warning, "This
-folder has opencode plugins that will run with your permissions", with **Start anyway** and
-**Don't start**; the answer is remembered per folder on this machine and the question comes back if
-the list of plugins changes. Start, **OpenCode: Restart Server** or your first prompt ask in a modal
-instead. **OpenCode: Forget Plugin Decision for This Folder** clears the answer.
-
-*While opencode runs.* opencode 2.0.32 imports a plugin that appears in the folder it serves within
-a fraction of a second, with no request at all (checked against a real opencode 2.0.32 on Windows
-11: 223 to 446 ms for a file in `.opencode/plugins/`, one in `.opencode/plugin/` and an entry in
-`opencode.json`). So the extension starts opencode with its file watcher off
-(`OPENCODE_FILEWATCHER_DISABLE=1`; with it, the same plugin was not loaded in 17 s) and watches
-the served folder itself: `opencode.json(c)` and `.opencode/` (which holds `.opencode/plugin(s)/`
-and `.opencode/opencode.json(c)`). If a change makes the list of plugins one you have not
-approved, the extension stops the server and asks as above, before the plugin has run. That
-restart also cuts a turn that is in progress. A change
-that leaves the list approved or empty (a new command, a deleted plugin, an edit to a plugin you
-allowed) restarts nothing.
-
-*The cost.* With opencode's watcher off, opencode no longer picks up by itself changes to its
-config, `AGENTS.md`, skills or commands while it runs: run **OpenCode: Restart Server** to apply
-them.
-
-*What this does not cover.* It does not apply when you connect to a server with
-`openVsCode.serverUrl` (the extension starts nothing and does not watch). Plugins in folders
-**above** the one you opened are not watched; opencode also rescans every 24 hours
-(`supervisor.ts`, read in the source and not executed), and that rescan is not covered; nor is
-the one opencode runs when its own config is updated (for example when you connect a provider),
-read in the same file and not executed. A
-`files.watcherExclude` setting that hides `.opencode` from VS Code, and symlinks, may stop the
-events from arriving. A plugin written while the server is still starting (`starting`) can run
-once before the check made when it becomes ready stops the server. And it does not cover the
-other code a project config can run (for example local MCP servers). The detection replicates
-what opencode 2.0.32 reads. Checked once against a real opencode 2.0.32 on Windows 11: a plugin
-file in `.opencode/plugins/` was imported by the first request that loads the folder's models
-(`GET /api/model`), not when the server started and not by the other requests tried (`GET
-/api/info`, `/api/session`, `/api/agent` and `/api/command`); the extension makes the `GET
-/api/model` request as soon as it connects, so asking before the start is still the right moment.
-The hot-reload check is only on Windows; macOS and Linux are covered by CI alone.
-
-The chat view never talks to the opencode server. The port and the password live only in the
-extension host, and the server password you set is kept in VS Code's SecretStorage. The extension
-does not send any data anywhere other than to the opencode server you use.
-
-An API key typed in the OpenCode Settings tab is asked only in a native VS Code input box: it does
-not pass through the webview or the log, and opencode stores it.
+Untrusted workspaces are not supported, because opencode can run what the project defines. opencode
+runs the plugins a project brings, so the extension asks before it starts opencode in a folder that
+has them. The chat view never talks to the server; the port and passwords stay in the extension host
+(passwords in SecretStorage), and nothing is sent anywhere except to the opencode server you use.
+Details:
+[Privacy and security](https://github.com/sergwei/open-vs-code/blob/main/docs/privacy.md).
 
 ## License
 
 [PolyForm Shield License 1.0.0](LICENSE). You may use, change and share this extension for any
-purpose, at work too, except providing a product that competes with it (or with a product its
-author provides using it): publishing a copy or a renamed fork as an alternative to this extension
-is not allowed, even for free, and that stays so if the author stops providing it. Whoever gets a
-copy from you must also get the license terms (or their URL) and its `Required Notice:` line. This
-makes it source-available, not open source as the OSI defines it. Commits made before this license was adopted were published under the MIT license.
+purpose, at work too, except providing a product that competes with it (or with a product its author
+provides using it): publishing a copy or a renamed fork as an alternative to this extension is not
+allowed, even for free, and that stays so if the author stops providing it. Whoever gets a copy from
+you must also get the license terms (or their URL) and its `Required Notice:` line. This makes it
+source-available, not open source as the OSI defines it. Commits made before this license was
+adopted were published under the MIT license.
 
 opencode itself is a separate project by [anomalyco](https://github.com/anomalyco/opencode) under
 its own license.

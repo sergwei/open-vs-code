@@ -41,10 +41,10 @@ const nls = JSON.parse(readText('package.nls.json')) as Record<string, string>;
 
 /**
  * Turns a `%key%` string of package.json into its English text from `package.nls.json` (what a
- * VS Code in English shows); any other string passes through. Throws on a missing key. The README
- * is English, so every title and description is compared in its resolved form.
+ * VS Code in English shows); any other string passes through. Throws on a missing key. The docs
+ * are English, so every title and description is compared in its resolved form.
  * VERIFIED indirectly: "has a Commands table whose rows are exactly the contributed commands"
- * passes only if the `OpenCode: Show Logs` row of the README matches the resolved title.
+ * passes only if the `OpenCode: Show Logs` row of `docs/commands.md` matches the resolved title.
  */
 function resolveNls(text: string): string {
   const key = /^%([\w.-]+)%$/.exec(text)?.[1];
@@ -58,13 +58,38 @@ const manifest = JSON.parse(readText('package.json')) as Manifest;
 manifest.description = resolveNls(manifest.description);
 for (const command of manifest.contributes.commands) command.title = resolveNls(command.title);
 const readme = readText('README.md');
+const readmeEs = readText('README.es.md');
+const featuresDoc = readText('docs/features.md');
+// The Settings, Commands and Keyboard shortcuts tables moved out of the short README (E11-readme-
+// bilingual); `docs/commands.md` is now where they live and where the table tests below read them.
+const commandsDoc = readText('docs/commands.md');
+
+/**
+ * Reads the Default column of the short "most changed" Settings table of a README.
+ *
+ * The READMEs keep a 3-column table (Setting | Default | What it does, `Opción | Por defecto | Qué
+ * hace` in Spanish) that is NOT the 4-column one of `docs/commands.md`, so it has its own reader.
+ * Returns setting name -> trimmed Default cell; `empty` (English) and `vacío` (Spanish) are
+ * mapped to the empty string, and any other cell is returned without its backticks. Rows that are
+ * not `openVsCode.*` settings are ignored.
+ */
+function readmeSettingDefaults(markdown: string): Map<string, string> {
+  const rows = new Map<string, string>();
+  for (const line of markdown.split(/\r?\n/)) {
+    const cells = /^\| `(openVsCode\.[\w.]+)` \| ([^|]+) \|/.exec(line);
+    if (cells?.[1] === undefined || cells[2] === undefined) continue;
+    const cell = cells[2].trim();
+    rows.set(cells[1], cell === 'empty' || cell === 'vacío' ? '' : cell.replace(/^`|`$/g, ''));
+  }
+  return rows;
+}
 
 /**
  * Lists every image reference of a README: Markdown `![alt](target)` and HTML `<img src>`.
  *
- * A regex, not a Markdown parser: enough for the README of this repository, which uses plain
- * image syntax. It is what vsce's README check cares about (https, no SVG, no inline `<svg>`),
- * so an image written in a form this misses would also be missed here.
+ * A regex, not a Markdown parser: enough for the READMEs and the docs/ pages of this repository,
+ * which use plain image syntax. It is what vsce's README check cares about (https, no SVG, no
+ * inline `<svg>`), so an image written in a form this misses would also be missed here.
  * VERIFIED by reading vsce 4.0.0 `out/package.js` (2026-10-22): the README check parses the
  * rendered HTML and applies, to every `img`, `Images in ${this.name} must come from an HTTPS
  * source`, `SVGs are restricted in ${this.name}` and `SVG tags are not allowed in ${this.name}.`,
@@ -98,7 +123,8 @@ function pngSize(file: Buffer): { width: number; height: number } {
 }
 
 /**
- * Collects, sorted, the first capture group of every README line that matches a table-row pattern.
+ * Collects, sorted, the first capture group of every line of a Markdown file (a README or a docs/
+ * page) that matches a table-row pattern.
  *
  * Exact names, not `includes()` over the whole README: a name mentioned in another section, or a
  * longer name that merely starts with the real one, must not count as documented. The sort makes
@@ -118,17 +144,16 @@ function tableKeys(markdown: string, row: RegExp): string[] {
  * Protects the Marketplace metadata that `vsce` only checks while packaging (issue #42).
  *
  * `vsce package` refuses an SVG icon or a missing icon file, but it does not check that the icon
- * is big enough, that the license text matches `license`, or that the README documents what the
+ * is big enough, that the license text matches `license`, or that `docs/commands.md` documents what the
  * manifest contributes; a regression would otherwise show up only in the Marketplace page.
  * VERIFIED by reading vsce 4.0.0 `out/package.js` (2026-10-22): `SVGs can't be used as icons`
  * (`/\.svg$/i.test(manifest.icon || '')`) and `The specified icon '${this.icon}' wasn't found in
  * the extension.` are the only icon checks found in that file. Read, not run against a bad icon.
  * The data are the real files. Mutations tried by hand on 2026-10-22 (each turned a test red,
- * then was reverted): a 64x64 `media/icon.png`, `--skip-license` put back in `scripts.vsix`, and,
- * for the README tables (2026-10-22, on Windows 11, `npx vitest run` of this file): the
- * `openVsCode.serverUrl` row renamed to `openVsCode.serverUrlX` (Settings test red), the same row
- * stripped of its backticks, which makes it a non-row (Settings test red), and an extra
- * "OpenCode: Ghost Command" row (Commands test red).
+ * then was reverted): a 64x64 `media/icon.png` and `--skip-license` put back in `scripts.vsix`.
+ * The table mutations of 2026-10-22 ran against the old README.md, before its tables moved to
+ * `docs/commands.md`; they are not evidence for the new file, whose own mutations are recorded in
+ * the header of `describe('docs/commands.md')`.
  *
  * The license is PolyForm Shield 1.0.0 (decision of 2026-11-02: forbid published copies that
  * compete with the extension, renamed or free, while use at work stays allowed). It has no SPDX
@@ -213,54 +238,120 @@ describe('Marketplace metadata (package.json)', () => {
 });
 
 /**
- * Protects the README against what vsce rejects in a package and against going stale.
+ * Protects the Marketplace README (and its Spanish copy) against what vsce rejects in a package
+ * and against going stale (E11-readme-bilingual, review fixes of 2026-11-19).
  *
  * vsce rewrites relative image links to `raw/HEAD` URLs of the repository and refuses SVG images
  * and inline `<svg>`; the allowlist in `.vscodeignore` keeps `docs/` out of the package, so images
- * must live in `docs/images/`. The two table checks compare the rows of the Settings and Commands
- * tables of the README with the manifest, in both directions: a new setting or command fails until
- * the README has its row (a parallel task that adds one must add its README row too), and a row
- * left behind for something the manifest no longer contributes fails too.
+ * must live in `docs/images/`. `README.md` uses relative `docs/images/*.png` links (vsce rewrites
+ * them); `README.es.md` is not packaged, so it uses absolute `raw.githubusercontent.com` URLs of
+ * `main`. Both must keep at least one image (the Marketplace page was left without any once, and
+ * the old image test then passed vacuously) and every image must exist in `docs/images/`. The
+ * short 3-column Settings table of each README is checked against the manifest defaults, the
+ * drift class of #77/E5. Provenance: the REAL README files, `docs/features.md` and `package.json`.
+ * VERIFIED by mutations (Windows 11, `npx vitest run src/extension/marketplace.test.ts`,
+ * 2026-11-19), each reverted afterwards: the `openVsCode.autoStart` Default of README.md set to
+ * `false` turned "README.md lists settings whose Default is the default of the manifest" red; the
+ * `openVsCode.defaultModel` Default of README.es.md set to `x` turned "README.es.md lists settings
+ * whose Default is the default of the manifest" red; the second image of README.es.md pointed at
+ * `permission-cardX.png` turned "uses only images that vsce accepts, and keeps at least one" red
+ * ("... exists: expected false to be true"). Not tried: removing every image of README.md (the
+ * `length > 0` assertion), a broken image in docs/features.md, and macOS or Linux.
  * VERIFIED by reading vsce 4.0.0 `out/package.js` (2026-10-22): the `ReadmeProcessor` rejects
  * images that are not `https` (`Images in ${this.name} must come from an HTTPS source`), SVG
  * images (`SVGs are restricted in ${this.name}`) and `<svg>` tags (`SVG tags are not allowed in
  * ${this.name}.`). Unverified here: the `raw/HEAD` rewrite itself; it was observed by running the
  * `ReadmeProcessor` in memory in the review of #42 (2026-10-22), not by this file.
  */
-describe('README.md', () => {
+describe('README.md and README.es.md', () => {
   it('is not the template of `yo code`', () => {
     expect(readme).not.toContain('This is the README for your extension');
   });
 
-  it('uses only images that vsce accepts', () => {
+  it('uses only images that vsce accepts, and keeps at least one', () => {
     expect(readme).not.toMatch(/<svg\b/i);
-    for (const target of imageTargets(readme)) {
-      if (/^https:\/\//i.test(target)) {
-        expect(target, target).not.toMatch(/\.svg(\?|$)/i);
-      } else {
-        expect(target, target).toMatch(/^docs\/images\/[\w.-]+\.(png|gif|jpg)$/);
-        expect(exists(target), `${target} exists`).toBe(true);
-      }
+    expect(readmeEs).not.toMatch(/<svg\b/i);
+    const targets = imageTargets(readme);
+    expect(targets.length, 'README.md has images').toBeGreaterThan(0);
+    for (const target of targets) {
+      expect(target, target).toMatch(/^docs\/images\/[\w.-]+\.(png|gif|jpg)$/);
+      expect(exists(target), `${target} exists`).toBe(true);
+    }
+    const targetsEs = imageTargets(readmeEs);
+    expect(targetsEs.length, 'README.es.md has images').toBeGreaterThan(0);
+    for (const target of targetsEs) {
+      const match = new RegExp(
+        `^https://raw\\.githubusercontent\\.com/sergwei/open-vs-code/main/(docs/images/[\\w.-]+\\.(?:png|gif|jpg))$`,
+      ).exec(target);
+      expect(match, `${target} is a raw URL of docs/images`).not.toBeNull();
+      expect(exists(match?.[1] ?? ''), `${target} exists`).toBe(true);
     }
   });
 
+  it('only references images of docs/features.md that exist', () => {
+    const targets = imageTargets(featuresDoc);
+    expect(targets.length).toBeGreaterThan(0);
+    for (const target of targets) {
+      expect(target, target).toMatch(/^images\/[\w.-]+\.(png|gif|jpg)$/);
+      expect(exists(`docs/${target}`), `docs/${target} exists`).toBe(true);
+    }
+  });
+
+  // The 3-column table of each README (Setting | Default | What it does) is not covered by the
+  // docs/commands.md tests below. `empty` / `vacío` stand for the empty string. Provenance: the REAL
+  // READMEs and manifest.
+  it.each([
+    ['README.md', readme],
+    ['README.es.md', readmeEs],
+  ])('%s lists settings whose Default is the default of the manifest', (_name, markdown) => {
+    const properties = manifest.contributes.configuration.properties as Record<
+      string,
+      { default?: unknown }
+    >;
+    const rows = readmeSettingDefaults(markdown);
+    expect(rows.size).toBeGreaterThan(0);
+    for (const [key, cell] of rows) {
+      expect(properties[key], `${key} is contributed`).toBeDefined();
+      expect(cell, key).toBe(String(properties[key]?.default));
+    }
+  });
+});
+
+/**
+ * Protects the Settings, Commands and Keyboard shortcuts tables of `docs/commands.md` (they left
+ * the short README) against going stale, in both directions: a new setting, command or keybinding
+ * fails until that page has its row (a parallel task that adds one must add its row there, and in
+ * the READMEs only if it is one of the few they list), and a row left behind for something the
+ * manifest no longer contributes fails too. Provenance: the REAL `docs/commands.md` and manifest.
+ * VERIFIED by mutations on `docs/commands.md` (Windows 11, `npx vitest run
+ * src/extension/marketplace.test.ts`, 2026-11-19), each reverted afterwards: the Default cell of
+ * `openVsCode.chatLocation` set to `sidebar` turned "has a Settings table whose Default column is
+ * the default of each contributed setting" red ("openVsCode.chatLocation: expected '`sidebar`' to
+ * be '`editor`'"); an extra "OpenCode: Ghost Command" row turned "has a Commands table whose rows
+ * are exactly the contributed commands" red; the `openVsCode.serverUrl` row renamed to
+ * `openVsCode.serverUrlX` turned "has a Settings table whose rows are exactly the contributed
+ * settings" red; the `Ctrl+Alt+P` cell changed to `Ctrl+Alt+Q` turned "has a Keyboard shortcuts
+ * table whose rows are exactly the contributed keybindings" red. Not tried on this file: a row
+ * stripped of its backticks, and macOS or Linux.
+ */
+describe('docs/commands.md', () => {
   it('has a Settings table whose rows are exactly the contributed settings', () => {
-    expect(tableKeys(readme, /^\| `(openVsCode\.[\w.]+)` \|/)).toEqual(
+    expect(tableKeys(commandsDoc, /^\| `(openVsCode\.[\w.]+)` \|/)).toEqual(
       Object.keys(manifest.contributes.configuration.properties).sort(),
     );
   });
 
-  // E5 of #77: the names test above ignores the Default column, so a README that kept saying
+  // E5 of #77: the names test above ignores the Default column, so a page that kept saying
   // `sidebar` after the default moved to `editor` passed. `empty` stands for the empty string.
-  // Provenance: the REAL README and manifest. Mutation (Windows 11, `npx vitest run`, 30/10/2026):
-  // with `sidebar` in the Default cell of the `openVsCode.chatLocation` row this test is red.
+  // Provenance: the REAL docs/commands.md and manifest. Mutation recorded in the header of the
+  // describe (`sidebar` in the chatLocation Default cell).
   it('has a Settings table whose Default column is the default of each contributed setting', () => {
     const properties = manifest.contributes.configuration.properties as Record<
       string,
       { default?: unknown }
     >;
     const rows = new Map<string, string>();
-    for (const line of readme.split(/\r?\n/)) {
+    for (const line of commandsDoc.split(/\r?\n/)) {
       const cells = /^\| `(openVsCode\.[\w.]+)` \| [^|]+ \| ([^|]+) \|/.exec(line);
       if (cells?.[1] !== undefined && cells[2] !== undefined) rows.set(cells[1], cells[2].trim());
     }
@@ -275,7 +366,7 @@ describe('README.md', () => {
     const labels = manifest.contributes.commands.map(({ title, category }) =>
       category ? `${category}: ${title}` : title,
     );
-    expect(tableKeys(readme, /^\| \*\*([^*|]+)\*\* \|/)).toEqual(labels.sort());
+    expect(tableKeys(commandsDoc, /^\| \*\*([^*|]+)\*\* \|/)).toEqual(labels.sort());
   });
 
   // Issue #35. The first column is NOT bold on purpose: the Commands regex above would count a
@@ -295,7 +386,7 @@ describe('README.md', () => {
         ),
       ),
     ];
-    const rows = readme
+    const rows = commandsDoc
       .split(/\r?\n/)
       .map((line) => /^\| `([^`]+)` \| `([^`]+)` \| (OpenCode: [^|]+?) \|/.exec(line))
       .flatMap((m) => (m === null ? [] : [`${m[1]} | ${m[2]} | ${m[3]}`.toLowerCase()]));
