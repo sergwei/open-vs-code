@@ -8,14 +8,13 @@ there is an `### English` block followed by an `### Español` block, each with i
 Changed or Fixed lists (the Spanish ones are named Añadido, Cambiado and Corregido). Older entries
 were condensed when the Spanish version was added: every user-visible change is still listed.
 
-Todos los cambios relevantes de este proyecto se documentan en este archivo, en inglés y en español.
+Aquí se recogen todos los cambios relevantes del proyecto, en inglés y en español.
 
-El formato se basa en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y este proyecto
-sigue el [Versionado Semántico](https://semver.org/lang/es/). Bajo el encabezado de cada versión hay
-un bloque `### English` seguido de un bloque `### Español`, cada uno con sus propias listas de
-Added, Changed o Fixed (en español: Añadido, Cambiado y Corregido). Las entradas antiguas se
-condensaron al añadir la versión en español: todos los cambios visibles para el usuario siguen
-listados.
+El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y las versiones, el
+[Versionado Semántico](https://semver.org/lang/es/). Cada versión tiene un bloque `### English` y,
+a continuación, un bloque `### Español`, cada uno con sus listas de Added, Changed o Fixed (en
+español: Añadido, Cambiado y Corregido). Las entradas antiguas se resumieron al añadir la versión en
+español, pero no falta ningún cambio de los que nota el usuario.
 
 ## [Unreleased]
 
@@ -32,11 +31,11 @@ listados.
 
 #### Corregido
 
-- Al hacer clic en una ruta de archivo `~/…` del chat, ahora se abre el archivo si está dentro de la
-  carpeta del espacio de trabajo (fuera de ella, la ruta sigue rechazada). Antes la ruta no se
-  expandía y fallaba con "does not exist" (visto en macOS). Cuando no se encuentra un archivo, el
-  canal de salida **OpenCode** registra ahora la ruta que se intentó, truncada (issue #228, PR
-  #229).
+- Al hacer clic en una ruta `~/…` del chat ya se abre el archivo, siempre que esté dentro de la
+  carpeta del espacio de trabajo (si está fuera, se sigue rechazando). Antes la ruta no se expandía
+  y el clic fallaba con "does not exist" (visto en macOS). Además, cuando no se encuentra un
+  archivo, el canal de salida **OpenCode** deja escrita la ruta que se probó, truncada (issue #228,
+  PR #229).
 
 ## [1.1.0] - 2026-11-13
 
@@ -147,118 +146,126 @@ Manual/Auto work mode.
 
 ### Español
 
-Un inicio en la barra lateral, pestañas en el panel del chat, una pestaña de configuración rediseñada, un
-monitor de subagentes y un modo de trabajo Manual/Auto.
+Una pantalla de inicio en la barra lateral, pestañas en el panel del chat, la pestaña de
+configuración rehecha, un monitor de subagentes y un modo de trabajo Manual/Auto.
 
 #### Añadido
 
-- **Un inicio en la barra lateral** (con `chatLocation` en `editor`). **Inicio rápido**, sobre el
-  árbol de Sesiones, es una caja pequeña: escribe y pulsa Intro para abrir una pestaña de chat
-  nueva que inicia la conversación. Su píldora de modelo abre un selector (agrupado por proveedor y
-  con búsqueda) para el modelo de la siguiente conversación; dura hasta que elijas otro o recargues
-  la ventana y no toca `openVsCode.defaultModel`. Una franja de estado muestra el modelo, el modo
-  de la siguiente conversación, cualquier servidor MCP con error y, solo mientras no está listo, el
-  servidor. **En ejecución** lista las sesiones raíz que se ejecutan ahora con su actividad, un
-  reloj y **Detener**, que también para sus subagentes; **Esperándote** lista permisos y
-  preguntas, y Responder abre la conversación con la tarjeta enfocada. Bajo el árbol de Sesiones,
-  **Cambios de las sesiones** lista los archivos que cambió cada sesión (clic para el diff de VS
-  Code) y **Uso (todos los proyectos)** muestra coste y tokens de hoy y de los últimos 7 días por
-  modelo, de todos los proyectos de tu base de datos de opencode. Nuevos botones de la barra de
-  título **OpenCode: Actualizar cambios** y **OpenCode: Actualizar uso**. La ruta de uso es
-  experimental en opencode, así que una versión más nueva puede cambiarla.
-- **Una pestaña de configuración rediseñada.** Una cabecera con búsqueda y cuatro tarjetas de
-  estado pulsables (servidor, proveedores, modelo por defecto, servidores MCP), y secciones
-  laterales: General (ubicación del chat, arranque automático), Proveedores (filas compactas y un
-  selector + Agregar proveedor), Modelos (el modelo por defecto), Servidores MCP, Mods (un
-  interruptor por mod, Recargar mods y Abrir carpeta), Modo de trabajo y Avanzado (la contraseña del
-  servidor, los permisos guardados, la decisión sobre los plugins de la carpeta). Por debajo de
-  600 px las secciones se pliegan en una franja.
-- **Conectar, desconectar e iniciar sesión en servidores MCP** desde la configuración (antes eran
-  de solo lectura). El cambio dura hasta que opencode se reinicie.
-- **Monitor de subagentes.** Mientras un subagente trabaja o espera, una franja sobre el cuadro del
-  prompt dice "Subagentes · N"; ábrela para ver una fila por subagente (agente, tarea, herramienta
-  actual, tiempo transcurrido) con Abrir, Responder, Detener y un **Detener todos** que nunca para
-  el turno principal. En la conversación, cada llamada a un subagente se convierte en una tarjeta
-  viva que se pliega en "Terminado", "Detenido" o "Con error" al terminar.
-- **Pestañas Chat, Cambios y Sesión en el panel del chat.** Una fila de pestañas bajo la cabecera
-  cambia el área central; las tarjetas de peticiones, la franja de subagentes, la línea de
-  actividad y el cuadro del prompt se mantienen en las tres. **Cambios** contiene los archivos que
-  cambió la sesión (antes en la cabecera). **Sesión** contiene las instrucciones fijadas, un
-  medidor de contexto con Compactar, los totales de tokens y coste, los subagentes de la sesión con
-  Abrir y **Exportar** a Markdown o JSON (el JSON contiene el texto completo y las rutas de
-  archivos). La línea de contexto bajo el título incorpora un botón **Compactar** a partir del 80 %
-  de la ventana.
-- **Escribe mientras el agente trabaja.** Durante un turno, Intro encola el mensaje (una etiqueta
-  "En cola: …" con Dirigir ahora, Editar y quitar) y Ctrl+Intro (Cmd+Intro en macOS) dirige el
-  turno con él al instante. Detener pasó a la línea de actividad de abajo, que ahora dice qué hace
-  el agente, el paso, el tiempo transcurrido y cuántos subagentes se ejecutan.
-- **Instrucciones fijadas por sesión** ("Responde siempre en gallego"), que opencode envía en cada
-  paso. Estas y Exportar usan la API experimental de opencode, así que una versión más nueva puede
-  cambiarlas.
-- **El shell de opencode en Configuración de OpenCode › Avanzado.** Una lista desplegable con
-  Automático y los shells
-  que ofrece el servidor (los que opencode solo acepta para el terminal van marcados). Se guarda en
-  tu configuración global de opencode, así que también se aplica a la interfaz de terminal y a
-  todas las carpetas; un aviso indica cuándo otra configuración (la de la carpeta o la de tu
-  organización) fija su propio shell y oculta la elección.
-- **Un interruptor por mod.** Un botón con forma de pieza de puzle tras **+** y **/** en la barra
-  del prompt (con el número de mods activos) abre un panel con los mods y un interruptor para cada
-  uno. Un interruptor arranca o para solo ese mod: los demás mantienen su estado, bandas y paneles
-  abiertos. La elección se guarda para el espacio de trabajo (la lista de mods que desactivaste),
-  sobrevive a Recargar mods y a recargar la ventana, y un mod nuevo arranca activado. Sin carpeta
-  abierta dura hasta que se cierra la ventana. Con `openVsCode.mods.enabled` desactivado el panel
-  sigue listando los mods, con los interruptores deshabilitados y un botón **Abrir configuración**.
-  **Administrar mods…** muestra los mods desactivados.
-- **Modo de trabajo (Manual / Auto)**: una píldora a la izquierda de Enviar en la barra del prompt
-  (icono de persona y **Manual**, rayo y **Auto**; solo el icono por debajo de 200 px) elige, por
-  sesión, quién responde a las peticiones de permiso de opencode. **Manual** no cambia nada: la
-  tarjeta aparece siempre que las reglas de opencode lo piden. En **Auto** la extensión responde
-  "una vez" por ti (nunca "siempre"), también por los subagentes de la sesión y por las peticiones
-  que ya están en pantalla, y el historial dice **Permitido automáticamente**. Auto no aprueba por ti
-  lo que **reconoce** como leer un secreto (archivos `.env`, claves SSH, certificados,
-  `credentials*.json`, `.npmrc`, `.kube/config`…, también cuando un comando de shell nombra uno),
-  salir del proyecto (`external_directory`), borrar o mover archivos (un parche que borra o mueve,
-  un `edit` de forma desconocida) o publicar o hacer push. Esos mantienen la tarjeta habitual. En
-  los comandos de shell la comprobación es una **lista negra heurística por familias, no una
-  garantía**: pide confirmación para borradores y sobrescritores (`rm`, `mv`, `cp`, `>`, `tee`),
-  todo `git push` y las opciones de git que ejecutan un comando, publicar (`npm publish`, `docker
-  push`, `gh pr merge`…), destructivos de infraestructura y nube (`kubectl delete`, `terraform
-  destroy`, `docker run|exec`…), shells e intérpretes alimentados por stdin o código en línea,
-  lanzadores (`npx`, `pnpm exec`, `uv run`, `dnx`, `asdf env`, `wsl`, `ssh`…) clasificados por lo
-  que ejecutan (también piden confirmación para las opciones que cambian de dónde viene el paquete,
-  como `uvx --index` y `npx --registry`, y para `uvx --env-file`), `mise env` (imprime secretos),
-  clientes SQL, copias a otra máquina (`scp`, `rsync host:`, `sftp`) y publicar mediante `gh`
-  (`repo create --push`, `workflow run`…), un comodín sin comillas o un `$` en una palabra, una
-  barra invertida en el nombre de un comando o que sea un escape POSIX (`git pu\sh`; las rutas de
-  Windows como `src\app.ts` están bien), variables de entorno que configuran lo que se ejecuta
-  (`GIT_*`, `PAGER`, `LD_*`, también mediante `export`; `GIT_EDITOR=true` y alguna más pasan),
-  subidas a la nube (`aws s3 sync . s3://b`, `gcloud storage cp … gs://`, `az storage blob
-  upload`, `azcopy`; las descargas pasan), reinicios de bases de datos de frameworks (`rails
-  db:drop`, `php artisan migrate:fresh`, `manage.py flush`, `dotnet ef database drop`…) y, porque en
-  Windows un punto inicial no oculta nada, un listado recursivo (`Get-ChildItem -Recurse`, `dir /s`,
-  `ls -R`) salvo que liste solo nombres (`-Name`, `-Directory`, `dir /b`), y despliegues (`vercel --prod`, `firebase deploy`, `fly deploy`,
+- **Una pantalla de inicio en la barra lateral** (con `chatLocation` en `editor`). **Inicio
+  rápido**, encima del árbol de Sesiones, es una caja pequeña: escribes, pulsas Intro y se abre una
+  pestaña de chat nueva con la conversación ya en marcha. La píldora del modelo abre un selector
+  (agrupado por proveedor y con buscador) para elegir el modelo de la próxima conversación; la
+  elección vale hasta que escojas otro o recargues la ventana, y no toca `openVsCode.defaultModel`.
+  Una franja de estado enseña el modelo, el modo de la próxima conversación, los servidores MCP que
+  hayan fallado y, solo mientras no esté listo, el servidor. **En ejecución** lista las sesiones
+  raíz que están trabajando ahora mismo, con su actividad, un reloj y **Detener**, que para también
+  a sus subagentes; **Esperándote** lista los permisos y las preguntas pendientes, y Responder abre
+  la conversación con el foco en la tarjeta. Debajo del árbol de Sesiones, **Cambios de las
+  sesiones** lista los archivos que ha cambiado cada sesión (un clic abre el diff de VS Code) y
+  **Uso (todos los proyectos)** muestra el coste y los tokens de hoy y de los últimos 7 días por
+  modelo, sumando todos los proyectos de tu base de datos de opencode. Hay dos botones nuevos en la
+  barra de título: **OpenCode: Actualizar cambios** y **OpenCode: Actualizar uso**. La ruta de uso
+  es experimental en opencode, así que una versión posterior puede cambiarla.
+- **Pestaña de configuración rehecha.** Arriba, una cabecera con buscador y cuatro tarjetas de
+  estado en las que se puede hacer clic (servidor, proveedores, modelo por defecto, servidores
+  MCP); a un lado, las secciones: General (dónde va el chat, arranque automático), Proveedores
+  (filas compactas y un selector + Agregar proveedor), Modelos (el modelo por defecto), Servidores
+  MCP, Mods (un interruptor por mod, Recargar mods y Abrir carpeta), Modo de trabajo y Avanzado (la
+  contraseña del servidor, los permisos guardados, lo que decidiste sobre los plugins de la
+  carpeta). Con menos de 600 px de ancho, las secciones se recogen en una franja.
+- **Conectar, desconectar e iniciar sesión en servidores MCP** desde la configuración (antes solo
+  se podían consultar). El cambio se mantiene hasta que opencode se reinicia.
+- **Monitor de subagentes.** Mientras haya un subagente trabajando o esperando, encima del cuadro
+  del prompt aparece una franja con "Subagentes · N"; al abrirla ves una fila por subagente
+  (agente, tarea, herramienta en uso, tiempo que lleva) con Abrir, Responder, Detener y un
+  **Detener todos** que nunca para el turno principal. En la conversación, cada llamada a un
+  subagente es ahora una tarjeta que se va actualizando y que, al acabar, se pliega en "Terminado",
+  "Detenido" o "Con error".
+- **Pestañas Chat, Cambios y Sesión en el panel del chat.** Debajo de la cabecera hay una fila de
+  pestañas que cambia la zona central; las tarjetas de peticiones, la franja de subagentes, la
+  línea de actividad y el cuadro del prompt se ven en las tres. En **Cambios** están los archivos
+  que ha cambiado la sesión (antes estaban en la cabecera). En **Sesión** tienes las instrucciones
+  fijadas, un medidor de contexto con Compactar, los totales de tokens y de coste, los subagentes
+  de la sesión con Abrir y **Exportar** a Markdown o JSON (el JSON lleva el texto completo y las
+  rutas de los archivos). En la línea de contexto que hay bajo el título aparece un botón
+  **Compactar** cuando pasas del 80 % de la ventana.
+- **Escribe mientras el agente trabaja.** En mitad de un turno, Intro deja el mensaje en cola (una
+  etiqueta "En cola: …" con Dirigir ahora, Editar y quitar) y Ctrl+Intro (Cmd+Intro en macOS)
+  redirige el turno con ese mensaje en el momento. Detener se ha ido a la línea de actividad de
+  abajo, que ahora cuenta qué está haciendo el agente, por qué paso va, cuánto tiempo lleva y
+  cuántos subagentes hay en marcha.
+- **Instrucciones fijadas por sesión** ("Responde siempre en gallego"), que opencode manda en cada
+  paso. Tanto esto como Exportar usan la API experimental de opencode, así que una versión
+  posterior puede cambiarlos.
+- **El shell de opencode, en Configuración de OpenCode › Avanzado.** Un desplegable con Automático
+  y los shells que ofrece el servidor (van marcados los que opencode solo admite para el terminal).
+  Se guarda en tu configuración global de opencode, de modo que vale también para la interfaz de
+  terminal y para todas las carpetas; si otra configuración (la de la carpeta o la de tu
+  organización) fija su propio shell y deja sin efecto el que elijas, un aviso te lo dice.
+- **Un interruptor por mod.** En la barra del prompt, después de **+** y **/**, hay un botón con
+  forma de pieza de puzle (con el número de mods activos) que abre un panel con la lista de mods y
+  un interruptor para cada uno. Cada interruptor arranca o para solo su mod: los demás siguen como
+  estaban, con sus bandas y sus paneles abiertos. Lo que elijas se guarda en el espacio de trabajo
+  (la lista de mods que has desactivado), aguanta un Recargar mods y una recarga de la ventana, y
+  los mods nuevos arrancan activados. Si no hay ninguna carpeta abierta, dura hasta que cierras la
+  ventana. Con `openVsCode.mods.enabled` desactivado, el panel sigue listando los mods, pero con
+  los interruptores deshabilitados y un botón **Abrir configuración**. **Administrar mods…**
+  muestra los que están desactivados.
+- **Modo de trabajo (Manual / Auto)**: en la barra del prompt, a la izquierda de Enviar, hay una
+  píldora (icono de persona y **Manual**, rayo y **Auto**; solo el icono con menos de 200 px) con
+  la que decides, sesión a sesión, quién contesta a las peticiones de permiso de opencode. En
+  **Manual** todo sigue igual: la tarjeta aparece cada vez que las reglas de opencode lo piden. En
+  **Auto** la extensión contesta "una vez" por ti (nunca "siempre"), también a los subagentes de la
+  sesión y a las peticiones que ya estuvieran en pantalla, y en el historial queda **Permitido
+  automáticamente**. Lo que Auto no aprueba por ti es lo que **reconoce** como leer un secreto
+  (archivos `.env`, claves SSH, certificados, `credentials*.json`, `.npmrc`, `.kube/config`…,
+  también si lo nombra un comando de shell), salir del proyecto (`external_directory`), borrar o
+  mover archivos (un parche que borra o mueve, un `edit` con una forma que no conoce) o publicar o
+  hacer push. En esos casos sale la tarjeta de siempre. Con los comandos de shell, la comprobación
+  es una **lista negra heurística por familias, no una garantía**. Te pregunta con los comandos que
+  borran o sobrescriben (`rm`, `mv`, `cp`, `>`, `tee`), con cualquier `git push` y con las opciones
+  de git que ejecutan un comando, al publicar (`npm publish`, `docker push`, `gh pr merge`…), con
+  los comandos destructivos de infraestructura y nube (`kubectl delete`, `terraform destroy`,
+  `docker run|exec`…), con los shells e intérpretes que reciben el código por stdin o en la propia
+  línea, con los lanzadores (`npx`, `pnpm exec`, `uv run`, `dnx`, `asdf env`, `wsl`, `ssh`…), que
+  se clasifican por lo que ejecutan (y también preguntan por las opciones que cambian de dónde sale
+  el paquete, como `uvx --index` y `npx --registry`, y por `uvx --env-file`), con `mise env`
+  (imprime secretos), con los clientes SQL, con las copias a otra máquina (`scp`, `rsync host:`,
+  `sftp`) y al publicar con `gh` (`repo create --push`, `workflow run`…), con un comodín sin
+  comillas o un `$` dentro de una palabra, con una barra invertida en el nombre de un comando o que
+  sea un escape POSIX (`git pu\sh`; las rutas de Windows como `src\app.ts` no dan problema), con
+  las variables de entorno que configuran lo que se ejecuta (`GIT_*`, `PAGER`, `LD_*`, también con
+  `export`; `GIT_EDITOR=true` y alguna más sí pasan), con las subidas a la nube
+  (`aws s3 sync . s3://b`, `gcloud storage cp … gs://`, `az storage blob upload`, `azcopy`; las
+  descargas pasan), con los comandos de los frameworks que vacían la base de datos
+  (`rails db:drop`, `php artisan migrate:fresh`, `manage.py flush`, `dotnet ef database drop`…) y,
+  como en Windows un punto al principio del nombre no oculta nada, con los listados recursivos
+  (`Get-ChildItem -Recurse`, `dir /s`, `ls -R`), salvo que solo listen nombres (`-Name`,
+  `-Directory`, `dir /b`), y con los despliegues (`vercel --prod`, `firebase deploy`, `fly deploy`,
   `wrangler deploy`, `cdk deploy`, `sam deploy`, `kubectl apply`…). Límites conocidos: clasifica un
-  comando simple por su texto, así que no conoce las opciones con valor de todos los lanzadores
-  (`bunx --cwd src tool`), lee `%VAR%` solo en mayúsculas, no mira `--import` tras `node --test`, y
-  `ls -R` también pide confirmación en bash. Lo que **no** ve se aprueba: herramientas que no
-  nombra (`fd -X rm`, `trash`, `rclone`, `gsutil rm` mediante un alias…), un alias que hayas
-  configurado (`git p` por `git push`), lo que hace un script (`bash build.sh`, `npm run clean`) y
-  cualquier herramienta que no esté nombrada en su lista; las revisiones siguen encontrando más de
-  esas. Las preguntas propias del agente siguen llegándote. El modo vive en la memoria del
-  extension host: una sesión nueva y una recarga empiezan en Manual. Nuevo comando **OpenCode:
-  Alternar modo de trabajo** (sin atajo por defecto). Auto solo responde a lo que opencode pregunta: lo que su
-  configuración permite sin preguntar se ejecuta igual en ambos modos.
+  comando simple por su texto, así que no se sabe las opciones con valor de todos los lanzadores
+  (`bunx --cwd src tool`), solo lee `%VAR%` en mayúsculas, no mira `--import` después de
+  `node --test` y con `ls -R` pregunta también en bash. Lo que **no** ve, lo aprueba: herramientas
+  que no nombra (`fd -X rm`, `trash`, `rclone`, `gsutil rm` detrás de un alias…), un alias que
+  hayas configurado tú (`git p` para `git push`), lo que haga un script (`bash build.sh`,
+  `npm run clean`) y cualquier herramienta que no figure en su lista; en cada revisión siguen
+  saliendo más. Las preguntas que hace el propio agente te siguen llegando. El modo se guarda en la
+  memoria del extension host: una sesión nueva y una recarga empiezan en Manual. Comando nuevo:
+  **OpenCode: Alternar modo de trabajo** (sin atajo por defecto). Auto solo contesta a lo que
+  opencode pregunta: lo que su configuración permite sin preguntar se ejecuta igual en los dos
+  modos.
 
 #### Cambiado
 
-- **Compilado y probado con opencode 2.2.7** (antes 2.0.32): la versión fijada de `@opencode/client`
-  y el CLI recomendado se mueven juntos. Las llamadas a las rutas experimentales (estadísticas de
-  uso, conectar y desconectar MCP) usan ahora los métodos `client.experimental.*`.
-- **Varias peticiones pendientes comparten una caja.** En lugar de apilar una tarjeta sobre otra,
-  los permisos y preguntas que el agente espera van en una única caja con una pestaña por petición
-  (icono y nombre, la activa subrayada, "1 de 3" a la derecha) y solo la petición activa debajo.
-  Los nombres de las pestañas se ven siempre enteros; si no caben, la fila se desplaza
-  lateralmente. Con una sola petición no cambia nada.
+- **Compilada y probada con opencode 2.2.7** (antes, 2.0.32): la versión fijada de
+  `@opencode/client` y el CLI recomendado suben a la vez. Las llamadas a las rutas experimentales
+  (estadísticas de uso, conectar y desconectar MCP) pasan a usar los métodos
+  `client.experimental.*`.
+- **Las peticiones pendientes comparten una caja.** Los permisos y las preguntas por los que espera
+  el agente ya no se apilan en tarjetas, una encima de otra: van en una sola caja con una pestaña
+  por petición (icono y nombre, la activa subrayada, "1 de 3" a la derecha) y debajo solo se ve la
+  petición activa. Los nombres de las pestañas se ven siempre enteros; si no caben, la fila se
+  desplaza hacia los lados. Si solo hay una petición, no cambia nada.
 
 ## [1.0.0] - 2026-11-04
 
@@ -446,192 +453,201 @@ Primera versión en el Visual Studio Marketplace y en Open VSX.
 
 #### Añadido
 
-- **Español y una forma de añadir idiomas**: el manifiesto (comandos, configuración, vistas), los avisos
-  y diálogos del extension host, el chat y la pestaña de configuración siguen el idioma de visualización
-  de VS Code; el español se incluye con la extensión. VS Code necesita el paquete de idioma
-  correspondiente instalado; si no, informa en inglés. Un idioma nuevo son dos archivos con el
-  identificador de idioma del paquete (`package.nls.<id>.json`, `l10n/bundle.l10n.<id>.json`)
-  comprobados con `npm run l10n:check`; consulta `docs/i18n.md`. Cambios visibles: las fechas de la
-  lista de sesiones del chat siguen el idioma de VS Code (antes, el del sistema), y el prompt que
-  escriben **Explicar con OpenCode** y **Corregir con OpenCode** está en el idioma de VS Code, así
-  que el modelo responde en él. Los registros y los nombres de los canales siguen en inglés.
-- **Consentimiento de plugins**: antes de que la extensión arranque opencode en una carpeta cuya
-  configuración de opencode trae plugins (archivos en `.opencode/plugin(s)/`, o entradas `plugins` /
-  `plugin` en `opencode.json(c)`, incluidos nombres de npm, en la carpeta o en cualquiera de sus
-  carpetas superiores) muestra un aviso con **Iniciar de todos modos** y **No iniciar**. La
-  respuesta se recuerda por carpeta y se vuelve a preguntar si cambia la lista de plugins; Iniciar,
-  **OpenCode: Reiniciar servidor** y el primer prompt preguntan en un modal. Nuevo comando
-  **OpenCode: Olvidar decisión sobre el plugin para esta carpeta**. Un plugin que llega mientras
-  opencode se ejecuta (un `git pull`, un cambio de rama) para el servidor y vuelve a preguntar (ver
-  Cambiado). No cubierto: un servidor indicado en `openVsCode.serverUrl`, que la extensión no
-  arranca. La tarjeta del chat y la barra de estado dicen "No iniciado" a causa de los plugins.
-- **Mods**: JavaScript que escribes tú, cargado solo desde `~/.config/opencode-station/mods`
-  (nunca desde un proyecto), cada uno en su propio Worker. Un mod puede mostrar una banda de estado
-  en el chat, añadir comandos al menú `/` y a **OpenCode: Ejecutar comando de mod…**, mostrar un aviso
-  emergente, escribir texto en el cuadro del prompt (solo tú lo envías), abrir su propio panel
-  junto al chat y observar los turnos, herramientas y permisos de una sesión. Un mod que lanza un
-  error o se cuelga se detiene sin afectar al chat. Los mods no son un entorno aislado: se ejecutan
-  con tus permisos. Desactívalos con `openVsCode.mods.enabled`. Consulta `docs/mods.md`.
-- Pestaña Configuración de OpenCode, seguimiento: en una ventana remota cada método OAuth avisa de
-  que el inicio de sesión puede no funcionar si te devuelve desde el navegador; un enlace de inicio
-  de sesión cuya consulta VS Code reescribiría (`%26`, `%2B`, `%3D`) no se abre y la notificación
-  ofrece **Copiar enlace**; tras introducir o descartar la clave de API en el cuadro nativo, la tarjeta
-  del proveedor recupera el foco; un inicio de sesión OAuth cuyo estado no se puede leer tres veces,
-  o cuyo plazo local vence mientras el servidor aún dice que está pendiente, se cancela también en
-  el servidor (no cuando el propio servidor responde que expiró).
-- Pestaña **Configuración de OpenCode** (**OpenCode: Abrir configuración…**, también el engranaje
-  de las vistas Chat y Sesiones): los proveedores del servidor opencode con **Conectar** (clave de
-  API en un cuadro nativo enmascarado que solo ve el extension host, OAuth `auto` o con código,
-  métodos externos) y **Quitar**, y los servidores MCP de la carpeta con su estado, recursos y
-  plantillas, en vivo y de solo lectura. El anterior comando **Abrir configuración** es ahora
-  **Abrir configuración de la extensión** (mismo id) y es un enlace al pie de la pestaña. opencode guarda las credenciales para
-  todos tus proyectos; la extensión no guarda, envía al webview ni registra ninguna clave.
+- **Español, y cómo añadir más idiomas**: el manifiesto (comandos, configuración, vistas), los
+  avisos y diálogos del extension host, el chat y la pestaña de configuración salen en el idioma en
+  el que tengas VS Code; el español viene con la extensión. Tienes que tener instalado el paquete
+  de idioma correspondiente; si no, VS Code dice que está en inglés. Para añadir un idioma bastan
+  dos archivos con el identificador de idioma del paquete (`package.nls.<id>.json`,
+  `l10n/bundle.l10n.<id>.json`), que `npm run l10n:check` comprueba; está explicado en
+  `docs/i18n.md`. Lo que se nota: las fechas de la lista de sesiones del chat van en el idioma de
+  VS Code (antes, en el del sistema), y el prompt que escriben **Explicar con OpenCode** y
+  **Corregir con OpenCode** también, así que el modelo contesta en ese idioma. Los registros y los
+  nombres de los canales siguen en inglés.
+- **Permiso para los plugins**: si la configuración de opencode de una carpeta trae plugins
+  (archivos en `.opencode/plugin(s)/`, o entradas `plugins` / `plugin` en `opencode.json(c)`,
+  nombres de npm incluidos, en esa carpeta o en cualquiera de las que tiene por encima), la
+  extensión no arranca opencode sin enseñarte antes un aviso con **Iniciar de todos modos** y **No
+  iniciar**. La respuesta se recuerda para cada carpeta y se te vuelve a preguntar si cambia la
+  lista de plugins; Iniciar, **OpenCode: Reiniciar servidor** y el primer prompt lo preguntan en un
+  diálogo modal. Comando nuevo: **OpenCode: Olvidar decisión sobre el plugin para esta carpeta**.
+  Si llega un plugin con opencode ya en marcha (un `git pull`, un cambio de rama), el servidor se
+  para y se te pregunta otra vez (ver Cambiado). Queda fuera un servidor puesto en
+  `openVsCode.serverUrl`, porque no lo arranca la extensión. La tarjeta del chat y la barra de
+  estado dicen "No iniciado" cuando el motivo son los plugins.
+- **Mods**: JavaScript que escribes tú y que solo se carga desde `~/.config/opencode-station/mods`
+  (nunca desde un proyecto), cada mod en su propio Worker. Un mod puede poner una banda de estado
+  en el chat, añadir comandos al menú `/` y a **OpenCode: Ejecutar comando de mod…**, sacar un
+  aviso emergente, escribir en el cuadro del prompt (enviarlo es cosa tuya), abrir un panel propio
+  al lado del chat y seguir los turnos, las herramientas y los permisos de una sesión. Si un mod
+  lanza un error o se queda colgado, se para sin que el chat lo note. Los mods no van en un entorno
+  aislado: se ejecutan con tus permisos. Se desactivan con `openVsCode.mods.enabled`. Más
+  información en `docs/mods.md`.
+- Retoques en la pestaña Configuración de OpenCode: en una ventana remota, cada método OAuth avisa
+  de que el inicio de sesión puede fallar si el navegador tiene que devolverte a VS Code; un enlace
+  de inicio de sesión con una consulta que VS Code reescribiría (`%26`, `%2B`, `%3D`) no se abre, y
+  la notificación te ofrece **Copiar enlace**; después de escribir o descartar la clave de API en
+  el cuadro nativo, el foco vuelve a la tarjeta del proveedor; un inicio de sesión OAuth cuyo
+  estado no se consigue leer tres veces, o al que se le acaba el plazo local mientras el servidor
+  sigue diciendo que está pendiente, se cancela también en el servidor (no así cuando es el propio
+  servidor el que contesta que ha caducado).
+- Pestaña **Configuración de OpenCode** (**OpenCode: Abrir configuración…**, o el engranaje de las
+  vistas Chat y Sesiones): los proveedores del servidor de opencode, con **Conectar** (clave de API
+  en un cuadro nativo enmascarado que solo ve el extension host, OAuth `auto` o con código, métodos
+  externos) y **Quitar**, y los servidores MCP de la carpeta con su estado, sus recursos y sus
+  plantillas, actualizados en directo y solo para consultar. El comando que antes se llamaba
+  **Abrir configuración** ahora es **Abrir configuración de la extensión** (con el mismo id) y está
+  como enlace al pie de la pestaña. Las credenciales las guarda opencode y valen para todos tus
+  proyectos; la extensión no guarda ninguna clave, ni la manda al webview, ni la escribe en los
+  registros.
 - Organiza el árbol de Sesiones (`chatLocation: editor`): **carpetas** y subcarpetas (**Nueva
   carpeta…**, **Nueva subcarpeta…**, **Cambiar nombre de la carpeta…**, **Eliminar carpeta**;
-  **Mover a carpeta…** o arrastrar las filas, varias a la vez), **Anclar** y **Desanclar** (una
-  sección **Anclados** arriba) y **Archivar** y **Desarchivar** (una sección **Archivados**
-  plegada al final; se recuerda la carpeta). Una sección **Requiere atención** sobre ellas repite
-  las sesiones que se ejecutan o esperan respuesta. **Filtrar sesiones…** deja las sesiones en
-  ejecución, las que esperan una respuesta o las abiertas en una pestaña (**Borrar filtros** lo
-  desactiva; el filtro también se escribe sobre las filas). El tooltip de una fila muestra el coste
-  y los tokens, la carpeta y, para una sesión con pestaña, el número de archivos modificados.
-  **Buscar sesiones…** también encuentra sesiones archivadas y lo indica. Las carpetas, los
-  anclados y los archivados se guardan por carpeta de espacio de trabajo en VS Code y se pierden si
-  la carpeta del proyecto se mueve, se renombra o se vuelve a clonar (consulta Known limitations);
-  nunca borran ninguna sesión. En modo `sidebar` no cambia
-  nada y no se ofrece ningún comando nuevo.
-- Peticiones por pestaña de chat: con `chatLocation: editor`, un permiso o una pregunta solo se
-  muestra en la pestaña de su sesión o en la de un ancestro del subagente que lo pidió (el chat de
-  la barra lateral sigue mostrándolas todas). La notificación nativa se titula `OpenCode · <título
-  de la sesión>: …` y aparece cuando ninguna pestaña de chat que muestre la petición es el editor
-  activo; **Abrir chat** revela esa pestaña, o la de la sesión raíz para un subagente que no tiene
-  la suya, y enfoca la tarjeta. **Requiere respuesta** marca la fila raíz del árbol de Sesiones para una
-  petición a cualquier profundidad de sus subagentes. Una tarjeta de petición nueva ya no toma el
-  foco cuando su chat no lo tiene (una pestaña en paralelo a aquella en la que estás), así que la
-  notificación se mantiene y tu foco no se mueve. Con el chat de la barra lateral visible, una
-  petición nueva muestra su tarjeta y la insignia, pero ni mueve el foco ni lanza una notificación
-  (issue #77).
+  **Mover a carpeta…** o arrastrando las filas, varias de golpe si quieres), **Anclar** y
+  **Desanclar** (con una sección **Anclados** arriba) y **Archivar** y **Desarchivar** (con una
+  sección **Archivados** plegada al final; la sesión archivada recuerda su carpeta). Por encima,
+  una sección
+  **Requiere atención** repite las sesiones que están en ejecución o esperando respuesta.
+  **Filtrar sesiones…** deja solo las que están en ejecución, las que esperan respuesta o las que
+  tienen pestaña abierta (**Borrar filtros** lo quita; el filtro activo sale también escrito encima
+  de las filas). El tooltip de cada fila dice el coste y los tokens, la carpeta y, si la sesión
+  tiene pestaña, cuántos archivos ha modificado. **Buscar sesiones…** encuentra también las
+  archivadas, y lo indica. Las carpetas, los anclados y los archivados se guardan en VS Code, por
+  carpeta del espacio de trabajo, y se pierden si mueves, renombras o vuelves a clonar la carpeta
+  del proyecto (mira Known limitations); en ningún caso se borra una sesión por ello. En modo
+  `sidebar` no cambia nada ni aparece ningún comando nuevo.
+- Las peticiones, en la pestaña que toca: con `chatLocation: editor`, un permiso o una pregunta
+  solo aparece en la pestaña de su sesión o en la de un ancestro del subagente que lo pidió (el
+  chat de la barra lateral las sigue enseñando todas). La notificación nativa lleva el título
+  `OpenCode · <título de la sesión>: …` y sale cuando el editor activo no es ninguna pestaña de
+  chat que muestre la petición; **Abrir chat** te lleva a esa pestaña, o a la de la sesión raíz si
+  el subagente no tiene pestaña, y pone el foco en la tarjeta. **Requiere respuesta** marca la fila
+  raíz del árbol de Sesiones aunque la petición venga de un subagente de cualquier nivel. Una
+  tarjeta de petición nueva ya no se queda con el foco si su chat no lo tenía (por ejemplo, una
+  pestaña al lado de la que estás usando): la notificación sigue ahí y tu foco no se mueve. Con el
+  chat de la barra lateral a la vista, una petición nueva muestra la tarjeta y la insignia, pero ni
+  mueve el foco ni saca una notificación (issue #77).
 - Árbol nativo de **Sesiones** en modo `editor`: la vista OpenCode lista las sesiones raíz de la
-  carpeta, agrupadas por Hoy, Ayer, Últimos 7 días y Anteriores. Cada fila muestra su estado con
-  un icono (En ejecución, Requiere respuesta, Con error) y, cuando la barra lateral es lo bastante
-  ancha, con palabras (también Bifurcación y Pestaña) antes de su hora; un título largo puede ocultar las
-  palabras, y el tooltip y la etiqueta del lector de pantalla siempre las llevan. El chat en una
-  pestaña no tiene botón **Sesiones**: el árbol es el lugar para explorar, buscar, renombrar y
-  eliminar sesiones (el
-  chat de la barra lateral conserva su botón). Sigue al servidor sin refrescar (creadas,
-  renombradas, eliminadas, en ejecución, esperando respuesta), abre una sesión en una pestaña o
-  revela la que ya tiene, renombra y elimina desde la fila (botones en línea, menú contextual, `F2`
-  y `Delete`), busca los títulos en el servidor con **Buscar sesiones…**, carga 50 más con
-  **Mostrar más sesiones**, sigue a la pestaña activa y muestra una bienvenida con botones cuando la
-  carpeta no tiene sesiones, cuando opencode no se está ejecutando o cuando no hay carpeta abierta.
-  La insignia es el número de peticiones pendientes. Límites conocidos: eliminar una sesión elimina
-  también sus sesiones de subagentes, y una pestaña que mostraba una de ellas recibe el aviso "La
-  sesión abierta se eliminó fuera de esta vista" (issue #77).
-- Ajuste `openVsCode.chatLocation` (`editor` por defecto, o `sidebar`; cualquier otro valor cuenta
-  como `editor`): con `editor` cada sesión se abre en su propia pestaña de editor junto al código y
-  la vista OpenCode es el árbol de Sesiones (arriba); `sidebar` mantiene un chat en la vista
-  OpenCode. Abrir una sesión que ya tiene pestaña la revela, Nueva sesión abre una pestaña nueva, e
-  Insertar código en el cursor y Agregar selección escriben en el último editor de texto, mientras que los enlaces
-  de archivos y los diffs se abren fuera del grupo del chat. Abrir una fila del árbol adopta una
-  pestaña vacía en lugar de dejar una atrás. Cambiar el ajuste se aplica al instante: la sesión de
-  la barra lateral se abre en una pestaña, y al volver a `sidebar` las pestañas siguen abiertas.
-  Las pestañas se restauran tras Recargar ventana, cada una con su sesión, borrador y título (las de
-  segundo plano cuando las abres); una pestaña restaurada cuya sesión ya está abierta en otro sitio
-  se cierra y revela la otra, y una cuya sesión se eliminó vuelve vacía con un aviso. Con pestañas
-  abiertas la extensión se activa ahora al abrir la ventana. Límites conocidos: el borrador del
-  cuadro del prompt no se mueve al cambiar el ajuste, y cambiar la carpeta servida con pestañas
-  abiertas las deja vacías (issue #77).
-- Menús contextuales del editor y del Explorador: **Agregar al chat de OpenCode**, **Explicar con
-  OpenCode** y **Corregir con OpenCode** (Corregir incluye los errores y avisos que VS Code informa
-  para la selección) en el editor, y **Explicar con OpenCode** sobre uno o más archivos en el
-  Explorador.
-  El prompt se envía al instante en la sesión abierta, o se deja en el cuadro del prompt con un
-  aviso cuando el chat está ocupado, sin conexión, o el búfer tiene cambios sin guardar, o cuando
-  el chat tardó más de 10 s en abrirse (issue #36).
-- Editor de configuración: las opciones se listan en un orden fijo (ejecutable, dirección del servidor,
-  modelo por defecto, ubicación del chat) y se enlazan entre sí (issue #38).
-- Detección de opencode v2: encuentra `opencode2` o `opencode` (o el ejecutable de
-  `openVsCode.opencodePath`), solo acepta la versión mayor 2, y en Windows resuelve los shims
-  `.cmd` de npm al ejecutable real (issue #7).
-- Un `opencode serve` por carpeta de espacio de trabajo, arrancado en un puerto de loopback con una
-  contraseña aleatoria y detenido con todo su árbol de procesos al cerrar la ventana. Reiniciar
-  servidor, Seleccionar carpeta del área de trabajo para espacios multi-raíz, y un canal de salida
-  OpenCode (issues #8, #10).
-- Conexión a un servidor opencode v2 que ya se ejecuta en esta máquina con `openVsCode.serverUrl`,
-  con su contraseña guardada en el SecretStorage de VS Code (issue #11).
-- Vista de chat en la barra de actividad con un cuadro de prompt, respuestas en streaming y una
-  línea de estado dentro del chat que muestra el estado de la conexión (issues #12, #13, #14).
-- Comandos de la paleta Abrir chat, Poner el foco en el prompt, Nueva sesión y Detener respuesta,
-  con atajos por defecto Ctrl+Alt+P / Cmd+Alt+P (Poner el foco en el prompt, vuelve al editor) y
-  Ctrl+Alt+N / Cmd+Alt+N (Nueva sesión, solo con el chat enfocado); ambos se pueden reasignar
-  (issue #35).
-- Adjuntar archivos con clic derecho en el Explorador (**Agregar al chat de OpenCode**) o arrastrándolos
-  al cuadro del prompt **con Mayús pulsada**, y pegar imágenes (PNG, JPEG, GIF, WebP, hasta 10 MiB)
-  con Ctrl/Cmd+V (issue #30). Una imagen soltada desde el gestor de archivos del sistema se adjunta
-  como una pegada; cualquier otro archivo de ahí se rechaza con un aviso. Reintentar, "Bifurcar
-  desde aquí" y "Revertir desde aquí" no vuelven a adjuntar las imágenes pegadas. En VS Code 1.140 o
-  posterior se informa de que soltar desde el Explorador no llega a las vistas de extensiones
-  ([microsoft/vscode#339036](https://github.com/microsoft/vscode/issues/339036), no reproducido
-  aquí); el comando del menú, Adjuntar y las menciones `@` siguen funcionando.
-- Renderizado de Markdown durante el streaming, resaltado de sintaxis y acciones sobre el código
-  (copiar, insertar en el cursor, abrir en un archivo nuevo, abrir referencias `path:line`) (issue
-  #15).
-- Botón Detener y Escape para interrumpir un turno, una nota neutra "Detenido" y mensajes de error
-  legibles (issue #16).
+  carpeta, agrupadas en Hoy, Ayer, Últimos 7 días y Anteriores. Cada fila indica su estado con un
+  icono (En ejecución, Requiere respuesta, Con error) y, si la barra lateral es lo bastante ancha,
+  también con texto (además de Bifurcación y Pestaña) delante de la hora; un título largo puede
+  tapar ese texto, pero el tooltip y la etiqueta para el lector de pantalla lo llevan siempre. El
+  chat en pestaña no tiene botón **Sesiones**: para explorar, buscar, renombrar y eliminar sesiones
+  está el árbol (el chat de la barra lateral conserva el botón). El árbol va al día con el servidor
+  sin que tengas que refrescar (sesiones creadas, renombradas, eliminadas, en ejecución, esperando
+  respuesta), abre una sesión en una pestaña o te lleva a la que ya tiene, renombra y elimina desde
+  la propia fila (botones en línea, menú contextual, `F2` y `Delete`), busca por título en el
+  servidor con **Buscar sesiones…**, carga 50 más con **Mostrar más sesiones**, sigue a la pestaña
+  activa y muestra una bienvenida con botones cuando la carpeta no tiene sesiones, cuando opencode
+  no está en marcha o cuando no hay ninguna carpeta abierta. La insignia es el número de peticiones
+  pendientes. Límites conocidos: al eliminar una sesión se eliminan también las de sus subagentes,
+  y una pestaña que estuviera mostrando una de ellas recibe el aviso "La sesión abierta se eliminó
+  fuera de esta vista" (issue #77).
+- Opción `openVsCode.chatLocation` (`editor` por defecto, o `sidebar`; cualquier otro valor cuenta
+  como `editor`): con `editor`, cada sesión se abre en su propia pestaña del editor, al lado del
+  código, y la vista OpenCode es el árbol de Sesiones (el punto anterior); con `sidebar` hay un
+  único chat en la vista OpenCode. Si abres una sesión que ya tiene pestaña, te lleva a ella; Nueva
+  sesión abre una pestaña nueva; Insertar código en el cursor y Agregar selección escriben en el
+  último editor de texto, y los enlaces a archivos y los diffs se abren fuera del grupo del chat.
+  Al abrir una fila del árbol se aprovecha la pestaña vacía que haya, en vez de dejarla ahí
+  olvidada. El cambio de opción se aplica en el momento: la sesión de la barra lateral se abre en
+  una pestaña y, si vuelves a `sidebar`, las pestañas siguen abiertas. Después de Recargar ventana
+  las pestañas vuelven, cada una con su sesión, su borrador y su título (las que estaban en segundo
+  plano, cuando las abres); si la sesión de una pestaña restaurada ya está abierta en otro sitio,
+  la pestaña se cierra y te lleva a la otra, y si la sesión se ha eliminado, vuelve vacía y con un
+  aviso. Con pestañas abiertas, la extensión se activa ahora al abrir la ventana. Límites
+  conocidos: el borrador del cuadro del prompt no viaja contigo al cambiar la opción, y si cambias
+  la carpeta que se sirve con pestañas abiertas, se quedan vacías (issue #77).
+- Menús contextuales del editor y del Explorador: en el editor, **Agregar al chat de OpenCode**,
+  **Explicar con OpenCode** y **Corregir con OpenCode** (Corregir añade los errores y avisos que VS
+  Code tenga para la selección); en el Explorador, **Explicar con OpenCode** sobre uno o varios
+  archivos. El prompt se envía en el momento a la sesión abierta. Si el chat está ocupado o sin
+  conexión, si el archivo tiene cambios sin guardar o si el chat tardó más de 10 s en abrirse, se
+  queda escrito en el cuadro del prompt, con un aviso (issue #36).
+- Editor de configuración: las opciones salen en un orden fijo (ejecutable, dirección del servidor,
+  modelo por defecto, ubicación del chat) y enlazan unas con otras (issue #38).
+- Detección de opencode v2: busca `opencode2` u `opencode` (o el ejecutable de
+  `openVsCode.opencodePath`), solo da por buena la versión mayor 2 y, en Windows, llega al
+  ejecutable real que hay detrás de los shims `.cmd` de npm (issue #7).
+- Un `opencode serve` por carpeta del espacio de trabajo: arranca en un puerto de loopback con una
+  contraseña aleatoria y, al cerrar la ventana, se para con todo su árbol de procesos. Reiniciar
+  servidor, Seleccionar carpeta del área de trabajo para los espacios de trabajo con varias
+  carpetas raíz y un canal de salida OpenCode (issues #8, #10).
+- Con `openVsCode.serverUrl` te conectas a un servidor de opencode v2 que ya esté en marcha en esta
+  máquina; su contraseña se guarda en el SecretStorage de VS Code (issue #11).
+- Vista de chat en la barra de actividad, con un cuadro para el prompt, respuestas en streaming y,
+  dentro del chat, una línea que indica el estado de la conexión (issues #12, #13, #14).
+- Comandos en la paleta: Abrir chat, Poner el foco en el prompt, Nueva sesión y Detener respuesta.
+  Los atajos por defecto son Ctrl+Alt+P / Cmd+Alt+P (Poner el foco en el prompt; si lo repites,
+  vuelves al editor) y Ctrl+Alt+N / Cmd+Alt+N (Nueva sesión, solo con el foco en el chat); puedes
+  cambiar los dos (issue #35).
+- Adjunta archivos con clic derecho en el Explorador (**Agregar al chat de OpenCode**) o
+  arrastrándolos al cuadro del prompt **con Mayús pulsada**, y pega imágenes (PNG, JPEG, GIF, WebP,
+  hasta 10 MiB) con Ctrl/Cmd+V (issue #30). Una imagen que sueltes desde el gestor de archivos del
+  sistema se adjunta igual que una pegada; cualquier otro archivo que venga de ahí se rechaza con
+  un aviso. Reintentar, "Bifurcar desde aquí" y "Revertir desde aquí" no vuelven a adjuntar las
+  imágenes pegadas. Hay avisos de que, en VS Code 1.140 o posterior, lo que sueltas desde el
+  Explorador ni siquiera llega a las vistas de las extensiones
+  ([microsoft/vscode#339036](https://github.com/microsoft/vscode/issues/339036); aquí no se ha
+  reproducido); el comando del menú, Adjuntar y las menciones con `@` siguen funcionando.
+- Markdown que se va pintando durante el streaming, resaltado de sintaxis y acciones sobre el
+  código (copiar, insertar en el cursor, abrir en un archivo nuevo, abrir referencias `path:line`)
+  (issue #15).
+- Botón Detener y tecla Escape para interrumpir un turno, una nota neutra "Detenido" y mensajes de
+  error que se entienden (issue #16).
 - Temas claro, oscuro y de alto contraste, navegación con teclado y etiquetas para lectores de
   pantalla (issue #17).
-- Tarjetas de permisos, una notificación y una insignia cuando el chat está oculto, y una lista de
-  permisos guardados que se pueden revocar (issues #18, #19).
-- Tarjetas de preguntas, y una línea en el historial por cada permiso o pregunta ya respondidos
-  (issues #44, #56).
-- Lista de sesiones con grupos, búsqueda, renombrar y eliminar; la sesión abierta se recuerda por
-  espacio de trabajo (issues #20, #22).
-- Bifurcar una sesión desde cualquiera de tus mensajes, y abrir sesiones de subagentes desde su
-  llamada a la herramienta (issue #21).
-- Selectores de modelo y agente (Build/Plan), el ajuste `openVsCode.defaultModel` y el control de
-  la variante de razonamiento (issues #23, #24, #61).
-- Tarjetas de herramientas plegables para shell, read, grep y edit, con diffs para las
-  ediciones (issue #26).
-- Menciones de archivos con `@` en el prompt y un botón "Agregar selección" que adjunta la
-  selección del editor (issues #28, #29).
-- Una línea bajo el título de la sesión con el contexto usado por el último paso y, para modelos de
-  pago, el coste de la sesión incluidos los subagentes directos (issue #25).
-- Integración continua en Windows, macOS y Linux, con una comprobación de la lista de archivos
-  empaquetados (issue #5).
+- Tarjetas de permiso, notificación e insignia cuando el chat no está a la vista y una lista de
+  permisos guardados que puedes revocar (issues #18, #19).
+- Tarjetas de pregunta, y una línea en el historial por cada permiso o pregunta que ya se ha
+  contestado (issues #44, #56).
+- Lista de sesiones con grupos, búsqueda, renombrar y eliminar; se recuerda qué sesión estaba
+  abierta en cada espacio de trabajo (issues #20, #22).
+- Bifurca una sesión desde cualquiera de tus mensajes y abre las sesiones de los subagentes desde
+  la llamada a la herramienta que los lanzó (issue #21).
+- Selectores de modelo y de agente (Build/Plan), la opción `openVsCode.defaultModel` y el control
+  de la variante de razonamiento (issues #23, #24, #61).
+- Tarjetas de herramientas plegables para shell, read, grep y edit, con el diff en las ediciones
+  (issue #26).
+- Menciones de archivos con `@` en el prompt y un botón "Agregar selección" que adjunta lo que
+  tengas seleccionado en el editor (issues #28, #29).
+- Una línea bajo el título de la sesión con el contexto que gastó el último paso y, en los modelos
+  de pago, el coste de la sesión, subagentes directos incluidos (issue #25).
+- Integración continua en Windows, macOS y Linux, que además comprueba la lista de archivos que
+  van en el paquete (issue #5).
 - Empaquetado para el Marketplace: icono, README, registro de cambios y licencia (issue #42).
-- Flujo de publicación que publica el mismo paquete en el VS Code Marketplace y en Open VSX a
-  partir de una etiqueta de versión (issue #43).
+- Flujo de publicación que, a partir de una etiqueta de versión, sube el mismo paquete al VS Code
+  Marketplace y a Open VSX (issue #43).
 
 #### Cambiado
 
-- opencode se arranca ahora con su vigilante de archivos desactivado
-  (`OPENCODE_FILEWATCHER_DISABLE=1`), de modo que ya no importa un plugin de proyecto que llega
-  mientras se ejecuta (opencode 2.0.32 lo hacía en menos de medio segundo, sin preguntar). En su
-  lugar la extensión vigila la carpeta servida: un plugin que no has permitido para el servidor
-  (cortando un turno en curso) y vuelve a preguntar, antes de que se ejecute. El coste: los cambios
-  en la configuración de opencode, `AGENTS.md`, las skills y los comandos se aplican ahora tras
-  **OpenCode: Reiniciar servidor**. No cubierto: carpetas de plugins por encima de la servida, eventos
-  perdidos por `files.watcherExclude` o por enlaces simbólicos, y un plugin escrito mientras el
-  servidor aún arranca, que puede ejecutarse una vez (issue #158).
-- Los mods tienen límites contra desbordamiento: como máximo 50 líneas por segundo en el canal
-  **OpenCode Mods** (incluidos los avisos de la extensión sobre lo que envía el mod) y 30 mensajes
-  por segundo a sus paneles; el resto se descarta con un aviso por segundo. Los argumentos de los
-  comandos se limitan a 4000 caracteres en todas las vías, **OpenCode: Ejecutar comando de mod…**
-  incluido (issue #155).
-- Los comandos de los mods aparecen en el menú `/` y se ejecutan aunque opencode no esté en
-  ejecución (autoStart desactivado, arrancando, reconectando): un comando de mod escrito se
-  ejecuta en su mod en lugar de salir como prompt, lo que antes arrancaba el servidor. Los
-  comandos propios de opencode aparecen cuando el servidor los envía (issue #155).
-- Los mods son más robustos al apagarse: una carga o un mensaje que termina después de que la
-  extensión se detenga ya no escribe en un canal de salida cerrado. El aviso de la página de un
-  panel por un mensaje descartado se limita a uno por segundo y panel. `docs/mods.md` indica ahora
-  que un enlace dentro de la carpeta de un mod que apunta fuera de ella puede ser leído por la
-  página del panel de ese mod (issue #155).
-- La licencia es ahora la [PolyForm Shield License 1.0.0](LICENSE) en lugar de MIT: puedes usar,
-  modificar y compartir la extensión para cualquier fin salvo ofrecer un producto que compita con
-  ella. Es de código disponible (source-available), no una licencia de código abierto de la OSI.
-- Elegir un agente, un modelo o un nivel de razonamiento en el panel del chip ya no lo cierra, así
-  que los tres se pueden cambiar en una sola apertura. El chip, Escape, un clic fuera y mover el
-  foco a otro sitio siguen cerrándolo.
+- opencode arranca ahora con su vigilante de archivos desactivado
+  (`OPENCODE_FILEWATCHER_DISABLE=1`), así que ya no importa un plugin de proyecto que aparezca
+  mientras está en marcha (opencode 2.0.32 lo hacía en menos de medio segundo y sin preguntar).
+  Quien vigila la carpeta servida es la extensión: si aparece un plugin que no has permitido, para
+  el servidor (y corta el turno que hubiera en curso) y te vuelve a preguntar antes de que llegue a
+  ejecutarse. A cambio, lo que toques en la configuración de opencode, en `AGENTS.md`, en las
+  skills y en los comandos no se aplica hasta que lances **OpenCode: Reiniciar servidor**. Quedan
+  fuera las carpetas de plugins que estén por encima de la servida, los eventos que se pierdan por
+  `files.watcherExclude` o por enlaces simbólicos, y un plugin que se escriba mientras el servidor
+  todavía está arrancando, que puede ejecutarse una vez (issue #158).
+- Los mods tienen límites para que no lo inunden todo: 50 líneas por segundo como mucho en el canal
+  **OpenCode Mods** (contando los avisos de la extensión sobre lo que manda el mod) y 30 mensajes
+  por segundo a sus paneles; lo que pase de ahí se descarta, con un aviso por segundo. Los
+  argumentos de los comandos se recortan a 4000 caracteres vengan por donde vengan, también desde
+  **OpenCode: Ejecutar comando de mod…** (issue #155).
+- Los comandos de los mods salen en el menú `/` y se ejecutan aunque opencode no esté en marcha
+  (autoStart desactivado, arrancando, reconectando): si escribes un comando de mod, lo ejecuta su
+  mod en vez de mandarse como prompt, que era lo que antes arrancaba el servidor. Los comandos de
+  opencode aparecen cuando el servidor los envía (issue #155).
+- Los mods aguantan mejor el apagado: una carga o un mensaje que termine cuando la extensión ya se
+  ha parado no escribe en un canal de salida cerrado. El aviso que da la página de un panel cuando
+  se descarta un mensaje se limita a uno por segundo y por panel. `docs/mods.md` explica ahora que,
+  si dentro de la carpeta de un mod hay un enlace que apunta fuera, la página del panel de ese mod
+  puede leer lo que haya al otro lado (issue #155).
+- La licencia pasa de MIT a la [PolyForm Shield License 1.0.0](LICENSE): puedes usar, modificar y
+  compartir la extensión para lo que quieras, menos para ofrecer un producto que compita con ella.
+  Es de código disponible (source-available), no una licencia de código abierto de la OSI.
+- El panel del chip ya no se cierra al elegir un agente, un modelo o un nivel de razonamiento, así
+  que puedes cambiar los tres sin tener que abrirlo otra vez. Se sigue cerrando con el chip, con
+  Escape, con un clic fuera o al llevar el foco a otro sitio.
 - Vista de chat en la barra lateral: **Abrir configuración** es un botón de la barra de título y
-  **Reiniciar servidor** pasó al menú "…", como en la vista Sesiones (issue #133).
+  **Reiniciar servidor** se ha ido al menú "…", igual que en la vista Sesiones (issue #133).
