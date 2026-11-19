@@ -43,9 +43,10 @@ del código fuente (hacen falta Node 24 y git), mira
 1. Abre una carpeta y pulsa el icono **OpenCode** de la barra de actividad. La extensión arranca
    `opencode serve` para esa carpeta (en `127.0.0.1`, con puerto y contraseña aleatorios) y lo para
    cuando cierras la ventana.
-2. Pulsa **Nueva sesión** en la vista **Sesiones** y se abre una pestaña de chat al lado de tu
-   código. Escribe y pulsa Intro; para interrumpir un turno, Escape o **Detener**. Con `Ctrl+Alt+P`
-   (`Cmd+Alt+P` en macOS) saltas al prompt y vuelves al editor.
+2. Pulsa **Nueva sesión** arriba de la vista **Inicio rápido** (o en la vista **Sesiones** cuando
+   está vacía) y se abre una pestaña de chat al lado de tu código. Escribe y pulsa Intro; para
+   interrumpir un turno, Escape o **Detener**. Con `Ctrl+Alt+P` (`Cmd+Alt+P` en macOS) saltas al
+   prompt y vuelves al editor.
 3. Si quieres preguntar por un trozo de código sin abrir el chat, selecciónalo, haz clic derecho y
    elige **Explicar con OpenCode** o **Corregir con OpenCode** (o **Agregar al chat de OpenCode**).
    En el Explorador, el clic derecho sobre un archivo te deja explicarlo o adjuntarlo.
@@ -67,8 +68,9 @@ Todo lo de esta lista está explicado a fondo en
   sesiones de los subagentes se abren desde la sesión que los lanzó.
 - Caja **Inicio rápido** arriba del todo: abres una pestaña de chat nueva con el modelo que elijas,
   ves qué se está ejecutando y qué espera tu respuesta, y compruebas cómo están el servidor y los
-  servidores MCP. Debajo del árbol, **Cambios de las sesiones** (un clic abre el diff de VS Code) y
-  **Uso (todos los proyectos)** (coste y tokens, de hoy y de 7 días).
+  servidores MCP. Su barra, siempre a la vista, tiene **Nueva sesión** y un engranaje que abre la
+  pestaña Configuración de OpenCode. Debajo del árbol, **Cambios de las sesiones** (un clic abre el
+  diff de VS Code) y **Uso (todos los proyectos)** (coste y tokens, de hoy y de 7 días).
 - **Permisos y preguntas** en tarjetas que contestas con un clic, con notificación e insignia si el
   chat no está a la vista. Si hay varias peticiones, comparten una caja y cada una tiene su pestaña.
 - **Modo de trabajo** (Manual / Auto) por sesión: en Auto se contesta "permitir una vez" por ti,
