@@ -81,6 +81,34 @@ export function PlusIcon() {
   );
 }
 
+/**
+ * A gear: the settings button of the Quick start toolbar (E9-sidebar-top-actions).
+ *
+ * Drawn by hand (a ring, a hub and eight teeth, all `currentColor`) instead of copying the codicon
+ * path, whose licence (CC-BY) asks for attribution. Decorative: the button carries the name.
+ * VERIFIED by `--steps 29,34,49,50` (Windows 11, VS Code 1.147.0, 19/11/2026) that the gear button is
+ * drawn whole inside the view at 170 and 300 px in the four themes ("ok   M1 idle at 170 px (bar
+ * 170), light: toolbar with both buttons, box, pills (…) are drawn whole inside the view, no sideways
+ * overflow, no style attribute, contrast >= 4.5"; the contrast measured there is the one of "New
+ * session", not of the gear). That it reads as a gear: seen in the 170 px light capture of that run,
+ * not judged in the other themes.
+ */
+export function GearIcon() {
+  return (
+    <svg class="icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+      <circle cx="8" cy="8" r="4.2" fill="none" stroke="currentColor" stroke-width="1.5" />
+      <circle cx="8" cy="8" r="1.6" fill="currentColor" />
+      <path
+        d="M8 1v1.4M8 13.6V15M1 8h1.4M13.6 8H15M3.05 3.05l1 1M11.95 11.95l1 1M12.95 3.05l-1 1M4.05 11.95l-1 1"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.6"
+        stroke-linecap="round"
+      />
+    </svg>
+  );
+}
+
 /** A slash: the "Commands" button of the prompt bar. */
 export function SlashIcon() {
   return (

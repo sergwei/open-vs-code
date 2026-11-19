@@ -4,6 +4,9 @@
 //
 // Provenance: every message here is FABRICATED by the test; it proves OUR validator, not how
 // `postMessage` delivers real payloads (`test:visual` step 50 sends real ones from the DOM).
+// VERIFIED by mutation (Windows 11, 19/11/2026): with `action === 'newSession'` removed from the
+// `home.action` guard of `homeProtocol.ts`, "accepts every message of the union in its exact shape"
+// failed (1 failed, 6 passed); restored.
 import { describe, expect, it } from 'vitest';
 import {
   MAX_HOME_ID,
@@ -24,6 +27,7 @@ describe('isHomeWebviewToHost', () => {
       { type: 'home.action', action: 'restart' },
       { type: 'home.action', action: 'logs' },
       { type: 'home.action', action: 'settings' },
+      { type: 'home.action', action: 'newSession' },
       { type: 'home.mode', mode: 'manual' },
       { type: 'home.mode', mode: 'auto' },
       { type: 'home.model' },
@@ -57,6 +61,11 @@ describe('isHomeWebviewToHost', () => {
 
   it('refuses a value outside the closed unions', () => {
     expect(isHomeWebviewToHost({ type: 'home.action', action: 'rm -rf' })).toBe(false);
+    // E9-sidebar-top-actions: `newSession` is the only spelling; near misses and the action Sergio
+    // left out of the bar (decision P1=1: no Search) stay refused.
+    for (const action of ['new-session', 'NEWSESSION', 'search']) {
+      expect(isHomeWebviewToHost({ type: 'home.action', action }), action).toBe(false);
+    }
     expect(isHomeWebviewToHost({ type: 'home.mode', mode: 'yolo' })).toBe(false);
     expect(
       isHomeWebviewToHost({ type: 'home.reply', kind: 'other', sessionID: 's', id: 'i' }),

@@ -20216,6 +20216,35 @@ try {
   });
 
   // Step 50 (E9-sidebar-home, issue #187): the Quick start webview view above the Sessions tree.
+  // E9-sidebar-top-actions: its toolbar (`.home-toolbar`: "New session" and the gear "OpenCode settings")
+  // is checked by O1 (Quick start is the first pane of the side bar, by exact pane names, so the bar
+  // is at the very top), T0 (the toolbar is the first child of `.home-root`, two `button.home-tool`,
+  // their names, `top` about 0; it prints the bar height and `scroll-padding-top`), the toolbar cells
+  // of M1 (the idle matrix: bar, both buttons, contrast of "New session"), N2 and N1 (at 300 px the
+  // text of New session is on one line; at 170 px only the plus icon shows, one line, with its name
+  // and `title`), T1 (a click on New session opens one chat tab and sends no prompt), T2 (a click on
+  // the gear opens exactly one OpenCode Settings tab) and T3 (at 170 px, with a row listed, the
+  // toolbar stays at the top after the document scrolls; not judged, with a warning, when it does not
+  // scroll).
+  // VERIFIED on Windows 11, VS Code 1.147.0, 19/11/2026: `--steps 29,34,49,50` ended with "all visual
+  // checks passed" (0 expired waits, step 50 in 47.1 s, budget 90) and printed "ok   O1 the Quick
+  // start pane is the first of the side bar, above the Sessions pane", "ok   T0 the toolbar is the
+  // first child of the Quick start document, before the box, …", "ok   N2 at 298 px "New session"
+  // shows its text on one line next to the plus icon, with its title", "ok   N1 at 167 px "New
+  // session" is only the plus icon (button 28 px wide, text clipped), on one line, with its accessible
+  // name and title", T3 (printed `ok` only in this run), T1, T2 and the eight toolbar cells of M1;
+  // `--steps 50` alone also ended with "all visual checks passed", but it printed the warning "T3 not
+  // judged: the Quick start document does not scroll" instead of T3's `ok` (0 expired waits, 46.7 s,
+  // the side bar had no session so the wait used the Quick start pane).
+  // Earlier alone runs (`--steps 50`,
+  // with the bar and the reordered views) failed at the F5 box click with "the pointer for
+  // ".home-box" would land on something else" (HYPOTHESIS: the sticky bar over the scrolled box; it
+  // passed after `scroll-padding-top` on the home document, the cause was not measured). The wait
+  // after the switch to `editor` expects a restored chat tab only when the side bar chat had a
+  // session (an earlier step left one): alone there is none and the 15 s cap used to expire, so then
+  // the Quick start pane showing is the signal. NOT run: macOS, Linux; N1/N2 only in English (the
+  // Spanish label is longer: HYPOTHESIS, not measured); T3 is judged only if the document scrolls
+  // (it did in the `--steps 29,34,49,50` run; alone it did not, and the step warned).
   // VERIFIED by the full run of E9-sidebar-home on its final tree (Windows 11, VS Code 1.145.2,
   // 08/11/2026, "all visual checks passed", this step 59.4 s): e.g. "F1 Enter opened exactly one new tab with one accepted prompt and cleared the box"
   // and "F4 Stop made the row leave and the turn finished interrupted". The matrix is 2 widths (170 and 300
@@ -20494,8 +20523,17 @@ try {
       await setTheme(DARK);
       await command('Notifications: Clear All Notifications');
       await waitConnected();
+      // A chat tab is restored only when the side bar chat had a session (an earlier step left one);
+      // run alone (`--steps 50`) it has none and waiting for a tab expired its whole cap of 15 s.
+      // So the tab is awaited only in the first case, and the Quick start pane showing is the signal
+      // of the second (no tab can arrive late there to outlive `closeAllEditors`).
+      const sideHadSession = await web.inDoc((doc) => doc.querySelectorAll('.message').length > 0);
       setLocation('editor');
-      await waitFor(async () => (await chatTabs()).length >= 1, 15_000, 200);
+      await waitFor(
+        async () => (sideHadSession ? (await chatTabs()).length >= 1 : await homeHeaderShown()),
+        15_000,
+        200,
+      );
       await closeAllEditors();
       const barOpen = await page.evaluate(() => {
         const side = globalThis.document.querySelector('.part.sidebar');
@@ -20505,6 +20543,53 @@ try {
       await setSideBarWidth(NORMAL);
       await setQuickStartFolded(false); // another step may have left the pane folded
       await connectHome();
+
+      // --- O1: Quick start is the FIRST pane of the side bar (the toolbar is then at the very top) ---
+      // Exact names: "Changes of the sessions" would also contain "sessions".
+      const panes = await page.evaluate(() =>
+        [...globalThis.document.querySelectorAll('.part.sidebar .pane-header')]
+          .map((header) => ({
+            name: (header.textContent ?? '').trim().toLowerCase(),
+            top: header.getBoundingClientRect().top,
+          }))
+          .filter((pane) => pane.name === 'sessions' || pane.name === 'quick start'),
+      );
+      const sessionsPane = panes.find((pane) => pane.name === 'sessions');
+      const quickPane = panes.find((pane) => pane.name === 'quick start');
+      check(
+        sessionsPane !== undefined && quickPane !== undefined && quickPane.top < sessionsPane.top,
+        `O1 the Quick start pane is the first of the side bar, above the Sessions pane (${JSON.stringify(panes)})`,
+      );
+      const toolbar = await homeWeb.inDoc((doc) => {
+        const root = doc.querySelector('.home-root');
+        const bar = doc.querySelector('.home-toolbar');
+        const tools = [...doc.querySelectorAll('.home-toolbar button.home-tool')];
+        return {
+          first: root !== null && bar !== null && root.firstElementChild === bar,
+          group: bar?.getAttribute('role') ?? null,
+          names: tools.map(
+            (tool) => tool.getAttribute('aria-label') ?? (tool.textContent ?? '').trim(),
+          ),
+          top: bar?.getBoundingClientRect().top ?? null,
+          height: bar?.getBoundingClientRect().height ?? null,
+          scrollPaddingTop: doc.defaultView.getComputedStyle(doc.documentElement).scrollPaddingTop,
+          beforeBox:
+            bar !== null &&
+            doc.querySelector('.home-box') !== null &&
+            (bar.compareDocumentPosition(doc.querySelector('.home-box')) &
+              doc.defaultView.Node.DOCUMENT_POSITION_FOLLOWING) !==
+              0,
+        };
+      });
+      check(
+        toolbar.first &&
+          toolbar.beforeBox &&
+          toolbar.group === 'group' &&
+          toolbar.names.join('|') === 'New session|OpenCode settings' &&
+          toolbar.top !== null &&
+          Math.abs(toolbar.top) <= 1,
+        `T0 the toolbar is the first child of the Quick start document, before the box, with the buttons "New session" and "OpenCode settings" and its top at 0 (${JSON.stringify(toolbar)})`,
+      );
 
       // --- H0: the document, the strip and the empty state ---------------------------------------------
       const first = await homeWeb.inDoc((doc) => ({
@@ -20616,16 +20701,19 @@ try {
       // --- Matrix A (idle): the box, the status strip, the empty state ---------------------------------
       await matrix('idle', (label) =>
         judgeCell(
-          `M1 ${label}: box, pills (the chosen model with its chevron among them) and "Nothing running" are drawn whole inside the view, no sideways overflow, no style attribute, contrast >= 4.5`,
+          `M1 ${label}: toolbar with both buttons, box, pills (the chosen model with its chevron among them) and "Nothing running" are drawn whole inside the view, no sideways overflow, no style attribute, contrast >= 4.5`,
           {
             box: '.home-box',
             pills: '.home-pill',
             model: modelPill,
             mode: '.home-pill[data-kind="mode"]',
             empty: '.home-empty',
+            toolbar: '.home-toolbar',
+            tools: 'button.home-tool',
           },
           {
             box: '.home-box',
+            tool: 'button.home-tool[data-action="newSession"]',
             model: modelPill,
             pill: '.home-pill[data-kind="mode"]',
             empty: '.home-empty',
@@ -20788,6 +20876,84 @@ try {
           },
         ),
       );
+
+      // --- N2 (300 px) and N1 (170 px): New session shows its text on ONE line when wide and only the
+      // plus icon when narrow, with the accessible name and the tooltip in both modes. Behaviour, so
+      // one theme (Dark). The label is judged by the client rects of its text: one rect = one line.
+      const toolMode = () =>
+        homeWeb.inDoc((doc) => {
+          const button = doc.querySelector('button.home-tool[data-action="newSession"]');
+          const gear = doc.querySelector('button.home-tool[data-action="settings"]');
+          const bar = doc.querySelector('.home-toolbar');
+          const label = button?.querySelector('.home-tool-label');
+          if (button === null || gear === null || bar === null || !label) return null;
+          const range = doc.createRange();
+          range.selectNodeContents(label);
+          const lines = new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+          const box = button.getBoundingClientRect();
+          return {
+            viewport: doc.defaultView.innerWidth,
+            lines,
+            labelWidth: Math.round(label.getBoundingClientRect().width),
+            button: { width: Math.round(box.width), height: Math.round(box.height) },
+            bar: Math.round(bar.getBoundingClientRect().height),
+            name: (label.textContent ?? '').trim(),
+            title: button.getAttribute('title'),
+            gearTitle: gear.getAttribute('title'),
+            inside:
+              box.left >= 0 && gear.getBoundingClientRect().right <= doc.defaultView.innerWidth,
+          };
+        });
+      const wide = await toolMode();
+      check(
+        wide !== null &&
+          wide.viewport > 240 &&
+          wide.lines === 1 &&
+          wide.labelWidth > 20 &&
+          wide.button.height <= 32 &&
+          wide.name === 'New session' &&
+          wide.title === 'New session' &&
+          wide.inside,
+        `N2 at ${String(wide?.viewport)} px "New session" shows its text on one line next to the plus icon, with its title (${JSON.stringify(wide)})`,
+      );
+      await setSideBarWidth(NARROW).catch(() => undefined);
+      await settleLayout();
+      const narrow = await toolMode();
+      check(
+        narrow !== null &&
+          narrow.viewport <= 240 &&
+          narrow.labelWidth <= 1 &&
+          narrow.button.width <= 40 &&
+          narrow.button.height <= 32 &&
+          narrow.name === 'New session' &&
+          narrow.title === 'New session' &&
+          narrow.gearTitle === 'OpenCode settings' &&
+          narrow.inside,
+        `N1 at ${String(narrow?.viewport)} px "New session" is only the plus icon (button ${String(narrow?.button.width)} px wide, text clipped), on one line, with its accessible name and title (${JSON.stringify(narrow)})`,
+      );
+      // --- T3: at 170 px, with the waiting row listed, the toolbar stays at the top when the document scrolls
+      const scrolled = await homeWeb.inDoc((doc) => {
+        const scroller = doc.scrollingElement ?? doc.documentElement;
+        const scrollable = scroller.scrollHeight > scroller.clientHeight + 1;
+        scroller.scrollTo(0, scroller.scrollHeight);
+        return { scrollable, scrollTop: scroller.scrollTop };
+      });
+      if (scrolled.scrollable && scrolled.scrollTop > 0) {
+        const bar = await homeWeb.inDoc((doc) => {
+          const rect = doc.querySelector('.home-toolbar')?.getBoundingClientRect();
+          return rect === undefined
+            ? null
+            : { top: rect.top, visible: rect.height > 0 && rect.bottom > 0 };
+        });
+        check(
+          bar !== null && bar.top >= -0.5 && bar.top <= 1 && bar.visible,
+          `T3 at 170 px, scrolled to the end (${String(scrolled.scrollTop)} px), the toolbar is still at the top of the Quick start view (${JSON.stringify(bar)})`,
+        );
+        await homeWeb.inDoc((doc) => (doc.scrollingElement ?? doc.documentElement).scrollTo(0, 0));
+      } else {
+        warn('T3 not judged: the Quick start document does not scroll');
+      }
+      await setSideBarWidth(NORMAL).catch(() => undefined);
       await closeAllEditors();
       check(await homeClick('.home-action[aria-label^="Reply to "]'), 'F6 Reply is clicked');
       const chatId = await waitFor(async () => visibleChatId(), 15_000, 200);
@@ -20873,6 +21039,35 @@ try {
       check(
         (await settingsTab()).length === 1,
         `F8 the MCP pill opens the OpenCode Settings tab, once (${String((await settingsTab()).length)} tab)`,
+      );
+      await closeAllEditors();
+
+      // --- T1: the toolbar "New session" opens one chat tab and sends no prompt ---------------------------
+      const promptsBeforeT1 = logCount('prompt accepted for');
+      const tabsBeforeT1 = (await chatTabs()).length;
+      check(
+        await homeClick('button.home-tool[data-action="newSession"]'),
+        'T1 the toolbar New session button is clicked',
+      );
+      await waitFor(async () => (await chatTabs()).length >= tabsBeforeT1 + 1, 15_000, 200);
+      await sleep(1_000); // negative window: New session opens one tab and sends no prompt
+      check(
+        (await chatTabs()).length === tabsBeforeT1 + 1 &&
+          logCount('prompt accepted for') === promptsBeforeT1,
+        `T1 the toolbar New session opened exactly one new chat tab and sent no prompt (tabs ${String(tabsBeforeT1)} -> ${String((await chatTabs()).length)})`,
+      );
+      await closeAllEditors();
+
+      // --- T2: the toolbar gear opens the OpenCode Settings tab, once ------------------------------------
+      check(
+        await homeClick('button.home-tool[data-action="settings"]'),
+        'T2 the toolbar gear button is clicked',
+      );
+      await waitFor(async () => (await settingsTab()).length >= 1, 15_000, 200);
+      await sleep(1_000); // negative window: the gear opens the Settings tab once, not twice
+      check(
+        (await settingsTab()).length === 1,
+        `T2 the toolbar gear opens the OpenCode Settings tab, once (${String((await settingsTab()).length)} tab)`,
       );
       await closeAllEditors();
 

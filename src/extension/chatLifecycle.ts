@@ -1,6 +1,7 @@
 import * as l10n from '@vscode/l10n';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import type { HomeAction } from '../shared/homeProtocol';
 import { isWebviewToHost, type ConnectionState, type UiCommand } from '../shared/protocol';
 import { createAttention } from './attention';
 import {
@@ -276,7 +277,9 @@ function warnSessionFailure(action: 'rename' | 'delete' | 'loadMore', error: unk
  * a NEW tab and composes the text with `send: true` (Auto first goes through `workMode.set`; the
  * model the user chose in the box, if any, rides in the compose: issue #223), `stop`
  * is `controller.stopSession`, `reply` and `open` reuse `SHOW_REQUEST_COMMAND_ID` and
- * `OPEN_SESSION_COMMAND_ID`. Under `ExtensionMode.Test`, `TEST_HOME_MESSAGE_COMMAND_ID` and
+ * `OPEN_SESSION_COMMAND_ID`; its `action` maps each `HomeAction` (`restart`, `logs`, `settings` and
+ * the toolbar's `newSession`, E9-sidebar-top-actions) to an existing command through a
+ * `Record<HomeAction, string>`. Under `ExtensionMode.Test`, `TEST_HOME_MESSAGE_COMMAND_ID` and
  * `TEST_HOME_STATE_COMMAND_ID` drive it without a webview.
  *
  * The injection command runs a raw message through the SAME guard (`isWebviewToHost`) and the
@@ -1210,11 +1213,16 @@ export function registerChat(
         void vscode.commands.executeCommand(OPEN_SESSION_COMMAND_ID, sessionID);
       },
       action: (action) => {
-        const command = {
+        // Typed as a Record over the whole union so a future HomeAction without a command does not
+        // compile. `newSession` is the toolbar's button (E9-sidebar-top-actions): the same command
+        // as the Sessions title bar, which opens a lazy tab.
+        const commands: Record<HomeAction, string> = {
           restart: RESTART_SERVER_COMMAND_ID,
           logs: SHOW_LOGS_COMMAND_ID,
           settings: OPEN_SERVER_SETTINGS_COMMAND_ID,
-        }[action];
+          newSession: NEW_SESSION_COMMAND_ID,
+        };
+        const command = commands[action];
         void vscode.commands.executeCommand(command);
       },
       onActivity: (listener) => controller.onActivity(() => listener()),
